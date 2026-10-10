@@ -27,6 +27,7 @@ from mstar.conductor.request_info import (
 from mstar.distributed.base import ShardingConfig
 from mstar.distributed.communication import GlobalParallelConfig, WorkerParallelGroups
 from mstar.engine.resources import KVReqConfig, KVSpec, PagedKVConfig, ResourceReqConfig
+from mstar.engine.resources.kv.config import SPECULATIVE_DECODE_TOKENS
 from mstar.graph.base import GraphEdge, NodeAndGraphWalk, TensorPointerInfo
 from mstar.graph.loop_indices import NestedLoopIndices
 from mstar.model.base import ForwardPassArgs, Model, WorkerGraph
@@ -350,6 +351,10 @@ class Conductor:
             worker_graph.worker_graph_id: worker_graph
             for worker_graph in worker_graphs
         }
+        # decode ends with its loop, whatever max_tokens the client sent
+        self._max_loop_iters = max(
+            (loop.max_iters for wg in worker_graphs for loop in wg.section.get_loops().values()), default=0,
+        )
 
         # (1) Set up worker graph TP ranks
         # (2) Assert that streaming consumers don't have graph-walk-specific sharding config
@@ -981,9 +986,12 @@ class Conductor:
         request_data.resource_configs = self._get_resource_configs(
             model_kwargs, partition_fwd_args
         )
+        # a bound under the loop's, not at it: no step is speculated past the loop's last
+        # iteration, so decode there writes max_iters, not the step more a stop inside it leaves
+        loop_bound = self._max_loop_iters - SPECULATIVE_DECODE_TOKENS
         self._stamp_resource_configs(
             request_data.resource_configs, model_kwargs,
-            seed=seed, max_tokens=request_data.max_output_tokens,
+            seed=seed, max_tokens=max(0, min(request_data.max_output_tokens, loop_bound)),
         )
 
         # Send NewRequest to each worker with the appropriate partition's inputs
