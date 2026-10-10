@@ -65,13 +65,18 @@ def bagel():
 
 
 def _text_tokens(out) -> int:
-    return sum(len(span) for span in out.new_input_tensors["text_inputs"])
+    return sum(len(span) for span in out["text_inputs"])
+
+
+def _slots(bagel, out, input_modalities, output_modalities, tensors=None, **kwargs) -> dict:
+    """What `kv_slots` counts of ``process_prompt``'s tensors, merged over the upload as the data worker does."""
+    return bagel.kv_slots({**(tensors or {}), **out}, input_modalities, output_modalities, **kwargs)
 
 
 def test_a_text_request_reserves_its_prompt_and_decodes_on_main(bagel):
     out = bagel.process_prompt("hello", ["text"], ["text"])
 
-    assert out.metadata == {
+    assert _slots(bagel, out, ["text"], ["text"]) == {
         "prompt_slots": {"kv": {"main": _text_tokens(out)}},
         "decode_labels": {"kv": ["main"]},
     }, "a text request was sized other than by its prompt, growing by decode"
@@ -92,13 +97,14 @@ def test_an_attachment_counts_at_the_size_its_walk_writes(bagel, monkeypatch):
         PromptPart(modality="image", index=0),
         PromptPart(modality="text", text="What is this?"),
     ]
+    tensors = {"image_inputs": [torch.zeros(3, 480, 640)]}
     out = bagel.process_prompt(
-        "What is this?", ["image", "text"], ["text"],
-        tensors={"image_inputs": [torch.zeros(3, 480, 640)]}, prompt_parts=parts,
+        "What is this?", ["image", "text"], ["text"], tensors=tensors, prompt_parts=parts,
     )
+    count = _slots(bagel, out, ["image", "text"], ["text"], tensors)
 
     # the walk resizes 480x640 to 512x688 for the VAE, then to 518x686: 37x49 patches
-    slots = out.metadata["prompt_slots"]["kv"]["main"]
+    slots = count["prompt_slots"]["kv"]["main"]
     assert slots == _text_tokens(out) + 37 * 49 + 2
     assert -(-slots // 128) == 15, (
         "a 480x640 attachment was counted at the ViT's largest grid, not its own size"
@@ -114,8 +120,8 @@ def test_an_attachment_counts_at_the_size_its_walk_writes(bagel, monkeypatch):
         device=torch.device("cpu"), dtype=torch.float32,
     )
     kv.ingest_request("look", KVReqConfig(
-        max_tokens=256, prompt_slots=out.metadata["prompt_slots"]["kv"],
-        decode_labels=out.metadata["decode_labels"]["kv"],
+        max_tokens=256, prompt_slots=count["prompt_slots"]["kv"],
+        decode_labels=count["decode_labels"]["kv"],
     ))
 
     assert kv.admit_retrieve("look", "LLM", "prefill_vit", None).ready, (
@@ -130,7 +136,7 @@ def test_an_image_request_counts_its_latents_on_every_guidance_label(bagel):
 
     latents = (512 // 16) * (512 // 16) + 2
     main = _text_tokens(out) + latents
-    assert out.metadata == {
+    assert _slots(bagel, out, ["text"], ["image"], height=512, width=512) == {
         "prompt_slots": {"kv": {"main": main, "cfg_text": main, "cfg_img": main}},
         "decode_labels": {"kv": []},
     }, (
@@ -144,16 +150,16 @@ def test_an_edit_sizes_its_latents_off_its_input(bagel):
         PromptPart(modality="image", index=0),
         PromptPart(modality="text", text="make it blue"),
     ]
+    tensors = {"image_inputs": [torch.zeros(3, 512, 1024)]}
     out = bagel.process_prompt(
-        "make it blue", ["image", "text"], ["image"],
-        tensors={"image_inputs": [torch.zeros(3, 512, 1024)]}, prompt_parts=parts,
+        "make it blue", ["image", "text"], ["image"], tensors=tensors, prompt_parts=parts,
     )
 
     # already 1024 on its long edge, so the edit keeps its size; the ViT walk
     # takes it to 490x980 (35x70 patches), the VAE walk keeps it (32x64)
     vit, vae = 35 * 70 + 2, 32 * 64 + 2
     latents = (512 // 16) * (1024 // 16) + 2
-    slots = out.metadata["prompt_slots"]["kv"]["main"]
+    slots = _slots(bagel, out, ["image", "text"], ["image"], tensors)["prompt_slots"]["kv"]["main"]
     assert slots == _text_tokens(out) + vit + vae + latents, (
         "an edit generates at its input's size, and its attachment writes "
         "both a ViT and a VAE walk"

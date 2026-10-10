@@ -82,7 +82,7 @@ from mstar.model.bagel.submodules import (
     vae_image_slots,
     vit_image_slots,
 )
-from mstar.model.base import DECODE, ForwardPassArgs, Model, PrefixStream, ProcessPromptOutput
+from mstar.model.base import DECODE, ForwardPassArgs, Model, PrefixStream
 from mstar.model.loader import iter_safetensors_file, load_hf_weights
 from mstar.model.loader.base import LLAMA_STACKED_PARAMS, StackedParamRule
 from mstar.model.multimodal import (
@@ -578,7 +578,7 @@ class BagelModel(Model):
         tensors: NameToTensorList | None = None,
         prompt_parts: list[PromptPart] | None = None,
         **kwargs,
-    ) -> ProcessPromptOutput:
+    ) -> NameToTensorList:
         """Tokenize the prompt into one text span per prefill step.
 
         Returns model-specific keys matching get_forward_pass_inputs:
@@ -673,9 +673,7 @@ class BagelModel(Model):
                 for img in tensors["image_inputs"]
             ]
 
-        return ProcessPromptOutput(
-            result, self._kv_slots(result, tensors, output_modalities, kwargs),
-        )
+        return result
 
     @staticmethod
     def _resize_to_fit(
@@ -712,23 +710,22 @@ class BagelModel(Model):
         )
         return resized.squeeze(0)
 
-    def _kv_slots(
-        self, result: NameToTensorList, tensors: NameToTensorList | None,
-        output_modalities: list[str], kwargs: dict,
+    def kv_slots(
+        self, tensors: NameToTensorList, input_modalities: list[str],
+        output_modalities: list[str], **kwargs,
     ) -> dict:
         """What each ``kv`` label holds over the request's life, decode aside,
         and the labels decode grows, for the cache to admit the request by.
 
-        An attachment counts at the size its ViT and VAE walks resize it to,
-        from the image they are given: an edit's, resized to fit the output,
-        else the one attached. No walk writes one to ``cfg_img``, and decode
-        writes main and ``cfg_img`` (`active_labels`).
+        An attachment counts at the size its ViT and VAE walks resize it to: an
+        edit's, resized to fit the output, else the one attached. No walk writes
+        one to ``cfg_img``, and decode writes main and ``cfg_img`` (`active_labels`).
         """
-        segments = result.get("text_inputs") or []
+        segments = tensors.get("text_inputs") or []
         cfg = self.config
         # the first output picks the walks, as in process_prompt: text then image decodes text
         generating = output_modalities[:1] == ["image"]
-        images = result.get("image_inputs") or (tensors or {}).get("image_inputs") or []
+        images = tensors.get("image_inputs") or []
         preprocess = kwargs.get("image_preprocess", "default")
         attached = 0
         for image in images:
@@ -744,10 +741,10 @@ class BagelModel(Model):
         main = sum(len(span) for span in segments) + attached
         if not generating:
             return {"prompt_slots": {"kv": {"main": main}}, "decode_labels": {"kv": ["main"]}}
-        # an edit generates at its input's size (see get_initial_forward_pass_args)
-        edited = result.get("image_inputs")
-        if edited:
-            height, width = edited[0].shape[-2:]
+        # an edit generates at its input's size, as process_prompt resized it
+        # (see get_initial_forward_pass_args)
+        if images and "image" in input_modalities:
+            height, width = images[0].shape[-2:]
         else:
             height, width = kwargs.get("height", 1024), kwargs.get("width", 1024)
         main += (height // cfg.latent_downsample) * (width // cfg.latent_downsample) + 2
@@ -797,6 +794,9 @@ class BagelModel(Model):
         the next user turn, so their keys never match.
         """
         return {"kv": {"main": PrefixStream("text_inputs", "ids", "prefill_text")}}
+
+    def kv_counted(self) -> frozenset[str]:
+        return frozenset({"kv"})
 
     def checkpoint_path(self) -> str:
         return snapshot_download(

@@ -454,7 +454,7 @@ def test_whisper_hands_each_cache_what_it_will_hold():
         None, ["audio"], ["text"], tensors={"audio_inputs": [torch.zeros(16000)]},
     )
 
-    configs = _conductor_configs(whisper, out.metadata, max_tokens=444)
+    configs = _conductor_configs(whisper, whisper.kv_slots(out, ["audio"], ["text"]), max_tokens=444)
 
     handed = {
         key: (configs[key].max_tokens, configs[key].prompt_slots, configs[key].decode_labels)
