@@ -726,7 +726,8 @@ class BagelModel(Model):
         """
         segments = result.get("text_inputs") or []
         cfg = self.config
-        generating = "image" in output_modalities
+        # the first output picks the walks, as in process_prompt: text then image decodes text
+        generating = output_modalities[:1] == ["image"]
         images = result.get("image_inputs") or (tensors or {}).get("image_inputs") or []
         preprocess = kwargs.get("image_preprocess", "default")
         main = sum(len(span) for span in segments)
