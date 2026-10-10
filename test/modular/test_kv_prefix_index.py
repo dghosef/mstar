@@ -190,7 +190,7 @@ def test_eviction_stops_when_no_leaf_is_left():
 
 
 def _one_entry_per_indexed_page(index: PrefixIndex) -> None:
-    entries = Counter(page for _, page in index._leaves)
+    entries = Counter(page for *_, page in index._leaves)
     assert set(entries) <= set(index.pages()), (
         f"the heap still names pages the index let go of: "
         f"{sorted(set(entries) - set(index.pages()))}"

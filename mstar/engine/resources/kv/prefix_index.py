@@ -4,8 +4,13 @@ Inserting makes the index a page's second owner, so evicting releases that one
 reference and the page reaches the free list only once no live request holds it
 too. Leaves are ordered by a clock that ticks on every insert and every matching
 lookup. A hit re-stamps a page without pushing it again, so a leaf keeps one heap
-entry however often it is read, and an entry that surfaces under an older stamp
+entry however often it is read, and an entry that surfaces under an older order
 is pushed back under the page's own.
+
+A page a waiting request matched goes after every idle one, and among those the
+back of the admission queue goes first, so the requests ahead keep what they will
+read. Nothing is held for them: the head's room still counts these pages, so its
+admission can always evict them and the queue cannot deadlock.
 
 Every caller holds the manager's lock, so none of this takes one of its own.
 """
@@ -29,7 +34,13 @@ class PrefixIndex:
         # children with a page below them, or themselves, that something besides the index holds
         self._held_below: list[int] = [0] * num_pages
         self._stamp: list[int] = [0] * num_pages
-        self._leaves: list[tuple[int, int]] = []
+        # (0, stamp, page) for an idle leaf, (1, -place, page) for one a waiting
+        # request matched, under the front-most such request's place in the queue
+        self._leaves: list[tuple[int, int, int]] = []
+        # page -> the queue places of the waiting requests that matched it
+        self._waiters: dict[int, set[int]] = {}
+        # queue place -> the pages that request matched as it joined
+        self._matched: dict[int, list[int]] = {}
         self._clock = 0
         self._evictable: set[int] = set()
         arena.index = self
@@ -70,7 +81,7 @@ class PrefixIndex:
             self._children[parent] += 1
         if self._arena.num_owners[page] == 1:
             self._evictable.add(page)
-        heapq.heappush(self._leaves, (self._clock, page))
+        heapq.heappush(self._leaves, (0, self._clock, page))
         return True
 
     def peek(self, keys: Sequence[bytes]) -> list[int]:
@@ -127,6 +138,30 @@ class PrefixIndex:
             self._evictable.add(parent)
             parent = self._parent[parent]
 
+    def wait_on(self, place: int, keys: Sequence[bytes]) -> None:
+        """Put what the request queued at ``place`` matches behind every idle page."""
+        pages = self.peek(keys)
+        self._matched[place] = pages
+        for page in pages:
+            self._waiters.setdefault(page, set()).add(place)
+
+    def stop_waiting(self, place: int) -> None:
+        for page in self._matched.pop(place, ()):
+            places = self._waiters.get(page)
+            if places is None or place not in places:
+                # evicted since, and maybe named anew
+                continue
+            places.discard(place)
+            if not places:
+                del self._waiters[page]
+            if not self._children[page]:
+                # its order only fell, and an entry under the old one would surface too late
+                heapq.heappush(self._leaves, (*self._order(page), page))
+
+    def _order(self, page: int) -> tuple[int, int]:
+        places = self._waiters.get(page)
+        return (1, -min(places)) if places else (0, self._stamp[page])
+
     def pages(self) -> list[int]:
         """Every page the index is holding a reference to."""
         return list(self._by_key.values())
@@ -138,7 +173,7 @@ class PrefixIndex:
         )
 
     def evict(self, n: int) -> int:
-        """Drop the oldest leaves the index alone holds, until ``n`` are free.
+        """Drop the leaves the index alone holds, idle and oldest first, until ``n`` are free.
 
         A leaf a request or a lease also holds is passed over and put back:
         dropping it would free nothing and lose an entry that is still good.
@@ -150,7 +185,7 @@ class PrefixIndex:
             entry = self._pop_leaf()
             if entry is None:
                 break
-            stamp, page = entry
+            page = entry[2]
             if self._arena.num_owners[page] > 1:
                 passed_over.append(entry)
                 continue
@@ -160,19 +195,20 @@ class PrefixIndex:
             heapq.heappush(self._leaves, entry)
         return freed
 
-    def _pop_leaf(self) -> tuple[int, int] | None:
+    def _pop_leaf(self) -> tuple[int, int, int] | None:
         while self._leaves:
-            stamp, page = heapq.heappop(self._leaves)
+            tier, order, page = heapq.heappop(self._leaves)
             if self._key[page] is None or self._children[page]:
                 continue
-            if self._stamp[page] != stamp:
-                heapq.heappush(self._leaves, (self._stamp[page], page))
+            if (tier, order) != (current := self._order(page)):
+                heapq.heappush(self._leaves, (*current, page))
                 continue
-            return stamp, page
+            return tier, order, page
         return None
 
     def _remove(self, page: int) -> None:
         self._evictable.discard(page)
+        self._waiters.pop(page, None)
         del self._by_key[self._key[page]]
         self._key[page] = None
         parent = self._parent[page]
@@ -181,4 +217,4 @@ class PrefixIndex:
         if parent is not None:
             self._children[parent] -= 1
             if self._children[parent] == 0 and self._key[parent] is not None:
-                heapq.heappush(self._leaves, (self._stamp[parent], parent))
+                heapq.heappush(self._leaves, (*self._order(parent), parent))

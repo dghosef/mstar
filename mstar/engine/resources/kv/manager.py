@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 # request after each admit, commit, reset and remove.
 _DEBUG_ASSERTS = os.environ.get("MSTAR_KV_DEBUG_ASSERTS", "0") == "1"
 
-# admitted, but its reservation does not fit yet: the scheduler asks again
+# waiting: its reservation does not fit yet, or a request ahead of it has not been admitted
 _WAIT = AdmitOutcome(ok=True, ready=False)
 
 
@@ -451,11 +451,13 @@ class KVManager(AttentionResource):
         # requests that must reserve here and have not yet, decided at ingest so
         # a row that has reserved, or never must, does no admission work per step
         self._unreserved: set[str] = set()
-        # requests that asked and have not reserved, in the order they first asked
-        self._waiting: dict[str, None] = {}
+        # requests that asked and have not reserved, in the order they first asked,
+        # each with its place in that order
+        self._waiting: dict[str, int] = {}
+        self._places = 0
         # what each waiting request will reserve, worked out once as it joins the queue
         self._needs: dict[str, Reservation] = {}
-        # the head's rooted prompt keys, hashed once however often it asks
+        # a waiting request's rooted prompt keys, hashed once however often it asks
         self._rooted: dict[str, list[bytes]] = {}
         # the labels each counted request's walks open here, read per segment per step
         self._opened: dict[str, set[str]] = {}
@@ -2149,9 +2151,9 @@ class KVManager(AttentionResource):
         """Hold ``rid`` back until what it may take fits, in the order requests
         first asked. None once it has reserved.
 
-        Nothing passes the head, so short requests never starve a long one. The
-        head's hit is leased as it is admitted, not credited off a lookup that
-        an eviction could undo before its prefill runs.
+        The head's hit is leased as it is admitted, not credited off a lookup an
+        eviction could undo before its prefill runs. A request behind it has what it
+        matches evicted after idle pages, so the requests ahead keep theirs.
         """
         if rid not in self._unreserved:
             return None
@@ -2160,12 +2162,15 @@ class KVManager(AttentionResource):
                 return None
             if (failed := self._enqueue(rid)) is not None:
                 return failed
-            if next(iter(self._waiting)) != rid:
+            head = next(iter(self._waiting)) == rid
+            if not head and rid in self._rooted:
                 return _WAIT
             label = self._probe_label(rid, node_name, graph_walk)
             keys = None
             if label is not None and rid not in self._rooted:
                 keys = self._overrides[rid].prefix_keys[label]
+            if keys is None and not head:
+                return _WAIT
         # outside the lock, as `resolve_cached_prefix` hashes
         rooted = None if keys is None else [fingerprint(self._prefix_root, key) for key in keys]
         with self._lock:
@@ -2173,6 +2178,8 @@ class KVManager(AttentionResource):
                 return None
             if rooted is not None:
                 self._rooted[rid] = rooted
+                if self._index is not None and self._overrides[rid].prefix_cache:
+                    self._index.wait_on(self._waiting[rid], rooted)
             stream = None if label is None else self._ensure_label(rid, label)
             return self._try_reserve(rid, stream, self._rooted.get(rid))
 
@@ -2215,15 +2222,17 @@ class KVManager(AttentionResource):
                 f"KV {self.name}: request {rid} needs {need} pages, "
                 f"and the pool has {self._capacity()} for requests"
             ))
-        self._waiting[rid] = None
+        self._places += 1
+        self._waiting[rid] = self._places
         self._needs[rid] = reservation
         return None
 
     def _dequeue(self, rid: str) -> None:
         self._unreserved.discard(rid)
-        self._waiting.pop(rid, None)
+        place = self._waiting.pop(rid, None)
         self._needs.pop(rid, None)
-        self._rooted.pop(rid, None)
+        if self._rooted.pop(rid, None) is not None and self._index is not None:
+            self._index.stop_waiting(place)
 
     def _reserve_new(self, ctx: StepContext) -> None:
         """Reserve what the deciding pool admitted at readiness, without checking room.
