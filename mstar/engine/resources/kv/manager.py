@@ -2072,11 +2072,6 @@ class KVManager(AttentionResource):
 
     # Admission
 
-    @staticmethod
-    def _is_padding(rid) -> bool:
-        # CUDA-graph padding rows carry negative handles; tests key requests by str
-        return isinstance(rid, int) and rid < 0
-
     def _unheld(self, rid, label: str) -> bool:
         """Whether ``rid``, counted by its model, holds nothing in ``label``,
         as no walk of its own opens it.
@@ -2227,14 +2222,7 @@ class KVManager(AttentionResource):
         )
 
     def _capacity(self) -> int:
-        """Pages one request could have with nothing else admitted: all but the
-        sink and what a piecewise region's padding rows keep from capture."""
-        padding = sum(
-            len(stream.page_indices)
-            for rid, streams in self._streams.items() if self._is_padding(rid)
-            for stream in streams.values()
-        )
-        return self.config.max_num_pages - 1 - padding
+        return self.config.request_pages()
 
     def _held_fresh(self, rid: str) -> int:
         """Pages ``rid`` holds that it took from the free list."""

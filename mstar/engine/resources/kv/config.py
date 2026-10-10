@@ -112,6 +112,10 @@ class PagedKVConfig(KVConfig):
             if value is not None:
                 setattr(self, name, value)
 
+    def request_pages(self) -> int:
+        """Pages one request could have with nothing else admitted: all but the sink."""
+        return self.max_num_pages - 1
+
 
 @dataclass(frozen=True)
 class RingKVLayerConfig:
