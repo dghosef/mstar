@@ -437,11 +437,14 @@ class KVManager(AttentionResource):
         self._leads = leads
         self._decides = self._rank == 0 and leads
         self._reserved: dict[str, Reservation] = {}
+        # requests that must reserve here and have not yet, decided at ingest so
+        # a row that has reserved, or never must, does no admission work per step
+        self._unreserved: set[str] = set()
         # requests that asked and have not reserved, in the order they first asked
         self._waiting: dict[str, None] = {}
         # the head's rooted prompt keys, hashed once however often it asks
         self._rooted: dict[str, list[bytes]] = {}
-        # the labels each request's walks open here, read per segment per step
+        # the labels each counted request's walks open here, read per segment per step
         self._opened: dict[str, set[str]] = {}
         # label -> the walk prepare probes it on
         self._prefill_walks: dict[str, str] = {}
@@ -800,10 +803,14 @@ class KVManager(AttentionResource):
             # that had already filled them, and the request's publish info then
             # named more tokens than the stream held.
             self._streams.setdefault(rid, {"main": CacheStream()})
-            self._overrides.setdefault(rid, overrides)
+            overrides = self._overrides.setdefault(rid, overrides)
             for label, stream in self._streams[rid].items():
                 if stream.chain is None:
                     self._seed_keys(rid, label, stream)
+            if overrides.prompt_slots and rid not in self._opened:
+                self._opened[rid] = labels_opened(overrides, self._nodes)
+            if self._gated(rid, overrides):
+                self._unreserved.add(rid)
 
     def admit_retrieve(
         self, rid: str,
@@ -1940,8 +1947,7 @@ class KVManager(AttentionResource):
             self._overrides.pop(rid, None)
             self._transfer.remove_request(rid)
             self._reserved.pop(rid, None)
-            self._waiting.pop(rid, None)
-            self._rooted.pop(rid, None)
+            self._dequeue(rid)
             self._opened.pop(rid, None)
             if _DEBUG_ASSERTS:
                 self.assert_pages_conserved()
@@ -2077,17 +2083,11 @@ class KVManager(AttentionResource):
         as no walk of its own opens it.
 
         A model can run a label for a whole batch (Bagel's guidance branches run
-        for every row once one row needs them), and a row whose request holds
-        nothing there never reads back what it wrote. Pages for it would be
-        pages the request never reserved, which counts only the labels it opens.
+        for every row once one row needs them), and pages for a row whose request
+        never reads back what it wrote there are pages it never reserved.
         """
-        overrides = self._overrides.get(rid)
-        if overrides is None or not overrides.prompt_slots:
-            return False
         opened = self._opened.get(rid)
-        if opened is None:
-            opened = self._opened[rid] = labels_opened(overrides, self._nodes)
-        return label not in opened
+        return opened is not None and label not in opened
 
     def _reservation(self, rid: str) -> Reservation:
         """The pages ``rid`` may take from the free list over its life here.
@@ -2106,14 +2106,14 @@ class KVManager(AttentionResource):
             pages = min(pages, self._capacity())
         return Reservation(pages=max(0, pages - held), exact=count.exact)
 
-    def _gated(self, rid: str, overrides: KVReqConfig | None) -> bool:
-        """Whether ``rid`` still has to reserve before it runs.
+    def _gated(self, rid: str, overrides: KVReqConfig) -> bool:
+        """Whether ``rid`` still has to reserve before it runs: only once every label
+        it opens is counted, by its model or by its keys.
 
-        Only a request whose every label is counted, by the model or by its
-        keys: a bound as loose as ``max_seq_len`` would hold back or refuse
-        requests that fit, so the rest run as they always have.
+        A label with neither has no bound but ``max_seq_len``, which would hold back
+        or refuse requests that fit.
         """
-        if overrides is None or overrides.max_tokens is None or rid in self._reserved:
+        if overrides.max_tokens is None or rid in self._reserved:
             return False
         slots = overrides.prompt_slots or {}
         keys = overrides.prefix_keys or {}
@@ -2127,11 +2127,10 @@ class KVManager(AttentionResource):
         head's hit is leased as it is admitted, not credited off a lookup that
         an eviction could undo before its prefill runs.
         """
-        overrides = self._overrides.get(rid)
-        if not self._gated(rid, overrides):
+        if rid not in self._unreserved:
             return None
         with self._lock:
-            if rid not in self._overrides or rid in self._reserved:
+            if rid not in self._unreserved:
                 return None
             self._waiting.setdefault(rid, None)
             if next(iter(self._waiting)) != rid:
@@ -2139,11 +2138,11 @@ class KVManager(AttentionResource):
             label = self._probe_label(rid, node_name, graph_walk)
             keys = None
             if label is not None and rid not in self._rooted:
-                keys = overrides.prefix_keys[label]
+                keys = self._overrides[rid].prefix_keys[label]
         # outside the lock, as `resolve_cached_prefix` hashes
         rooted = None if keys is None else [fingerprint(self._prefix_root, key) for key in keys]
         with self._lock:
-            if rid not in self._overrides or rid in self._reserved:
+            if rid not in self._unreserved:
                 return None
             if rooted is not None:
                 self._rooted[rid] = rooted
@@ -2180,9 +2179,13 @@ class KVManager(AttentionResource):
             stream.gate_lease = True
         reservation.pages = need
         self._reserved[rid] = reservation
-        del self._waiting[rid]
-        self._rooted.pop(rid, None)
+        self._dequeue(rid)
         return None
+
+    def _dequeue(self, rid: str) -> None:
+        self._unreserved.discard(rid)
+        self._waiting.pop(rid, None)
+        self._rooted.pop(rid, None)
 
     def _reserve_new(self, ctx: StepContext) -> None:
         """Reserve what the deciding pool admitted at readiness, without checking room.
@@ -2191,16 +2194,17 @@ class KVManager(AttentionResource):
         admit; refusing it there would leave the other ranks in a forward rank 0
         runs, so it follows rank 0's decision instead.
         """
+        if not self._unreserved:
+            return
         for rid in ctx.request_ids:
-            if not self._gated(rid, self._overrides.get(rid)):
+            if rid not in self._unreserved:
                 continue
             if _DEBUG_ASSERTS:
                 assert not (self._decides and self._world_size == 1), (
                     f"KV {self.name}: request {rid} reached admit without passing readiness"
                 )
             self._reserved[rid] = self._reservation(rid)
-            self._waiting.pop(rid, None)
-            self._rooted.pop(rid, None)
+            self._dequeue(rid)
 
     def _probe_label(self, rid: str, node_name: str, graph_walk: str) -> str | None:
         """The label prepare probes for ``rid`` on this walk, if any.
