@@ -485,10 +485,7 @@ class KVManager(AttentionResource):
             dtype=info.kv_dtype,
             needs_remote_transfer=info.needs_remote_transfer,
             nodes=spec.nodes if info.nodes is None else info.nodes,
-            leads=(
-                info.nodes is None or info.nodes >= spec.nodes
-                or spec.leader in info.nodes
-            ),
+            leads=info.nodes is None or spec.leader is None or spec.leader in info.nodes,
         )
 
     def build_cuda_graph_buffers(
