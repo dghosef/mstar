@@ -346,7 +346,7 @@ class MicroScheduler:
                     )
                 return None
             fwd_info = request_state.get_fwd_info(rid, node_partition)
-            if not self._check_ready(node_name, rid, fwd_info,  allow_reload=False):
+            if not self.check_ready(node_name, rid, fwd_info,  allow_reload=False):
                 return None
 
         popped = self.runtime.pop_rids(
@@ -490,7 +490,7 @@ class MicroScheduler:
                 fwd_info = request_state.get_fwd_info(rid, node_partition)
                 # check if the node is ready on the engine level
                 # (e.g., for AR, whether the kv cache is read in)
-                if not self._check_ready(spec.node_name, rid, fwd_info):
+                if not self.check_ready(spec.node_name, rid, fwd_info):
                     continue
                 node_name_to_requests.setdefault(spec.node_name, []).append(
                     ReadyNodeEntry(rid, wg_id, spec.graph_walk)
@@ -606,7 +606,7 @@ class MicroScheduler:
     ):
         node_partition = request_state.get_partition_for_node(batch.node_name)
         not_ready_rids = {
-            rid for rid in batch.request_to_worker_graph if not self._check_ready(
+            rid for rid in batch.request_to_worker_graph if not self.check_ready(
                 batch.node_name, rid,
                 request_state.get_fwd_info(rid, node_partition),
             )
@@ -857,11 +857,11 @@ class MicroScheduler:
                 fwd_info = request_state.get_fwd_info(
                     rid, node_partition
                 )
-                if self._check_ready(spec.node_name, rid, fwd_info):
+                if self.check_ready(spec.node_name, rid, fwd_info):
                     return True
         return False
 
-    def _check_ready(
+    def check_ready(
         self, node_name: str, rid: int, fwd_info: CurrentForwardPassInfo,
         allow_reload: bool=True
     ) -> bool:

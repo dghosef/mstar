@@ -451,6 +451,8 @@ class KVManager(AttentionResource):
         self._unreserved: set[str] = set()
         # requests that asked and have not reserved, in the order they first asked
         self._waiting: dict[str, None] = {}
+        # what each waiting request will reserve, worked out once as it joins the queue
+        self._needs: dict[str, Reservation] = {}
         # the head's rooted prompt keys, hashed once however often it asks
         self._rooted: dict[str, list[bytes]] = {}
         # the labels each counted request's walks open here, read per segment per step
@@ -2154,7 +2156,8 @@ class KVManager(AttentionResource):
         with self._lock:
             if rid not in self._unreserved:
                 return None
-            self._waiting.setdefault(rid, None)
+            if (failed := self._enqueue(rid)) is not None:
+                return failed
             if next(iter(self._waiting)) != rid:
                 return _WAIT
             label = self._probe_label(rid, node_name, graph_walk)
@@ -2177,23 +2180,13 @@ class KVManager(AttentionResource):
     ) -> AdmitOutcome | None:
         """Reserve for ``rid`` if it heads the queue and fits, leasing its hit
         on ``stream`` as it does. None once it has reserved."""
-        self._waiting.setdefault(rid, None)
         if next(iter(self._waiting)) != rid:
             return _WAIT
         hit = []
         if stream is not None and rooted and self._leasable(stream):
             hit = self._index.peek(rooted)[:len(rooted) - 1]
-        reservation = self._reservation(rid)
-        held = len(hit) + sum(len(s.lease or ()) + s.hits for s in self._streams[rid].values())
+        reservation = self._needs[rid]
         need = reservation.pages - len(hit)
-        capacity = self._capacity()
-        if need + held > capacity:
-            del self._waiting[rid]
-            self._rooted.pop(rid, None)
-            return AdmitOutcome(ok=False, ready=False, reason=AdmitRuntimeError(
-                f"KV {self.name}: request {rid} needs {need + held} pages, "
-                f"and the pool has {capacity} for requests"
-            ))
         if self._outstanding + need > self._supply(leasing=hit):
             return _WAIT
         if hit:
@@ -2205,9 +2198,29 @@ class KVManager(AttentionResource):
         self._dequeue(rid)
         return None
 
+    def _enqueue(self, rid: str) -> AdmitOutcome | None:
+        """Queue ``rid`` behind the requests that asked before it, or fail it if it
+        could not fit alone: checked at the head, it would fail only once every
+        request ahead of it was admitted."""
+        if rid in self._waiting:
+            return None
+        reservation = self._reservation(rid)
+        need = reservation.pages + sum(
+            len(s.lease or ()) + s.hits for s in self._streams[rid].values()
+        )
+        if need > self._capacity():
+            return AdmitOutcome(ok=False, ready=False, reason=AdmitRuntimeError(
+                f"KV {self.name}: request {rid} needs {need} pages, "
+                f"and the pool has {self._capacity()} for requests"
+            ))
+        self._waiting[rid] = None
+        self._needs[rid] = reservation
+        return None
+
     def _dequeue(self, rid: str) -> None:
         self._unreserved.discard(rid)
         self._waiting.pop(rid, None)
+        self._needs.pop(rid, None)
         self._rooted.pop(rid, None)
 
     def _reserve_new(self, ctx: StepContext) -> None:

@@ -2246,14 +2246,15 @@ class Worker:
         max_continuing = self.scheduler.room_for_continuing(spec_target)
 
         # Removes, aborts and failures are filtered here; prep_spec_rids
-        # assumes that. So is a rid the target would not run yet, as its admit
-        # would refuse the whole batch; a loop-back asks nothing, since batch
-        # N's rids passed this node's readiness. Torn-down rids first: the ask
-        # can reload a request or lease its prefix hit.
+        # assumes that. So is a rid the target would not run yet, whose admit would refuse
+        # the whole batch (a loop-back's passed already); asked last, as the ask can reload or lease.
+        partition = self.request_state.get_partition_for_node(spec_node_name)
         candidates = [
             r for r in batch_N.request_to_worker_graph
             if not self._is_tearing_down(r)
-            and (speculating_same_node or self._ready_on(spec_node_name, r))
+            and (speculating_same_node or self.scheduler.check_ready(
+                spec_node_name, r, self.request_state.get_fwd_info(r, partition),
+            ))
         ]
         # Polling the StreamBuffers stays on this side: they hold real tensors.
         polled: list[tuple[int, StreamingEdge]] = []
@@ -2351,14 +2352,6 @@ class Worker:
             consumed_streaming_edges, continuing,
             is_same_node=speculating_same_node, spec_id=prep.spec_id,
         )
-
-    def _ready_on(self, node_name: str, rid: int) -> bool:
-        """Whether ``node_name`` would run ``rid`` now; a terminal failure is left for the scheduler to fail."""
-        partition = self.request_state.get_partition_for_node(node_name)
-        outcome = self.engine_manager.get_engine(node_name).check_ready(
-            node_name, rid, self.request_state.get_fwd_info(rid, partition),
-        )
-        return outcome.ok and outcome.ready
 
     def _thread_outputs_to_speculative(
         self, speculation: Speculation,

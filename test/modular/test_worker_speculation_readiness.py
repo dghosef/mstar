@@ -38,10 +38,6 @@ class _Runtime:
 
 
 def _worker(target: str, not_ready: set[int]) -> tuple[Worker, _Runtime]:
-    def check_ready(node_name, rid, request_info):
-        del node_name, request_info
-        return SimpleNamespace(ok=True, ready=rid not in not_ready)
-
     worker = Worker.__new__(Worker)
     worker._graph_runtime = runtime = _Runtime(target)
     worker._pending_removes = set()
@@ -52,14 +48,12 @@ def _worker(target: str, not_ready: set[int]) -> tuple[Worker, _Runtime]:
     worker.scheduler = SimpleNamespace(
         room_for_continuing=lambda target: None, failed_rids=set(),
         backlog_splits_from=lambda request_state, target, rid: False,
+        check_ready=lambda node_name, rid, fwd_info: rid not in not_ready,
     )
     worker.tensor_manager = SimpleNamespace(get_tensor=None)
     worker.request_state = SimpleNamespace(
         get_partition_for_node=lambda node_name: 0,
         get_fwd_info=lambda rid, partition: None,
-    )
-    worker.engine_manager = SimpleNamespace(
-        get_engine=lambda node_name: SimpleNamespace(check_ready=check_ready),
     )
     return worker, runtime
 
