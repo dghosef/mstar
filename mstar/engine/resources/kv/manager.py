@@ -74,9 +74,9 @@ class PageArena:
     allocator: PageAllocator
     num_owners: list[int] = field(init=False, repr=False)
     sealed: list[bool] = field(init=False, repr=False)
-    # bumped as owners are added or dropped, for `PrefixIndex.evictable` to keep its answer by;
-    # `acquire` hands out free pages, which the index never holds, so it does not count
-    owner_changes: int = field(default=0, init=False, repr=False)
+    # told as a page goes from one owner to two or back, for the index to keep what
+    # eviction reaches by; `acquire` hands out free pages, which the index never holds
+    index: PrefixIndex | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         self.num_owners = [0] * self.allocator.max_num_pages
@@ -92,7 +92,8 @@ class PageArena:
     def retain(self, pages: list[int]) -> None:
         for page in pages:
             self.num_owners[page] += 1
-        self.owner_changes += 1
+            if self.num_owners[page] == 2 and self.index is not None:
+                self.index.set_shared(page, True)
 
     def seal(self, pages: list[int]) -> None:
         for page in pages:
@@ -109,7 +110,8 @@ class PageArena:
             if self.num_owners[page] == 0:
                 self.sealed[page] = False
                 freed.append(page)
-        self.owner_changes += 1
+            elif self.num_owners[page] == 1 and self.index is not None:
+                self.index.set_shared(page, False)
         self.allocator.free(freed)
 
     def copy_pages(self, src: list[int], dst: list[int]) -> None:

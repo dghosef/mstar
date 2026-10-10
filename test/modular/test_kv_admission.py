@@ -481,7 +481,7 @@ def _drive(kv: KVManager, rng: random.Random, ops: int) -> list[str]:
     """Requests sharing a few prompts, admitted by readiness, prefilled after
     a probe as prepare does, decoded to their ``max_tokens`` and removed, with
     aborts along the way. Every step an admitted request runs must fit, and
-    the supply the pool keeps between asks is what it would count afresh."""
+    the totals the pool keeps as pages move are what counting afresh gives."""
     prompts = [list(range(base, base + rng.randrange(20, 90))) for base in (0, 1000, 2000)]
     waiting: dict[str, tuple[int, int]] = {}
     running: dict[str, list[int]] = {}
@@ -519,10 +519,23 @@ def _drive(kv: KVManager, rng: random.Random, ops: int) -> list[str]:
             kv.remove_request(rid)
             log.append(f"abort {rid}")
         kv.assert_pages_conserved()
-        assert kv._supply() == kv._arena.num_free + len(kv._index._find_evictable()), (
-            f"the supply kept since the last ask is not what counting afresh gives: {log}"
+        assert kv._index.evictable() == _evictable_afresh(kv), (
+            f"the evictable pages kept as owners changed are not what a walk finds: {log}"
         )
     return log
+
+
+def _evictable_afresh(kv: KVManager) -> set[int]:
+    """Pages only the index holds, with no page below them held."""
+    index, owners = kv._index, kv._arena.num_owners
+    pinned: set[int] = set()
+    for page in index.pages():
+        if owners[page] > 1:
+            parent = index._parent[page]
+            while parent is not None and parent not in pinned:
+                pinned.add(parent)
+                parent = index._parent[parent]
+    return {page for page in index.pages() if owners[page] == 1 and page not in pinned}
 
 
 def test_no_admitted_request_runs_out_of_pages(monkeypatch):

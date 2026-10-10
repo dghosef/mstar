@@ -26,11 +26,13 @@ class PrefixIndex:
         self._key: list[bytes | None] = [None] * num_pages
         self._parent: list[int | None] = [None] * num_pages
         self._children: list[int] = [0] * num_pages
+        # children with a page below them, or themselves, that something besides the index holds
+        self._held_below: list[int] = [0] * num_pages
         self._stamp: list[int] = [0] * num_pages
         self._leaves: list[tuple[int, int]] = []
         self._clock = 0
-        self._evictable: frozenset[int] = frozenset()
-        self._evictable_at: int | None = None
+        self._evictable: set[int] = set()
+        arena.index = self
 
     def lookup(self, keys: Sequence[bytes]) -> list[int]:
         """Walk ``keys`` from the root and stop at the first one not indexed."""
@@ -60,11 +62,14 @@ class PrefixIndex:
         self._key[page] = key
         self._parent[page] = parent
         self._children[page] = 0
+        self._held_below[page] = 0
         self._stamp[page] = self._clock
         self._arena.seal([page])
         self._arena.retain([page])
         if parent is not None:
             self._children[parent] += 1
+        if self._arena.num_owners[page] == 1:
+            self._evictable.add(page)
         heapq.heappush(self._leaves, (self._clock, page))
         return True
 
@@ -82,34 +87,45 @@ class PrefixIndex:
         # not `lookup`: this is not a hit, and must not re-stamp the page
         return self._by_key.get(key)
 
-    def evictable(self) -> frozenset[int]:
-        """The pages `evict` could free, cascading from the leaves.
+    def evictable(self) -> set[int]:
+        """The pages `evict` could free, cascading from the leaves; the live set, to read and not keep.
 
-        A page only the index holds is still out of reach while any page below
-        it is held by someone else: eviction takes leaves only, and that one is
-        never a leaf it can drop.
-
-        Kept until a page's owners change, the index's own inserts and removals
-        included: a request waiting at the head of the admission queue asks on
-        every scheduling pass, and the walk is over every page indexed.
+        A page only the index holds is out of reach while any page below it is
+        held: eviction takes leaves only.
         """
-        if self._evictable_at != self._arena.owner_changes:
-            self._evictable = self._find_evictable()
-            self._evictable_at = self._arena.owner_changes
         return self._evictable
 
-    def _find_evictable(self) -> frozenset[int]:
-        pinned: set[int] = set()
-        for page in self._by_key.values():
-            if self._arena.num_owners[page] > 1:
-                parent = self._parent[page]
-                while parent is not None and parent not in pinned:
-                    pinned.add(parent)
-                    parent = self._parent[parent]
-        return frozenset(
-            page for page in self._by_key.values()
-            if self._arena.num_owners[page] == 1 and page not in pinned
-        )
+    def set_shared(self, page: int, shared: bool) -> None:
+        """``page`` gained (``shared``) or lost its only owner besides the index."""
+        if self._key[page] is None or self._held_below[page]:
+            # not indexed, or held below either way
+            return
+        if shared:
+            self._evictable.discard(page)
+            self._pin_above(page)
+        else:
+            self._evictable.add(page)
+            self._unpin_above(page)
+
+    def _pin_above(self, page: int) -> None:
+        """Take the pages above ``page``, which just became held, out of reach."""
+        parent = self._parent[page]
+        while parent is not None:
+            self._held_below[parent] += 1
+            if self._held_below[parent] > 1 or self._arena.num_owners[parent] > 1:
+                return
+            self._evictable.discard(parent)
+            parent = self._parent[parent]
+
+    def _unpin_above(self, page: int) -> None:
+        """Give back the pages above ``page`` that nothing below holds any longer."""
+        parent = self._parent[page]
+        while parent is not None:
+            self._held_below[parent] -= 1
+            if self._held_below[parent] or self._arena.num_owners[parent] > 1:
+                return
+            self._evictable.add(parent)
+            parent = self._parent[parent]
 
     def pages(self) -> list[int]:
         """Every page the index is holding a reference to."""
@@ -156,6 +172,7 @@ class PrefixIndex:
         return None
 
     def _remove(self, page: int) -> None:
+        self._evictable.discard(page)
         del self._by_key[self._key[page]]
         self._key[page] = None
         parent = self._parent[page]
