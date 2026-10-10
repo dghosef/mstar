@@ -30,7 +30,7 @@ from mstar.engine.resources.kv.config import (
     RingKVLayerConfig,
 )
 from mstar.engine.resources.kv.keys import chain
-from mstar.model.base import PrefixStream, ProcessPromptOutput
+from mstar.model.base import Model, PrefixStream, ProcessPromptOutput
 from mstar.model.orpheus.config import OrpheusModelConfig
 from mstar.model.orpheus.orpheus_model import OrpheusModel
 from mstar.model.whisper.config import WhisperModelConfig
@@ -369,7 +369,7 @@ def _conductor_configs(
     the model's own, a default for anything it declared a stream for or any
     cache, and then each stamped with its own chain and counts."""
     configs = Conductor._get_resource_configs(
-        SimpleNamespace(model=model, _kv_cache_keys=Conductor._paged_kv_keys(model)), model_kwargs, {},
+        SimpleNamespace(model=model, _kv_cache_keys=Model.paged_kv_keys(model)), model_kwargs, {},
     )
     Conductor._stamp_resource_configs(configs, model_kwargs, seed=1, max_tokens=max_tokens)
     return configs
@@ -423,7 +423,7 @@ def test_a_ring_cache_is_handed_no_reservation_to_admit_by():
 
 def test_opening_a_request_builds_none_of_the_models_resources():
     model = _RingModel()
-    conductor = SimpleNamespace(model=model, _kv_cache_keys=Conductor._paged_kv_keys(model))
+    conductor = SimpleNamespace(model=model, _kv_cache_keys=Model.paged_kv_keys(model))
 
     def rebuilt():
         raise AssertionError("a request rebuilt the model's resource specs")

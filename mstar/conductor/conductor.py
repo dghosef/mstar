@@ -27,7 +27,7 @@ from mstar.conductor.request_info import (
 )
 from mstar.distributed.base import ShardingConfig
 from mstar.distributed.communication import GlobalParallelConfig, WorkerParallelGroups
-from mstar.engine.resources import KVReqConfig, KVSpec, PagedKVConfig, ResourceReqConfig, apply_yaml_overrides
+from mstar.engine.resources import KVReqConfig, PagedKVConfig, ResourceReqConfig, apply_yaml_overrides
 from mstar.engine.resources.kv.config import SPECULATIVE_DECODE_TOKENS, count_pages, labels_opened
 from mstar.graph.base import GraphEdge, NodeAndGraphWalk, TensorPointerInfo
 from mstar.graph.loop_indices import NestedLoopIndices
@@ -304,7 +304,7 @@ class Conductor:
 
         self.model = model
         # read once: `get_node_resources` builds the specs anew on every call
-        self._kv_cache_keys = self._paged_kv_keys(model)
+        self._kv_cache_keys = self._counted_kv_keys(model)
         self.hostname = hostname
         self.socket_path_prefix = socket_path_prefix
         self.log_level = log_level
@@ -487,11 +487,20 @@ class Conductor:
         return configs
 
     @staticmethod
-    def _paged_kv_keys(model) -> frozenset[str]:
-        return frozenset(
-            spec.resource_key for spec in model.get_node_resources()
-            if isinstance(spec, KVSpec) and isinstance(spec.config, PagedKVConfig)
-        )
+    def _counted_kv_keys(model) -> frozenset[str]:
+        """The model's paged KV pools, refused at load unless each declares a request's need.
+
+        A pool nothing counts admits every request, so it is the one pool that can
+        still run out of pages mid-request and hold or offload to make room.
+        """
+        keys = model.paged_kv_keys()
+        uncounted = keys - model.kv_counted() - set(model.prefix_key_streams())
+        if uncounted:
+            raise ValueError(
+                f"{type(model).__name__} declares no need for its paged KV pools {sorted(uncounted)}: "
+                "override `kv_slots` and `kv_counted`"
+            )
+        return keys
 
     @functools.cached_property
     def _kv_pools(self) -> dict[str, list[tuple[PagedKVConfig, frozenset[str]]]]:

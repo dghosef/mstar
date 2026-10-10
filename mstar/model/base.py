@@ -15,7 +15,7 @@ from mstar.conductor.request_info import (
     StreamingConnectionState,
 )
 from mstar.distributed.base import ShardingConfig, ShardingGroup
-from mstar.engine.resources import NodeResourceSpec, ResourceReqConfig
+from mstar.engine.resources import KVSpec, NodeResourceSpec, PagedKVConfig, ResourceReqConfig
 from mstar.engine.resources.sampler.utils import SamplingConfig
 from mstar.graph.base import (
     GraphEdge,
@@ -474,6 +474,12 @@ class Model(ABC):
     def kv_counted(self) -> frozenset[str]:
         """The paged KV pools whose need `kv_slots` declares."""
         return frozenset()
+
+    def paged_kv_keys(self) -> frozenset[str]:
+        return frozenset(
+            spec.resource_key for spec in self.get_node_resources()
+            if isinstance(spec, KVSpec) and isinstance(spec.config, PagedKVConfig)
+        )
 
     def get_request_resource_configs(
         self,
