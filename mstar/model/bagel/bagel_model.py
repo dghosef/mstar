@@ -721,8 +721,8 @@ class BagelModel(Model):
 
         An attachment counts at the size its ViT and VAE walks resize it to,
         from the image they are given: an edit's, resized to fit the output,
-        else the one attached. The guidance labels take main's count: each
-        holds at most main's.
+        else the one attached. No walk writes one to ``cfg_img``, and decode
+        writes main and ``cfg_img`` (`active_labels`).
         """
         segments = result.get("text_inputs") or []
         cfg = self.config
@@ -730,17 +730,18 @@ class BagelModel(Model):
         generating = output_modalities[:1] == ["image"]
         images = result.get("image_inputs") or (tensors or {}).get("image_inputs") or []
         preprocess = kwargs.get("image_preprocess", "default")
-        main = sum(len(span) for span in segments)
+        attached = 0
         for image in images:
             height, width = image.shape[-2:]
-            main += vit_image_slots(
+            attached += vit_image_slots(
                 height, width, preprocess,
                 cfg.vit_config.patch_size, cfg.vit_max_num_patch_per_side,
             )
             if generating:
-                main += vae_image_slots(
+                attached += vae_image_slots(
                     height, width, preprocess, cfg.latent_downsample, cfg.max_latent_size,
                 )
+        main = sum(len(span) for span in segments) + attached
         if not generating:
             return {"prompt_slots": {"kv": {"main": main}}, "decode_labels": {"kv": ["main"]}}
         # an edit generates at its input's size (see get_initial_forward_pass_args)
@@ -750,11 +751,10 @@ class BagelModel(Model):
         else:
             height, width = kwargs.get("height", 1024), kwargs.get("width", 1024)
         main += (height // cfg.latent_downsample) * (width // cfg.latent_downsample) + 2
-        labels = ("main", "cfg_text", "cfg_img")
         think = kwargs.get("think_mode", cfg.think_mode)
         return {
-            "prompt_slots": {"kv": dict.fromkeys(labels, main)},
-            "decode_labels": {"kv": list(labels) if think else []},
+            "prompt_slots": {"kv": {"main": main, "cfg_text": main, "cfg_img": main - attached}},
+            "decode_labels": {"kv": ["main", "cfg_img"] if think else []},
         }
 
     def postprocess(

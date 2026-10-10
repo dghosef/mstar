@@ -109,9 +109,8 @@ def vit_image_slots(
 ) -> int:
     """The KV slots the ViT walk writes for one image: a patch each, and its two sentinels.
 
-    Counted from the image's size by the resizes `ViTEncoderSubmodule.prepare_inputs`
-    runs, so a layout agrees with the walk; the probe's length check catches one that
-    does not, and the walks after it lose their reuse.
+    Counted by the resizes `ViTEncoderSubmodule.prepare_inputs` runs, so a layout
+    agrees with the walk.
     """
     if image_preprocess == "vllm":
         patches = max_num_patches_per_side ** 2
