@@ -112,7 +112,7 @@ def test_a_cold_request_reserves_its_prompt_and_max_tokens_of_growth():
     assert kv._reserved["r"].pages == _pages(50 + 40), (
         "a request was admitted on other than its prompt and its growth"
     )
-    assert kv._outstanding() == _pages(90) - _pages(50), (
+    assert kv._outstanding == _pages(90) - _pages(50), (
         "what the prompt already took was still counted as owed"
     )
 

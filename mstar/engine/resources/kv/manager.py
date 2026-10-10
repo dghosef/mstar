@@ -3,6 +3,7 @@ import os
 import threading
 from concurrent.futures import Future, wait
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Any
 
 import torch
@@ -48,6 +49,7 @@ from mstar.engine.resources.step import (
     StepContext,
 )
 from mstar.utils.h2d import PinnedStager
+from mstar.utils.profiler import PHASE_PERIOD, phase_record
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +259,8 @@ class Reservation:
     pages: int
     # counted by the model; one guessed from the prompt's ids can overrun
     exact: bool
+    # its share of `KVManager._outstanding`, as of the last time its pages moved
+    remaining: int = 0
 
 
 LabelToStream = dict[str, CacheStream]
@@ -437,6 +441,9 @@ class KVManager(AttentionResource):
         self._leads = leads
         self._decides = self._rank == 0 and leads
         self._reserved: dict[str, Reservation] = {}
+        # pages admitted requests may still take: kept as pages move (`_recount`),
+        # so the head's ask is one comparison however many requests run
+        self._outstanding = 0
         # requests that must reserve here and have not yet, decided at ingest so
         # a row that has reserved, or never must, does no admission work per step
         self._unreserved: set[str] = set()
@@ -569,8 +576,10 @@ class KVManager(AttentionResource):
         # held rather than taken, so the reservation gives up what the index lends
         # (and takes back what it returns)
         reserved = self._reserved.get(rid)
-        if reserved is not None:
+        # most calls lend nothing: a readiness ask per row per step
+        if pages and reserved is not None:
             reserved.pages -= pages
+            self._recount(rid)
 
     def apply_cached_prefix(
         self, rid: str, node_name: str, graph_walk: str, inputs, matched_len: int,
@@ -885,6 +894,7 @@ class KVManager(AttentionResource):
                         self._arena.release(stream.page_indices)
                     stream.reset(freed=drop)
                     stream.forget_chain()
+                    self._recount(rid)
                 if not own and remote_reset_generation is not None:
                     stream.remote_reset_generation = remote_reset_generation
                 if not own and stream.chain is not None:
@@ -993,6 +1003,7 @@ class KVManager(AttentionResource):
                         stream.chain.cursor = len(stream.lease)
                         stream.lease = None
                         stream.converted = True
+                        self._recount(segment.request_id)
                 self._report_admission(segment, stream)
             if ctx.is_preplan:
                 # a preplan that was promoted or abandoned already cleared
@@ -1094,6 +1105,7 @@ class KVManager(AttentionResource):
                     continue
                 self._arena.release(pages)
                 del stream.page_indices[-len(pages):]
+                self._recount(rid)
                 # so an offload that claimed this stream mid-admit notices its
                 # host copy no longer describes it and aborts
                 stream.generation += 1
@@ -1396,6 +1408,7 @@ class KVManager(AttentionResource):
                 stream = self._streams.get(rid, {}).pop(label, None)
                 if stream is not None:
                     self._arena.release(stream.page_indices)
+                    self._recount(rid)
             self._preplan_new_labels = []
             for rid, label in self._preplan_marked:
                 stream = self._streams.get(rid, {}).get(label)
@@ -1455,8 +1468,8 @@ class KVManager(AttentionResource):
                     # may still be reading them, but every later user of the
                     # pages queues behind them on the node's stream, the host
                     # pool's copies included)
-                    if policy is not None:
-                        self._apply_retention(stream, policy)
+                    if policy is not None and self._apply_retention(stream, policy):
+                        self._recount(segment.request_id)
             # post-forks copy what this step just wrote, so they land after the
             # spans above are counted
             for (from_label, to_label) in step.post_forks:
@@ -1586,7 +1599,9 @@ class KVManager(AttentionResource):
                     f"release_oldest on request {request_id!r} label {label!r} while its "
                     "pages are offloaded or in transfer"
                 )
-            return self._release_oldest_locked(stream, num_tokens)
+            freed = self._release_oldest_locked(stream, num_tokens)
+            self._recount(request_id)
+            return freed
 
     # Eviction
 
@@ -1721,6 +1736,7 @@ class KVManager(AttentionResource):
                 stream.hits = 0
                 # Offload changes residency, not logical stream contents.
                 stream.reset(content_reset=False)
+            self._recount(rid)
             return freed, {claim.label for claim in moved}
 
     def _abandon_claims(self, rid: str, labels: list[str]) -> None:
@@ -1800,6 +1816,7 @@ class KVManager(AttentionResource):
                 stream.released = state.released
                 stream.protected_prefix = state.protected_prefix
                 stream.offloaded = False
+            self._recount(rid)
         # sync outside the lock: orders the reload H2D copies before attention
         # reads them, but the pages are already assigned so it touches no
         # shared state
@@ -1919,6 +1936,7 @@ class KVManager(AttentionResource):
                 stream.reset(freed=drop)
                 # a stale cursor or generated key would misfile what the rerun writes
                 stream.forget_chain()
+            self._recount(rid)
             # the pages above were released, so any record of them is stale
             self._forget_reservations(rid)
             for label, stream in self._streams.get(rid, {}).items():
@@ -1946,7 +1964,9 @@ class KVManager(AttentionResource):
             self._streams.pop(rid, None)
             self._overrides.pop(rid, None)
             self._transfer.remove_request(rid)
-            self._reserved.pop(rid, None)
+            reserved = self._reserved.pop(rid, None)
+            if reserved is not None:
+                self._outstanding -= reserved.remaining
             self._dequeue(rid)
             self._opened.pop(rid, None)
             if _DEBUG_ASSERTS:
@@ -2031,7 +2051,7 @@ class KVManager(AttentionResource):
                 }
                 assert not over, f"requests took more pages than they reserved: {over}"
                 if self._leads:
-                    outstanding, supply = self._outstanding(), self._supply()
+                    outstanding, supply = self._outstanding, self._supply()
                     assert outstanding <= supply, (
                         f"admitted requests may still take {outstanding} pages, but "
                         f"only {supply} are free or evictable"
@@ -2172,13 +2192,14 @@ class KVManager(AttentionResource):
                 f"KV {self.name}: request {rid} needs {need + held} pages, "
                 f"and the pool has {capacity} for requests"
             ))
-        if self._outstanding() + need > self._supply(leasing=hit):
+        if self._outstanding + need > self._supply(leasing=hit):
             return _WAIT
         if hit:
             self._lease(rid, stream, rooted)
             stream.gate_lease = True
         reservation.pages = need
         self._reserved[rid] = reservation
+        self._recount(rid)
         self._dequeue(rid)
         return None
 
@@ -2204,6 +2225,7 @@ class KVManager(AttentionResource):
                     f"KV {self.name}: request {rid} reached admit without passing readiness"
                 )
             self._reserved[rid] = self._reservation(rid)
+            self._recount(rid)
             self._dequeue(rid)
 
     def _probe_label(self, rid: str, node_name: str, graph_walk: str) -> str | None:
@@ -2241,12 +2263,22 @@ class KVManager(AttentionResource):
         evictable = self._index.evictable() if self._index is not None else frozenset()
         return self._arena.num_free + len(evictable) - len(evictable.intersection(leasing))
 
-    def _outstanding(self) -> int:
-        """Pages admitted requests may still take."""
-        return sum(
-            max(0, res.pages - self._held_fresh(rid))
-            for rid, res in self._reserved.items()
-        )
+    def _recount(self, rid: str) -> None:
+        """Bring ``rid``'s share of `_outstanding` up to what it may still take.
+
+        Owed wherever its reservation or the pages it took move: a share left
+        stale lets the head into room an admitted request still needs.
+        """
+        reserved = self._reserved.get(rid)
+        if reserved is None:
+            return
+        t0 = perf_counter() if PHASE_PERIOD else 0.0
+        taken = self._held_fresh(rid)
+        remaining = max(0, reserved.pages - taken)
+        self._outstanding += remaining - reserved.remaining
+        reserved.remaining = remaining
+        if PHASE_PERIOD:
+            phase_record("kv.recount", perf_counter() - t0)
 
     def _check_ready(
         self, rid: str, label: str
@@ -2390,6 +2422,7 @@ class KVManager(AttentionResource):
                     )
                 stream.page_indices.extend(new_pages)
                 stream.generation += 1
+                self._recount(request_id)
         return AllocResult(new_pages=new_pages)
 
     ### Submodule-level functionality
