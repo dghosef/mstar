@@ -680,17 +680,6 @@ class Engine:
             nodes = ", ".join(sorted(specs_by_key[key].nodes))
             for label in declared[key]:
                 logger.info("KV %s: prefix cache open for %s on %s", key, label, nodes)
-            # a hit allocates only the prompt's tail, so the pool admits a request by
-            # what it can still take, not by what its prompt takes
-            config = specs_by_key[key].config
-            max_tokens = model.get_max_output_tokens()
-            logger.info(
-                "KV %s: admits by reservation from %d pages: a request reserves its "
-                "uncached prompt and up to %d pages of decode at the default "
-                "max_tokens %d",
-                key, config.max_num_pages,
-                -(-min(max_tokens, config.max_seq_len) // config.page_size), max_tokens,
-            )
         for node in set().union(*(specs_by_key[key].nodes for key in keyed)):
             pools = sorted(key for key in keyed if node in specs_by_key[key].nodes)
             if len(pools) > 1:
