@@ -227,11 +227,11 @@ travels with its other ``model_kwargs``.
 The pool admits a request only once the pages it can take fit beside what the running
 requests may still take. A request can take its prompt, less the pages it finds cached, and
 up to ``max_tokens`` of decode, so a running request never runs out of pages. A request that
-doesn't fit waits, and none passes one that asked earlier, so short requests never starve a
-long one. A request that could not fit even alone fails at once. The pool sizes a request
-this way when its model counts what each request holds (Bagel and Whisper do) or keys its
-prompt; for any other model it admits as before. When a cache opens for prefix reuse, the
-engine logs its pages and what a request reserves at the default ``max_tokens``.
+sends no ``max_tokens`` reserves as far as the model's decode loop runs, so a client that
+sends a tight one fits more requests at once. A request that doesn't fit waits, and none
+passes one that asked earlier, so short requests never starve a long one. A request the
+model counts that could not fit even alone fails at once. Every model with a paged pool
+counts what each request holds there, and the server refuses at load one that does not.
 ``max_concurrent_requests`` is still an optional cap on top. ``cpu_offload_pages`` lets a
 full pool move a request to the host. An offload frees only the device pages no other
 running request reads, so a request that shares most of its prompt frees little.
