@@ -444,6 +444,8 @@ class KVManager(AttentionResource):
         # pages admitted requests may still take: kept as pages move (`_recount`),
         # so the head's ask is one comparison however many requests run
         self._outstanding = 0
+        # the label sets a request has taken past its reservation on, each reported once
+        self._overran: set[tuple[str, ...]] = set()
         # requests that must reserve here and have not yet, decided at ingest so
         # a row that has reserved, or never must, does no admission work per step
         self._unreserved: set[str] = set()
@@ -2274,11 +2276,32 @@ class KVManager(AttentionResource):
             return
         t0 = perf_counter() if PHASE_PERIOD else 0.0
         taken = self._held_fresh(rid)
+        if taken > reserved.pages:
+            self._report_overrun(rid, reserved, taken)
         remaining = max(0, reserved.pages - taken)
         self._outstanding += remaining - reserved.remaining
         reserved.remaining = remaining
         if PHASE_PERIOD:
             phase_record("kv.recount", perf_counter() - t0)
+
+    def _report_overrun(self, rid: str, reserved: Reservation, taken: int) -> None:
+        """Say once per label set that a request took more pages than it reserved.
+
+        The pool then admits into room it no longer has, and the holds and
+        offloads admission exists to end come back; the count the model declared
+        is what is wrong, so the line names it.
+        """
+        labels = tuple(sorted(self._streams[rid]))
+        if labels in self._overran:
+            return
+        self._overran.add(labels)
+        overrides = self._overrides[rid]
+        logger.error(
+            "KV %s: request %s took %d pages against a reservation of %d on labels %s: "
+            "prompt_slots %s, decode_labels %s, max_tokens %s%s",
+            self.name, rid, taken, reserved.pages, list(labels), overrides.prompt_slots,
+            overrides.decode_labels, overrides.max_tokens, "" if reserved.exact else " (a guess from its keys)",
+        )
 
     def _check_ready(
         self, rid: str, label: str
