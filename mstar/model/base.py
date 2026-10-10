@@ -458,6 +458,25 @@ class Model(ABC):
         """
         return {}
 
+    def kv_slots(
+        self, tensors: NameToTensorList, input_modalities: list[str],
+        output_modalities: list[str], **kwargs,
+    ) -> dict:
+        """What each paged KV pool reserves for a request, keyed by resource:
+        ``prompt_slots`` per label, and the ``decode_labels`` that grow by
+        ``max_tokens``.
+
+        Only the model knows what its walks write (conditioning rows, media
+        expanded on the worker, spans no step commits), so a model with a paged
+        pool overrides this, and `kv_counted` with it.
+        """
+        del tensors, input_modalities, output_modalities, kwargs
+        return {}
+
+    def kv_counted(self) -> frozenset[str]:
+        """The paged KV pools whose need `kv_slots` declares."""
+        return frozenset()
+
     def get_request_resource_configs(
         self,
         partition_fwd_args: dict[str, ForwardPassArgs],
