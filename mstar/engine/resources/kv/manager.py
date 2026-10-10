@@ -963,29 +963,29 @@ class KVManager(AttentionResource):
                 ).get(segment.label)
                 if stream is None:
                     continue
-                if stream.gate_lease and segment.span:
-                    # prepare never cut this step's inputs to the lease the gate
-                    # took, so the step writes the stream from 0
-                    self._lent(segment.request_id, -len(stream.lease))
-                    self._release_lease(stream)
-                if (
-                    stream.lease is not None
-                    and not stream.gate_lease
-                    and not stream.stored_len
-                    and not stream.offloaded
-                    and not stream.read_pending
-                ):
-                    # drop the empty pages a refused batch admit left, before taking the lease
-                    self._arena.release(stream.page_indices)
-                    stream.page_indices = list(stream.lease)
-                    stream.hits = len(stream.lease)
-                    stream.stored_len = (
-                        len(stream.lease) * self.config.page_size
-                    )
-                    # they came out of the index, so they are already in it
-                    stream.chain.cursor = len(stream.lease)
-                    stream.lease = None
-                    stream.converted = True
+                if stream.lease is not None:
+                    if stream.gate_lease and segment.span:
+                        # prepare never cut this step's inputs to the lease the gate
+                        # took, so the step writes the stream from 0
+                        self._lent(segment.request_id, -len(stream.lease))
+                        self._release_lease(stream)
+                    elif (
+                        not stream.gate_lease
+                        and not stream.stored_len
+                        and not stream.offloaded
+                        and not stream.read_pending
+                    ):
+                        # drop the empty pages a refused batch admit left, before taking the lease
+                        self._arena.release(stream.page_indices)
+                        stream.page_indices = list(stream.lease)
+                        stream.hits = len(stream.lease)
+                        stream.stored_len = (
+                            len(stream.lease) * self.config.page_size
+                        )
+                        # they came out of the index, so they are already in it
+                        stream.chain.cursor = len(stream.lease)
+                        stream.lease = None
+                        stream.converted = True
                 self._report_admission(segment, stream)
             if ctx.is_preplan:
                 # a preplan that was promoted or abandoned already cleared
