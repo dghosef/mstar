@@ -2119,7 +2119,11 @@ class KVManager(AttentionResource):
             len(stream.lease or ()) + stream.hits
             for label, stream in self._streams[rid].items() if label in count.labels
         )
-        return Reservation(pages=max(0, count.pages - held), exact=count.exact)
+        pages = count.pages
+        if not count.exact:
+            # a guess proves nothing unservable: at worst it waits for an empty pool
+            pages = min(pages, self._capacity())
+        return Reservation(pages=max(0, pages - held), exact=count.exact)
 
     def _gated(self, rid: str, overrides: KVReqConfig | None) -> bool:
         """Whether ``rid`` still has to reserve before it runs.
@@ -2182,15 +2186,12 @@ class KVManager(AttentionResource):
         need = reservation.pages - len(hit)
         capacity = self._capacity()
         if need + held > capacity:
-            if reservation.exact:
-                del self._waiting[rid]
-                self._rooted.pop(rid, None)
-                return AdmitOutcome(ok=False, ready=False, reason=AdmitRuntimeError(
-                    f"KV {self.name}: request {rid} needs {need + held} pages, "
-                    f"and the pool has {capacity} for requests"
-                ))
-            # a guess proves nothing unservable: at worst it waits for an empty pool
-            need = capacity - held
+            del self._waiting[rid]
+            self._rooted.pop(rid, None)
+            return AdmitOutcome(ok=False, ready=False, reason=AdmitRuntimeError(
+                f"KV {self.name}: request {rid} needs {need + held} pages, "
+                f"and the pool has {capacity} for requests"
+            ))
         if self._outstanding() + need > self._supply(leasing=hit):
             return _WAIT
         if hit:
