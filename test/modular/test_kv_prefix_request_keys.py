@@ -71,11 +71,12 @@ class _Model:
 
     def __init__(
         self, declares: bool = True, metadata: dict | None = None,
-        decode_walk: str | None = None,
+        decode_walk: str | None = None, slots: dict | None = None,
     ):
         self._declares = declares
         self._metadata = metadata
         self._decode_walk = decode_walk
+        self._slots = slots or {}
 
     def prefix_key_streams(self):
         if not self._declares:
@@ -94,6 +95,9 @@ class _Model:
                 max_num_pages=64, page_size=128,
             ),
         )]
+
+    def kv_slots(self, *args, **kwargs):
+        return self._slots
 
     def process_prompt(self, *args, **kwargs):
         tensors = {"text_inputs": [torch.tensor(PROMPT, dtype=torch.long)]}
