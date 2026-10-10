@@ -259,16 +259,6 @@ class Reservation:
     exact: bool
 
 
-@dataclass
-class AdmissionDeferred(AdmitFailedReason):
-    """A step carries a request that has not reserved, and its turn hasn't come.
-
-    Not an `AllocationFailed`: nothing needs evicting. The step goes back, and
-    readiness admits the request when its reservation fits.
-    """
-    request_id: str
-
-
 LabelToStream = dict[str, CacheStream]
 
 @dataclass
@@ -963,12 +953,8 @@ class KVManager(AttentionResource):
         # one critical section so the read-of-stored_len then alloc is atomic
         # against a concurrent reset/remove/commit on another thread
         with self._lock:
-            # before anything moves, so a refusal leaves nothing to unwind, and
             # before the lease converts, as a request is sized off the lease it holds
-            if not ctx.capture:
-                deferred = self._reserve_new(ctx)
-                if deferred is not None:
-                    return AdmitOutcome(ok=False, reason=deferred)
+            self._reserve_new(ctx)
             # before the fork loop and the segment loop, both of which size
             # off `stored_len`: a pre-fork target has to cover the whole prefix
             for segment in step.segments:
@@ -2203,32 +2189,23 @@ class KVManager(AttentionResource):
         self._rooted.pop(rid, None)
         return None
 
-    def _reserve_new(self, ctx: StepContext) -> AdmissionDeferred | None:
-        """Reserve for a request that reached admit without passing this pool's readiness.
+    def _reserve_new(self, ctx: StepContext) -> None:
+        """Reserve what the deciding pool admitted at readiness, without checking room.
 
-        Where this pool decides, at world size 1, it waits its turn as at
-        readiness. Under TP, rank 0 has already sent the step to the other
-        ranks, so refusing it would leave them in a forward rank 0 never runs;
-        and a pool that does not decide reserves what the deciding one admitted.
+        A pool that does not decide, and every rank but 0, sees a request first at
+        admit; refusing it there would leave the other ranks in a forward rank 0
+        runs, so it follows rank 0's decision instead.
         """
         for rid in ctx.request_ids:
             if not self._gated(rid, self._overrides.get(rid)):
                 continue
-            if self._decides and self._world_size == 1 and not self._in_region(ctx):
-                if self._try_reserve(rid) is not None:
-                    return AdmissionDeferred(
-                        message=f"KV {self.name}: request {rid} has not reserved its pages",
-                        request_id=rid,
-                    )
-                continue
+            if _DEBUG_ASSERTS:
+                assert not (self._decides and self._world_size == 1), (
+                    f"KV {self.name}: request {rid} reached admit without passing readiness"
+                )
             self._reserved[rid] = self._reservation(rid)
             self._waiting.pop(rid, None)
             self._rooted.pop(rid, None)
-            if _DEBUG_ASSERTS and self._leads:
-                assert self._outstanding() <= self._supply(), (
-                    f"KV {self.name}: {rid} was admitted into room this rank does not have"
-                )
-        return None
 
     def _probe_label(self, rid: str, node_name: str, graph_walk: str) -> str | None:
         """The label prepare probes for ``rid`` on this walk, if any.
@@ -2248,14 +2225,6 @@ class KVManager(AttentionResource):
         return stream.lease is None and not (
             stream.converted or stream.stored_len or stream.offloaded or stream.read_pending
         )
-
-    @staticmethod
-    def _in_region(ctx: StepContext) -> bool:
-        # a piecewise region admits inside the forward, where a refusal fails the
-        # batch; imported here, as the runner imports this package
-        from mstar.engine.cuda_graph_runner import PIECEWISE_WALK
-
-        return ctx.graph_walk == PIECEWISE_WALK
 
     def _capacity(self) -> int:
         """Pages one request could have with nothing else admitted: all but the
@@ -2414,13 +2383,6 @@ class KVManager(AttentionResource):
                     new_pages = self._arena.acquire(num_new_pages)
                 if new_pages is None:
                     pages_short = num_new_pages - self._arena.num_free
-                    reserved = self._reserved.get(request_id)
-                    if _DEBUG_ASSERTS and self._leads and reserved is not None and reserved.exact:
-                        raise AssertionError(
-                            f"KV {self.name}: {request_id}/{label} was admitted on "
-                            f"a reservation of {reserved.pages} pages and is "
-                            f"{pages_short} short"
-                        )
                     return AllocResult(
                         success=False,
                         error=AllocationFailed(

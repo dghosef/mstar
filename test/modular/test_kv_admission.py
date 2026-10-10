@@ -26,7 +26,6 @@ from mstar.engine.resources.kv.config import KVReqConfig, KVSpec, KVStep, PagedK
 from mstar.engine.resources.kv.cpu_page_pool import OffloadedStream
 from mstar.engine.resources.kv.keys import chain
 from mstar.engine.resources.kv.manager import (
-    AdmissionDeferred,
     KVManager,
     KVSequenceInfo,
     PublishedKVInfo,
@@ -228,20 +227,6 @@ def test_a_lease_prepare_never_cut_to_is_given_back_at_admit():
 
 
 # ── where readiness is skipped ──────────────────────────────────────────
-
-
-def test_a_step_that_skipped_readiness_waits_its_turn_at_admit():
-    kv = _manager(max_num_pages=16)
-    kv.ingest_request("a", _request(list(range(100)), max_tokens=60))
-    assert _ready(kv, "a").ready
-    kv.ingest_request("b", _request(list(range(500, 600)), max_tokens=60))
-    free = kv._arena.num_free
-
-    # a step that never asked readiness
-    outcome = _step(kv, "b", 100)
-
-    assert isinstance(outcome.reason, AdmissionDeferred)
-    assert kv._arena.num_free == free, "a step refused its turn still took pages"
 
 
 def _two_admitted(kv: KVManager) -> KVManager:

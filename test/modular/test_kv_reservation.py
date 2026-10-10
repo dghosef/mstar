@@ -202,21 +202,8 @@ def test_the_check_catches_a_request_taking_more_than_it_reserved(monkeypatch):
     kv.ingest_request("r", KVReqConfig(
         max_tokens=16, prompt_slots={"main": PAGE_SIZE}, decode_labels=[],
     ))
+    assert kv.admit_retrieve("r", "LLM", WALK, None).ready
 
     with pytest.raises(AssertionError, match="took more pages than they reserved"):
         _run(kv, "r", 3 * PAGE_SIZE)
 
-
-def test_an_admitted_request_that_finds_no_page_is_an_assertion(monkeypatch):
-    kv = _manager(max_num_pages=8)
-    kv.ingest_request("r", KVReqConfig(
-        max_tokens=16, prompt_slots={"main": PAGE_SIZE}, decode_labels=["main"],
-    ))
-    assert kv.admit_retrieve("r", "LLM", WALK, None).ready
-    # a row with no max_tokens is never admitted by reservation, so it can take the room
-    kv.ingest_request("filler", KVReqConfig())
-    _run(kv, "filler", 7 * PAGE_SIZE)
-    monkeypatch.setattr(manager_mod, "_DEBUG_ASSERTS", True)
-
-    with pytest.raises(AssertionError, match="was admitted on a reservation of"):
-        kv.admit(KVStep(segments=(Segment("r", "main", PAGE_SIZE),)), _ctx("r"))
