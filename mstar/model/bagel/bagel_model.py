@@ -724,9 +724,7 @@ class BagelModel(Model):
         else the one attached. The guidance labels take main's count: each
         holds at most main's.
         """
-        segments = result.get("text_inputs")
-        if not segments:
-            return {}
+        segments = result.get("text_inputs") or []
         cfg = self.config
         generating = "image" in output_modalities
         images = result.get("image_inputs") or (tensors or {}).get("image_inputs") or []
