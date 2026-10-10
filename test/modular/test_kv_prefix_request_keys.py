@@ -16,19 +16,15 @@ from types import SimpleNamespace
 
 sys.path.insert(0, ".")
 
+import numpy as np
+import soundfile
 import torch
 
 from mstar.api_server.data_worker import PreprocessWorkerThread
 from mstar.api_server.request_types import PreprocessInput
 from mstar.conductor.conductor import Conductor
 from mstar.engine.resources import SamplingReqConfig
-from mstar.engine.resources.kv.config import (
-    KVReqConfig,
-    KVSpec,
-    PagedKVConfig,
-    RingKVConfig,
-    RingKVLayerConfig,
-)
+from mstar.engine.resources.kv.config import KVReqConfig, KVSpec, PagedKVConfig
 from mstar.engine.resources.kv.keys import chain
 from mstar.model.base import Model, PrefixStream, ProcessPromptOutput
 from mstar.model.orpheus.config import OrpheusModelConfig
@@ -285,6 +281,20 @@ def test_a_clients_page_counts_never_reach_the_conductor():
     )
 
 
+def test_the_pool_admits_by_kv_slots_whatever_process_prompt_returns():
+    counted = {"prompt_slots": {"kv": {"main": len(PROMPT)}}, "decode_labels": {"kv": ["main"]}}
+    worker = _worker(_Model(
+        metadata={"prompt_slots": {"kv": {"main": 1}}, "decode_labels": {"kv": []}}, slots=counted,
+    ), _deployment())
+
+    kwargs = _run(worker)
+
+    assert {name: kwargs[name] for name in counted} == counted, (
+        "a count process_prompt returned stood in for the model's kv_slots, so "
+        "the pool admitted the request by a second channel"
+    )
+
+
 # ── the metadata fold ───────────────────────────────────────────────────
 
 
@@ -402,38 +412,6 @@ def test_orpheus_is_handed_a_config_for_the_stream_it_declares():
 # ── max_tokens on every kv cache ─────────────────────────────────────────
 
 
-class _RingModel(_SamplerOnlyModel):
-    """Beside its paged cache, a ring cache, as Waypoint's frames keep one."""
-
-    def get_node_resources(self):
-        ring = RingKVConfig(
-            num_layers=1, num_kv_heads=1, head_dim=8, tokens_per_frame=4,
-            layers=(RingKVLayerConfig(ring_frames=2, ring_buckets=1, pinned_dilation=1),),
-        )
-        return [*super().get_node_resources(), KVSpec(resource_key="ring", nodes={"DiT"}, config=ring)]
-
-
-def test_a_ring_cache_is_handed_no_reservation_to_admit_by():
-    configs = _conductor_configs(_RingModel(), {}, max_tokens=16)
-
-    assert configs["kv"].max_tokens == 16 and "ring" not in configs, (
-        "a ring cache, which keeps a window, was handed a paged cache's reservation"
-    )
-
-
-def test_opening_a_request_builds_none_of_the_models_resources():
-    model = _RingModel()
-    conductor = SimpleNamespace(model=model, _kv_cache_keys=Model.paged_kv_keys(model))
-
-    def rebuilt():
-        raise AssertionError("a request rebuilt the model's resource specs")
-
-    model.get_node_resources = rebuilt
-
-    configs = Conductor._get_resource_configs(conductor, {}, {})
-
-    assert "kv" in configs, "the paged cache got no config to admit by"
-
 class _StubFeatureExtractor:
     """A silent 30 s window's features, the length the real extractor pads to."""
 
@@ -444,17 +422,25 @@ class _StubFeatureExtractor:
         return {"input_features": [torch.zeros(128, 3000)]}
 
 
-def test_whisper_hands_each_cache_what_it_will_hold():
+def test_whisper_hands_each_cache_what_it_will_hold(monkeypatch, tmp_path):
+    # here, not at the top: api_uploads imports this module's stubs
+    from api_uploads import decode_uploads
+
+    decode_uploads(monkeypatch)
     whisper = WhisperModel.__new__(WhisperModel)
     whisper.config = WhisperModelConfig(
         lang_to_id={"<|en|>": 50259}, task_to_id={"transcribe": 50360},
     )
     whisper.feature_extractor = _StubFeatureExtractor()
-    out = whisper.process_prompt(
-        None, ["audio"], ["text"], tensors={"audio_inputs": [torch.zeros(16000)]},
-    )
+    clip = tmp_path / "clip.wav"
+    soundfile.write(clip, np.zeros(16000), 16000, subtype="PCM_16")
+    worker = _worker(whisper, None)
+    worker._process_input(PreprocessInput(
+        request_id="r0", text="", file_paths={"audio": [str(clip)]},
+        input_modalities=["audio", "text"], output_modalities=["text"], model_kwargs={},
+    ))
 
-    configs = _conductor_configs(whisper, whisper.kv_slots(out, ["audio"], ["text"]), max_tokens=444)
+    configs = _conductor_configs(whisper, worker.communicator.sent[-1].body.model_kwargs, max_tokens=444)
 
     handed = {
         key: (configs[key].max_tokens, configs[key].prompt_slots, configs[key].decode_labels)

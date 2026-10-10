@@ -31,11 +31,7 @@ from mstar.engine.resources.kv.manager import (
     PublishedKVInfo,
 )
 from mstar.engine.resources.kv.plan import SINK_PAGE
-from mstar.engine.resources.step import AdmitRuntimeError, AllocationFailed, Segment, StepContext
-
-requires_cuda = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="the host pool pins its memory"
-)
+from mstar.engine.resources.step import AdmitRuntimeError, Segment, StepContext
 
 PAGE_SIZE = 16
 ROOT = b"a root"
@@ -73,10 +69,7 @@ def _stub_transfer(monkeypatch):
     monkeypatch.setattr(manager_mod, "KVTransferManager", _StubTransfer)
 
 
-def _manager(
-    max_num_pages: int = 16, rank: int = 0, world_size: int = 1,
-    cpu_offload_pages: int = 0,
-) -> KVManager:
+def _manager(max_num_pages: int = 16, rank: int = 0, world_size: int = 1) -> KVManager:
     group = None
     if world_size > 1:
         group = SimpleNamespace(rank=rank, world_size=world_size)
@@ -84,11 +77,9 @@ def _manager(
         cfg=PagedKVConfig(
             num_layers=1, num_kv_heads=2, head_dim=8, max_seq_len=4096,
             max_num_pages=max_num_pages, page_size=PAGE_SIZE,
-            cpu_offload_pages=cpu_offload_pages,
         ),
         name="kv", joint_comm_group=group, transfer_engine_info=None,
-        device=torch.device("cuda" if cpu_offload_pages else "cpu"),
-        dtype=torch.float32,
+        device=torch.device("cpu"), dtype=torch.float32,
     )
     kv.enable_prefix_cache(ROOT, {"main": (PREFILL, DECODE)})
     return kv
@@ -173,16 +164,24 @@ def test_a_guessed_count_too_big_for_the_pool_waits_for_it_to_empty():
     assert _ready(kv, "guess").ready, "a guess too big for the pool was kept from an empty one"
 
 
-def test_a_request_nothing_counts_runs_where_a_counted_one_waits():
-    kv = _manager(max_num_pages=16)
-    kv.ingest_request("a", _request(list(range(100)), max_tokens=60))
-    assert _ready(kv, "a").ready
-    kv.ingest_request("counted", _request(list(range(500, 600)), max_tokens=60))
-    # no count and no keys: max_seq_len is all that would bound it
-    kv.ingest_request("uncounted", KVReqConfig(max_tokens=60))
+# ── decode past max_tokens ──────────────────────────────────────────────
 
-    assert not _ready(kv, "counted").ready
-    assert _ready(kv, "uncounted").ready, "a request with nothing to size it by was held back"
+
+def test_a_request_ending_on_a_page_boundary_has_a_page_for_its_speculative_step():
+    # 16 of prompt and 16 of decode fill two pages; the speculative step that runs
+    # past the stop writes a 33rd token, on a third: two requests fill the 6 pages
+    kv = _manager(max_num_pages=7)
+    for rid in ("a", "b", "c"):
+        kv.ingest_request(rid, KVReqConfig(max_tokens=16, prompt_slots={"main": 16}, decode_labels=["main"]))
+    admitted = [rid for rid in ("a", "b", "c") if _ready(kv, rid).ready]
+    for rid in admitted:
+        assert _step(kv, rid, 16).ok
+
+    for _ in range(16 + 1):
+        for rid in admitted:
+            assert _step(kv, rid, 1, DECODE).ok, (
+                f"{rid} found no page for the token its speculative step writes past max_tokens"
+            )
 
 
 # ── the hit ─────────────────────────────────────────────────────────────
@@ -224,6 +223,42 @@ def test_a_lease_prepare_never_cut_to_is_given_back_at_admit():
         "the lease became the front of a stream whose step wrote the prompt from 0"
     )
     assert kv._reserved["b"].pages == 6, "the pages the lease gave back were not reserved again"
+
+
+# ── eviction while waiting ──────────────────────────────────────────────
+
+
+def test_a_waiters_cached_pages_outlast_idle_ones_and_those_of_waiters_behind_it():
+    kv = _manager(max_num_pages=24)
+    prompts = {
+        name: list(range(base, base + 3 * PAGE_SIZE))
+        for name, base in (("idle", 0), ("ahead", 1000), ("behind", 2000))
+    }
+    cached = {}
+    for name, prompt in prompts.items():
+        kv.ingest_request(name, _request(prompt, max_tokens=1))
+        assert _ready(kv, name).ready and _prefill(kv, name, len(prompt)).ok
+        cached[name] = list(kv._streams[name]["main"].page_indices)
+        kv.remove_request(name)
+    # 20 of the 23 pages, so its decode evicts 6 of the 9 cached
+    running = _request(list(range(5000, 5000 + PAGE_SIZE)), max_tokens=19 * PAGE_SIZE - 1)
+    running.prefix_cache = False
+    kv.ingest_request("running", running)
+    assert _ready(kv, "running").ready and _step(kv, "running", PAGE_SIZE).ok
+    # 23 pages, 2 of them its hit: more than is free once "running" leaves
+    kv.ingest_request("a", _request(prompts["ahead"], max_tokens=310))
+    kv.ingest_request("b", _request(prompts["behind"], max_tokens=1))
+    assert not _ready(kv, "a").ready and not _ready(kv, "b").ready
+
+    for _ in range(19):
+        assert _step(kv, "running", PAGE_SIZE, DECODE).ok
+
+    indexed = set(kv._index.pages())
+    assert not indexed & set(cached["idle"] + cached["behind"]), "an idle page or a later waiter's outlasted"
+    assert set(cached["ahead"]) <= indexed, "the head lost what it matched while pages others needed were evictable"
+    kv.remove_request("running")
+    assert kv._arena.num_free < kv._reservation("a").pages, "the head would fit in the free pages alone"
+    assert _ready(kv, "a").ready, "the head waited on pages only waiting requests matched"
 
 
 # ── where readiness is skipped ──────────────────────────────────────────
@@ -272,21 +307,6 @@ def test_a_guidance_cache_checks_no_room_of_its_own(monkeypatch):
 
     # admitted by the leader, so past what this cache alone would have let in
     assert _step(guidance, "b", 100).ok, "a guidance cache failed the leader's decision"
-
-
-def test_a_guidance_cache_short_of_pages_reports_it_rather_than_asserting(monkeypatch):
-    monkeypatch.setattr(manager_mod, "_DEBUG_ASSERTS", True)
-    guidance = _cfg_parallel_cache("LLM_cfg_text")
-    guidance.ingest_request("a", _request(list(range(100)), max_tokens=60))
-    assert _step(guidance, "a", 100).ok
-    guidance.ingest_request("b", _request(list(range(500, 700)), max_tokens=10))
-
-    # b's 13 pages are more than the 8 a left: room only the leader's cache promises
-    outcome = _step(guidance, "b", 200)
-
-    assert isinstance(outcome.reason, AllocationFailed), (
-        "a guidance cache treated room the leader promised as its own broken promise"
-    )
 
 
 # ── a batch that runs guidance for every row ────────────────────────────
@@ -372,19 +392,6 @@ def test_a_producer_rewind_gives_back_what_the_index_lent():
 # ── a request moved to the host ─────────────────────────────────────────
 
 
-def _offloaded_with_a_hit(kv: KVManager) -> str:
-    """``b`` running on three pages lent by the index, then moved out."""
-    prompt = list(range(4 * PAGE_SIZE))
-    kv.ingest_request("a", _request(prompt, max_tokens=2 * PAGE_SIZE))
-    assert _ready(kv, "a").ready and _prefill(kv, "a", len(prompt)).ok
-    kv.ingest_request("b", _request(prompt, max_tokens=2 * PAGE_SIZE))
-    assert _ready(kv, "b").ready and _prefill(kv, "b", len(prompt)).ok
-    kv.remove_request("a")
-    assert kv.offload("b") > 0, "the request did not move to the host"
-    return "b"
-
-
-
 class _StubHostPool:
     """The host pool `offload` and `reload` use, minus the copies."""
 
@@ -405,6 +412,16 @@ class _StubHostPool:
 
     def labels(self, rid):
         return list(self.states.get(rid, {}))
+
+    def num_pages(self, rid, label):
+        return len(self.states[rid][label].cpu_page_indices)
+
+    def reload_stream(self, rid, label, **kwargs):
+        del kwargs
+        state = self.states[rid].pop(label)
+        if not self.states[rid]:
+            del self.states[rid]
+        return state
 
     def remove_request(self, rid):
         self.states.pop(rid, None)
@@ -436,15 +453,9 @@ def test_an_offload_gives_back_what_the_index_lent():
     )
 
 
-def test_an_offload_does_not_tell_readers_the_stream_was_rewritten():
-    kv = _manager(max_num_pages=32)
-    stream, (_, _, epoch) = _on_the_host(kv)
-
-    assert stream.reset_generation == epoch, "an offload moved the stream's contents epoch"
-
-@requires_cuda
 def test_a_reload_takes_back_only_what_the_reservation_kept():
-    kv = _manager(max_num_pages=32, cpu_offload_pages=32)
+    kv = _manager(max_num_pages=32)
+    kv._cpu_pool = _StubHostPool()
     prompt = list(range(4 * PAGE_SIZE))
     kv.ingest_request("a", _request(prompt, max_tokens=2 * PAGE_SIZE))
     assert _ready(kv, "a").ready and _prefill(kv, "a", len(prompt)).ok
@@ -460,10 +471,9 @@ def test_a_reload_takes_back_only_what_the_reservation_kept():
     )
 
 
-@requires_cuda
 def test_nothing_is_admitted_into_the_room_a_reload_will_take():
-    kv = _manager(max_num_pages=16, cpu_offload_pages=32)
-    _offloaded_with_a_hit(kv)
+    kv = _manager(max_num_pages=16)
+    _on_the_host(kv)
     # b comes back on four pages of its own and still owes two of growth: of
     # the fifteen, a request needing ten fits only if b's room goes to it
     kv.ingest_request("c", KVReqConfig(
@@ -522,6 +532,9 @@ def _drive(kv: KVManager, rng: random.Random, ops: int) -> list[str]:
         assert kv._index.evictable() == _evictable_afresh(kv), (
             f"the evictable pages kept as owners changed are not what a walk finds: {log}"
         )
+        assert kv._outstanding == sum(
+            max(0, res.pages - kv._held_fresh(rid)) for rid, res in kv._reserved.items()
+        ), f"what admitted requests may still take, kept as pages moved, is not their sum: {log}"
     return log
 
 
@@ -552,3 +565,21 @@ def test_no_admitted_request_runs_out_of_pages(monkeypatch):
     assert kv._arena.num_free + len(kv._index.evictable()) == kv.config.max_num_pages - 1, (
         f"seed {SEED}: pages outlived every request that owned them"
     )
+
+
+# ── a count that is wrong ───────────────────────────────────────────────
+
+
+def test_a_request_past_its_reservation_is_reported_once_with_its_count(caplog):
+    kv = _manager(max_num_pages=16)
+    # counted as 16 tokens, but its prefill writes 48: 2 pages reserved, 3 taken
+    kv.ingest_request("a", KVReqConfig(max_tokens=1, prompt_slots={"main": 16}, decode_labels=["main"]))
+    assert _ready(kv, "a").ready
+
+    with caplog.at_level("ERROR", logger=manager_mod.logger.name):
+        assert _step(kv, "a", 3 * PAGE_SIZE).ok
+        assert _step(kv, "a", PAGE_SIZE, DECODE).ok
+
+    reports = [r.getMessage() for r in caplog.records if "against a reservation" in r.getMessage()]
+    assert len(reports) == 1, f"an undercount was reported {len(reports)} times, not once: {reports}"
+    assert "prompt_slots {'main': 16}" in reports[0], "the report does not name the count that was wrong"

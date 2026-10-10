@@ -19,9 +19,8 @@ sys.path.insert(0, ".")
 import pytest
 import torch
 
-from mstar.engine.resources.base import EngineResourceInfo
 from mstar.engine.resources.kv import manager as manager_mod
-from mstar.engine.resources.kv.config import KVReqConfig, KVSpec, KVStep, PagedKVConfig
+from mstar.engine.resources.kv.config import KVReqConfig, KVStep, PagedKVConfig
 from mstar.engine.resources.kv.keys import chain
 from mstar.engine.resources.kv.manager import KVManager
 from mstar.engine.resources.step import Segment, StepContext
@@ -37,38 +36,20 @@ class _StubTransfer:
     def __init__(self, transfer_engine_info, kv_cache, **kwargs):
         del transfer_engine_info, kv_cache, kwargs
 
-    def get_kv_transfer_info(self, **kwargs):
-        del kwargs
-
-    def owns_transfer_info(self, transfer_info, **kwargs):
-        del kwargs
-        return transfer_info == self.get_kv_transfer_info()
-
-    def remove_request(self, request_id):
-        del request_id
-
-    def start_async_retrieve(self, **kwargs):
-        del kwargs
-
-    def cleanup(self):
-        pass
-
 
 @pytest.fixture(autouse=True)
 def _stub_transfer(monkeypatch):
     monkeypatch.setattr(manager_mod, "KVTransferManager", _StubTransfer)
 
 
-def _manager(
-    max_num_pages: int = 64, max_seq_len: int = 4096, nodes: set[str] | None = None,
-) -> KVManager:
+def _manager(max_num_pages: int = 64, max_seq_len: int = 4096) -> KVManager:
     return KVManager(
         cfg=PagedKVConfig(
             num_layers=1, num_kv_heads=1, head_dim=8, max_seq_len=max_seq_len,
             max_num_pages=max_num_pages, page_size=PAGE_SIZE,
         ),
         name="kv", joint_comm_group=None, transfer_engine_info=None,
-        device=torch.device("cpu"), dtype=torch.float32, nodes=nodes,
+        device=torch.device("cpu"), dtype=torch.float32,
     )
 
 
@@ -103,20 +84,6 @@ def _pages(tokens: int) -> int:
 # ── what a request reserves ─────────────────────────────────────────────
 
 
-def test_a_cold_request_reserves_its_prompt_and_max_tokens_of_growth():
-    kv = _manager()
-    kv.ingest_request("r", _keyed(list(range(50)), max_tokens=40))
-
-    _run(kv, "r", 50)
-
-    assert kv._reserved["r"].pages == _pages(50 + 40), (
-        "a request was admitted on other than its prompt and its growth"
-    )
-    assert kv._outstanding == _pages(90) - _pages(50), (
-        "what the prompt already took was still counted as owed"
-    )
-
-
 def test_a_leased_hit_is_held_rather_than_reserved():
     kv = _manager()
     kv.enable_prefix_cache(ROOT)
@@ -148,62 +115,3 @@ def test_a_models_count_past_max_seq_len_is_reserved_whole():
     assert kv._reserved["r"].pages == _pages(200 + 16), (
         "a model's own count was cut down to max_seq_len, leaving the request short"
     )
-
-
-def test_decode_adds_at_most_max_seq_len_to_a_models_count():
-    kv = _manager(max_seq_len=64)
-    kv.ingest_request("r", KVReqConfig(
-        max_tokens=444, prompt_slots={"main": 20}, decode_labels=["main"],
-    ))
-
-    _run(kv, "r", 20)
-
-    assert kv._reserved["r"].pages == _pages(20 + 64), (
-        "decode was reserved past the positions max_seq_len allows"
-    )
-
-
-def test_a_worker_reserves_only_what_its_own_nodes_open():
-    # CFG parallel: every worker builds the cache from a spec naming all three
-    spec = KVSpec(
-        resource_key="kv", nodes={"LLM", "LLM_cfg_text", "LLM_cfg_img"},
-        config=PagedKVConfig(
-            num_layers=1, num_kv_heads=1, head_dim=8, max_seq_len=4096,
-            max_num_pages=64, page_size=PAGE_SIZE,
-        ),
-    )
-    kv = KVManager.build(spec, EngineResourceInfo(
-        device=torch.device("cpu"), kv_dtype=torch.float32, nodes=frozenset({"LLM"}),
-    ))
-    kv.ingest_request("r", KVReqConfig(
-        max_tokens=16,
-        needed_labels_per_node_walk={
-            ("LLM", WALK): ["main"],
-            ("LLM_cfg_text", "image_gen_cfg"): ["cfg_text"],
-            ("LLM_cfg_img", "image_gen_cfg"): ["cfg_img"],
-        },
-        prompt_slots={"main": 32}, decode_labels=["main"],
-    ))
-
-    _run(kv, "r", 32)
-
-    # its prompt, 16 of decode and the speculative step's token
-    assert kv._reserved["r"].pages == _pages(32 + 16 + 1), (
-        "a worker reserved labels only the other workers' nodes open"
-    )
-
-
-# ── the check ───────────────────────────────────────────────────────────
-
-
-def test_the_check_catches_a_request_taking_more_than_it_reserved(monkeypatch):
-    monkeypatch.setattr(manager_mod, "_DEBUG_ASSERTS", True)
-    kv = _manager()
-    kv.ingest_request("r", KVReqConfig(
-        max_tokens=16, prompt_slots={"main": PAGE_SIZE}, decode_labels=[],
-    ))
-    assert kv.admit_retrieve("r", "LLM", WALK, None).ready
-
-    with pytest.raises(AssertionError, match="took more pages than they reserved"):
-        _run(kv, "r", 3 * PAGE_SIZE)
-

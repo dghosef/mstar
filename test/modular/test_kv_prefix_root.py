@@ -10,9 +10,9 @@ walk their indexes independently and would match different lengths; and for a
 model that names no checkpoint, until the deployment sets a salt, because two
 builds that differ only in their weights would share every key.
 
-Where it opens, the engine says so, and what a request reserves there. It
-refuses a node that keys prompts in two pools: the node's steps cut both to the
-shorter hit, so the other pool would take pages it admitted the request without.
+Where it opens, the engine says so. It refuses a node that keys prompts in two
+pools: the node's steps cut both to the shorter hit, so the other pool would take
+pages it admitted the request without.
 """
 
 from __future__ import annotations
@@ -36,10 +36,6 @@ from mstar.model.base import PrefixStream
 
 KV = "kv"
 ROPE = "rope"
-
-requires_cuda = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="the host pool pins its memory"
-)
 
 
 class _StubTransfer:
@@ -85,9 +81,6 @@ class _Model:
 
     def prefix_key_streams(self):
         return {}
-
-    def get_max_output_tokens(self):
-        return 64
 
 
 class _Declaring(_Model):
@@ -275,19 +268,6 @@ def _said_at_load(caplog, kv, model) -> tuple[list[str], list[str]]:
         [r.getMessage() for r in said if r.levelno == logging.INFO],
         [r.getMessage() for r in said if r.levelno == logging.WARNING],
     )
-
-
-@requires_cuda
-def test_a_keyed_node_says_what_one_request_reserves(caplog):
-    info, warnings = _said_at_load(caplog, _kv(prefix_cache_salt="deployment"), _Declaring())
-
-    assert len(info) == 2 and "main" in info[0] and "LLM" in info[0], (
-        "the cache opened without saying which label it keys on which node"
-    )
-    assert "16 pages" in info[1] and "up to 4 pages of decode" in info[1] and "max_tokens 64" in info[1], (
-        "the load log left out the pool's pages or what a request reserves at the default max_tokens"
-    )
-    assert warnings == [], "a pool that admits by reservation was warned its decode can hold"
 
 
 def test_a_node_that_keys_two_pools_is_refused_at_load():
