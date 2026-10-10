@@ -1122,7 +1122,7 @@ class VJepa2ACModel(VJepa2Model):
         del tensors, input_modalities, output_modalities
         main = 0
         if self._initial_walk(kwargs) in (self.PREFILL_VIDEO_ROLLOUT, self.PREFILL_VIDEO_ROLLOUT_STREAMING):
-            # capped as get_initial_forward_pass_args caps it: the loop stops there
+            # capped as get_initial_forward_pass_args caps it, since the loop stops there
             horizon = min(int(kwargs["rollout_horizon"]), self.config.max_rollout_horizon)
             cond_tokens = 3 if self.config.ac_predictor.use_extrinsics else 2
             main = horizon * (self.config.grid_size ** 2 + cond_tokens)

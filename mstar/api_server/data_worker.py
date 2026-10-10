@@ -364,8 +364,7 @@ class PreprocessWorkerThread:
             model.prefix_key_streams()
             if model is not None and model_config else {}
         )
-        # resolved as the worker does at load: the keys split a prompt into the same pages, and
-        # a count of what the pool releases in whole pages needs the same page size
+        # resolved as the worker resolves them at load, so the keys and the counts use the pool's page size
         self._page_sizes = (
             _kv_page_sizes(model, model_config) if model is not None and model_config else {}
         )
@@ -475,8 +474,8 @@ class PreprocessWorkerThread:
         # and returns any additional tensors to merge into the final dict.
         model_kwargs = dict(input.model_kwargs or {})
         # only this worker keys a prompt: a client that sent its own could name
-        # another request's pages and be served that request's KV. Nor does a
-        # client count its own pages: the cache admits it by the model's count
+        # another request's pages and be served that request's KV. A client's
+        # own counts are dropped too, since the pool admits by the model's count.
         for name in (
             "prefix_keys", "prefix_tail", "prefix_decode", "prompt_slots", "decode_labels", "page_sizes",
         ):

@@ -399,7 +399,7 @@ class Cosmos3Model(Model):
         frames = p["num_frames"]
         latent_frames = 1 if frames == 1 else 1 + (frames - 1) // vae.scale_factor_temporal
         if p.get("window_mode") is not None:
-            # a window, not the clip: windows are denoised one at a time
+            # windows are denoised one at a time, so count a window, not the whole clip
             latent_frames = min(p["window_latent_units"], p["total_latent_units"])
         span = latent_frames * per_frame
         if p.get("generate_sound"):
@@ -411,8 +411,7 @@ class Cosmos3Model(Model):
                 return prompt + span
             return self._kv_window_peak(p, per_frame, prompt, page_sizes[KV_CACHE])
 
-        # uncond is opened either way (`get_request_resource_configs`), so it
-        # is counted even when no guidance writes it
+        # uncond is always opened (`get_request_resource_configs`), so it gets a count, 0 without guidance
         uncond = peak(len(prompts[1])) if p["guidance_scale"] != 1.0 else 0
         return {
             "prompt_slots": {KV_CACHE: {COND_LABEL: peak(len(prompts[0])), UNCOND_LABEL: uncond}},

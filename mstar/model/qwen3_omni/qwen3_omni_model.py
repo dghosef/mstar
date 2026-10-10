@@ -1271,8 +1271,8 @@ class Qwen3OmniModel(Model):
             for start, end in itertools.pairwise(starts):
                 if int(span[start + 1]) in (cfg.system_token_id, cfg.assistant_token_id):
                     dropped += end - start
-        # check_stop's steps (one at a bound under 1) and the step speculated past them, unless
-        # the loop's max_iters (`get_max_output_tokens()`, no kwargs) ends it first, with none past
+        # `check_stop` allows the bound's steps (one when the bound is under 1), and one more step is
+        # speculated past them. The loop's max_iters (`get_max_output_tokens()`) caps that, with no step past it.
         talker_steps = max(self._get_max_talker_output_tokens(**kwargs), 1)
         talker_decode = min(talker_steps + SPECULATIVE_DECODE_TOKENS, self.get_max_output_tokens())
         slots["prompt_slots"][TALKER_KV]["main"] = thinker - dropped + TALKER_LAST_PREFILL_TOKENS + talker_decode

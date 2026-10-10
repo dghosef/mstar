@@ -303,7 +303,7 @@ class Conductor:
         self._early_abort_deadlines: deque[tuple[float, str]] = deque()
 
         self.model = model
-        # read once: `get_node_resources` builds the specs anew on every call
+        # read once, since `get_node_resources` builds new specs on every call
         self._kv_cache_keys = self._counted_kv_keys(model)
         self.hostname = hostname
         self.socket_path_prefix = socket_path_prefix
@@ -488,10 +488,10 @@ class Conductor:
 
     @staticmethod
     def _counted_kv_keys(model) -> frozenset[str]:
-        """The model's paged KV pools, refused at load unless each declares a request's need.
+        """Return the model's paged KV pools, or raise if it counts no need for one of them.
 
-        A pool nothing counts admits every request, so it is the one pool that can
-        still run out of pages mid-request and hold or offload to make room.
+        A pool with no count admits every request, so it can still run out of pages
+        mid-request and hold or offload to make room.
         """
         keys = model.paged_kv_keys()
         uncounted = keys - model.kv_counted() - set(model.prefix_key_streams())
@@ -504,13 +504,12 @@ class Conductor:
 
     @functools.cached_property
     def _kv_pools(self) -> dict[str, list[tuple[PagedKVConfig, frozenset[str]]]]:
-        """Each counted paged KV pool's config, after this deployment's YAML, with
-        the nodes of every instance of it that admits requests.
+        """Map each counted paged KV pool to its config after this deployment's YAML,
+        with the nodes of each instance that admits requests.
 
-        An instance counts only the labels its own worker's nodes open, so a pool
-        spanning workers (Bagel's CFG branches) is checked as its leader's
-        instance checks it: counted over all its nodes, it would refuse requests
-        that fit.
+        An instance counts only the labels its own worker's nodes open. A pool spanning
+        workers (Bagel's CFG branches) is checked as its leader's instance checks it,
+        since counting over all its nodes would refuse requests that fit.
         """
         specs = self.model.get_node_resources()
         apply_yaml_overrides(specs, self.model_config)
@@ -526,11 +525,11 @@ class Conductor:
         return pools
 
     def _uncounted(self, configs: dict[str, ResourceReqConfig]) -> str | None:
-        """Name the model and the label when a request opens a label of a KV pool
-        that the model's `kv_slots` does not count and no key describes.
+        """Return why a request opens a KV label that neither its model's count nor its
+        keys cover, or None.
 
-        The pool has nothing to reserve for such a request, so it would run without
-        a reservation and could run out of pages mid-request.
+        The pool would have nothing to reserve for such a request, so it would run
+        without a reservation and could run out of pages mid-request.
         """
         for key, pools in self._kv_pools.items():
             slots, keys = configs[key].prompt_slots or {}, configs[key].prefix_keys or {}
@@ -544,16 +543,16 @@ class Conductor:
         return None
 
     def _never_fits(self, configs: dict[str, ResourceReqConfig]) -> str | None:
-        """Why a request can never be admitted to one of its KV pools, or None.
+        """Return why a request can never be admitted to one of its KV pools, or None.
 
-        Only a count the model made: a reservation guessed from keys is cut to
-        the pool, and waits for it to empty instead.
+        Only the model's own count refuses a request. A count guessed from keys is
+        capped at the pool, and the request waits for it to empty instead.
         """
         for key, pools in self._kv_pools.items():
             for config, nodes in pools:
                 count = count_pages(configs[key], config, nodes)
                 if count.exact and count.pages > config.request_pages():
-                    # max_tokens helps only where a label decodes; elsewhere the model's own bound sizes the output
+                    # a lower max_tokens helps only when a label decodes; otherwise the model bounds the output
                     decodes = bool(count.labels & set(configs[key].decode_labels or ()))
                     return (
                         f"KV pool {key!r} cannot hold this request: it needs {count.pages} pages of "
@@ -1058,8 +1057,8 @@ class Conductor:
         request_data.resource_configs = self._get_resource_configs(
             model_kwargs, partition_fwd_args
         )
-        # a bound under the loop's, not at it: no step is speculated past the loop's last
-        # iteration, so decode there writes max_iters, not the step more a stop inside it leaves
+        # Cap max_tokens to max_iters - 1. The count adds one speculative token,
+        # which the loop's last iteration never runs.
         loop_bound = self._max_loop_iters - SPECULATIVE_DECODE_TOKENS
         self._stamp_resource_configs(
             request_data.resource_configs, model_kwargs,
@@ -1068,7 +1067,7 @@ class Conductor:
         if (error := self._uncounted(request_data.resource_configs)) is not None:
             self._refuse_request(body.request_id, error, status=500)
             return
-        # before any worker is sent it: one would fail it only once it asked to run
+        # refused here, before a worker would fail it at its first readiness ask
         if (error := self._never_fits(request_data.resource_configs)) is not None:
             self._refuse_request(body.request_id, error, status=400)
             return
@@ -1308,8 +1307,8 @@ class Conductor:
         self._remove_request(request_id, request_data)
 
     def _refuse_request(self, request_id: str, error_message: str, status: int):
-        """Fail a request no worker was sent: only the preprocess worker holds
-        its signals, so it alone drains before the client hears."""
+        """Fail a request before any worker is sent it. Only the preprocess worker
+        holds its signals, so only it drains before the client is told."""
         participants = {self.PREPROCESS_WORKER}
         self.communicator.send(
             self.PREPROCESS_WORKER,

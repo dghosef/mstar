@@ -723,7 +723,7 @@ class BagelModel(Model):
         """
         segments = tensors.get("text_inputs") or []
         cfg = self.config
-        # the first output picks the walks, as in process_prompt: text then image decodes text
+        # the first output picks the walks, as in process_prompt, so a text-then-image request only decodes text
         generating = output_modalities[:1] == ["image"]
         images = tensors.get("image_inputs") or []
         preprocess = kwargs.get("image_preprocess", "default")

@@ -98,7 +98,7 @@ def active_labels(graph_walk: str, cfg: bool, node_name: str) -> list[str]:
     return ["main"]
 
 
-# module level, not per ViT: `vit_image_slots` counts with the resizes prepare_inputs runs
+# module level, so `vit_image_slots` counts with the same resizes prepare_inputs runs
 _VAE_TRANSFORM = ImageTransform(1024, 512, 16)
 _VIT_TRANSFORM = ImageTransform(980, 224, 14)
 

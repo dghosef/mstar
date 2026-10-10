@@ -16,8 +16,8 @@ from mstar.engine.resources.step import ResourceStep
 if TYPE_CHECKING:
     from mstar.engine.resources.base import Resource
 
-# what a decode label writes past ``max_tokens``: `Worker._try_speculate_next` submits one more
-# step while the step whose `check_stop` ends the loop still runs
+# Tokens a decode label writes past ``max_tokens``. `Worker._try_speculate_next` submits one
+# more step while the step whose `check_stop` ends the loop is still running.
 SPECULATIVE_DECODE_TOKENS = 1
 
 
@@ -212,11 +212,12 @@ class KVReqConfig(ResourceReqConfig):
     # label -> the output tensor its sampled ids arrive in, if the stream keys generation
     prefix_decode: dict[str, str] | None = None
     prefix_cache: bool = True
-    # the most tokens the request may generate; None on a row no request owns
+    # What a request reserves, stamped by the conductor.
+    # `max_tokens` is the most tokens the request may generate, None on a row no request owns.
+    # `prompt_slots` maps a label to the tokens it holds over the request's life, apart from decode.
+    # `decode_labels` are the labels decode grows, by up to `max_tokens`.
     max_tokens: int | None = None
-    # label -> tokens it holds over the request's life, decode aside, as the model counts them
     prompt_slots: dict[str, int] | None = None
-    # labels decode grows, by up to max_tokens; read only beside prompt_slots
     decode_labels: list[str] | None = None
 
     def apply_conductor_config(
@@ -291,13 +292,13 @@ def labels_opened(overrides: KVReqConfig, nodes: Collection[str] | None) -> set[
 
 class PageCount(NamedTuple):
     pages: int
-    # every label counted by the model, none guessed from its keys
+    # True when the model counted every label, none guessed from its keys
     exact: bool
     labels: set[str]
 
 
 def count_pages(overrides: KVReqConfig, config: PagedKVConfig, nodes: Collection[str] | None) -> PageCount:
-    """The pages a request may take over its life from a pool shared by ``nodes``,
+    """Count the pages a request may take over its life from a pool shared by ``nodes``,
     before any it holds.
 
     A label counts to its prompt, as the model counted it or as its keys
@@ -323,8 +324,8 @@ def count_pages(overrides: KVReqConfig, config: PagedKVConfig, nodes: Collection
 @dataclass
 class KVSpec(NodeResourceSpec):
     config: KVConfig
-    # of nodes on several workers (CFG parallel), the one whose cache admits a
-    # request for all of them; the others hold at most what it does per request
+    # Under CFG parallel, the node whose cache admits a request for every worker's nodes.
+    # The other nodes' caches hold at most what the leader's does per request.
     leader: str | None = None
 
     @property

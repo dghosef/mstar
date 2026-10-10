@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 # request after each admit, commit, reset and remove.
 _DEBUG_ASSERTS = os.environ.get("MSTAR_KV_DEBUG_ASSERTS", "0") == "1"
 
-# waiting: its reservation does not fit yet, or a request ahead of it has not been admitted
+# the request waits: its reservation doesn't fit yet, or a request ahead of it is still waiting
 _WAIT = AdmitOutcome(ok=True, ready=False)
 
 
@@ -74,8 +74,8 @@ class PageArena:
     allocator: PageAllocator
     num_owners: list[int] = field(init=False, repr=False)
     sealed: list[bool] = field(init=False, repr=False)
-    # told as a page goes from one owner to two or back, for the index to keep what
-    # eviction reaches by; `acquire` hands out free pages, which the index never holds
+    # The prefix index, told when a page gains or loses its second owner so it can keep
+    # its evictable set. Free pages are never in the index, so `acquire` doesn't tell it.
     index: PrefixIndex | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
@@ -196,11 +196,11 @@ class CacheStream:
     lease: list[int] | None = None
     # set at conversion, cleared at `commit`, so a refused admit's re-probe answers the same
     converted: bool = False
-    # leading pages of `page_indices` the index lent this stream (a converted
-    # lease, a local match): held, but never taken from the free list
+    # how many leading pages of `page_indices` came from the index (a converted lease
+    # or a local match) rather than the free list
     hits: int = 0
-    # a lease admission took before prepare saw the request, until prepare cuts
-    # the inputs to it (`apply_cached_prefix`); `admit` never converts one still set
+    # The lease was taken by admission before prepare saw the request. `admit` converts
+    # it only after `apply_cached_prefix` clears this.
     gate_lease: bool = False
     offloaded: bool = False
     # General mutation epoch used by plans and offload claims. Appends move it.
@@ -257,11 +257,13 @@ class ClaimedStream:
 
 @dataclass
 class Reservation:
-    """What an admitted request may take from the free list over its life."""
+    """Pages an admitted request may take from the free list over its life.
+
+    ``exact`` is False for a count guessed from the prompt's keys, which can fall short.
+    ``remaining`` is the request's part of `KVManager._outstanding`.
+    """
     pages: int
-    # counted by the model; one guessed from the prompt's ids can overrun
     exact: bool
-    # its share of `KVManager._outstanding`, as of the last time its pages moved
     remaining: int = 0
 
 
@@ -435,33 +437,29 @@ class KVManager(AttentionResource):
         # one does not leave its streams unevictable
         self._preplan_marked: list[tuple[str, str]] = []
 
-        # the nodes sharing this pool, whose labels a request's reservation covers
+        # Admission state.
+        # `_nodes` are the nodes sharing this pool. A reservation covers the labels they open.
+        # `_leads` is False for a guidance pool under CFG parallel, which reserves what the
+        # leader admitted without checking room.
+        # `_outstanding` counts the pages admitted requests have reserved but not yet used.
+        # `_unreserved` holds the requests that must reserve before they run, decided at ingest.
+        # `_waiting` is the queue in arrival order, each request with its place.
+        # `_needs` holds each waiting request's reservation, worked out as it joins the queue.
+        # `_rooted` holds each waiting request's rooted prompt keys, hashed once.
+        # `_opened` holds the labels each counted request's walks open here.
+        # `_prefill_walks` maps a label to the walk prepare probes it on.
         self._nodes = nodes
-        # whether this pool's count stands for the request: the only pool of its
-        # spec, or the spec leader's. A guidance pool under CFG parallel only
-        # reserves what the leader admitted, so no room is checked on it
         self._leads = leads
         self._decides = self._rank == 0 and leads
         self._reserved: dict[str, Reservation] = {}
-        # pages admitted requests may still take: kept as pages move (`_recount`),
-        # so the head's ask is one comparison however many requests run
         self._outstanding = 0
-        # the label sets a request has taken past its reservation on, each reported once
         self._overran: set[tuple[str, ...]] = set()
-        # requests that must reserve here and have not yet, decided at ingest so
-        # a row that has reserved, or never must, does no admission work per step
         self._unreserved: set[str] = set()
-        # requests that asked and have not reserved, in the order they first asked,
-        # each with its place in that order
         self._waiting: dict[str, int] = {}
         self._places = 0
-        # what each waiting request will reserve, worked out once as it joins the queue
         self._needs: dict[str, Reservation] = {}
-        # a waiting request's rooted prompt keys, hashed once however often it asks
         self._rooted: dict[str, list[bytes]] = {}
-        # the labels each counted request's walks open here, read per segment per step
         self._opened: dict[str, set[str]] = {}
-        # label -> the walk prepare probes it on
         self._prefill_walks: dict[str, str] = {}
         # (rid, label) -> pages the live reservation freshly acquired, for
         # ``rollback_admit``. One record, not one per pass: only the plan thread
@@ -561,7 +559,7 @@ class KVManager(AttentionResource):
         with self._lock:
             if self._streams.get(rid, {}).get(label) is not stream:
                 return None
-            # admission may have leased it on its own thread while this one hashed
+            # the gate may have leased the stream while the keys were hashed
             if stream.lease is None:
                 self._lease(rid, stream, rooted)
             if stream.lease is None:
@@ -578,10 +576,9 @@ class KVManager(AttentionResource):
         self._lent(rid, len(matched))
 
     def _lent(self, rid: str, pages: int) -> None:
-        # held rather than taken, so the reservation gives up what the index lends
-        # (and takes back what it returns)
+        """Shrink ``rid``'s reservation by ``pages`` the index lent it, or grow it by pages given back."""
         reserved = self._reserved.get(rid)
-        # most calls lend nothing: a readiness ask per row per step
+        # most calls lend nothing
         if pages and reserved is not None:
             reserved.pages -= pages
             self._recount(rid)
@@ -647,8 +644,8 @@ class KVManager(AttentionResource):
         while chain.cursor < filled:
             key = fingerprint(self._prefix_root, chain.keys[chain.cursor])
             page = stream.page_indices[chain.cursor]
-            # unparented, not chained, under a page only the index holds: a live
-            # child would keep eviction from a page the pool counts as free
+            # Don't chain under a page only the index holds. A held child would keep eviction
+            # from that page, which the pool counts as free.
             if parent is not None and self._arena.num_owners[parent] == 1:
                 parent = None
             if not self._index.insert(key, page, parent):
@@ -832,7 +829,7 @@ class KVManager(AttentionResource):
         graph_walk: str,
         published: PublishedKVInfo | None
     ) -> AdmitOutcome:
-        # one pool decides for each request, and the rest follow it
+        # the other pools follow the deciding pool at admit (`_reserve_new`)
         if self._decides:
             gated = self._gate(rid, node_name, graph_walk)
             if gated is not None:
@@ -891,7 +888,7 @@ class KVManager(AttentionResource):
                     # The producer rewound/replaced this logical stream. Its
                     # seq_len may be unchanged, so length alone cannot prove
                     # the receiver still holds the published contents.
-                    # what the index lent goes, so the request takes those pages itself
+                    # the request now writes these pages itself, so its reservation takes them back
                     self._lent(rid, -(len(stream.lease or ()) + stream.hits))
                     self._release_lease(stream)
                     drop = self._arena.any_sealed(stream.page_indices)
@@ -975,7 +972,7 @@ class KVManager(AttentionResource):
         # one critical section so the read-of-stored_len then alloc is atomic
         # against a concurrent reset/remove/commit on another thread
         with self._lock:
-            # before the lease converts, as a request is sized off the lease it holds
+            # before the lease converts, since the reservation subtracts the lease
             self._reserve_new(ctx)
             # before the fork loop and the segment loop, both of which size
             # off `stored_len`: a pre-fork target has to cover the whole prefix
@@ -987,8 +984,8 @@ class KVManager(AttentionResource):
                     continue
                 if stream.lease is not None:
                     if stream.gate_lease and segment.span:
-                        # prepare never cut this step's inputs to the lease the gate
-                        # took, so the step writes the stream from 0
+                        # Prepare didn't cut this step's inputs to the gate's lease, so the
+                        # step writes the stream from 0 and the lease goes back.
                         self._lent(segment.request_id, -len(stream.lease))
                         self._release_lease(stream)
                     elif (
@@ -1154,7 +1151,7 @@ class KVManager(AttentionResource):
             num_pages = -(-length // page_size)
             page_idxs = stream.page_indices[:num_pages]
             if self._unheld(s.request_id, s.label):
-                # took no page of its own (see `_unheld`): its tokens land in the sink
+                # the row has no pages in this label, so its tokens go to the sink page
                 page_idxs += [SINK_PAGE] * (num_pages - len(page_idxs))
             views.append(SequenceView(
                 request_id=s.request_id,
@@ -1439,7 +1436,7 @@ class KVManager(AttentionResource):
                 # tokens (image_gen, action_gen) still read these pages, and
                 # leaving the mark set would make the request unevictable
                 stream.step_in_flight = False
-                # went to the sink: a length kept here would stretch every later view of it over sink pages
+                # an unheld row's tokens went to the sink page, so its stored length doesn't grow
                 if (
                     step.commit and segment.span > 0
                     and not self._unheld(segment.request_id, segment.label)
@@ -1734,7 +1731,7 @@ class KVManager(AttentionResource):
             for claim in moved:
                 stream = streams[claim.label]
                 freed += len(claim.pages)
-                # what the index lent comes back on reload as the request's own copies
+                # reload brings the lent pages back as the request's own copies
                 self._lent(rid, -stream.hits)
                 self._arena.release(claim.pages)
                 stream.page_indices = []
@@ -2040,9 +2037,8 @@ class KVManager(AttentionResource):
                 f"pages still being written into, but not owned alone: {crowded}"
             )
 
-            # a guessed reservation, or a request nothing counts, may take room the
-            # others were promised, which the worker's hold absorbs: only pools
-            # holding nothing but the model's own counts are checked
+            # Check only a pool whose requests all reserved exact counts. A guessed or
+            # uncounted request can take room promised to others, and the worker's hold covers that.
             ungated = any(
                 rid not in self._reserved and self._held_fresh(rid)
                 for rid, overrides in self._overrides.items()
@@ -2104,21 +2100,17 @@ class KVManager(AttentionResource):
     # Admission
 
     def _unheld(self, rid, label: str) -> bool:
-        """Whether ``rid``, counted by its model, holds nothing in ``label``,
-        as no walk of its own opens it.
+        """True when ``label`` is not one of the labels ``rid``'s own walks open.
 
-        A model can run a label for a whole batch (Bagel's guidance branches run
-        for every row once one row needs them), and pages for a row whose request
-        never reads back what it wrote there are pages it never reserved.
+        A model can run a label for the whole batch (Bagel runs its guidance branches
+        for every row once one row needs them). A row whose request never reads that
+        label gets no pages there, since its reservation doesn't count them.
         """
         opened = self._opened.get(rid)
         return opened is not None and label not in opened
 
     def _reservation(self, rid: str) -> Reservation:
-        """The pages ``rid`` may take from the free list over its life here.
-
-        A page the request leases, or was lent, is held rather than taken.
-        """
+        """Count the pages ``rid`` may take from the free list, less what the index lent it."""
         overrides = self._overrides[rid]
         count = count_pages(overrides, self.config, self._nodes)
         held = sum(
@@ -2127,17 +2119,13 @@ class KVManager(AttentionResource):
         )
         pages = count.pages
         if not count.exact:
-            # a guess proves nothing unservable: at worst it waits for an empty pool
+            # capped at the pool, so a guess waits rather than fails
             pages = min(pages, self._capacity())
         return Reservation(pages=max(0, pages - held), exact=count.exact)
 
     def _gated(self, rid: str, overrides: KVReqConfig) -> bool:
-        """Whether ``rid`` still has to reserve before it runs: only once every label
-        it opens is counted, by its model or by its keys.
-
-        A label with neither has no bound but ``max_seq_len``, which would hold back
-        or refuse requests that fit.
-        """
+        """True when ``rid`` must reserve before it runs: it has a ``max_tokens``, and
+        its model counts or its keys describe every label it opens."""
         if overrides.max_tokens is None or rid in self._reserved:
             return False
         slots = overrides.prompt_slots or {}
@@ -2145,12 +2133,12 @@ class KVManager(AttentionResource):
         return all(label in slots or keys.get(label) for label in labels_opened(overrides, self._nodes))
 
     def _gate(self, rid: str, node_name: str, graph_walk: str) -> AdmitOutcome | None:
-        """Hold ``rid`` back until what it may take fits, in the order requests
-        first asked. None once it has reserved.
+        """Hold ``rid`` back until its reservation fits, in the order requests first
+        asked. Returns None once it has reserved.
 
-        The head's hit is leased as it is admitted, not credited off a lookup an
-        eviction could undo before its prefill runs. A request behind it has what it
-        matches evicted after idle pages, so the requests ahead keep theirs.
+        The head leases its hit as it is admitted, so an eviction can't take the hit
+        before its prefill runs. The pages a waiting request matched are evicted only
+        after idle pages.
         """
         if rid not in self._unreserved:
             return None
@@ -2168,7 +2156,7 @@ class KVManager(AttentionResource):
                 keys = self._overrides[rid].prefix_keys[label]
             if keys is None and not head:
                 return _WAIT
-        # outside the lock, as `resolve_cached_prefix` hashes
+        # hashed outside the lock, similar to `resolve_cached_prefix`, so other threads don't wait on it
         rooted = None if keys is None else [fingerprint(self._prefix_root, key) for key in keys]
         with self._lock:
             if rid not in self._unreserved:
@@ -2184,8 +2172,8 @@ class KVManager(AttentionResource):
         self, rid: str, stream: CacheStream | None = None,
         rooted: list[bytes] | None = None,
     ) -> AdmitOutcome | None:
-        """Reserve for ``rid`` if it heads the queue and fits, leasing its hit
-        on ``stream`` as it does. None once it has reserved."""
+        """Reserve for ``rid`` if it heads the queue and fits, leasing its hit on
+        ``stream``. Returns None once it has reserved."""
         if next(iter(self._waiting)) != rid:
             return _WAIT
         hit = []
@@ -2205,9 +2193,11 @@ class KVManager(AttentionResource):
         return None
 
     def _enqueue(self, rid: str) -> AdmitOutcome | None:
-        """Queue ``rid`` behind the requests that asked before it, or fail it if it
-        could not fit alone: checked at the head, it would fail only once every
-        request ahead of it was admitted."""
+        """Queue ``rid``, or return why it can never be admitted.
+
+        A request that can't fit even in an empty pool fails here, and not after
+        waiting behind every request ahead of it.
+        """
         if rid in self._waiting:
             return None
         reservation = self._reservation(rid)
@@ -2232,11 +2222,11 @@ class KVManager(AttentionResource):
             self._index.stop_waiting(place)
 
     def _reserve_new(self, ctx: StepContext) -> None:
-        """Reserve what the deciding pool admitted at readiness, without checking room.
+        """Reserve for a request this pool first sees at admit, without checking room.
 
-        A pool that does not decide, and every rank but 0, sees a request first at
-        admit; refusing it there would leave the other ranks in a forward rank 0
-        runs, so it follows rank 0's decision instead.
+        Only rank 0's deciding pool checks room, at readiness. Every other pool follows
+        its decision, since refusing the request here would leave the other ranks
+        waiting in a forward that rank 0 runs.
         """
         if not self._unreserved:
             return
@@ -2252,10 +2242,11 @@ class KVManager(AttentionResource):
             self._dequeue(rid)
 
     def _probe_label(self, rid: str, node_name: str, graph_walk: str) -> str | None:
-        """The label prepare probes for ``rid`` on this walk, if any.
+        """Return the label prepare probes for ``rid`` on this walk, or None.
 
-        Only its keyed label's own walk, and only alone: a guided walk writes a
-        second label from the same input, and prepare leaves it whole.
+        Prepare probes only the keyed label's own prefill walk, and only when the walk
+        writes no other label. A guided walk writes a second label from the same
+        input, and prepare doesn't cut it.
         """
         label = self._keyed_label(rid, node_name, graph_walk)
         if label is None or self._prefill_walks.get(label) != graph_walk:
@@ -2281,16 +2272,14 @@ class KVManager(AttentionResource):
         )
 
     def _supply(self, leasing: list[int] = ()) -> int:
-        """Pages an allocation can still get: the free ones, and the cached ones
-        eviction reaches, less any about to be leased."""
+        """Count the free pages and the cached pages eviction can reach, less the ones in ``leasing``."""
         evictable = self._index.evictable() if self._index is not None else frozenset()
         return self._arena.num_free + len(evictable) - len(evictable.intersection(leasing))
 
     def _recount(self, rid: str) -> None:
-        """Bring ``rid``'s share of `_outstanding` up to what it may still take.
+        """Bring ``rid``'s part of `_outstanding` up to date after its reservation or its pages change.
 
-        Owed wherever its reservation or the pages it took move: a share left
-        stale lets the head into room an admitted request still needs.
+        A stale count would let the head be admitted into room an admitted request still needs.
         """
         reserved = self._reserved.get(rid)
         if reserved is None:
@@ -2306,11 +2295,10 @@ class KVManager(AttentionResource):
             phase_record("kv.recount", perf_counter() - t0)
 
     def _report_overrun(self, rid: str, reserved: Reservation, taken: int) -> None:
-        """Say once per label set that a request took more pages than it reserved.
+        """Log once per label set that a request took more pages than it reserved.
 
-        The pool then admits into room it no longer has, and the holds and
-        offloads admission exists to end come back; the count the model declared
-        is what is wrong, so the line names it.
+        The pool has then admitted requests into room it no longer has, and the
+        model's declared count is the likely cause, so the line prints it.
         """
         labels = tuple(sorted(self._streams[rid]))
         if labels in self._overran:

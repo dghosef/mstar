@@ -2246,8 +2246,9 @@ class Worker:
         max_continuing = self.scheduler.room_for_continuing(spec_target)
 
         # Removes, aborts and failures are filtered here; prep_spec_rids
-        # assumes that. So is a rid the target would not run yet, whose admit would refuse
-        # the whole batch (a loop-back's passed already); asked last, as the ask can reload or lease.
+        # assumes that. So is a rid the target node isn't ready to run, since its admit
+        # would refuse the whole batch. Readiness goes last because it can reload a request
+        # or lease its hit.
         partition = self.request_state.get_partition_for_node(spec_node_name)
         candidates = [
             r for r in batch_N.request_to_worker_graph

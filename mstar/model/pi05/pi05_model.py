@@ -545,7 +545,7 @@ class Pi05Model(Model):
         """
         del input_modalities, output_modalities, kwargs
         cfg = self.config
-        # one camera per uploaded file, each its own CxHxW tensor (`Model.load_image`): the encoder writes them all
+        # each uploaded file is one camera, its own CxHxW tensor (`Model.load_image`), and the encoder writes them all
         cameras = len(tensors.get("image_inputs") or ())
         main = (
             cameras * (cfg.vit_image_size // cfg.vit_patch_size) ** 2
