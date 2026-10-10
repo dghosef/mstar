@@ -1,4 +1,5 @@
 import atexit
+import functools
 import hashlib
 import logging
 import multiprocessing as mp
@@ -26,8 +27,8 @@ from mstar.conductor.request_info import (
 )
 from mstar.distributed.base import ShardingConfig
 from mstar.distributed.communication import GlobalParallelConfig, WorkerParallelGroups
-from mstar.engine.resources import KVReqConfig, KVSpec, PagedKVConfig, ResourceReqConfig
-from mstar.engine.resources.kv.config import SPECULATIVE_DECODE_TOKENS
+from mstar.engine.resources import KVReqConfig, KVSpec, PagedKVConfig, ResourceReqConfig, apply_yaml_overrides
+from mstar.engine.resources.kv.config import SPECULATIVE_DECODE_TOKENS, count_pages, labels_opened
 from mstar.graph.base import GraphEdge, NodeAndGraphWalk, TensorPointerInfo
 from mstar.graph.loop_indices import NestedLoopIndices
 from mstar.model.base import ForwardPassArgs, Model, WorkerGraph
@@ -491,6 +492,68 @@ class Conductor:
             spec.resource_key for spec in model.get_node_resources()
             if isinstance(spec, KVSpec) and isinstance(spec.config, PagedKVConfig)
         )
+
+    @functools.cached_property
+    def _kv_pools(self) -> dict[str, list[tuple[PagedKVConfig, frozenset[str]]]]:
+        """Each counted paged KV pool's config, after this deployment's YAML, with
+        the nodes of every instance of it that admits requests.
+
+        An instance counts only the labels its own worker's nodes open, so a pool
+        spanning workers (Bagel's CFG branches) is checked as its leader's
+        instance checks it: counted over all its nodes, it would refuse requests
+        that fit.
+        """
+        specs = self.model.get_node_resources()
+        apply_yaml_overrides(specs, self.model_config)
+        pools = {}
+        for spec in specs:
+            if spec.resource_key not in self._kv_cache_keys:
+                continue
+            instances = {frozenset(spec.nodes & self._worker_nodes(worker_id)) for worker_id in self.worker_ids}
+            pools[spec.resource_key] = [
+                (spec.config, nodes) for nodes in instances
+                if nodes and (spec.leader is None or spec.leader in nodes)
+            ]
+        return pools
+
+    def _uncounted(self, configs: dict[str, ResourceReqConfig]) -> str | None:
+        """Name the model and the label when a request opens a label of a KV pool
+        that the model's `kv_slots` does not count and no key describes.
+
+        The pool has nothing to reserve for such a request, so it would run without
+        a reservation and could run out of pages mid-request.
+        """
+        for key, pools in self._kv_pools.items():
+            slots, keys = configs[key].prompt_slots or {}, configs[key].prefix_keys or {}
+            for _, nodes in pools:
+                for label in sorted(labels_opened(configs[key], nodes)):
+                    if label not in slots and not keys.get(label):
+                        return (
+                            f"{type(self.model).__name__}'s kv_slots counts nothing for label {label!r} "
+                            f"of KV pool {key!r}, which this request opens"
+                        )
+        return None
+
+    def _never_fits(self, configs: dict[str, ResourceReqConfig]) -> str | None:
+        """Why a request can never be admitted to one of its KV pools, or None.
+
+        Only a count the model made: a reservation guessed from keys is cut to
+        the pool, and waits for it to empty instead.
+        """
+        for key, pools in self._kv_pools.items():
+            for config, nodes in pools:
+                count = count_pages(configs[key], config, nodes)
+                if count.exact and count.pages > config.request_pages():
+                    # max_tokens helps only where a label decodes; elsewhere the model's own bound sizes the output
+                    decodes = bool(count.labels & set(configs[key].decode_labels or ()))
+                    return (
+                        f"KV pool {key!r} cannot hold this request: it needs {count.pages} pages of "
+                        f"{config.page_size} tokens, and the pool holds {config.request_pages()} for requests. "
+                        f"To fit, send a shorter prompt, fewer or smaller attachments or "
+                        f"{'a lower max_tokens' if decodes else 'a shorter output'}; "
+                        f"or serve it with a larger resources.{key}.max_num_pages"
+                    )
+        return None
 
     def _derive_worker_info(self):
         """Derive per-rank worker info from the worker graphs."""
@@ -993,6 +1056,13 @@ class Conductor:
             request_data.resource_configs, model_kwargs,
             seed=seed, max_tokens=max(0, min(request_data.max_output_tokens, loop_bound)),
         )
+        if (error := self._uncounted(request_data.resource_configs)) is not None:
+            self._refuse_request(body.request_id, error, status=500)
+            return
+        # before any worker is sent it: one would fail it only once it asked to run
+        if (error := self._never_fits(request_data.resource_configs)) is not None:
+            self._refuse_request(body.request_id, error, status=400)
+            return
 
         # Send NewRequest to each worker with the appropriate partition's inputs
         for worker_id, worker_graph_ids in worker_to_worker_graph_ids.items():
@@ -1227,6 +1297,26 @@ class Conductor:
             logger.info("Abort for request %s ignored; already draining", request_id)
             return
         self._remove_request(request_id, request_data)
+
+    def _refuse_request(self, request_id: str, error_message: str, status: int):
+        """Fail a request no worker was sent: only the preprocess worker holds
+        its signals, so it alone drains before the client hears."""
+        participants = {self.PREPROCESS_WORKER}
+        self.communicator.send(
+            self.PREPROCESS_WORKER,
+            WorkerMessage(
+                message_type=WorkerMessageType.DRAIN_REQUEST,
+                body=DrainRequest(request_id),
+            ),
+        )
+        logger.info("Refusing request %s: %s", request_id, error_message)
+        self._register_draining(
+            request_id,
+            expected_acks=participants,
+            participants=participants,
+            failure_error=error_message,
+            failure_status=status,
+        )
 
     def _remove_request(
         self, request_id: str, request_data: RequestData,
