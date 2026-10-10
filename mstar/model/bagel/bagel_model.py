@@ -594,6 +594,10 @@ class BagelModel(Model):
         as ``image_inputs`` by the data worker.
         """
         result: NameToTensorList = {}
+        for side in ("height", "width"):
+            size = kwargs.get(side) if "image" in output_modalities else None
+            if size is not None and size < self.config.latent_downsample:
+                raise ValueError(f"BAGEL needs a {side} of at least {self.config.latent_downsample}; got {size}")
 
         if prompt is not None:
             target_output = output_modalities[0] if output_modalities else "text"
