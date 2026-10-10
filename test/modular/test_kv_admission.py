@@ -204,7 +204,8 @@ def test_the_head_holds_its_hit_as_it_is_admitted():
     assert kv.resolve_cached_prefix("b", NODE, PREFILL) == 3 * PAGE_SIZE, (
         "prepare's probe took a second lease instead of answering from the one held"
     )
-    assert kv._reserved["b"].pages == 5 - 3, "the leased pages were reserved as well"
+    # 64 of prompt, 16 of decode and the speculative step's token: 6 pages, 3 of them leased
+    assert kv._reserved["b"].pages == 3, "the leased pages were reserved as well"
 
 
 def test_a_lease_prepare_never_cut_to_is_given_back_at_admit():
@@ -223,7 +224,7 @@ def test_a_lease_prepare_never_cut_to_is_given_back_at_admit():
     assert stream.stored_len == len(prompt), (
         "the lease became the front of a stream whose step wrote the prompt from 0"
     )
-    assert kv._reserved["b"].pages == 5, "the pages the lease gave back were not reserved again"
+    assert kv._reserved["b"].pages == 6, "the pages the lease gave back were not reserved again"
 
 
 # ── where readiness is skipped ──────────────────────────────────────────

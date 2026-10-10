@@ -130,7 +130,8 @@ def test_a_leased_hit_is_held_rather_than_reserved():
     _run(kv, "b", len(tokens) - leased * PAGE_SIZE)
 
     assert leased == 3
-    assert kv._reserved["b"].pages == _pages(len(tokens) + 32) - leased, (
+    # 64 of prompt, 32 of decode and the speculative step's token: 7 pages
+    assert kv._reserved["b"].pages == 7 - leased, (
         "the pages the lease already holds were reserved again"
     )
 
@@ -186,7 +187,8 @@ def test_a_worker_reserves_only_what_its_own_nodes_open():
 
     _run(kv, "r", 32)
 
-    assert kv._reserved["r"].pages == _pages(32 + 16), (
+    # its prompt, 16 of decode and the speculative step's token
+    assert kv._reserved["r"].pages == _pages(32 + 16 + 1), (
         "a worker reserved labels only the other workers' nodes open"
     )
 

@@ -5,16 +5,20 @@ without pulling FlashInfer in behind it.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from mstar.engine.resources.spec import NodeResourceSpec, ResourceReqConfig
 from mstar.engine.resources.step import ResourceStep
 
 if TYPE_CHECKING:
     from mstar.engine.resources.base import Resource
+
+# what a decode label writes past ``max_tokens``: `Worker._try_speculate_next` submits one more
+# step while the step whose `check_stop` ends the loop still runs
+SPECULATIVE_DECODE_TOKENS = 1
 
 
 class KVLayout(Enum):
@@ -267,6 +271,49 @@ class KVReqConfig(ResourceReqConfig):
         if node is None or walk is None:
             return []
         return mapping.get((node, walk), [])
+
+
+def labels_opened(overrides: KVReqConfig, nodes: Collection[str] | None) -> set[str]:
+    """The labels ``overrides`` can open on ``nodes``, on any walk."""
+    labels = set(overrides.needed_labels or ["main"])
+    for (node, _), named in overrides.needed_labels_per_node_walk.items():
+        if nodes is None or node in nodes:
+            labels.update(named)
+    for node, named in overrides.needed_labels_per_node.items():
+        if nodes is None or node in nodes:
+            labels.update(named)
+    return labels
+
+
+class PageCount(NamedTuple):
+    pages: int
+    # every label counted by the model, none guessed from its keys
+    exact: bool
+    labels: set[str]
+
+
+def count_pages(overrides: KVReqConfig, config: PagedKVConfig, nodes: Collection[str] | None) -> PageCount:
+    """The pages a request may take over its life from a pool shared by ``nodes``,
+    before any it holds.
+
+    A label counts to its prompt, as the model counted it or as its keys
+    describe it, plus its decode. ``max_seq_len`` caps decode but not the
+    prompt, which nothing cuts to it.
+    """
+    page_size = config.page_size
+    decode = min(overrides.max_tokens + SPECULATIVE_DECODE_TOKENS, config.max_seq_len)
+    slots = overrides.prompt_slots or {}
+    labels = labels_opened(overrides, nodes)
+    pages = 0
+    for label in labels:
+        if label in slots:
+            tokens = slots[label] + (decode if label in (overrides.decode_labels or ()) else 0)
+        else:
+            keys = overrides.prefix_keys[label]
+            tail = (overrides.prefix_tail or {}).get(label) or ()
+            tokens = (len(keys) - (1 if tail else 0)) * page_size + len(tail) + decode
+        pages += -(-tokens // page_size)
+    return PageCount(pages=pages, exact=bool(slots) and labels <= slots.keys(), labels=labels)
 
 
 @dataclass

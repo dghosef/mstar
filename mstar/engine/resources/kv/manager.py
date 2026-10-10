@@ -21,6 +21,8 @@ from mstar.engine.resources.kv.config import (
     KVStep,
     PagedKVConfig,
     RetentionPolicy,
+    count_pages,
+    labels_opened,
 )
 from mstar.engine.resources.kv.cpu_page_pool import CPUPagePool
 from mstar.engine.resources.kv.keys import fingerprint, page_key
@@ -2103,49 +2105,21 @@ class KVManager(AttentionResource):
             return False
         opened = self._opened.get(rid)
         if opened is None:
-            opened = self._opened[rid] = self._labels_opened(overrides)
+            opened = self._opened[rid] = labels_opened(overrides, self._nodes)
         return label not in opened
-
-    def _labels_opened(self, overrides: KVReqConfig) -> set[str]:
-        """The labels ``overrides`` can open on this pool's nodes, on any walk."""
-        labels = set(overrides.needed_labels or ["main"])
-        for (node, _), named in overrides.needed_labels_per_node_walk.items():
-            if self._nodes is None or node in self._nodes:
-                labels.update(named)
-        for node, named in overrides.needed_labels_per_node.items():
-            if self._nodes is None or node in self._nodes:
-                labels.update(named)
-        return labels
 
     def _reservation(self, rid: str) -> Reservation:
         """The pages ``rid`` may take from the free list over its life here.
 
-        A label counts to its prompt plus what decode adds: the prompt as the
-        model counted it, else as its keys describe it. ``max_seq_len`` bounds
-        positions, so it caps decode, which takes one per token, and a keyed
-        prompt, whose tokens are positions, but not the model's count, whose
-        image tokens are not. A page the request leases, or was lent, is held
-        rather than taken.
+        A page the request leases, or was lent, is held rather than taken.
         """
         overrides = self._overrides[rid]
-        page_size, cap = self.config.page_size, self.config.max_seq_len
-        slots = overrides.prompt_slots or {}
-        labels = self._labels_opened(overrides)
-        pages = 0
-        for label in labels:
-            if label in slots:
-                decodes = label in (overrides.decode_labels or ())
-                tokens = slots[label] + (min(overrides.max_tokens, cap) if decodes else 0)
-            else:
-                keys = overrides.prefix_keys[label]
-                tail = (overrides.prefix_tail or {}).get(label) or ()
-                prompt = (len(keys) - (1 if tail else 0)) * page_size + len(tail)
-                tokens = min(prompt + overrides.max_tokens, cap)
-            pages += -(-tokens // page_size)
-            stream = self._streams[rid].get(label)
-            if stream is not None:
-                pages -= len(stream.lease or ()) + stream.hits
-        return Reservation(pages=max(0, pages), exact=bool(slots) and labels <= slots.keys())
+        count = count_pages(overrides, self.config, self._nodes)
+        held = sum(
+            len(stream.lease or ()) + stream.hits
+            for label, stream in self._streams[rid].items() if label in count.labels
+        )
+        return Reservation(pages=max(0, count.pages - held), exact=count.exact)
 
     def _gated(self, rid: str, overrides: KVReqConfig | None) -> bool:
         """Whether ``rid`` still has to reserve before it runs.
@@ -2158,7 +2132,7 @@ class KVManager(AttentionResource):
             return False
         slots = overrides.prompt_slots or {}
         keys = overrides.prefix_keys or {}
-        return all(label in slots or keys.get(label) for label in self._labels_opened(overrides))
+        return all(label in slots or keys.get(label) for label in labels_opened(overrides, self._nodes))
 
     def _gate(self, rid: str, node_name: str, graph_walk: str) -> AdmitOutcome | None:
         """Hold ``rid`` back until what it may take fits, in the order requests
