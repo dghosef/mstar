@@ -77,6 +77,9 @@ class PageArena:
     # The prefix index, told when a page gains or loses its second owner so it can keep
     # its evictable set. Free pages are never in the index, so `acquire` doesn't tell it.
     index: PrefixIndex | None = field(default=None, init=False, repr=False)
+    # How many acquires this pool has made and a hash of their pages in order, for a TP follower
+    # to check against rank 0's. None unless `_DEBUG_ASSERTS` is on for a pool with the TP cache on.
+    trail: tuple[int, int] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         self.num_owners = [0] * self.allocator.max_num_pages
@@ -87,6 +90,8 @@ class PageArena:
         if pages is not None:
             for page in pages:
                 self.num_owners[page] = 1
+            if self.trail is not None:
+                self.trail = (self.trail[0] + 1, hash((self.trail, *pages)))
         return pages
 
     def retain(self, pages: list[int]) -> None:
@@ -432,6 +437,10 @@ class KVManager(AttentionResource):
         # TP: rank 0 decides each hit as it schedules the step and the other ranks
         # take the same pages (`adopt_cached_prefix`)
         self._follower = self._world_size > 1 and self._rank != 0
+        # Only with the TP cache on. Without its load refusals a pool also allocates in a reload,
+        # which rank 0 runs at readiness and a follower when it replays the move.
+        if _DEBUG_ASSERTS and self._world_size > 1 and cfg.prefix_cache and cfg.prefix_cache_tp:
+            self._arena.trail = (0, 0)
         self._device = device
         self._lock = threading.RLock()
 
@@ -665,6 +674,10 @@ class KVManager(AttentionResource):
             stream.lease = matched
             self._lent(rid, len(matched))
             return True
+
+    def page_trail(self) -> tuple[int, int] | None:
+        with self._lock:
+            return self._arena.trail
 
     def apply_cached_prefix(
         self, rid: str, node_name: str, graph_walk: str, inputs, matched_len: int,

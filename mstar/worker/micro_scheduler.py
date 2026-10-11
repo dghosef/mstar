@@ -297,11 +297,13 @@ class MicroScheduler:
             return True
         if not self._apply_delta_from_message(head):
             return False
-        # rank 0's prefix-cache hits too: built without them, the step would run
-        # tokens rank 0 skips
-        if not head.prefix_hits:
+        if not head.prefix_hits and not head.page_trails:
             return True
         engine = self.engine_manager.get_engine(head.node_name)
+        # before the hits are adopted: a rank whose pages differ may never come to hold them
+        engine.check_page_trails(head.node_name, head.graph_walk, head.spec_seq, head.page_trails)
+        # rank 0's prefix-cache hits too: built without them, the step would run
+        # tokens rank 0 skips
         return engine.adopt_cached_prefix(head.node_name, head.graph_walk, head.prefix_hits)
 
     def pop_tp_follow_head(self) -> ScheduleTPNode:

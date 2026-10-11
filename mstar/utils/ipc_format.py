@@ -194,6 +194,8 @@ class ScheduleTPNode(MessageBody):
     resident_delta: OffloadDelta = field(default_factory=OffloadDelta.new)
     # by wire request id; the followers take these before building the step
     prefix_hits: dict[str, PrefixHit] = field(default_factory=dict)
+    # under KV debug asserts: each pool's page allocations on rank 0 so far, as (count, hash)
+    page_trails: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
 @dataclass
