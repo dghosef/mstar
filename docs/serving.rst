@@ -224,7 +224,8 @@ no longer read. It raises an error with a message describing the migration.
 cached pages. A single request opts out by sending ``prefix_cache=False``, which
 travels with its other ``model_kwargs``. Above one rank the cache stays off unless
 ``prefix_cache_tp: true`` is set as well: rank 0 then decides each hit and the other
-ranks adopt it.
+ranks adopt it. A request is then admitted on its whole prompt, and gives back the pages
+it finds cached when its prefill is sent.
 
 The pool admits a request only once the pages it can take fit beside what the running
 requests may still take. A request can take its prompt, less the pages it finds cached, and

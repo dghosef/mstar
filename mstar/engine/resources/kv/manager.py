@@ -643,6 +643,7 @@ class KVManager(AttentionResource):
                     f"{rid}/{label}: pages {matched[:4]}... here, {list(pages)[:4]}... there")
             self._arena.retain(matched)
             stream.lease = matched
+            self._lent(rid, len(matched))
             return True
 
     def apply_cached_prefix(
@@ -2216,7 +2217,9 @@ class KVManager(AttentionResource):
             head = next(iter(self._waiting)) == rid
             if not head and rid in self._rooted:
                 return _WAIT
-            label = self._probe_label(rid, node_name, graph_walk)
+            # Above one rank the hit is leased as rank 0 sends the step, where the other ranks adopt it.
+            # A lease or an eviction order taken here would exist on rank 0 only.
+            label = None if self._world_size > 1 else self._probe_label(rid, node_name, graph_walk)
             keys = None
             if label is not None and rid not in self._rooted:
                 keys = self._overrides[rid].prefix_keys[label]
