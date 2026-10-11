@@ -643,6 +643,16 @@ def test_the_broadcast_carries_the_leaders_moves():
     assert body.request_ids == ["wire-r0"]
 
 
+def test_the_broadcast_carries_the_leaders_page_trails():
+    """Without them a follower has nothing to compare, and skips the check without a word."""
+    leader = _Leader(followers=("rank1",))
+    leader.engine.page_trails = lambda node_name: {"kv": (2, 7)}
+
+    leader.maybe_send_zmq_to_tp_followers(_node_batch())
+
+    assert leader.sent[0][1].body.page_trails == {"kv": (2, 7)}
+
+
 def test_every_follower_gets_the_same_moves_in_its_own_queue():
     """Drained once, copied per follower. Draining inside the send loop would
     give the first follower everything and leave the rest behind forever."""
