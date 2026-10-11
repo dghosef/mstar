@@ -686,12 +686,19 @@ class Engine:
                 logger.info("KV %s: prefix cache open for %s on %s", key, label, nodes)
         for node in set().union(*(specs_by_key[key].nodes for key in keyed)):
             pools = sorted(key for key in keyed if node in specs_by_key[key].nodes)
-            if len(pools) > 1:
+            # Above one rank the gate reserves the whole prompt, so a cut hit takes nothing the gate didn't count.
+            if len(pools) > 1 and node not in self._tp_leader_nodes | self._tp_follower_nodes:
                 raise ValueError(
                     f"{node} keys prompts in more than one KV pool ({', '.join(pools)}): its "
                     "steps cut every pool's prefix to the shortest hit, so a pool that admitted "
                     "a request on a longer one would take the difference fresh, past the room "
                     "it checked"
+                )
+            if len({specs_by_key[key].config.page_size for key in pools}) > 1:
+                raise ValueError(
+                    f"{node} keys prompts in KV pools of different page sizes ({', '.join(pools)}): "
+                    "its steps cut every pool's prefix to the shortest hit, which has to end on a "
+                    "page boundary in each. Give the pools one page_size."
                 )
 
     def prepare_inputs(self, batch: ExecutingBatch) -> None:
@@ -772,9 +779,10 @@ class Engine:
         for rid in batch.request_ids:
             matched = self._runner.resolve_cached_prefix(rid, node, walk)
             batch.cached_prefix[rid] = matched
+            # asked on a miss too: a pool that matched more cuts its lease to the agreed length
+            pages = self._runner.cached_prefix_pages(rid, node, walk, matched)
             if matched > 0:
-                hits[self._graph_runtime.get_rid_string(rid)] = PrefixHit(
-                    matched, self._runner.cached_prefix_pages(rid, node, walk, matched))
+                hits[self._graph_runtime.get_rid_string(rid)] = PrefixHit(matched, pages)
         return hits
 
     def adopt_cached_prefix(

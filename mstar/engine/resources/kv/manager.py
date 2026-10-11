@@ -613,8 +613,13 @@ class KVManager(AttentionResource):
         self, rid: str, node_name: str, graph_walk: str, matched_len: int,
     ) -> list[int] | None:
         """The pages of this request's lease that cover ``matched_len``, for rank 0 to
-        tell the other ranks; None where this resource holds no lease."""
+        tell the other ranks; None where this resource holds no lease.
+
+        The lease is cut to ``matched_len`` first. A pool that matched more than the agreed
+        length would otherwise hold pages on rank 0 that no other rank adopts.
+        """
         with self._lock:
+            self.apply_cached_prefix(rid, node_name, graph_walk, None, matched_len)
             label = self._keyed_label(rid, node_name, graph_walk)
             stream = None if label is None else self._streams.get(rid, {}).get(label)
             if stream is None or stream.lease is None:

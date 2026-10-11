@@ -284,6 +284,7 @@ def _said_at_load(caplog, kv, model) -> tuple[list[str], list[str]]:
 
 def test_a_node_that_keys_two_pools_is_refused_at_load():
     engine = Engine.__new__(Engine)
+    engine._tp_leader_nodes = engine._tp_follower_nodes = set()
     engine._resources = {
         KV: _kv(prefix_cache_salt="deployment"),
         "kv2": _kv(name="kv2", prefix_cache_salt="deployment"),
