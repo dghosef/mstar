@@ -741,8 +741,13 @@ class KVManager(AttentionResource):
             key = fingerprint(self._prefix_root, chain.keys[chain.cursor])
             page = stream.page_indices[chain.cursor]
             # Don't chain under a page only the index holds. A held child would keep eviction
-            # from that page, which the pool counts as free.
-            if parent is not None and self._arena.num_owners[parent] == 1:
+            # from that page, which the pool counts as free. Above one rank, chain only under a
+            # page this stream holds: another request's lease can hold a page at this commit on
+            # one rank and not yet on another.
+            if parent is not None and (
+                self._arena.num_owners[parent] == 1
+                or self._world_size > 1 and parent != stream.page_indices[chain.cursor - 1]
+            ):
                 parent = None
             if not self._index.insert(key, page, parent):
                 # another request filled this page first and its copy is the
