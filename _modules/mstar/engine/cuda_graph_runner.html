@@ -410,7 +410,7 @@ window.runMermaid = runMermaid;</script>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.2.1" />
-    <meta name="docbuild:last-update" content="Oct 09, 2026"/>
+    <meta name="docbuild:last-update" content="Oct 11, 2026"/>
   
     
     <script src="../../../_static/searchtools.js"></script>
@@ -1519,7 +1519,7 @@ window.runMermaid = runMermaid;</script>
         <span class="n">lease</span> <span class="o">=</span> <span class="n">SlotLease</span><span class="p">(</span><span class="n">slot</span><span class="o">=</span><span class="n">spec</span><span class="o">.</span><span class="n">slot</span><span class="p">,</span> <span class="n">bucket</span><span class="o">=</span><span class="n">spec</span><span class="o">.</span><span class="n">bucket</span><span class="p">)</span>
         <span class="n">step</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_submodule</span><span class="o">.</span><span class="n">declare_step</span><span class="p">(</span>
             <span class="n">graph_walk</span><span class="o">=</span><span class="n">walk</span><span class="p">,</span> <span class="n">request_ids</span><span class="o">=</span><span class="n">dummy_rids</span><span class="p">,</span> <span class="n">inputs</span><span class="o">=</span><span class="n">dummy_inputs</span><span class="p">,</span>
-            <span class="n">slot_lease</span><span class="o">=</span><span class="n">lease</span><span class="p">,</span>
+            <span class="n">slot_lease</span><span class="o">=</span><span class="n">lease</span><span class="p">,</span> <span class="n">per_request_info</span><span class="o">=</span><span class="n">engine_inputs</span><span class="o">.</span><span class="n">per_request_info</span><span class="p">,</span>
         <span class="p">)</span>
         <span class="k">if</span> <span class="n">step</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
             <span class="n">step</span> <span class="o">=</span> <span class="n">replace</span><span class="p">(</span><span class="n">step</span><span class="p">,</span> <span class="n">_ctx</span><span class="o">=</span><span class="n">StepContext</span><span class="p">(</span>
@@ -2619,7 +2619,7 @@ By M* Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Oct 09, 2026.
+  Last updated on Oct 11, 2026.
   <br/>
 </p>
   </div>

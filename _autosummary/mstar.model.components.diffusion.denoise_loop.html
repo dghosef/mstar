@@ -55,7 +55,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.2.1" />
-    <meta name="docbuild:last-update" content="Oct 09, 2026"/>
+    <meta name="docbuild:last-update" content="Oct 11, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -937,6 +937,9 @@ the batch <em>could</em> be captured, the lease says it was.</p>
 <p><code class="docutils literal notranslate"><span class="pre">piecewise_leases</span></code> names the regions of this node that hold a slot
 for this step. Such a region declares, plans and commits its own work,
 so a resource it owns must be left out of this declaration.</p>
+<p><code class="docutils literal notranslate"><span class="pre">per_request_info</span></code> holds the real rows’ forward-pass info (capture
+passes dummy metadata); padding rows are absent, so read it with
+<code class="docutils literal notranslate"><span class="pre">.get</span></code>.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
 <dd class="field-odd"><ul class="simple">
@@ -1440,7 +1443,7 @@ By M* Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Oct 09, 2026.
+  Last updated on Oct 11, 2026.
   <br/>
 </p>
   </div>
