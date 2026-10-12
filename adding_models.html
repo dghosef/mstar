@@ -54,7 +54,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.2.1" />
-    <meta name="docbuild:last-update" content="Oct 11, 2026"/>
+    <meta name="docbuild:last-update" content="Oct 12, 2026"/>
   
     
     <script src="_static/searchtools.js"></script>
@@ -822,6 +822,16 @@ model consumes (<code class="docutils literal notranslate"><span class="pre">_ST
 starts reading such a field from <code class="docutils literal notranslate"><span class="pre">model_kwargs</span></code> — the way <code class="docutils literal notranslate"><span class="pre">ignore_eos</span></code> is
 read — also delete the key from <code class="docutils literal notranslate"><span class="pre">_STRIP_KEYS</span></code>, or requests arriving through
 the Dynamo frontend will silently lose it.</p>
+</div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p><code class="docutils literal notranslate"><span class="pre">model_kwargs</span></code> cross the control plane to the conductor as plain data, so a
+value that <code class="docutils literal notranslate"><span class="pre">process_prompt</span></code> moves onto a tensor edge must not travel there
+too. List those kwargs in <code class="docutils literal notranslate"><span class="pre">PREPROCESS_ONLY_KWARGS</span></code>: the data worker keeps the
+originals for <code class="docutils literal notranslate"><span class="pre">postprocess</span></code> and leaves them out of the conductor’s copy. Pi0.5
+lists <code class="docutils literal notranslate"><span class="pre">robot_state</span></code>, and Cosmos3 lists <code class="docutils literal notranslate"><span class="pre">action</span></code> (it passes only the shape on as
+<code class="docutils literal notranslate"><span class="pre">action_shape</span></code> metadata). A tensor left in <code class="docutils literal notranslate"><span class="pre">model_kwargs</span></code> fails at send
+with an error that names the kwarg.</p>
 </div>
 <p>The following methods have defaults and are optional to override:
 <code class="docutils literal notranslate"><span class="pre">get_request_resource_configs</span></code> (described below), <code class="docutils literal notranslate"><span class="pre">get_sampling_config</span></code>,
@@ -2498,7 +2508,7 @@ By M* Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Oct 11, 2026.
+  Last updated on Oct 12, 2026.
   <br/>
 </p>
   </div>
