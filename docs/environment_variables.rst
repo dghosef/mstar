@@ -302,13 +302,15 @@ Worker scheduling
      - Pre-plan the speculative batch's attention on a dedicated thread
        while the previous replay runs. ``0`` plans inline on the GPU
        thread.
-   * - ``MSTAR_QWEN35_DECODE_BUCKETS``
+   * - ``MSTAR_DECODE_BUCKETS``
      - ``1,2,4,8,16,32,48,64,96,128``
-     - The decode batch sizes Qwen3.5 captures as CUDA graphs. A decode step
+     - The decode batch sizes a model captures as CUDA graphs (Qwen3.5 reads
+       it; a model with its own ladder reads it the same way). A decode step
        runs at the smallest bucket that holds its rows, so the ladder bounds
        both the rows per step and the graph memory; narrow it (for example
        ``1,2,4,8,16,32``) on a memory-tight GPU or for an A/B against the
-       former ladder.
+       former ladder. ``MSTAR_QWEN35_DECODE_BUCKETS`` overrides it for
+       Qwen3.5 alone.
    * - ``MSTAR_EARLY_SPEC``
      - ``1``
      - Build and pre-plan step N+2 while N+1 runs, between the stop and
@@ -333,15 +335,6 @@ Worker scheduling
      - ``1024``
      - Cap on back-to-back speculative steps before the leader yields to
        other ready work.
-   * - ``MSTAR_SPEC_YIELD_HOLD_MS``
-     - ``0``
-     - How long (ms) the speculative decode loop keeps going after another
-       step becomes ready, typically the prefill of requests that just
-       arrived. With ``0`` the loop yields at the next iteration and every
-       arrival tends to get a prefill step of its own; a hold of a few
-       milliseconds lets the arrivals of that window prefill together, which
-       is worth decode throughput at high concurrency and costs up to that
-       much time to first token.
    * - ``MSTAR_QWEN35_PREFILL_TOKEN_BUCKETS``
      - ``32,64,128,256,512,1024,2048,4096,8192``
      - Total tokens of a packed Qwen3.5 text-prefill step that get a captured

@@ -77,6 +77,20 @@ class ColumnarTensorInfo:
             self.dtype_names.append(_dtype_name(dtype))
         return idx
 
+    def add_row(
+        self, uuid: int, address: int, nbytes: int, ndims: int,
+        dims, stride, dtype_idx: int,
+    ) -> None:
+        """One tensor whose layout is already known (a row of a template):
+        its entry in every column, in the layout's order."""
+        self.uuids.append(uuid)
+        self.addresses.append(address)
+        self.nbytes.append(nbytes)
+        self.ndims.append(ndims)
+        self.dims_flat.extend(dims)
+        self.stride_flat.extend(stride)
+        self.dtype_idx.append(dtype_idx)
+
     def add_tensors_canonical(
         self, uuids: list[int],
         canonicals: list[torch.Tensor],
