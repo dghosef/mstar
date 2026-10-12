@@ -3048,6 +3048,9 @@ class Worker:
         with self._span("worker.postprocess.register_outputs"):
             self._register_outputs(route_output)
         _pp_stage("register_outputs")
+        if self.enable_nvtx:
+            # Close here; the next speculation may be built before the send half.
+            range_pop(synchronize=False)
 
         return _PostprocessState(
             cpu_outputs=cpu_outputs, host_rows=host_rows,
@@ -3081,7 +3084,6 @@ class Worker:
 
         # send outputs
         if self.enable_nvtx:
-            range_pop(synchronize=False)
             range_push("worker.send_outputs", synchronize=False)
 
         # The consuming pass (not the earlier ingest) reports the partition
