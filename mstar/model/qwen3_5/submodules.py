@@ -84,11 +84,13 @@ class LLMSubmodule(ARNodeSubmodule):
     # cap on rows per decode step: with 32 as the top, 64 requests in flight
     # ran as two alternating batches of 32 and each paid the whole per-step
     # host cost. A step above 32 rows pads to the next bucket.
-    # MSTAR_QWEN35_DECODE_BUCKETS="1,2,4,8,16,32" narrows the ladder (less graph
-    # memory, or the pre-#258 ladder for an A/B).
+    # MSTAR_DECODE_BUCKETS="1,2,4,8,16,32" narrows the ladder for every model
+    # that reads it (less graph memory, or the pre-#258 ladder for an A/B);
+    # MSTAR_QWEN35_DECODE_BUCKETS overrides it for this model alone.
     DECODE_CAPTURE_BATCH_SIZES = [
-        int(x) for x in os.environ.get(
-            "MSTAR_QWEN35_DECODE_BUCKETS", "1,2,4,8,16,32,48,64,96,128",
+        int(x) for x in (
+            os.environ.get("MSTAR_QWEN35_DECODE_BUCKETS")
+            or os.environ.get("MSTAR_DECODE_BUCKETS", "1,2,4,8,16,32,48,64,96,128")
         ).split(",")
     ]
 
