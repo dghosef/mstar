@@ -51,7 +51,7 @@ def _pending(seq=3):
 
 
 def _fair(**kw):
-    return _SpecFairness(peek=True, hold_s=0.0, max_consecutive=1024, **kw)
+    return _SpecFairness(peek=True, max_consecutive=1024, **kw)
 
 
 def test_an_early_build_with_no_head_sends_nothing_and_leaves_the_decision():
