@@ -124,14 +124,15 @@ class _FakeRunner:
         del before, after
 
 
-def _specs(walks=("decode",), num_slots=2):
+def _specs(walks=("decode",), num_slots=2, packed=()):
     out = []
     for walk in walks:
         bucket = BucketKey(graph_walk=walk, bs=1, num_tokens=8, cg_key_info=None)
+        kind = CudaGraphConfigType.FLASH_INFER_PACKED if walk in packed else CudaGraphConfigType.BASIC_BATCHED
         for slot in range(num_slots):
             out.append(CGSlotSpec(
                 bucket=bucket, slot=slot, config_idx=0,
-                config=SimpleNamespace(get_config_type=lambda: CudaGraphConfigType.BASIC_BATCHED),
+                config=SimpleNamespace(get_config_type=lambda kind=kind: kind),
             ))
     return out
 
@@ -243,6 +244,19 @@ def test_single_slot_runners_still_register():
     (bucket,) = runner._buckets.values()
     assert bucket.slots == ["decode:slot0"]
     assert runner.declared == [], "nothing to pre-plan with a single slot"
+
+
+def test_only_a_batched_bucket_gets_pre_seeded_rows():
+    """A batch that hasn't built its inputs can only lease a batched bucket, so
+    no step ever reads a packed bucket's template rows. Pre-seeded for every
+    bucket, they held over 0.5 GiB for the prefill buckets of Qwen3-Omni's Thinker."""
+    runner = _FakeRunner(_specs(walks=("decode", "prefill"), packed=("prefill",)))
+
+    runner.warmup_and_capture()
+
+    assert [lease.bucket.graph_walk for lease in runner.declared] == ["decode"], (
+        "a packed bucket's rows are never read, so they must not be built"
+    )
 
 
 class _InternRunner:
