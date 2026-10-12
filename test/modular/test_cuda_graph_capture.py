@@ -21,6 +21,7 @@ sys.path.insert(0, ".")
 import pytest
 import torch
 
+from mstar.engine.cuda_graph_config import CudaGraphConfigType
 from mstar.engine.cuda_graph_runner import (
     CaptureCost,
     CudaGraphRunner,
@@ -129,7 +130,8 @@ def _specs(walks=("decode",), num_slots=2):
         bucket = BucketKey(graph_walk=walk, bs=1, num_tokens=8, cg_key_info=None)
         for slot in range(num_slots):
             out.append(CGSlotSpec(
-                bucket=bucket, slot=slot, config=SimpleNamespace(), config_idx=0,
+                bucket=bucket, slot=slot, config_idx=0,
+                config=SimpleNamespace(get_config_type=lambda: CudaGraphConfigType.BASIC_BATCHED),
             ))
     return out
 

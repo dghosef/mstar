@@ -731,8 +731,11 @@ class CudaGraphRunner:
                 spec, slot = slots[slot_idx]
                 for key_spec in [spec, *self._get_addtl_slot_specs(spec)]:
                     self._register_slot(key_spec, slot)
-            if self._num_slots > 1:
-                # pre-seed preplan inputs; cached per bucket, so once is enough
+            config = self._buckets[bucket_key].config
+            if self._num_slots > 1 and config.get_config_type() == CudaGraphConfigType.BASIC_BATCHED:
+                # pre-seed preplan inputs; cached per bucket, so once is enough.
+                # A packed bucket's rows would never be read: a batch with no inputs
+                # yet can only lease a batched one (see `select_batched_bucket`).
                 self.declare_inputs_for(SlotLease(slot=0, bucket=bucket_key))
 
         self._dummy_rows.release_all()
