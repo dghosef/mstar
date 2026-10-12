@@ -601,13 +601,7 @@ class TensorCommunicationManager(ABC):
         cpus: list[torch.Tensor | None] | None = [] if want_cpu else None
         sharded_uuids: list[int] = []
         mint = self._uuid_minter.mint
-        add_uuid = columns.uuids.append
-        add_addr = columns.addresses.append
-        add_nbytes = columns.nbytes.append
-        add_ndims = columns.ndims.append
-        add_dims = columns.dims_flat.extend
-        add_stride = columns.stride_flat.extend
-        add_dtype = columns.dtype_idx.append
+        add_row = columns.add_row
         try:
             for rid in request_ids:
                 i = row_of.get(rid)
@@ -658,13 +652,7 @@ class TensorCommunicationManager(ABC):
                     signal_idxs.append(s)
                     num_tensors.append(1)
                     canonicals.append(tensor)
-                    add_uuid(uuid)
-                    add_addr(base + i * step)
-                    add_nbytes(nbytes)
-                    add_ndims(ndims)
-                    add_dims(dims)
-                    add_stride(stride)
-                    add_dtype(dtype_idx)
+                    add_row(uuid, base + i * step, nbytes, ndims, dims, stride, dtype_idx)
                     if want_cpu:
                         cpus.append(host[i] if host is not None else None)
                     if cfg is not None:
