@@ -1901,10 +1901,12 @@ class Engine:
                 mark(f"engine.preplan_discarded.{batch.node_name}")
             batch.preplan_event = None
             batch.preplanned_rids = None
-            if batch.inputs is None:
-                # declared over template rows for a step that is now stale:
-                # exec declares again over the real ones
-                batch.step = None
+            # The step was declared over the rows the pre-plan saw: template
+            # rows for an unprepared batch, or a request set that has since
+            # lost rows to prepare_inputs (preplan_is_stale). Either way exec
+            # declares and admits again over the batch as it stands now; a
+            # kept step would go to admit unchecked.
+            batch.step = None
             lease = batch.step_context.slot_lease
             cg_runner = self._submodules[batch.node_name].cuda_graph_runner
             if lease is not None and cg_runner is not None:
