@@ -66,12 +66,16 @@ class RequestFailed:
     status: int = 500
 
 
+# what an ``APIServerMessage`` carries; None for ``setup_done``
+APIServerMessageBody = ResultTensors | ResultTokens | RequestComplete | RequestFailed | None
+
+
 @dataclass
 class APIServerMessage:
     """Envelope for messages received by the API server."""
     # "result_tensors" | "result_tokens" | "request_complete" | "request_failed" | "setup_done"
     message_type: str
-    body: ResultTensors | ResultTokens | RequestComplete | RequestFailed | None = None  # None for setup_done
+    body: APIServerMessageBody = None
 
 
 @dataclass

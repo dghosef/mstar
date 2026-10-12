@@ -2420,7 +2420,11 @@ class KVManager(AttentionResource):
     ):
         """``publish`` as of the snapshot: the lengths are the snapshot's, so a
         step that committed in between (the next one is already running when
-        the worker finishes a publication) does not leak into it."""
+        the worker finishes a publication) does not leak into it. A commit
+        only appends pages, so the snapshot's page count still names the
+        pages it saw. A reset or a fork in between replaces the list (the
+        stream's ``reset_generation`` moves); the snapshot describes pages
+        that no longer exist then, and the stream is published as it stands."""
         del node_name, graph_walk
         if not snapshot:
             return None
@@ -2433,6 +2437,10 @@ class KVManager(AttentionResource):
                 stream = streams.get(label)
                 if stream is None:
                     continue
+                if stream.reset_generation != reset_generation:
+                    seq_len = stream.stored_len
+                    num_pages = len(stream.page_indices)
+                    reset_generation = stream.reset_generation
                 pages = list(stream.page_indices[:num_pages])
                 seq_info[label] = KVSequenceInfo(
                     seq_len=seq_len,

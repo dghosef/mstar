@@ -243,3 +243,21 @@ def test_eager_finalize_still_publishes_every_request(monkeypatch):
     assert batch.per_request_info[1].resource_publish_info == {"kv": "kv-info:1"}
     assert batch.publish_snapshots is None
     eng.materialize_publish(batch, [1])  # nothing to finish, no error
+
+
+def test_kv_snapshot_of_a_stream_reset_since_publishes_the_stream_as_it_stands():
+    # a reset between the snapshot and its finish replaces the page list
+    # (the generation moves): the snapshot's page count would name pages
+    # of the old generation, so the stream is published as it is now
+    kv = _manager()
+    kv.ingest_request("r0", None)
+    _grow(kv, "r0", 40)
+    snap = kv.publish_snapshot_for_step("r0", "node", "w")
+    kv.reset_request("r0")
+    _grow(kv, "r0", 10)
+    live = kv.publish("r0", "node", "w")
+    lazy = kv.publish_from_snapshot("r0", snap, "node", "w")
+    assert _seq(lazy).seq_len == _seq(live).seq_len == 10
+    assert _seq(lazy).page_indices == _seq(live).page_indices
+    assert _seq(lazy).reset_generation == _seq(live).reset_generation
+    assert _seq(lazy).latest_kv_transfer_info == _seq(live).latest_kv_transfer_info

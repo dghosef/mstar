@@ -152,14 +152,10 @@ def _parse_tp_async_sched(raw: str) -> tuple[bool, frozenset[str] | None]:
 
 @dataclass
 class _SpecFairness:
-    """The decode loop's fairness settings and clock for ``_build_speculation``:
-    whether to peek for other ready work, how long to hold the yield once it
-    is seen, the consecutive-step cap, and when other work first became
-    ready (None while nothing else waits)."""
+    """The decode loop's fairness settings for ``_build_speculation``: whether
+    to peek for other ready work, and the consecutive-step cap."""
     peek: bool
-    hold_s: float
     max_consecutive: int
-    ready_since: float | None = None
 
 
 @dataclass
@@ -3206,6 +3202,11 @@ class Worker:
         )
         # A frame to a peer or the conductor carries this step's publication:
         # finish the snapshot for those rids (the stopped ones already are).
+        # The snapshot pins the lengths and page counts of step N, so the
+        # commit of N+1 that may have landed since does not leak in; only a
+        # reset or fork in between moves a stream past its snapshot, and the
+        # KV manager publishes such a stream as it stands (its generation
+        # says so).
         if info_rids:
             engine.materialize_publish(batch_N.node_batch, info_rids)
             for rid in info_rids:
@@ -3751,22 +3752,7 @@ class Worker:
                     (pending.node_name, pending.graph_walk),
                 )
             )
-            if other_ready:
-                now = _time.perf_counter()
-                if fair.ready_since is None:
-                    fair.ready_since = now
-                must_yield_for_fairness = (
-                    now - fair.ready_since >= fair.hold_s
-                )
-            else:
-                fair.ready_since = None
-                must_yield_for_fairness = False
-            must_yield_away = (
-                consecutive >= fair.max_consecutive
-                or must_yield_for_fairness
-            )
-            if must_yield_away:
-                fair.ready_since = None
+            must_yield_away = consecutive >= fair.max_consecutive or other_ready
             if not must_yield_away and not admit_refused:
                 if self.enable_nvtx:
                     range_push("worker.speculate", synchronize=False)
@@ -3945,19 +3931,17 @@ class Worker:
         spec_peek_for_fairness = (
             os.environ.get("MSTAR_SPEC_PEEK_FOR_FAIRNESS", "1") == "1"
         )
-        # How long the loop keeps speculating once another step is ready, so
-        # that at high concurrency the requests arriving over that window
-        # prefill in one step rather than one step each. 0 yields at once.
-        spec_yield_hold_s = float(os.environ.get("MSTAR_SPEC_YIELD_HOLD_MS", "0")) / 1000.0
         fair = _SpecFairness(
-            peek=spec_peek_for_fairness, hold_s=spec_yield_hold_s,
-            max_consecutive=max_consecutive_spec,
+            peek=spec_peek_for_fairness, max_consecutive=max_consecutive_spec,
         )
         consecutive_spec_steps = 0
         yield_away_from_target: tuple[str, str] | None = None
         # Build N+2 while N+1 runs, between the two halves of N's
         # post-processing: its pre-plan then overlaps the routing half rather
-        # than the next launch. On a parallel (TP) node the early build only
+        # than the next launch. Two slots (graph buffers, resource staging)
+        # still suffice: N's GPU work has completed by then (its outputs are
+        # what the post-processing reads), so N+2 takes N's slot while N+1
+        # holds the other. On a parallel (TP) node the early build only
         # commits when it finds a head: the followers settle each step on
         # exactly one decision, so an early build that finds nothing sends no
         # marker and schedules no yield-away, and the top of the next
