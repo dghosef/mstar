@@ -52,6 +52,7 @@ test/modular/test_streams.py
 test/modular/test_batched_model_output.py
 test/modular/test_qwen3_5_check_stop_batched.py
 test/modular/test_qwen3_5_video.py
+test/modular/test_piecewise_can_lease.py
 test/modular/test_wire_codec.py
 test/modular/test_wire_security.py
 test/modular/test_model_kwargs_tensor_transport.py

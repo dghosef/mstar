@@ -159,15 +159,20 @@ around a video stay, with each group's own pair inside. Earlier transformers
 replaced the outer pair too; mstar keeps the 5.10 layout whatever version is
 installed. Resizing follows the installed transformers version:
 transformers 5.22 turns on the per-frame pixel cap of qwen-vl-utils by
-default, which lowers the token count of short clips. Limits:
+default, which lowers the token count of short clips. Notes:
 
-- One vision attention segment per image and per video frame group. A prompt
-  whose patches fit the vision encoder's largest captured bucket (16384) but
-  that has more than 64 segments, in practice a video over ~64 s whose frames
-  resize below ~256x256 pixels, is refused with a 400.
-- A long video is one wide prefill: one 1-3 minute video is ~10k tokens,
+- The vision encoder attends within each image and each video frame group
+  separately, and its captured CUDA graphs hold up to 16384 patches and 64 such
+  segments per prompt. A prompt over either limit runs the encoder without the
+  graph: a long video at ordinary resolution exceeds the patches, and one over
+  ~64 s with frames resized below ~256x256 pixels exceeds the segments.
+- A long video is one wide prefill: one 1-3 minute video is ~11-12k tokens,
   beyond the largest captured ``prefill_vision`` bucket (4096), so it runs
   eagerly.
+- Size the KV pool for video. ``configs/qwen3_5_*.yaml`` keep the default
+  2048 pages of 128 tokens (262k tokens per deployment); 32 concurrent long
+  videos need about twice that, and requests then wait for pages. Raise
+  ``resources: kv_cache: max_num_pages`` to fit the concurrency you serve.
 - Decoding happens in the API server process, before the request is queued.
 
 Most layers are gated DeltaNet, so a request holds a recurrent-state slot as

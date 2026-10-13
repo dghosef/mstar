@@ -271,10 +271,11 @@ class Qwen3_5DenseModel(Model):
     def _max_vision_segments(self) -> int:
         """The captured vision block loop's segment ceiling per prompt.
 
-        A segment per image, not per request: the resize floors each image at
-        `shortest_edge` pixels. A video frame group is a segment too but has
-        no such floor, so `process_prompt` refuses a prompt that would land in
-        a captured bucket with more segments than this.
+        A segment per image, and the resize floors each image at
+        `shortest_edge` pixels, so the top bucket holds this many images. A
+        video frame group is a segment too, with no such floor; a prompt with
+        more segments runs the block loop eagerly
+        (`VisionEncoderSubmodule._fits_capture`).
         """
         from mstar.model.qwen3_5.submodules import VisionEncoderSubmodule
 
@@ -434,31 +435,6 @@ class Qwen3_5DenseModel(Model):
             )
         return ProcessedVideo(out["pixel_values_videos"], grid, timestamps)
 
-    def _check_vision_segments(self, grids: list[torch.Tensor]) -> None:
-        """400 a prompt the captured vision block loop cannot hold.
-
-        One segment per image and per video frame group. The block loop is
-        leased by patch count alone, so a prompt that fits its top bucket with
-        more segments than `_max_vision_segments` would fail in the encoder; a
-        larger prompt runs eagerly, where segments are unbounded.
-
-        TODO: make the lease segment-aware in the engine (run such prompts
-        eagerly) and drop this refusal.
-        """
-        from mstar.model.qwen3_5.submodules import VisionEncoderSubmodule
-
-        segments = sum(int(g[0]) for g in grids)
-        patches = sum(int(g.prod()) for g in grids)
-        limit = self._max_vision_segments()
-        top_bucket = VisionEncoderSubmodule.BLOCK_LOOP_PATCH_BUCKETS[-1]
-        if segments > limit and patches <= top_bucket:
-            raise ValueError(
-                f"Qwen3.5 here takes at most {limit} vision segments (images "
-                f"plus video frame pairs) when a prompt's {patches} patches "
-                f"fit {top_bucket}; this one has {segments}. Send a shorter "
-                "or higher-resolution video."
-            )
-
     def process_prompt(
         self,
         prompt: str | None,
@@ -518,11 +494,6 @@ class Qwen3_5DenseModel(Model):
             self._preprocess_video(frames, metadata)
             for frames, metadata in zip(raw_videos, video_metadata, strict=True)
         ]
-        if videos:
-            self._check_vision_segments(
-                [g for out in images for g in out["image_grid_thw"]]
-                + [video.grid for video in videos]
-            )
 
         # The released checkpoints are chat models (base ones say `-Base`), so
         # always use the chat template. `enable_thinking=False` emits an empty,
@@ -851,7 +822,9 @@ class Qwen3_5DenseModel(Model):
             load_qwen3_5_vision_weights(tower, weights_dir, device=device)
             tower.requires_grad_(False).eval()
             logger.info("Loaded Qwen3.5 vision tower onto %s", device)
-            return VisionEncoderSubmodule(tower, self.vision_config)
+            return VisionEncoderSubmodule(
+                tower, self.vision_config, max_segments=self._max_vision_segments(),
+            )
 
         from mstar.model.qwen3_5.weight_loader import load_qwen3_5_weights
 

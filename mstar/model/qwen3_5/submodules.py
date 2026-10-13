@@ -555,6 +555,10 @@ class VisionEncoderSubmodule(NodeSubmodule):
     The block loop is captured one prompt per replay, which beats batching:
     eager, the tower is launch-bound (~500 kernels, ~4 ms of GPU work in a
     ~20 ms forward on 9B). So the encoder takes one request a step.
+
+    A replay's attention plan holds at most ``max_segments`` segments (one
+    per image and per video frame group). A prompt with more takes no lease
+    and runs the block loop eagerly, however few its patches.
     """
 
     # Patch-count buckets, one prompt per replay. 16384 patches merge to the
@@ -563,10 +567,13 @@ class VisionEncoderSubmodule(NodeSubmodule):
 
     def __init__(
         self, model: Qwen3_5VisionModel, config: Qwen3_5VisionConfig,
+        max_segments: int,
     ):
         super().__init__()
         self.model = model
         self.config = config
+        # the ragged attention resource's `max_segments_per_request`
+        self.max_segments = max_segments
 
     def prepare_inputs(
         self,
@@ -667,10 +674,17 @@ class VisionEncoderSubmodule(NodeSubmodule):
                 make_static_inputs=make_static_inputs,
                 declare_step=declare_step,
                 lease_before_step=True,
+                can_lease=self._fits_capture,
                 total_tokens=self.BLOCK_LOOP_PATCH_BUCKETS,
                 capture_batch_sizes=[1],
             )
         }
+
+    def _fits_capture(self, inputs: list[NodeInputs]) -> bool:
+        """Whether the batch's segments fit a replay's attention plan, which
+        holds ``max_segments`` per request of the bucket."""
+        segments = sum(len(inp.tensor_inputs["seq_lengths"]) for inp in inputs)
+        return segments <= self.max_segments * len(inputs)
 
     def _capture_block_loop(self, inp: PiecewiseCallInputs) -> dict[str, torch.Tensor]:
         """The captured region: reads the runner's buffers, never rebinds."""
@@ -688,12 +702,12 @@ class VisionEncoderSubmodule(NodeSubmodule):
     ) -> torch.Tensor | None:
         """The block loop replayed once per prompt, or None if not leased.
 
-        Decided as the engine leased, on batch size and total patch count.
+        Exactly when the engine leased it: a leased step declares nothing of
+        its own (`declare_step`), so ``engine_inputs.step`` is None. Re-asking
+        the runner would miss a refusal by ``can_lease``.
         """
         runner = engine_inputs.piecewise_runners.get(VISION_BLOCK_LOOP)
-        if runner is None or not runner.can_run(
-            len(engine_inputs.request_ids), int(hidden.shape[0]),
-        ):
+        if runner is None or engine_inputs.step is not None:
             return None
         # one replay for every image, not one each: a second plan overwrites the schedule a queued replay still reads
         return runner.run(

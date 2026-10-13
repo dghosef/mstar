@@ -470,18 +470,79 @@ def test_mp4_matches_processor(model, processor, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_refuses_more_frame_groups_than_the_captured_block_loop_holds(model):
-    """Many tiny frame groups fit the top patch bucket but overflow its
-    segment ceiling; that is refused at intake rather than in the encoder."""
-    n = 2 * (model._max_vision_segments() + 1)
+def test_more_frame_groups_than_a_replay_holds_is_accepted(model):
+    """Many tiny frame groups fit the top patch bucket but overflow a replay's
+    segment ceiling; the encoder runs them eagerly, so intake takes them."""
+    from mstar.model.qwen3_5.submodules import VisionEncoderSubmodule
+
+    limit = model._max_vision_segments()
+    n = 2 * (limit + 1)
     video = torch.randint(0, 256, (n, 3, 32, 32), dtype=torch.uint8)
     frames, metadata = sampled(video, 2.0, model.video_processor)
-    with pytest.raises(ValueError, match="vision segments"):
-        model.process_prompt(
-            "", ["video"], ["text"],
-            tensors={"video_inputs": [frames]},
-            input_metadata={"video_inputs": [metadata]},
+    out = model.process_prompt(
+        "", ["video"], ["text"],
+        tensors={"video_inputs": [frames]},
+        input_metadata={"video_inputs": [metadata]},
+    )
+    (grid,) = out.new_input_tensors["video_grid_thw"]
+    assert int(grid[0]) > limit
+    assert int(grid.prod()) <= VisionEncoderSubmodule.BLOCK_LOOP_PATCH_BUCKETS[-1]
+
+
+def _encoder(max_segments: int):
+    from mstar.model.qwen3_5.config import Qwen3_5VisionConfig
+    from mstar.model.qwen3_5.submodules import VisionEncoderSubmodule
+
+    config = Qwen3_5VisionConfig(
+        depth=1, hidden_size=32, intermediate_size=64, num_heads=2, in_channels=3,
+        patch_size=16, temporal_patch_size=2, spatial_merge_size=2,
+        num_position_embeddings=16, out_hidden_size=64,
+    )
+    return VisionEncoderSubmodule(nn.Linear(1, 1), config, max_segments=max_segments)
+
+
+def test_vision_block_loop_leases_only_what_a_replay_holds():
+    """The captured block loop declares `can_lease`: a request whose
+    segments exceed a replay's plan gets no slot."""
+    from mstar.model.qwen3_5.submodules import VISION_BLOCK_LOOP
+    from mstar.model.submodule_base import NodeInputs
+
+    encoder = _encoder(max_segments=4)
+    config = encoder.get_piecewise_cuda_graph_configs(
+        torch.device("cpu"), torch.bfloat16,
+    )[VISION_BLOCK_LOOP]
+
+    def request(segments: int) -> NodeInputs:
+        return NodeInputs(input_seq_len=16 * segments, tensor_inputs={"seq_lengths": (16,) * segments})
+
+    assert config.lease_before_step
+    assert config.can_lease([request(4)])
+    assert not config.can_lease([request(5)])
+
+
+def test_vision_block_loop_replays_exactly_when_leased():
+    """A leased step declares nothing of its own, so the forward replays
+    then and runs eagerly otherwise, whatever the runner's buckets allow."""
+    from mstar.model.qwen3_5.submodules import VISION_BLOCK_LOOP
+
+    class Runner:
+        def run(self, **kwargs):
+            self.ran = kwargs
+            return SimpleNamespace(get_view=lambda name: "replayed")
+
+    encoder, runner = _encoder(max_segments=4), Runner()
+    hidden = cos = sin = torch.zeros(8, 32)
+
+    def replay(step):
+        engine_inputs = SimpleNamespace(
+            piecewise_runners={VISION_BLOCK_LOOP: runner}, request_ids=["r"], step=step,
         )
+        return encoder._replay_block_loop(engine_inputs, hidden, cos, sin, (4, 4))
+
+    assert replay(step=object()) is None
+    assert not hasattr(runner, "ran")
+    assert replay(step=None) == "replayed"
+    assert runner.ran["seq_lens"] == [4, 4]
 
 
 def test_still_refuses_audio(model):
