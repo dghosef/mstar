@@ -59,7 +59,7 @@ from mstar.model.qwen3_5.config import (
     Qwen3_5Config,
     Qwen3_5VisionConfig,
 )
-from mstar.model.qwen3_5.qwen3_5_model import TEXT_PART
+from mstar.model.qwen3_5.qwen3_5_model import TEXT_PART, VIDEO_PART
 from mstar.model.submodule_base import (
     ARNodeInputs,
     ARNodeSubmodule,
@@ -181,8 +181,11 @@ class LLMSubmodule(ARNodeSubmodule):
     ) -> ARNodeInputs:
         """A whole multimodal prompt as one row, spliced in prompt order.
 
-        `prefill_order` tags each part text (0) or image (1); the nth tag of a
-        kind takes the nth tensor of that kind.
+        `prefill_order` tags each part text, image or video frame group; the
+        nth tag of a kind takes the nth tensor of that kind, except that a
+        video's tags, one per temporal group, share its one grid and walk
+        through it. A group is placed like a one-frame image; the timestamp
+        text between groups arrives as ordinary text parts.
 
         An image spans ``max(h', w')`` MRoPE positions but ``t * h' * w'``
         tokens, so the cursor advances by the real amount and `declare_step`
@@ -208,8 +211,10 @@ class LLMSubmodule(ARNodeSubmodule):
         embeds: list[torch.Tensor] = []
         pos_ids: list[torch.Tensor] = []
         tracked: list[torch.Tensor] = []
-        text_i = image_i = 0
-        # into `packed`, which holds every image's merged tokens end to end
+        text_i = grid_i = 0
+        # frame groups of the video at `grid_i` already placed
+        group = 0
+        # into `packed`, which holds every image's and video's merged tokens end to end
         cursor = 0
 
         for kind in fwd_info.step_metadata.get("prefill_order", ()):
@@ -222,10 +227,17 @@ class LLMSubmodule(ARNodeSubmodule):
                 tracked.append(ids)
                 pos += span
                 continue
-            grid = grids[image_i]
-            image_i += 1
+            grid = grids[grid_i]
             grid = grid[0] if grid.dim() == 2 else grid
             t, h, w = (int(v) for v in grid.tolist())
+            if kind == VIDEO_PART:
+                group += 1
+                if group == t:
+                    grid_i, group = grid_i + 1, 0
+                t = 1
+            else:
+                grid_i += 1
+            grid = torch.tensor((t, h, w))
             span = t * (h // merge) * (w // merge)
             advance = vision_position_advance(grid, merge)
             embeds += [start_embed, packed[cursor:cursor + span], end_embed]
