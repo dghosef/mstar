@@ -1394,11 +1394,13 @@ class KVManager(AttentionResource):
         with self._lock:
             ends, self._image_ends = self._image_ends, []
             for stream in ends:
-                # skip a stream that was reset or removed after its admit, which already released the lease
+                # a stream reset since its admit is no longer converted, and a lease it holds now is a later probe's
+                if not stream.converted:
+                    continue
                 if stream.lease is not None and stream.stored_len:
                     whole, end = divmod(stream.stored_len, self.config.page_size)
                     self.kv_cache.copy_slots(stream.lease[0], stream.page_indices[whole], end)
-                    self._release_lease(stream)
+                self._release_lease(stream)
 
     def _pending_fork_state(
         self, step: KVStep, ctx: StepContext
@@ -1779,6 +1781,9 @@ class KVManager(AttentionResource):
             # already admitted against these pages and the caller has other
             # victims. the eviction retries once the step commits
             if any(stream.step_in_flight for stream in streams.values()):
+                return [], []
+            # A stream offloaded before `plan` copies its cached image end would reload without it.
+            if any(stream is pending for stream in streams.values() for pending in self._image_ends):
                 return [], []
             for label, stream in streams.items():
                 if stream.offloaded or not stream.page_indices:
