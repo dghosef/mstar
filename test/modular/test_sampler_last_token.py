@@ -62,6 +62,27 @@ def test_growth_and_slot_reuse_keep_the_tokens():
     assert bufs.last_tokens_for(["d", "b", "c"]).tolist() == [8, 6, 7]
 
 
+def test_registration_growth_leaves_the_device_masters_to_the_gpu_thread():
+    """A scatter that read the master before a registration grew it must still land."""
+    bufs = _buffers(max_bs=2, cg_slots=1)
+    bufs.register_request("a")
+    bufs.register_request("b")
+    bufs.gather_static(["a", "b"], 2, 0)
+    bufs.gather_dynamic(["a", "b"], 2, 0)
+    bufs.slice_for_bs(2, 0)["last_token_buf"].copy_(torch.tensor([5, 6]))
+    # commit's scatter, split where the GIL can switch: it reads the master...
+    master = bufs.last_token.master
+    idx, real_bs = bufs._scatter_idx(0)
+    bufs.register_request("c")  # ...the main thread grows past the capacity of 2...
+    assert bufs.last_token.master is master
+    master.index_copy_(0, idx, bufs.last_token.slot_view(0, real_bs))  # ...then writes
+    # the next step grows the device rows on the gpu thread, keeping the tokens
+    bufs.gather_static(["a", "b"], 2, 0)
+    bufs.gather_dynamic(["a", "b"], 2, 0)
+    assert bufs.last_token.master.shape[0] >= 3 and bufs.offset.master.shape[0] >= 3
+    assert bufs.gather_last_tokens(0, 2).tolist() == [5, 6]
+
+
 def _ingraph(max_bs=4, cg_slots=2, slots=8):
     return SamplerBuffers.allocate(
         max_batch_size=max_bs, device=torch.device("cpu"), cg_slots=cg_slots,
@@ -108,4 +129,5 @@ def test_ingraph_scatter_masters_never_grow():
     plain = SamplerBuffers.allocate(max_batch_size=2, device=torch.device("cpu"))
     for rid in ("a", "b", "c"):
         plain.register_request(rid)
+    plain.write_last_tokens(["c"], torch.tensor([7]))  # a gpu-thread access grows the device rows
     assert plain.last_token.master.shape[0] >= 3 and not plain.ingraph_scatter

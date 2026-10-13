@@ -1338,6 +1338,8 @@ class SamplerBuffers:
     # Master cache capacity (grown by doubling when more requests are
     # concurrently registered than the per-step buffer holds).
     _master_capacity: int = field(default=0, repr=False)
+    # Rows of the device masters; lags ``_master_capacity`` until the gpu thread grows them.
+    _device_capacity: int = field(default=0, repr=False)
     # the in-graph scatter (knob): padding rows address ``_trash_slot``, one
     # master row past the capacity that no request is ever given
     ingraph_scatter: bool = False
@@ -1454,6 +1456,7 @@ class SamplerBuffers:
             seen_tokens=seen_tokens,
             min_p=mk(torch.float32, 0.0) if enable_min_p else None,
             _master_capacity=cap,
+            _device_capacity=cap,
             ingraph_scatter=ingraph_scatter,
             _trash_slot=cap if ingraph_scatter else 0,
             cg_slots=cg_slots,
@@ -1521,6 +1524,8 @@ class SamplerBuffers:
         Triggered when concurrently-registered requests exceed the current
         master capacity. Per-step buffers (sized to the cuda-graph max_bs) are
         NOT resized — the gather only reads ``padded_bs`` rows from master.
+
+        Host rows only; the device masters grow on the gpu thread (``_sync_device_capacity``).
         """
         if self.ingraph_scatter:
             raise RuntimeError(
@@ -1530,12 +1535,23 @@ class SamplerBuffers:
             )
         for buf in self._scalar_buffers():
             buf.grow_master(new_capacity)
-        self.offset.grow_master(new_capacity)
-        self.last_token.grow_master(new_capacity)
-        if self.seen_tokens is not None:
-            self.seen_tokens.grow_master(new_capacity)
-        self._free_slots.extend(range(self._master_capacity, new_capacity))
+        old_capacity = self._master_capacity
         self._master_capacity = new_capacity
+        self._free_slots.extend(range(old_capacity, new_capacity))
+
+    def _sync_device_capacity(self) -> None:
+        """Grow the device masters on the gpu thread, behind its own scatters.
+
+        Swapping them on the main thread let an in-flight scatter land in the old tensor.
+        """
+        cap = self._master_capacity
+        if self._device_capacity >= cap:
+            return
+        self.offset.grow_master(cap)
+        self.last_token.grow_master(cap)
+        if self.seen_tokens is not None:
+            self.seen_tokens.grow_master(cap)
+        self._device_capacity = cap
 
     def register_request(
         self, rid: str, sampling_config: SamplingConfig | None = None,
@@ -1600,6 +1616,7 @@ class SamplerBuffers:
         """
         if self.seen_tokens is None:
             return
+        self._sync_device_capacity()
         # Batched for the same reason as sync_seen_token_masks: bs launches
         # become one. _init_slot still has to run per slot (it is CPU-side
         # bookkeeping plus a master-row write) before anything is staged.
@@ -1720,6 +1737,7 @@ class SamplerBuffers:
 
         The seen-token mask is large ([bs, V] bool); only gathered when the
         caller's graph actually applies the penalty in-graph (the Talker)."""
+        self._sync_device_capacity()
         if self._staged_rids.get(cg_slot) != (tuple(request_ids), padded_bs):
             self._stage_slot_idx(request_ids, padded_bs, cg_slot)
         with self._offset_reset_lock:
@@ -1794,6 +1812,7 @@ class SamplerBuffers:
         requests' master rows. Every request must be registered."""
         if not request_ids:
             return
+        self._sync_device_capacity()
         self.last_token.master.index_copy_(
             0, self._slots_of(request_ids), tokens.to(self.last_token.master.dtype)
         )
@@ -1801,6 +1820,7 @@ class SamplerBuffers:
     def last_tokens_for(self, request_ids: list[str]) -> torch.Tensor:
         """``[len(request_ids)]`` last tokens of registered requests, for an
         eager step that has no staged slot row."""
+        self._sync_device_capacity()
         return self.last_token.master.index_select(0, self._slots_of(request_ids))
 
     def has_slot(self, rid: str) -> bool:
