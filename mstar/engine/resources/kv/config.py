@@ -239,7 +239,7 @@ class KVReqConfig(ResourceReqConfig):
         if prefix_decode is not None:
             self.prefix_decode = prefix_decode
         if prefix_layout is not None:
-            # sent as plain lists. A dataclass in the kwargs would make the wire pickle all of them.
+            # sent as plain lists, which keeps the request's kwargs on the wire's plain msgpack path
             self.prefix_layout = {
                 label: [PrefixSpan(*row) for row in rows]
                 for label, rows in prefix_layout.items()
