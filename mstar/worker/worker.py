@@ -3274,7 +3274,8 @@ class Worker:
         """Whether every output signal of this step is one the node keeps on
         the device (cached per node and walk: it depends on the node's
         resources, not on the step)."""
-        if not signals:
+        # without inline emit, a rows-only step has no path for the client's tokens
+        if not signals or not self._graph_runtime.supports_inline_emit:
             return False
         key = (node_name, graph_walk)
         on_device = self._device_loopback.get(key)
