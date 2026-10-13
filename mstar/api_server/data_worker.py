@@ -401,7 +401,7 @@ class PreprocessWorkerThread:
         # This thread turns each output tensor into client-ready bytes. At 720p
         # that is an 11 MiB SHM read plus a postprocess copy per engine step,
         # downstream of the last worker-side NVTX range.
-        self.enable_nvtx = enable_nvtx
+        self.enable_nvtx = profiler.nvtx_enabled(enable_nvtx)
 
         self.in_flight_requests = set()
         self.tensor_uuid_to_metadata_per_request = {}
@@ -537,6 +537,8 @@ class PreprocessWorkerThread:
 
         self.request_model_kwargs[input.request_id] = model_kwargs
         self.request_output_state[input.request_id] = RequestOutputState()
+        preprocess_only = getattr(self.model, "PREPROCESS_ONLY_KWARGS", ())
+        conductor_kwargs = {k: v for k, v in model_kwargs.items() if k not in preprocess_only}
         msg = ConductorMessage(
             message_type=ConductorMessageType.NEW_REQUEST,
             body=NewRequestConductor(
@@ -545,7 +547,7 @@ class PreprocessWorkerThread:
                 initial_input_modalities=input.input_modalities,
                 initial_output_modalities=input.output_modalities,
                 input_metadata=input_metadata,
-                model_kwargs=model_kwargs,
+                model_kwargs=conductor_kwargs,
                 session_id=input.session_id,
                 resumed=input.resumed,
                 end_session=input.end_session,

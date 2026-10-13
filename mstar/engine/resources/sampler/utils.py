@@ -7,8 +7,8 @@ module selects the next token.
 Supports per-request sampling parameters (different temperature/top_k/top_p
 for each request in a batch) via tensor parameters.
 
-CUDA graph compatible: no Python control flow branches — uses masking
-to handle greedy vs sampled requests in the same batch.
+Supports CUDA and XPU graph capture with explicit device seed/offset tensors
+after warmup. Uses masking for mixed greedy and sampled requests.
 
 Usage:
     from mstar.engine.resources.sampler.utils import sample_tokens
@@ -598,7 +598,8 @@ class Sampler(BaseSampler):
     # sampling runs inside the forward; nothing here is worth tracing
     @torch.compiler.disable
     def sample(
-        self, request_ids: list[str], logits: torch.Tensor, **kwargs
+        self, request_ids: list[str], logits: torch.Tensor,
+        kept_rids: "frozenset | None" = None, **kwargs
     ) -> torch.Tensor:
         """Return the sampled tokens as a single [B] int tensor.
 
@@ -606,6 +607,9 @@ class Sampler(BaseSampler):
         the rid order in `request_ids`. We return the raw tensor (instead of
         a dict of views) because constructing the dict adds Python overhead
         the hot path doesn't need.
+
+        Only ``kept_rids`` (None: all) advance their RNG offset and seen-token
+        mask.
         """
         configs = [self._sampling_config[rid] for rid in request_ids]
         temperature = torch.tensor([c.temperature for c in configs], device=logits.device)
@@ -624,8 +628,7 @@ class Sampler(BaseSampler):
 
         any_rep_pen = any(c.repetition_penalty != 1.0 for c in configs)
         any_greedy = any(c.temperature == 0 for c in configs)
-        any_top_k_zero = any(c.top_k == 0 for c in configs)
-        all_top_k_zero = all(c.top_k == 0 for c in configs)
+        top_k_zero_count = sum(c.top_k == 0 for c in configs)
 
         for rid in request_ids:
             if self._seen_token_mask[rid]._seen_token_mask is None:
@@ -648,8 +651,7 @@ class Sampler(BaseSampler):
             repetition_penalty=r_pen,
             seen_token_mask=seen_mask,
             any_greedy=any_greedy,
-            any_top_k_zero=any_top_k_zero,
-            all_top_k_zero=all_top_k_zero,
+            top_k_zero_count=top_k_zero_count,
             seed=seed,
             rand_offset=rand_offset,
             min_p=min_p,
@@ -670,7 +672,8 @@ class Sampler(BaseSampler):
 
         if any_rep_pen:
             for i, rid in enumerate(request_ids):
-                self._seen_token_mask[rid].add_tokens(tokens[i:i+1])
+                if kept_rids is None or rid in kept_rids:
+                    self._seen_token_mask[rid].add_tokens(tokens[i:i+1])
 
         # FlashInfer consumes one offset unit per sampled row. The XPU kernel
         # consumes one Philox region per logit in its row, so advancing by one
@@ -679,6 +682,8 @@ class Sampler(BaseSampler):
             logits.device.type, logits.shape[-1],
         )
         for rid in request_ids:
+            if kept_rids is not None and rid not in kept_rids:
+                continue
             self._step_offset[rid] = (
                 self._step_offset.get(rid, 0) + offset_stride
             )
@@ -694,7 +699,7 @@ def _sample_cuda(
     repetition_penalty: float | torch.Tensor,
     seen_token_mask: torch.Tensor | None,
     run_greedy: bool,
-    all_top_k_zero: bool | None,
+    top_k_zero_count: int | None,
     seed: torch.Tensor | None,
     rand_offset: torch.Tensor | None,
     min_p: torch.Tensor | None = None,
@@ -712,7 +717,7 @@ def _sample_cuda(
         # kernel fuses (optional rep-penalty) + (temperature-scaled softmax) +
         # (argmax → one-hot for greedy rows). FlashInfer's sample-from-probs then
         # deterministically picks argmax on one-hot rows, matching greedy semantics.
-        if all_top_k_zero is True:
+        if top_k_zero_count == logits.shape[0]:
             probs = fused_temperature_softmax(
                 logits, temperature,
                 penalty=repetition_penalty if seen_token_mask is not None else None,
@@ -752,12 +757,16 @@ def _sample_xpu(
     repetition_penalty: float | torch.Tensor,
     seen_token_mask: torch.Tensor | None,
     run_greedy: bool,
-    any_top_k_zero: bool | None,
+    top_k_zero_count: int | None,
     seed: torch.Tensor | None,
     rand_offset: torch.Tensor | None,
     min_p: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Sample normalized XPU inputs with vllm-xpu-kernels."""
+    """Sample a whole batch with vllm-xpu-kernels >= 0.1.15.
+
+    The kernel reads one device-side [seed, offset] pair per row. Explicit
+    RNG tensors never round-trip through the CPU, including under XPUGraph.
+    """
     import vllm_xpu_kernels._xpu_C  # noqa: F401
 
     batch_size = logits.shape[0]
@@ -781,75 +790,45 @@ def _sample_xpu(
         threshold = probs.amax(dim=-1, keepdim=True) * min_p[:, None]
         scores = scores.masked_fill(probs < threshold, float("-inf")).contiguous()
 
-    # The XPU kernel accepts one CPU [seed, offset] pair per invocation.
-    # Invoke it per row to preserve independent request RNG streams.
-    #
-    # TODO: batch this when the kernel accepts per-row RNG state. The
-    # current loop and scalar .item() checks synchronize once per row and
-    # are intended for the XPU deployment's current batch-size-one path.
-    #
-    # TODO: These device-to-host copies synchronize the asynchronous worker
-    # loop even if batched. The long-term fix is for the Sampler resource to
-    # pass the CPU seed/offset copies already maintained by SamplerBuffers.
-    #
     # Raw callers may omit seed and/or offset. Match CUDA's behavior by filling
     # missing values from the default XPU generator. When offset is omitted,
     # reserve one Philox region per logit and advance the generator state.
-    sampled_rows = []
-    seeds_cpu = seed.detach().cpu() if seed is not None else None
-    offsets_cpu = (
-        rand_offset.detach().cpu() if rand_offset is not None else None
-    )
-    if seeds_cpu is None or offsets_cpu is None:
+    # This fallback runs eagerly; graph callers supply explicit RNG tensors.
+    if seed is None or rand_offset is None:
         device_index = logits.device.index
         if device_index is None:
             device_index = torch.xpu.current_device()
         generator = torch.xpu.default_generators[device_index]
         default_seed, default_offset = _xpu_generator_seed_offset(
             generator,
-            logits.numel() if offsets_cpu is None else 0,
+            logits.numel() if rand_offset is None else 0,
         )
-        if seeds_cpu is None:
-            seeds_cpu = torch.full(
-                (batch_size,), default_seed, dtype=torch.int64,
+        if seed is None:
+            seed = torch.full(
+                (batch_size,), default_seed, dtype=torch.int64, device=logits.device,
             )
-        if offsets_cpu is None:
-            offsets_cpu = (
-                torch.arange(batch_size, dtype=torch.int64)
+        if rand_offset is None:
+            rand_offset = (
+                torch.arange(batch_size, dtype=torch.int64, device=logits.device)
                 * logits.shape[1]
                 + default_offset
             )
 
-    assert seeds_cpu is not None and offsets_cpu is not None
-    for row in range(batch_size):
-        sampled = torch.empty(
-            1, dtype=torch.int64, device=logits.device,
-        )
-        seed_offset = torch.tensor(
-            [int(seeds_cpu[row]), int(offsets_cpu[row])],
-            dtype=torch.int64,
-        )
-
-        row_k = top_k[row:row + 1].to(torch.int64)
-        if any_top_k_zero is not False and int(row_k.item()) == 0:
-            row_k = None
-        row_p = top_p[row:row + 1]
-        if float(row_p.item()) >= 1.0:
-            row_p = None
-
-        torch.ops._xpu_C.topk_topp_sampler(
-            sampled,
-            None,
-            scores[row:row + 1],
-            row_k,
-            row_p,
-            "raw_logits",
-            seed_offset,
-            1.0,
-        )
-        sampled_rows.append(sampled[0])
-
-    sampled = torch.stack(sampled_rows)
+    seed_offsets = torch.stack(
+        (seed.to(device=logits.device, dtype=torch.int64),
+         rand_offset.to(device=logits.device, dtype=torch.int64)),
+        dim=1,
+    ).contiguous()
+    kernel_top_k = None
+    if top_k_zero_count != batch_size:
+        kernel_top_k = top_k.to(torch.int64)
+        if top_k_zero_count != 0:
+            kernel_top_k = torch.where(kernel_top_k == 0, logits.shape[1], kernel_top_k)
+    sampled = torch.empty(batch_size, dtype=torch.int64, device=logits.device)
+    torch.ops._xpu_C.topk_topp_sampler(
+        sampled, None, scores, kernel_top_k, top_p,
+        "raw_logits", seed_offsets, 1.0,
+    )
     if greedy_tokens is not None:
         sampled = torch.where(greedy, greedy_tokens, sampled)
     return sampled
@@ -863,8 +842,7 @@ def sample_tokens(
     repetition_penalty: float | torch.Tensor= 1.0,
     seen_token_mask: torch.Tensor | None = None,
     any_greedy: bool | None = None,
-    any_top_k_zero: bool | None = None,
-    all_top_k_zero: bool | None = None,
+    top_k_zero_count: int | None = None,
     seed: torch.Tensor | None = None,
     rand_offset: torch.Tensor | None = None,
     min_p: float | torch.Tensor | None = None,
@@ -881,8 +859,14 @@ def sample_tokens(
         seen_token_mask: [batch_size, vocab_size] bool. None = penalty skipped.
         any_greedy: CPU-side hint. When False, skips the argmax/masked_fill/where
             branch entirely. None = unknown → run the full path.
-        any_top_k_zero: CPU-side hint. When False, skips the `top_k == 0 → vocab`
-            masked_fill. None = unknown → run the full path.
+        top_k_zero_count: CPU-side count of requests with top_k == 0.
+            0 skips zero-to-vocabulary normalization; batch_size disables top-k
+            filtering for the entire batch. Intermediate counts mean mixed
+            rows. None = unknown → use the conservative device path.
+        seed: Optional per-request int64 tensor [batch_size].
+        rand_offset: Optional per-request int64 tensor [batch_size]. On XPU,
+            omit seed/offset to use the default generator eagerly; provide both
+            on device to capture sampling in an XPUGraph.
         min_p: Scalar or per-request tensor [batch_size]; None/0 = disabled.
             Applied to the temperature-scaled, penalised distribution before
             top-k/top-p (the HF processor order).
@@ -913,7 +897,7 @@ def sample_tokens(
             repetition_penalty,
             seen_token_mask,
             run_greedy,
-            all_top_k_zero,
+            top_k_zero_count,
             seed,
             rand_offset,
             min_p=min_p,
@@ -927,7 +911,7 @@ def sample_tokens(
             repetition_penalty,
             seen_token_mask,
             run_greedy,
-            any_top_k_zero,
+            top_k_zero_count,
             seed,
             rand_offset,
             min_p=min_p,
@@ -1083,13 +1067,15 @@ class CudaGraphableSampler(BaseSampler):
     @torch.compiler.disable
     def sync_seen_token_masks(
         self, seen_masks: "Iterable[SeenTokenMask]",
+        keep: list[bool] | None = None,
     ) -> None:
         """Copy the in-graph seen-token rows back into canonical ``SeenTokenMask``s.
 
         Called eagerly after graph replay (the captured ``sample`` scattered the
         newly sampled token into ``seen_tokens_buf``). ``seen_masks`` are in
         request order; padding rows beyond ``len(seen_masks)`` are ignored, and
-        not-yet-sized masks (``_seen_token_mask is None``) are skipped.
+        not-yet-sized masks (``_seen_token_mask is None``) are skipped, as are
+        rows ``keep`` marks False.
         """
         if self.seen_tokens_buf is None:
             return
@@ -1101,7 +1087,7 @@ class CudaGraphableSampler(BaseSampler):
         srcs = []
         for i, m in enumerate(seen_masks):
             mask = m._seen_token_mask
-            if mask is not None:
+            if mask is not None and (keep is None or keep[i]):
                 dsts.append(mask)
                 srcs.append(self.seen_tokens_buf[i])
         if dsts:
@@ -1156,14 +1142,23 @@ class Buffer:
     def gather(self, idx_view: torch.Tensor, padded_bs: int, cg_slot: int) -> None:
         torch.index_select(self.master, 0, idx_view, out=self.slot_view(cg_slot, padded_bs))
 
-    def scatter(self, idx_view: torch.Tensor, real_bs: int, cg_slot: int) -> None:
+    def scatter(
+        self, idx_view: torch.Tensor, real_bs: int, cg_slot: int,
+        keep: torch.Tensor | None = None,
+    ) -> None:
         """Persist the per-step rows back to their slots (GPU-only, no CPU).
 
         Inverse of ``gather`` — for buffers whose per-step value is advanced in
         graph (the RNG offset). REAL rows only: padding rows all gather from
         slot 0 and get advanced too, so scattering them would clobber slot 0.
+        ``keep`` ([real_bs] bool, on device) leaves the False rows' masters as
+        they were.
         """
-        self.master.index_copy_(0, idx_view[:real_bs], self.slot_view(cg_slot, real_bs))
+        idx = idx_view[:real_bs]
+        rows = self.slot_view(cg_slot, real_bs)
+        if keep is not None:
+            rows = torch.where(keep.view(-1, *([1] * (rows.dim() - 1))), rows, self.master[idx])
+        self.master.index_copy_(0, idx, rows)
 
 
 @dataclass
@@ -1671,10 +1666,21 @@ class SamplerBuffers:
         Valid regardless of when the buffers are (re)gathered into."""
         return CudaGraphableSampler(**self.slice_for_bs(padded_bs, cg_slot))
 
-    def scatter_offset(self, cg_slot: int = 0) -> None:
+    def scatter_offset(
+        self, cg_slot: int = 0, keep: list[bool] | None = None,
+    ) -> None:
         """Persist the (in-graph advanced) per-step offsets back to their slot
         masters. Call once AFTER the graph replay for the gather on ``cg_slot``;
-        GPU-only, real rows only (padding rows all map to slot 0)."""
+        GPU-only, real rows only (padding rows all map to slot 0). ``keep``,
+        in request order, skips the rows whose draw was dropped."""
+        keep_gpu = None
+        if keep is not None and not all(keep):
+            # fresh pinned tensor: the host allocator holds it until the copy lands
+            device = self._slot_idx_gpu.device
+            keep_gpu = torch.tensor(
+                keep, dtype=torch.bool, pin_memory=device.type == "cuda",
+            ).to(device, non_blocking=True)
         self.offset.scatter(
-            self._slot_idx_gpu[cg_slot], self._last_real_bs[cg_slot], cg_slot
+            self._slot_idx_gpu[cg_slot], self._last_real_bs[cg_slot], cg_slot,
+            keep=keep_gpu,
         )
