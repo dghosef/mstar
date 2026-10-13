@@ -658,14 +658,11 @@ class Engine:
                     walk for stream in by_label.values()
                     for walk in (stream.walk, *stream.layout_walks)
                 )
-        # the nodes of a layout walk that don't use the stream's cache, such as an image
-        # encoder. The KV computed from their output is cached under their input's digest.
-        self._item_encoders: set[str] = set()
-        for key, by_label in declared.items():
-            for stream in by_label.values():
-                for walk in stream.layout_walks:
-                    nodes = model.get_graph_walk_graphs()[walk].get_nodes()
-                    self._item_encoders.update(set(nodes) - specs_by_key[key].nodes)
+        # a cache another engine holds is taken as open when its config says so
+        opened_keys = {
+            key for key in declared
+            if key not in self._resources and specs_by_key[key].config.prefix_cache
+        }
         for key, resource in self._resources.items():
             if checkpoint is None and declared.get(key):
                 config = specs_by_key[key].config
@@ -692,6 +689,7 @@ class Engine:
             })
             if not opened or not declared.get(key):
                 continue
+            opened_keys.add(key)
             nodes = ", ".join(sorted(specs_by_key[key].nodes))
             for label in declared[key]:
                 logger.info("KV %s: prefix cache open for %s on %s", key, label, nodes)
@@ -707,6 +705,14 @@ class Engine:
                     "prompt frees little",
                     key,
                 )
+        # the nodes of a layout walk that don't use the stream's cache, such as an image
+        # encoder. The KV computed from their output is cached under their input's digest.
+        self._item_encoders: set[str] = set()
+        for key in opened_keys:
+            for stream in declared[key].values():
+                for walk in stream.layout_walks:
+                    nodes = model.get_graph_walk_graphs()[walk].get_nodes()
+                    self._item_encoders.update(set(nodes) - specs_by_key[key].nodes)
 
     def prepare_inputs(self, batch: ExecutingBatch) -> None:
         """Per-rid ``submodule.prepare_inputs``, onto ``batch.inputs``.
