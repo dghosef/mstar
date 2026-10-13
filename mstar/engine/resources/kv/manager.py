@@ -748,6 +748,7 @@ class KVManager(AttentionResource):
         # only from free pages. A partial copy isn't worth evicting a full cached page for.
         copy = self._arena.acquire(1)
         if copy is None:
+            logger.debug("KV %s: no free page for an image end, so it is not cached", self.name)
             return
         self.kv_cache.copy_slots(stream.page_indices[page], copy[0], end % self.config.page_size)
         self._index.insert(rooted, copy[0], parent)
@@ -804,7 +805,7 @@ class KVManager(AttentionResource):
         stream.chain.cursor = len(matched)
 
     def _warn_unkeyed(self, rid: str, node_name: str, graph_walk: str) -> None:
-        """Say once per node that a stream the model declared arrived with no keys.
+        """Say once per node that a stream the model declared arrived with no keys or no layout.
 
         Nothing else would: an unkeyed request is served in full and never
         reported, so the cache stays empty while every other line looks healthy.
@@ -818,13 +819,14 @@ class KVManager(AttentionResource):
         ):
             return
         keys = overrides.prefix_keys or {}
+        layout = overrides.prefix_layout or {}
         for label in overrides.get_labels(node_name, graph_walk):
-            if graph_walk in self._keyed_walks.get(label, ()) and not keys.get(label):
+            if graph_walk in self._keyed_walks.get(label, ()) and not (keys.get(label) and layout.get(label)):
                 self._warned_unkeyed.add(node_name)
                 logger.warning(
-                    "KV %s: requests reach %s with no keys for %s, which the "
+                    "KV %s: requests reach %s with no %s for %s, which the "
                     "model declared for prefix reuse, so nothing will be cached",
-                    self.name, node_name, label,
+                    self.name, node_name, "layout" if keys.get(label) else "keys", label,
                 )
                 return
 
@@ -842,8 +844,9 @@ class KVManager(AttentionResource):
         if overrides is None or not overrides.prefix_cache:
             return None
         keys = overrides.prefix_keys or {}
+        layout = overrides.prefix_layout or {}
         for label in overrides.get_labels(node_name, graph_walk):
-            if keys.get(label):
+            if keys.get(label) and layout.get(label):
                 return label
         return None
 
