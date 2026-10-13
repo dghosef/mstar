@@ -112,11 +112,6 @@ def vit_preprocess(image_preprocess: str | None) -> str:
     return "vllm" if image_preprocess == "vllm" else "default"
 
 
-def _keeps_prefill_sample(step_metadata: dict) -> bool:
-    """Whether a text walk keeps the token sampled after it. A walk that isn't the prompt's last discards it."""
-    return step_metadata.get("sample_prefill_token", True)
-
-
 def vit_patches(
     height: int, width: int, image_preprocess: str,
     patch_size: int, max_num_patches_per_side: int,
@@ -871,7 +866,6 @@ class LLMSubmodule(ARNodeSubmodule):
         if graph_walk == "prefill_text":
             node_inputs.input_ids = inputs["text_inputs"][0]
             node_inputs.input_seq_len = node_inputs.input_ids.shape[0]
-            node_inputs.discard_sample = not _keeps_prefill_sample(fwd_info.step_metadata)
 
         elif graph_walk == "decode":
             # NOTE: newly-sampled tokens automatically added to the seen token mask
@@ -937,6 +931,7 @@ class LLMSubmodule(ARNodeSubmodule):
         inputs: list[ARNodeInputs],
         slot_lease: SlotLease | None = None,
         piecewise_leases: Mapping[str, SlotLease] | None = None,
+        per_request_info: Mapping[int, CurrentForwardPassInfo] | None = None,
         **kwargs,
     ) -> SubmoduleStep | None:
         """This batch's step: which cache streams it touches, by how much,
@@ -1021,6 +1016,12 @@ class LLMSubmodule(ARNodeSubmodule):
         # `cg_key_info` picks among the walk's capture buckets; it must match
         # the `additional_key_info` on the configs in get_cuda_graph_configs.
         steps: dict = {}
+        # the prefill rows whose token `postprocess` keeps
+        info = per_request_info or {}
+        kept_rids = frozenset(
+            rid for rid in request_ids
+            if rid in info and info[rid].step_metadata.get("sample_prefill_token", False)
+        ) if graph_walk in {"prefill_text", "prefill_vit"} else None
         if graph_walk == "prefill_text":
             # The prompt's tokens enter the repetition-penalty mask here; the
             # sampler resource adds them at plan time. Only prefill carries
@@ -1031,13 +1032,13 @@ class LLMSubmodule(ARNodeSubmodule):
                     for rid, inp in zip(request_ids, inputs, strict=True)
                     if inp.input_ids is not None
                 },
-                discarded=frozenset(
-                    rid for rid, inp in zip(request_ids, inputs, strict=True) if inp.discard_sample
-                ),
+                kept_rids=kept_rids,
             )
-        elif graph_walk in ("decode", "prefill_vit"):
+        elif graph_walk == "prefill_vit":
             # prefill_vit is the last walk before decode for an image prompt,
             # so it samples the first token too (prefill_vae never does).
+            steps["sampler"] = SamplerStep(kept_rids=kept_rids)
+        elif graph_walk == "decode":
             steps["sampler"] = SamplerStep()
 
         steps.update({
@@ -1078,7 +1079,7 @@ class LLMSubmodule(ARNodeSubmodule):
         # passes in dummy metadata
         result["requires_cfg"] = requires_cfg_for_inputs(inputs)
         result["sample_token"] = any([
-            _keeps_prefill_sample(info.step_metadata) \
+            info.step_metadata.get("sample_prefill_token", True) \
                 for info in engine_inputs.per_request_info.values()
         ])
         return result

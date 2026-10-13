@@ -170,7 +170,7 @@ def test_a_token_the_model_throws_away_is_not_seen(monkeypatch):
     monkeypatch.setattr(sampler_utils, "sample_tokens", lambda **kwargs: torch.tensor([200]))
     resource = _sampler()
 
-    resource.plan(SamplerStep(prefill_tracked_tokens={RID: PROMPT[:4]}, discarded=frozenset({RID})), _ctx())
+    resource.plan(SamplerStep(prefill_tracked_tokens={RID: PROMPT[:4]}, kept_rids=frozenset()), _ctx())
     resource.sample([RID], torch.zeros(1, 256))
 
     assert _seen(resource) == PROMPT[:4].tolist(), (
