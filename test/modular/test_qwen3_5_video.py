@@ -33,7 +33,6 @@ from mstar.model.multimodal import (
 )
 from mstar.model.qwen3_5.video import (
     VIDEO,
-    _wire_metadata,
     expand_video_pads,
     expand_video_parts,
     group_owners,
@@ -214,12 +213,14 @@ def sampled(video: torch.Tensor, fps: float, video_processor) -> tuple[torch.Ten
     (`test_mp4_matches_processor` checks the decode itself)."""
     from transformers.video_utils import VideoMetadata
 
+    from mstar.model.base import video_metadata_dict
+
     metadata = VideoMetadata(total_num_frames=video.shape[0], fps=fps)
     indices = video_processor.sample_frames(
         metadata, num_frames=video_processor.num_frames, fps=video_processor.fps,
     )
     metadata.frames_indices = indices
-    return video[torch.as_tensor(indices)], _wire_metadata(metadata)
+    return video[torch.as_tensor(indices)], video_metadata_dict(metadata)
 
 
 def an_image() -> torch.Tensor:
@@ -475,7 +476,8 @@ def test_more_frame_groups_than_a_replay_holds_is_accepted(model):
     segment ceiling; the encoder runs them eagerly, so intake takes them."""
     from mstar.model.qwen3_5.submodules import VisionEncoderSubmodule
 
-    limit = model._max_vision_segments()
+    (spec,) = model._vision_resources()
+    limit = spec.config.max_segments_per_request
     n = 2 * (limit + 1)
     video = torch.randint(0, 256, (n, 3, 32, 32), dtype=torch.uint8)
     frames, metadata = sampled(video, 2.0, model.video_processor)
@@ -490,7 +492,8 @@ def test_more_frame_groups_than_a_replay_holds_is_accepted(model):
 
 
 def _encoder(max_segments: int):
-    from mstar.model.qwen3_5.config import Qwen3_5VisionConfig
+    """A vision encoder bound to a ragged attention resource with this ceiling."""
+    from mstar.model.qwen3_5.config import VISION_ATTN, Qwen3_5VisionConfig
     from mstar.model.qwen3_5.submodules import VisionEncoderSubmodule
 
     config = Qwen3_5VisionConfig(
@@ -498,7 +501,9 @@ def _encoder(max_segments: int):
         patch_size=16, temporal_patch_size=2, spatial_merge_size=2,
         num_position_embeddings=16, out_hidden_size=64,
     )
-    return VisionEncoderSubmodule(nn.Linear(1, 1), config, max_segments=max_segments)
+    encoder = VisionEncoderSubmodule(nn.Linear(1, 1), config)
+    encoder.node_resources = {VISION_ATTN: SimpleNamespace(max_segments_per_request=max_segments)}
+    return encoder
 
 
 def test_vision_block_loop_leases_only_what_a_replay_holds():
@@ -526,6 +531,11 @@ def test_vision_block_loop_replays_exactly_when_leased():
     from mstar.model.qwen3_5.submodules import VISION_BLOCK_LOOP
 
     class Runner:
+        has_bucket = True
+
+        def can_run(self, batch_size, total_tokens):
+            return self.has_bucket
+
         def run(self, **kwargs):
             self.ran = kwargs
             return SimpleNamespace(get_view=lambda name: "replayed")
@@ -541,8 +551,69 @@ def test_vision_block_loop_replays_exactly_when_leased():
 
     assert replay(step=object()) is None
     assert not hasattr(runner, "ran")
+    # no declaration but no bucket either (a forward driven outside the engine)
+    runner.has_bucket = False
+    assert replay(step=None) is None
+    assert not hasattr(runner, "ran")
+    runner.has_bucket = True
     assert replay(step=None) == "replayed"
     assert runner.ran["seq_lens"] == [4, 4]
+
+
+def test_a_bad_layout_is_refused_before_the_video_is_preprocessed(model, monkeypatch):
+    """A literal `<|video_pad|>` in the user's text leaves the prompt with
+    more video placeholders than videos; that 400s before the processor
+    spends any time resizing frames."""
+    video, fps = a_video("odd")
+    frames, metadata = sampled(video, fps, model.video_processor)
+
+    def must_not_run(*args, **kwargs):
+        raise AssertionError("the video was preprocessed before the layout was checked")
+
+    monkeypatch.setattr(model, "_preprocess_video", must_not_run)
+    with pytest.raises(ValueError, match="video placeholders"):
+        model.process_prompt(
+            "look: <|video_pad|>", ["text", "video"], ["text"],
+            tensors={"video_inputs": [frames]},
+            input_metadata={"video_inputs": [metadata]},
+        )
+
+
+def test_an_undecodable_video_is_a_client_error(model, tmp_path):
+    """A corrupt upload is the client's input: ValueError (a 400), not the
+    decoder's RuntimeError (a 500)."""
+    try:
+        import torchcodec.decoders  # noqa: F401
+    except (ImportError, RuntimeError, OSError) as exc:
+        pytest.skip(f"torchcodec with FFmpeg is the decoder under test: {exc}")
+    from mstar.model.qwen3_5.video import sample_video
+
+    path = tmp_path / "broken.mp4"
+    path.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"not a video" * 64)
+    with pytest.raises(ValueError, match="could not decode"):
+        sample_video(str(path), model.video_processor)
+
+
+def test_video_metadata_dict_is_wire_safe():
+    """transformers' sampled indices are numpy and torchcodec's aspect ratio
+    a Fraction; the wire codec takes neither."""
+    from dataclasses import dataclass
+    from fractions import Fraction
+
+    import numpy as np
+
+    from mstar.model.base import video_metadata_dict
+
+    @dataclass
+    class Meta:
+        frames_indices: object
+        fps: object
+        pixel_aspect_ratio: object
+        total_num_frames: object
+
+    out = video_metadata_dict(Meta(np.array([0, 5, 9]), np.float64(10.0), Fraction(1, 1), 25))
+    assert out == {"frames_indices": [0, 5, 9], "fps": 10.0, "pixel_aspect_ratio": 1.0, "total_num_frames": 25}
+    assert type(out["frames_indices"][0]) is int and type(out["fps"]) is float
 
 
 def test_still_refuses_audio(model):

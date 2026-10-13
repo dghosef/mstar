@@ -255,7 +255,11 @@ class Qwen3_5DenseModel(Model):
         """The ViT tower's attention, its only resource; none when text-only."""
         if self.vision_config is None:
             return []
+        from mstar.model.qwen3_5.submodules import VisionEncoderSubmodule
+
         vision = self.vision_config
+        processor = self.image_processor
+        min_patches = processor.size["shortest_edge"] // processor.patch_size ** 2
         return [
             RaggedAttentionSpec(
                 resource_key=VISION_ATTN, nodes={"vision_encoder"},
@@ -263,25 +267,16 @@ class Qwen3_5DenseModel(Model):
                     num_qo_heads=vision.num_heads,
                     num_kv_heads=vision.num_heads,
                     head_dim=vision.head_dim,
-                    max_segments_per_request=self._max_vision_segments(),
+                    # A segment per image, not per request: the resize floors
+                    # each image at `shortest_edge` pixels. A video frame group
+                    # has no floor; a prompt with more segments runs the block
+                    # loop eagerly (`VisionEncoderSubmodule._fits_capture`).
+                    max_segments_per_request=(
+                        VisionEncoderSubmodule.BLOCK_LOOP_PATCH_BUCKETS[-1] // min_patches
+                    ),
                 ),
             ),
         ]
-
-    def _max_vision_segments(self) -> int:
-        """The captured vision block loop's segment ceiling per prompt.
-
-        A segment per image, and the resize floors each image at
-        `shortest_edge` pixels, so the top bucket holds this many images. A
-        video frame group is a segment too, with no such floor; a prompt with
-        more segments runs the block loop eagerly
-        (`VisionEncoderSubmodule._fits_capture`).
-        """
-        from mstar.model.qwen3_5.submodules import VisionEncoderSubmodule
-
-        processor = self.image_processor
-        min_patches = processor.size["shortest_edge"] // processor.patch_size ** 2
-        return VisionEncoderSubmodule.BLOCK_LOOP_PATCH_BUCKETS[-1] // min_patches
 
     # -----------------------------------------------------------------------
     # Model ABC: walk graph declaration
@@ -408,24 +403,28 @@ class Qwen3_5DenseModel(Model):
         video = sample_video(filepath, self.video_processor)
         return TensorAndMetadata(data=video.frames, metadata=video.metadata)
 
-    def _preprocess_video(self, frames: torch.Tensor, metadata: dict) -> ProcessedVideo:
-        """Patches, grid and per-group timestamps for one sampled video.
+    def _video_timestamps(self, metadata: dict) -> list[float]:
+        """Seconds per temporal group, from the sampling metadata alone."""
+        return group_timestamps(
+            metadata["frames_indices"], metadata.get("fps"),
+            self.video_processor.temporal_patch_size,
+        )
+
+    def _preprocess_video(
+        self, frames: torch.Tensor, metadata: dict, timestamps: list[float],
+    ) -> ProcessedVideo:
+        """Patches and grid for one sampled video.
 
         The frames are already sampled, so the processor must not sample
         again; everything else (resize budget, patchify) is its own.
         """
         from transformers.video_utils import VideoMetadata
 
-        processor = self.video_processor
-        out = processor(
+        out = self.video_processor(
             videos=[frames.cpu()],
             video_metadata=[VideoMetadata(**metadata)],
             do_sample_frames=False,
             return_tensors="pt",
-        )
-        timestamps = group_timestamps(
-            metadata["frames_indices"], metadata.get("fps"),
-            processor.temporal_patch_size,
         )
         (grid,) = out["video_grid_thw"]
         if int(grid[0]) != len(timestamps):
@@ -486,14 +485,9 @@ class Qwen3_5DenseModel(Model):
                 f"for {len(video_metadata)}; videos must come through `load_video`"
             )
 
-        images = [
-            self.image_processor(images=[_as_hwc_uint8(image)], return_tensors="pt")
-            for image in raw_images
-        ]
-        videos = [
-            self._preprocess_video(frames, metadata)
-            for frames, metadata in zip(raw_videos, video_metadata, strict=True)
-        ]
+        # From the metadata alone, so a bad layout 400s before the processors
+        # spend seconds resizing a long video
+        timestamps = [self._video_timestamps(metadata) for metadata in video_metadata]
 
         # The released checkpoints are chat models (base ones say `-Base`), so
         # always use the chat template. `enable_thinking=False` emits an empty,
@@ -509,17 +503,24 @@ class Qwen3_5DenseModel(Model):
             add_generation_prompt=True,
             enable_thinking=kwargs.get("enable_thinking", True),
         )
-        if videos:
+        if timestamps:
             start, pad, end = self._PLACEHOLDER_TOKENS[VIDEO]
-            text = expand_video_pads(
-                text, pad, start, end, [video.timestamps for video in videos],
-            )
+            text = expand_video_pads(text, pad, start, end, timestamps)
         input_ids = self.tokenizer(text, return_tensors="pt").input_ids[0]
 
-        groups = [int(video.grid[0]) for video in videos]
+        groups = [len(times) for times in timestamps]
         spans = find_media_spans(input_ids, self._placeholder_specs())
         segments = split_around_spans(input_ids, spans)
         check_plan(prefill_plan(expand_video_parts(parts, groups)), spans, len(segments))
+
+        images = [
+            self.image_processor(images=[_as_hwc_uint8(image)], return_tensors="pt")
+            for image in raw_images
+        ]
+        videos = [
+            self._preprocess_video(frames, metadata, times)
+            for frames, metadata, times in zip(raw_videos, video_metadata, timestamps, strict=True)
+        ]
 
         result: NameToTensorList = {"text_inputs": segments}
         if images:
@@ -822,9 +823,7 @@ class Qwen3_5DenseModel(Model):
             load_qwen3_5_vision_weights(tower, weights_dir, device=device)
             tower.requires_grad_(False).eval()
             logger.info("Loaded Qwen3.5 vision tower onto %s", device)
-            return VisionEncoderSubmodule(
-                tower, self.vision_config, max_segments=self._max_vision_segments(),
-            )
+            return VisionEncoderSubmodule(tower, self.vision_config)
 
         from mstar.model.qwen3_5.weight_loader import load_qwen3_5_weights
 

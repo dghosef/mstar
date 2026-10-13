@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from dataclasses import fields
 from functools import partial
 from typing import NamedTuple
 
@@ -72,25 +71,18 @@ def sample_video(path: str, video_processor) -> SampledVideo:
             f"transformers uses; it failed to load: {exc}"
         ) from exc
 
+    from mstar.model.base import video_metadata_dict
+
     sampler = partial(
         video_processor.sample_frames,
         num_frames=video_processor.num_frames, fps=video_processor.fps,
     )
-    frames, metadata = load_video(path, backend="torchcodec", sample_indices_fn=sampler)
-    return SampledVideo(frames, _wire_metadata(metadata))
-
-
-def _wire_metadata(metadata) -> dict:
-    """``VideoMetadata`` as plain Python values (the indices are numpy)."""
-    out = {}
-    for f in fields(metadata):
-        value = getattr(metadata, f.name)
-        if f.name == "frames_indices" and value is not None:
-            value = [int(i) for i in value]
-        elif hasattr(value, "item"):
-            value = value.item()
-        out[f.name] = value
-    return out
+    try:
+        frames, metadata = load_video(path, backend="torchcodec", sample_indices_fn=sampler)
+    except RuntimeError as exc:
+        # torchcodec's error for a corrupt or unsupported file: the client's input, a 400
+        raise ValueError(f"Qwen3.5 could not decode video {path!r}: {exc}") from exc
+    return SampledVideo(frames, video_metadata_dict(metadata))
 
 
 def group_timestamps(
