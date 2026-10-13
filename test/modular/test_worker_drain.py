@@ -40,7 +40,10 @@ def _worker(
     w._pending_drains = set(pending_drains)
     w._draining_rids = set(draining)
     w._reads_done_sent = set(reads_done)
+    w._drains_awaiting_handle = {}
     w._pending_removes = set()
+    w._deferred_idle_seq = {}
+    w._session_idle_seq = 0
     # Identity interning: these tests use the rid string as its own handle, so
     # the string/handle split is exercised without a real runtime.
     w._graph_runtime = SimpleNamespace(
@@ -71,7 +74,7 @@ def _worker(
         remove_request=lambda rid: None,
     )
     w.engine_manager = SimpleNamespace(
-        remove_request=lambda rid, end_session=False, **kw: None,
+        remove_request=lambda rid, **kw: None,
         evictable_nodes=lambda: [],
     )
     w.profile_info = SimpleNamespace(pop_request=lambda rid: None)
@@ -297,6 +300,7 @@ def test_add_new_request_hands_off_the_handle_not_the_string():
     w = Worker.__new__(Worker)
     w.worker_id = "w0"
     w._draining_rids = set()
+    w._drains_awaiting_handle = {}
     w._unprocessed_messages = {}
     w._my_consumer_connections = []
     w._last_active = {}

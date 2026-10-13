@@ -170,9 +170,17 @@ Convenience wrappers:
      - The ``voice`` ids the served speech model accepts (``GET /v1/audio/voices``).
    * - ``stream(**kw)``
      - Sugar for ``generate(stream=True, ...)``.
-   * - ``end_session(id)`` / ``sessions()``
-     - End a persistent session, or list the ones the server holds. See
-       :doc:`sessions`.
+   * - ``end_session(id)``
+     - Tear a persistent session down without sending a request through it.
+       See :doc:`sessions`.
+   * - ``session_counts()``
+     - How many sessions the server holds: ``live``, ``closing`` and
+       ``max_concurrent_sessions``. The server does not list ids — an id is all
+       it takes to resume or delete a session.
+   * - ``session(id)``
+     - One session's state (``closing``, ``expires_in_s``,
+       ``active_request_ids``, ...), or ``None`` once the server has released
+       it. For a client that already holds its own id.
    * - ``health()``
      - ``True`` if the server is healthy.
 

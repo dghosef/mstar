@@ -2,9 +2,9 @@
 
 ``WorkerSessionManager`` holds no engine or transport state, so the rules it
 enforces can be read directly: which rids belong to a session, when a resumed
-request is allowed in, which deferred removal still ends its session, and when a
-held teardown is free to run. The one thing it asks the worker is whether a rid
-is still on its way out, which these tests answer with a set.
+request is allowed in, when a held request is dropped instead, and when a held
+teardown is free to run. The one thing it asks the worker is whether a rid is
+still on its way out, which these tests answer with a set.
 """
 
 from __future__ import annotations
@@ -175,27 +175,6 @@ def test_releasing_a_sessionless_request_says_so():
     assert manager.release("stranger") is None
 
 
-def test_a_deferred_removal_remembers_that_it_ends_its_session():
-    manager, _ = _manager()
-    manager.bind("r0", "s")
-
-    assert manager.ends_session("r0") is False
-
-    manager.defer_end_session("r0")
-
-    assert manager.ends_session("r0") is True
-
-
-def test_releasing_clears_the_end_session_flag():
-    manager, _ = _manager()
-    manager.bind("r0", "s")
-    manager.defer_end_session("r0")
-
-    manager.release("r0")
-
-    assert manager.ends_session("r0") is False
-
-
 # ── teardown ────────────────────────────────────────────────────────────────
 
 def test_a_held_teardown_is_ready_once_its_requests_have_left():
@@ -222,20 +201,51 @@ def test_ready_teardowns_reports_each_free_session():
 
 
 def test_forgetting_a_session_drops_every_trace_of_it():
-    manager, _ = _manager()
+    manager, leaving = _manager(leaving={"r0"})
     manager.bind("r0", "s")
     manager.bind("r1", "s")
-    manager.defer_end_session("r1")
     manager.hold_teardown("s")
+    # a resumed request waiting on r0 to hand the state over
+    assert manager.hold_if_not_ready(_new_request("r2", "s")) is True
 
     manager.forget_session("s")
 
     assert manager.get_rids("s") == set()
     assert manager.session_of("r0") is None
     assert manager.session_of("r1") is None
-    assert manager.ends_session("r1") is False
     assert manager.ready_teardowns() == []
+    # the hold goes too: the state it was waiting for is being freed
+    leaving.discard("r0")
+    assert manager.take_held_ingests() == []
     assert manager.has_pending is False
+
+
+def test_a_request_held_for_a_session_being_torn_down_is_not_readmitted():
+    # _apply_pending_sessions admits held ingests before it runs ready
+    # teardowns, so handing this one back would give the session a live request
+    # again and its teardown would never come ready
+    manager, leaving = _manager(leaving={"r0"})
+    manager.bind("r0", "s")
+    manager.hold_if_not_ready(_new_request("r1", "s"))
+    manager.hold_teardown("s")
+
+    leaving.discard("r0")
+
+    assert manager.take_held_ingests() == []
+    assert manager.ready_teardowns() == ["s"]
+
+
+def test_a_hold_for_another_session_survives_a_teardown():
+    manager, leaving = _manager(leaving={"r0", "q0"})
+    manager.bind("r0", "going")
+    manager.bind("q0", "staying")
+    manager.hold_if_not_ready(_new_request("r1", "going"))
+    manager.hold_if_not_ready(_new_request("q1", "staying"))
+    manager.hold_teardown("going")
+
+    leaving.clear()
+
+    assert [b.request_id for b in manager.take_held_ingests()] == ["q1"]
 
 
 def test_forgetting_a_session_leaves_the_others_alone():

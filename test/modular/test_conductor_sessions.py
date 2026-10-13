@@ -306,7 +306,9 @@ def test_teardown_with_a_request_in_flight_tears_the_request_down_first():
     c._handle_reads_done(ReadsDone("r0", PREPROCESS))
 
     removes = _sent(c, "w0", WorkerMessageType.REMOVE_REQUEST)
-    assert [m.body.end_session for m in removes] == [True]
+    assert [m.body.request_id for m in removes] == ["r0"]
+    teardowns = _sent(c, "w0", WorkerMessageType.TEARDOWN_SESSION)
+    assert [m.body.session_id for m in teardowns] == ["s"]
     c._handle_session_torn_down(SessionTornDown("s", "w0"))
     assert _session_acks(c) == ["s"]
 
@@ -344,7 +346,7 @@ def test_a_stalled_worker_cannot_hold_the_tombstone_forever():
 
 # ── teardown riding on the last request ────────────────────────────────────
 
-def test_the_happy_path_removal_carries_end_session_and_opens_the_barrier():
+def test_the_happy_path_sends_a_teardown_behind_the_removal_and_opens_the_barrier():
     session = SessionData("s", {"wg": ["w0"]}, request_ids={"r0"}, ending=True)
     c = _conductor(requests={"r0": _request_data(("w0",))}, sessions=[session])
     c.request_sessions["r0"] = "s"
@@ -354,15 +356,20 @@ def test_the_happy_path_removal_carries_end_session_and_opens_the_barrier():
 
     c._handle_reads_done(ReadsDone("r0", PREPROCESS))
 
-    worker_removes = _sent(c, "w0", WorkerMessageType.REMOVE_REQUEST)
-    assert [m.body.end_session for m in worker_removes] == [True]
-    # named, for a worker that never admitted the request to tear down
-    assert [m.body.session_id for m in worker_removes] == ["s"]
-    # the preprocess worker holds no session state, so it is not asked to
-    # end one and is not part of the barrier
-    pre_removes = _sent(c, PREPROCESS, WorkerMessageType.REMOVE_REQUEST)
-    assert [m.body.end_session for m in pre_removes] == [False]
-    assert [m.body.session_id for m in pre_removes] == [None]
+    # the session goes on its own message, never as a flag on the removal: a
+    # worker that never admitted the request parks the removal, which would
+    # strand the teardown and its ACK
+    assert [
+        m.body.request_id
+        for m in _sent(c, "w0", WorkerMessageType.REMOVE_REQUEST)
+    ] == ["r0"]
+    assert [
+        m.body.session_id
+        for m in _sent(c, "w0", WorkerMessageType.TEARDOWN_SESSION)
+    ] == ["s"]
+    # the preprocess worker holds no session state, so it is not asked to end
+    # one and is not part of the barrier
+    assert _sent(c, PREPROCESS, WorkerMessageType.TEARDOWN_SESSION) == []
     assert c.session_teardowns["s"].expected_acks == {"w0"}
 
     c._handle_session_torn_down(SessionTornDown("s", "w0"))
@@ -380,7 +387,8 @@ def test_a_removal_in_a_live_session_keeps_the_session_s_state():
     c._handle_reads_done(ReadsDone("r0", PREPROCESS))
 
     removes = _sent(c, "w0", WorkerMessageType.REMOVE_REQUEST)
-    assert [m.body.end_session for m in removes] == [False]
+    assert [m.body.request_id for m in removes] == ["r0"]
+    assert _sent(c, "w0", WorkerMessageType.TEARDOWN_SESSION) == []
     assert "s" in c.sessions
     assert c.sessions["s"].request_ids == set()
     assert _session_acks(c) == []
@@ -401,9 +409,14 @@ def test_ending_waits_for_the_last_request_of_several():
         )
 
     c._handle_reads_done(ReadsDone("r0", PREPROCESS))
-    assert [m.body.end_session for m in _sent(c, "w0", WorkerMessageType.REMOVE_REQUEST)] == [False]
+    assert _sent(c, "w0", WorkerMessageType.TEARDOWN_SESSION) == []
 
     c._handle_reads_done(ReadsDone("r1", PREPROCESS))
     assert [
-        m.body.end_session for m in _sent(c, "w0", WorkerMessageType.REMOVE_REQUEST)
-    ] == [False, True]
+        m.body.request_id
+        for m in _sent(c, "w0", WorkerMessageType.REMOVE_REQUEST)
+    ] == ["r0", "r1"]
+    assert [
+        m.body.session_id
+        for m in _sent(c, "w0", WorkerMessageType.TEARDOWN_SESSION)
+    ] == ["s"]

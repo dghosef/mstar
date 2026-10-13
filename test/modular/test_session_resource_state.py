@@ -51,7 +51,7 @@ class _Stub(Resource):
         if held is not None:
             self.requests[rid] = held
 
-    def retain_session_state(self, rid, session_id):
+    def retain_session_state(self, rid, session_id, idle_seq=-1):
         self.calls.append(f"retain:{rid}:{session_id}")
         self.sessions[session_id] = self.requests.pop(rid, 0)
 

@@ -1301,8 +1301,11 @@ class Conductor:
         dr = self.draining.pop(request_id, None)
         if dr is None:
             return
-        # A session whose last request carried end_session goes with it: the
-        # workers free both on one message and ACK the session.
+        # A session whose last request carried end_session goes with it, as its
+        # own TEARDOWN_SESSION behind the removal. Not a flag on the removal: a
+        # worker that never admitted the request parks the REMOVE until an
+        # admission that will never come, which would strand the teardown and
+        # its ACK; a TEARDOWN_SESSION is never parked.
         session_id = self.request_sessions.pop(request_id, None)
         session = self.sessions.get(session_id) if session_id else None
         if session is not None:
@@ -1318,19 +1321,15 @@ class Conductor:
                 entity,
                 WorkerMessage(
                     message_type=WorkerMessageType.REMOVE_REQUEST,
-                    body=RemoveRequest(
-                        request_id,
-                        end_session=end_session and entity != self.PREPROCESS_WORKER,
-                        session_id=(
-                            session_id
-                            if end_session and entity != self.PREPROCESS_WORKER
-                            else None
-                        ),
-                    ),
+                    body=RemoveRequest(request_id),
                 ),
             )
         if end_session:
-            self._register_session_teardown(session_id, session.workers())
+            # After the removals: a worker holds the teardown while the request
+            # is still on its way out, so the order the two arrive in decides
+            # nothing, but the removal going first keeps the common case
+            # un-deferred.
+            self._begin_session_teardown(session_id, session.workers())
         if dr.failure_error is not None:
             self.communicator.send(
                 "api_server",

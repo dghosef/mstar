@@ -1,11 +1,18 @@
 """Worker-side sessions: what is freed when, and what is handed back.
 
 A request in a session gives its resource state back to the session instead of
-freeing it, so the worker must get two things right: the ``end_session`` flag
-has to survive every hop it takes (the TP fan-out, a remove deferred behind an
-in-flight GPU step), and a TEARDOWN_SESSION must not land while one of the
-session's requests is still on its way out — that request's removal would hand
-state back to a session that no longer exists.
+freeing it. Ending the session is a message of its own: the removal never
+carries a flag for it, because ``_process_message_list`` parks a REMOVE whose
+rid has no handle — the held-request case — until an admission that may never
+come, which would strand the teardown and its ACK behind the barrier's TTL. A
+TEARDOWN_SESSION is never parked, so it is the one that frees the state and
+ACKs, and the worker only has to hold it while one of the session's requests is
+still on its way out: that request's removal would otherwise hand state back to
+a session that no longer exists.
+
+The cases that turn on the parking are delivered through
+``_process_message_list``, not by calling ``_remove_request`` directly, since
+that is the hop the parking happens on.
 """
 
 from __future__ import annotations
@@ -18,9 +25,11 @@ sys.path.insert(0, ".")
 from mstar.model.sessions import RequestSession
 from mstar.utils.ipc_format import (
     ConductorMessageType,
+    DrainRequest,
     MessageSource,
     RemoveRequest,
     TeardownSession,
+    WorkerMessage,
     WorkerMessageType,
 )
 from mstar.worker.sessions import WorkerSessionManager
@@ -35,6 +44,7 @@ def _worker(known_rids=("X",), sessions=None, in_flight=(), is_follower=False):
     w.removed = []
     w.removed_sessions = []
     w.overshot = []
+    w.idle_seqs = []
     w.session_errors = {}
     w.communicator = SimpleNamespace(
         send=lambda e, msg=None, m=None: w.sent.append((e, msg if msg is not None else m))
@@ -43,7 +53,10 @@ def _worker(known_rids=("X",), sessions=None, in_flight=(), is_follower=False):
     w._pending_drains = set()
     w._draining_rids = set()
     w._reads_done_sent = set()
+    w._drains_awaiting_handle = {}
     w._pending_removes = set()
+    w._deferred_idle_seq = {}
+    w._session_idle_seq = 0
     w._removes_awaiting_step = {}
     w._teardowns_awaiting_step = {}
     w._tp_broadcast_seq = 0
@@ -92,9 +105,10 @@ def _worker(known_rids=("X",), sessions=None, in_flight=(), is_follower=False):
             interned.add(rid)
             w._sessions.bind(rid, session_id)
     w.engine_manager = SimpleNamespace(
-        remove_request=lambda rid, end_session=False, overshot_nodes=frozenset(): (
-            w.removed.append((rid, end_session)),
+        remove_request=lambda rid, overshot_nodes=frozenset(), **kw: (
+            w.removed.append(rid),
             w.overshot.append((rid, overshot_nodes)),
+            w.idle_seqs.append((rid, kw.get("session_idle_seq", -1))),
         ),
         remove_session=w.removed_sessions.append,
         add_request=lambda rid, cfgs, session=None: None,
@@ -119,11 +133,32 @@ def _acks(w):
     ]
 
 
+def _reads_done(w):
+    return [
+        m.body.request_id for e, m in w.sent
+        if e == "conductor"
+        and m.message_type == ConductorMessageType.READS_DONE
+    ]
+
+
 def _forwarded_removes(w):
     return [
         m.body for e, m in w.sent
         if m.message_type == WorkerMessageType.REMOVE_REQUEST
     ]
+
+
+def _deliver(w, *bodies):
+    """Hand the worker messages the way the communicator does, so the
+    out-of-order parking in ``_process_message_list`` is in the path."""
+    types = {
+        RemoveRequest: WorkerMessageType.REMOVE_REQUEST,
+        TeardownSession: WorkerMessageType.TEARDOWN_SESSION,
+    }
+    Worker._process_message_list(w, [
+        WorkerMessage(message_type=types[type(body)], body=body)
+        for body in bodies
+    ])
 
 
 # ── removal inside a live session ───────────────────────────────────────────
@@ -133,7 +168,7 @@ def test_a_plain_removal_leaves_the_session_holding_the_state():
 
     Worker._remove_request(w, RemoveRequest(request_id="X"))
 
-    assert w.removed == [("X", False)]
+    assert w.removed == ["X"]
     assert w.removed_sessions == []
     assert _acks(w) == []
     # the rid is gone, the session is not
@@ -141,12 +176,14 @@ def test_a_plain_removal_leaves_the_session_holding_the_state():
     assert w._sessions.get_rids("s") == set()
 
 
-def test_end_session_frees_the_session_and_acks():
+def test_the_removal_then_the_teardown_frees_the_session_and_acks():
+    # how the conductor ends a session whose last request carried end_session
     w = _worker(sessions={"s": {"X"}})
 
-    Worker._remove_request(w, RemoveRequest(request_id="X", end_session=True))
+    _deliver(w, RemoveRequest(request_id="X"), TeardownSession(session_id="s"))
 
-    assert w.removed == [("X", True)]
+    assert w.removed == ["X"]
+    assert w.removed_sessions == ["s"]
     assert _acks(w) == ["s"]
     assert w._sessions.get_rids("s") == set()
 
@@ -156,39 +193,49 @@ def test_a_sessionless_removal_is_unchanged():
 
     Worker._remove_request(w, RemoveRequest(request_id="X"))
 
-    assert w.removed == [("X", False)]
+    assert w.removed == ["X"]
     assert _acks(w) == []
 
 
-def test_a_deferred_removal_keeps_its_end_session_flag():
+def test_a_teardown_behind_a_deferred_removal_waits_for_it():
+    # the removal is held by an in-flight GPU step, so the teardown that
+    # follows it must wait too: freeing the session first would have the
+    # removal hand state back to a session that is gone
     w = _worker(sessions={"s": {"X"}}, in_flight=("X",))
 
-    Worker._remove_request(w, RemoveRequest(request_id="X", end_session=True))
+    _deliver(w, RemoveRequest(request_id="X"), TeardownSession(session_id="s"))
 
     assert w._pending_removes == {"X"}
-    assert w._sessions.ends_session("X") is True
     assert w.removed == []
+    assert w._sessions.has_pending is True
+    assert w.removed_sessions == [] and _acks(w) == []
 
-    # the GPU step retires and the deferred remove is applied
+    # the GPU step retires; the removal lands, then the held teardown
     w._in_flight_rids.clear()
     Worker._apply_pending_removes_safe_to_drop(w, set())
+    Worker._apply_pending_sessions(w)
 
-    assert w.removed == [("X", True)]
+    assert w.removed == ["X"]
+    assert w.removed_sessions == ["s"]
     assert _acks(w) == ["s"]
 
 
 def test_a_follower_that_waits_for_step_symmetry_still_ends_the_session():
-    # main stamps a forwarded removal with the step rank 0 released its pages
-    # after, and a follower that has not reached it parks the removal. The
-    # parked removal has to keep end_session, or the follower frees the request
-    # and leaves the session's state behind with no ACK for the barrier.
+    # rank 0 stamps both messages with the step it released the pages after,
+    # and a follower that has not reached it parks them; the session still
+    # goes, with its ACK, once the follower gets there.
     w = _worker(sessions={"s": {"X"}}, is_follower=True)
     w.scheduler.last_consumed_tp_seq = 3
 
-    Worker._remove_request(w, RemoveRequest(
-        request_id="X", source=MessageSource.TP_RANK_0,
-        after_tp_seq=7, end_session=True,
-    ))
+    _deliver(
+        w,
+        RemoveRequest(
+            request_id="X", source=MessageSource.TP_RANK_0, after_tp_seq=7,
+        ),
+        TeardownSession(
+            session_id="s", source=MessageSource.TP_RANK_0, after_tp_seq=7,
+        ),
+    )
 
     assert w.removed == [], "it should be waiting for step 7"
     assert w.removed_sessions == [] and _acks(w) == []
@@ -196,24 +243,25 @@ def test_a_follower_that_waits_for_step_symmetry_still_ends_the_session():
     w.scheduler.last_consumed_tp_seq = 7
     Worker._apply_removes_whose_step_landed(w)
 
-    assert w.removed == [("X", True)]
+    assert w.removed == ["X"]
+    assert w.removed_sessions == ["s"]
     assert _acks(w) == ["s"]
 
 
-def test_the_tp_leader_forwards_end_session_to_its_followers():
+def test_the_tp_leader_forwards_a_removal_that_says_nothing_of_the_session():
     w = _worker(sessions={"s": {"X"}})
     w._graph_runtime.get_sharding_config = lambda h: SimpleNamespace(groups=[
         SimpleNamespace(tp_size=2, _tp_rank=0, _workers=["w0", "w1"]),
     ])
 
-    Worker._remove_request(w, RemoveRequest(request_id="X", end_session=True))
+    Worker._remove_request(w, RemoveRequest(request_id="X"))
 
     [forwarded] = _forwarded_removes(w)
-    assert forwarded.end_session is True
     assert forwarded.source == MessageSource.TP_RANK_0
-    # named even though the conductor's message did not, for a follower
-    # that held the request rather than admitted it
-    assert forwarded.session_id == "s"
+    # the session goes on its own message, which rank 0 forwards from
+    # _teardown_session; nothing here says a session is ending
+    assert not hasattr(forwarded, "end_session")
+    assert w.removed_sessions == [] and _acks(w) == []
 
 
 # ── standalone teardown ─────────────────────────────────────────────────────
@@ -350,23 +398,190 @@ def test_ingest_without_a_session_touches_no_session_state():
     assert w._sessions.session_of("Y") is None
 
 
+# ── the offload victim order is the leader's ───────────────────────────────
+
+def test_the_leader_numbers_each_session_as_it_parks_its_state():
+    w = _worker(known_rids=("X", "Y"), sessions={"s": {"X"}, "t": {"Y"}})
+
+    Worker._remove_request(w, RemoveRequest(request_id="X"))
+    Worker._remove_request(w, RemoveRequest(request_id="Y"))
+
+    # increasing, so the resource offloads the one that idled first
+    assert w.idle_seqs == [("X", 1), ("Y", 2)]
+
+
+def test_a_removal_outside_a_session_is_not_numbered():
+    w = _worker(known_rids=("X", "Z"), sessions={"s": {"X"}})
+
+    Worker._remove_request(w, RemoveRequest(request_id="Z"))
+    Worker._remove_request(w, RemoveRequest(request_id="X"))
+
+    assert w.idle_seqs == [("Z", -1), ("X", 1)]
+
+
+def test_the_leader_forwards_the_number_it_minted():
+    w = _worker(sessions={"s": {"X"}})
+    _leads_one_follower(w)
+
+    Worker._remove_request(w, RemoveRequest(request_id="X"))
+
+    [forwarded] = _forwarded_removes(w)
+    assert forwarded.session_idle_seq == 1
+    assert w.idle_seqs == [("X", 1)]
+
+
+def test_a_follower_takes_the_leader_s_number_rather_than_counting():
+    # it never admitted some of the leader's requests, so counting for itself
+    # would order its parked sessions differently
+    w = _worker(sessions={"s": {"X"}}, is_follower=True)
+
+    Worker._remove_request(w, RemoveRequest(
+        request_id="X", source=MessageSource.TP_RANK_0, session_idle_seq=42,
+    ))
+
+    assert w.idle_seqs == [("X", 42)]
+    assert w._session_idle_seq == 0, "a follower mints nothing"
+
+
+def test_a_deferred_removal_keeps_the_number_it_arrived_with():
+    # _pending_removes holds only the handle, so the stamp has to be kept aside
+    w = _worker(sessions={"s": {"X"}}, in_flight=("X",), is_follower=True)
+
+    Worker._remove_request(w, RemoveRequest(
+        request_id="X", source=MessageSource.TP_RANK_0, session_idle_seq=42,
+    ))
+    assert w.idle_seqs == []
+
+    w._in_flight_rids.clear()
+    Worker._apply_pending_removes_safe_to_drop(w, set())
+
+    assert w.idle_seqs == [("X", 42)]
+    assert w._deferred_idle_seq == {}
+
+
+def test_a_follower_that_parks_a_removal_for_a_step_keeps_the_number():
+    w = _worker(sessions={"s": {"X"}}, is_follower=True)
+    w.scheduler.last_consumed_tp_seq = 3
+
+    Worker._remove_request(w, RemoveRequest(
+        request_id="X", source=MessageSource.TP_RANK_0, after_tp_seq=7,
+        session_idle_seq=42,
+    ))
+    assert w.idle_seqs == []
+
+    w.scheduler.last_consumed_tp_seq = 7
+    Worker._apply_removes_whose_step_landed(w)
+
+    assert w.idle_seqs == [("X", 42)]
+
+
+# ── a drain for a request still held here ──────────────────────────────────
+
+def _drains(w):
+    return [
+        (e, m.body) for e, m in w.sent
+        if m.message_type == WorkerMessageType.DRAIN_REQUEST
+    ]
+
+
+def _leads_one_follower(w):
+    w._graph_runtime.get_sharding_config = lambda h: SimpleNamespace(groups=[
+        SimpleNamespace(tp_size=2, _tp_rank=0, _workers=["w0", "w1"]),
+    ])
+
+
+def test_a_drain_for_a_held_request_waits_for_the_handle_then_fans():
+    # the drain cannot gate the scheduler or name the followers without a
+    # handle, and a follower ignores the conductor's copy, so draining here and
+    # fanning nothing would leave the follower's READS_DONE unsent
+    w = _worker(known_rids=("X",), sessions={"s": {"X"}})
+    _leads_one_follower(w)
+    Worker._add_new_request(w, _new_request(session_id="s"))  # Y, held
+
+    Worker._drain_request(w, DrainRequest(request_id="Y"))
+
+    assert w._drains_awaiting_handle.keys() == {"Y"}
+    assert _drains(w) == [], "nothing to fan to yet"
+    assert "Y" not in w._draining_rids
+
+    # X leaves, Y is admitted, and the drain goes with its handle
+    Worker._remove_request(w, RemoveRequest(request_id="X"))
+    Worker._apply_pending_sessions(w)
+
+    assert w._drains_awaiting_handle == {}
+    assert "Y" in w._draining_rids
+    [(to, body)] = _drains(w)
+    assert (to, body.request_id) == ("w1", "Y")
+    assert body.source == MessageSource.TP_RANK_0
+
+
+def test_a_drain_for_a_hold_that_is_dropped_still_acks():
+    # the session was torn down, so the hold is dropped rather than admitted
+    # and the handle never comes; the rank still owes the barrier its ACK
+    w = _worker(known_rids=("X",), sessions={"s": {"X"}})
+    Worker._add_new_request(w, _new_request(session_id="s"))
+    Worker._drain_request(w, DrainRequest(request_id="Y"))
+    assert w._drains_awaiting_handle.keys() == {"Y"}
+
+    _deliver(w, TeardownSession(session_id="s"), RemoveRequest(request_id="X"))
+    Worker._apply_pending_sessions(w)  # drops the hold with the session
+    Worker._apply_pending_drains(w, set())
+
+    assert w._drains_awaiting_handle == {}
+    assert "Y" in w._draining_rids
+    assert _reads_done(w) == ["Y"]
+
+
+def test_a_drain_for_a_hold_that_outlasts_the_wait_still_acks():
+    w = _worker(known_rids=("X",), sessions={"s": {"X"}})
+    Worker._add_new_request(w, _new_request(session_id="s"))
+    Worker._drain_request(w, DrainRequest(request_id="Y"))
+
+    # nothing has changed, so it is still waiting
+    Worker._apply_pending_drains(w, set())
+    assert w._drains_awaiting_handle.keys() == {"Y"}
+    assert _reads_done(w) == []
+
+    w._drains_awaiting_handle["Y"] = 0.0  # the deadline passes
+    Worker._apply_pending_drains(w, set())
+
+    assert w._drains_awaiting_handle == {}
+    assert _reads_done(w) == ["Y"]
+
+
+def test_a_drain_for_a_request_this_worker_never_saw_is_unchanged():
+    # not held, so nothing is coming: ACK at once, as before
+    w = _worker(known_rids=())
+
+    Worker._drain_request(w, DrainRequest(request_id="Z"))
+
+    assert w._drains_awaiting_handle == {}
+    assert "Z" in w._draining_rids
+    assert _reads_done(w) == ["Z"]
+
+
 # ── a held request removed before it was admitted ──────────────────────────
-
-def _ending(rid="Y", session_id="s"):
-    return RemoveRequest(request_id=rid, end_session=True, session_id=session_id)
-
 
 def test_a_held_request_removed_before_admission_still_ends_its_session():
     # the previous request is still leaving, so Y is held; the client aborts
-    # Y before it is admitted, and Y was the session's last request
+    # Y before it is admitted, and Y was the session's last request. Y has no
+    # handle here, so _process_message_list parks its REMOVE and only an
+    # admission that will never come would replay it -- the teardown is what
+    # has to free the session and ACK.
     w = _worker(known_rids=("X",), sessions={"s": {"X"}})
     Worker._add_new_request(w, _new_request(session_id="s"))
     assert w._sessions.has_pending is True
 
-    Worker._remove_request(w, RemoveRequest(request_id="X"))
-    Worker._remove_request(w, _ending())
+    _deliver(
+        w,
+        RemoveRequest(request_id="X"),
+        RemoveRequest(request_id="Y"),
+        TeardownSession(session_id="s"),
+    )
 
-    # dropped rather than admitted later into a session that is gone
+    assert w._unprocessed_messages.get("Y"), "the REMOVE for Y should be parked"
+    # the hold goes with the session, rather than being admitted later into a
+    # session that is gone
     assert w._sessions.has_pending is False
     assert w.removed_sessions == ["s"]
     assert _acks(w) == ["s"]
@@ -377,17 +592,17 @@ def test_a_held_request_drained_before_admission_still_ends_its_session():
     Worker._add_new_request(w, _new_request(session_id="s"))
     w._draining_rids.add("Y")  # the abort's DRAIN, while Y was held
 
-    Worker._remove_request(w, RemoveRequest(request_id="X"))
+    _deliver(w, RemoveRequest(request_id="X"))
     Worker._apply_pending_sessions(w)  # Y comes out of the hold, refused
     assert w._sessions.session_of("Y") is None
 
-    Worker._remove_request(w, _ending())
+    _deliver(w, RemoveRequest(request_id="Y"), TeardownSession(session_id="s"))
 
     assert w.removed_sessions == ["s"]
     assert _acks(w) == ["s"]
 
 
-def test_an_unadmitted_removal_that_ends_nothing_leaves_the_session():
+def test_an_unadmitted_removal_on_a_live_session_drops_only_the_hold():
     w = _worker(known_rids=("X",), sessions={"s": {"X"}})
     Worker._add_new_request(w, _new_request(session_id="s"))
 
@@ -396,6 +611,30 @@ def test_an_unadmitted_removal_that_ends_nothing_leaves_the_session():
     assert w._sessions.has_pending is False
     assert w.removed_sessions == []
     assert _acks(w) == []
+
+
+def test_a_teardown_drops_a_request_still_held_for_the_session():
+    # a standalone teardown (DELETE, TTL, eviction) landing while a NEW for the
+    # session is held: _apply_pending_sessions admits held ingests first, so a
+    # hold left behind would be admitted into a session that is gone and then
+    # block every later teardown of the same id here
+    w = _worker(known_rids=("X",), sessions={"s": {"X"}})
+    Worker._add_new_request(w, _new_request(session_id="s"))  # Y, held behind X
+    assert w._sessions.has_pending is True
+
+    _deliver(w, TeardownSession(session_id="s"))
+    assert w._sessions.has_pending is True, "X is still leaving"
+    assert w.removed_sessions == []
+
+    _deliver(w, RemoveRequest(request_id="X"))
+    Worker._apply_pending_sessions(w)
+
+    assert w.removed_sessions == ["s"]
+    assert _acks(w) == ["s"]
+    # Y was dropped, not admitted into a session that is going
+    assert w._sessions.get_rids("s") == set()
+    assert w._sessions.session_of("Y") is None
+    assert w._sessions.has_pending is False
 
 
 # ── a decode loop that ran past its stop ───────────────────────────────────
@@ -498,17 +737,19 @@ def test_a_follower_frees_the_session_once_it_reaches_rank_0_s_step():
 
 
 def test_a_follower_ends_the_session_of_a_request_it_never_admitted():
-    # rank 0 forwarded the REMOVE; the follower had held the request
+    # rank 0 forwarded the REMOVE and then the teardown; the follower had held
+    # the request, so its REMOVE parks here just as it does on a leader
     w = _worker(known_rids=("X",), sessions={"s": {"X"}}, is_follower=True)
     Worker._add_new_request(w, _new_request(session_id="s"))
-    Worker._remove_request(w, RemoveRequest(
-        request_id="X", source=MessageSource.TP_RANK_0,
-    ))
 
-    Worker._remove_request(w, RemoveRequest(
-        request_id="Y", source=MessageSource.TP_RANK_0,
-        end_session=True, session_id="s",
-    ))
+    _deliver(
+        w,
+        RemoveRequest(request_id="X", source=MessageSource.TP_RANK_0),
+        RemoveRequest(request_id="Y", source=MessageSource.TP_RANK_0),
+        TeardownSession(session_id="s", source=MessageSource.TP_RANK_0),
+    )
 
+    assert w._unprocessed_messages.get("Y"), "the REMOVE for Y should be parked"
+    assert w._sessions.has_pending is False
     assert w.removed_sessions == ["s"]
     assert _acks(w) == ["s"]

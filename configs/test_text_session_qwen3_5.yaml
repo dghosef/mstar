@@ -10,9 +10,10 @@ max_concurrent_requests: 8
 
 resources:
   gdn_state:
-    # A parked session holds its slot out of circulation (there is no host
-    # offload for recurrent state), so the pool covers every session's slot
-    # plus one per running request, with room to spare: 4 + 8 + the sink.
+    # A parked session holds its slot out of circulation: there is no host
+    # offload for recurrent state. The pool covers every session's slot plus
+    # one per running request, with room to spare; the engine refuses at load a
+    # pool that cannot fit max_concurrent_sessions.
     max_slots: 33
 
 sessions:

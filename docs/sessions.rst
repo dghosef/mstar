@@ -119,6 +119,15 @@ does not hold across a session.
        kv_cache:
          max_state: 1024
 
+A resource that cannot move parked state out of the way holds a session's units
+out of circulation until that session ends, so its pool has to fit every session
+at once. Recurrent state is the case today: there is no host offload for it, and
+the engine refuses at load a pool that ``max_concurrent_sessions`` parked
+sessions would not fit, rather than letting it turn into requests waiting at
+admission for sessions to end. Running requests need units of their own on top
+of that, so leave headroom. A KV cache with ``cpu_offload_pages`` is not bounded
+this way: it offloads parked pages when a running request needs them.
+
 ``ttl_mode: idle`` expires a session ``timeout_s`` after its last request
 finished; ``absolute`` expires it that long after it was started, however busy
 it is. A session with a request in flight is never collected.
@@ -181,16 +190,22 @@ opening chunk). The other OpenAI routes generate one-shot speech, images and
 video; they ignore the session fields rather than refusing them, since the
 request models accept unknown keys.
 
+The examples below run against a deployment of a model that declares sessions
+(``test_text_session`` or ``test_text_session_qwen3_5``; see :doc:`models`).
+``model`` is not what picks one: the route does not read it, so the server
+answers from whatever it was started with, and a deployment whose model
+declares no sessions refuses these with a ``400``.
+
 .. code-block:: bash
 
    curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
-     "model": "bagel", "start_session": true,
+     "model": "test_text_session", "start_session": true,
      "messages": [{"role": "user", "content": "Who painted Guernica?"}]
    }'
    # -> {... "choices": [...], "session_id": "9f2c..."}
 
    curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
-     "model": "bagel", "resume_session": true, "session_id": "9f2c...",
+     "model": "test_text_session", "resume_session": true, "session_id": "9f2c...",
      "messages": [{"role": "user", "content": "And when?"}]
    }'
 
@@ -239,13 +254,24 @@ its state is being freed; the conductor and the workers carry that out.
   reuses it for every request in the session. The state a resumed request
   continues lives on the workers that built it, so a fresh pick would route the
   request to workers holding nothing.
-- **Teardown is a barrier.** Freeing a session's state — on ``DELETE``, on a
-  TTL expiry, on a failed request, or riding on a request that carried
-  ``end_session`` — goes to every worker the session ran on, and each ACKs once
-  its state is gone. Until every ACK is in, the API server refuses the id. A
-  worker that never ACKs is timed out (``MSTAR_DRAIN_TTL_S``) so one faulty
-  worker cannot hold an id forever, and the API server releases a tombstone
-  that stands past ``MSTAR_SESSION_TOMBSTONE_GRACE_S`` (180s) regardless.
+- **Teardown is a barrier, and a message of its own.** Freeing a session's
+  state — on ``DELETE``, on a TTL expiry, on a failed request, or behind the
+  last request of one that carried ``end_session`` — goes to every worker the
+  session ran on as its own ``TEARDOWN_SESSION``, and each ACKs once its state
+  is gone. Never as a flag on that request's removal: a worker parks the
+  removal of a request it has no handle for, which is exactly the case of a
+  resumed request it was still holding, so a flag there would strand the
+  teardown and its ACK behind the barrier's TTL. Until every ACK is in, the API
+  server refuses the id. A worker that never ACKs is timed out
+  (``MSTAR_DRAIN_TTL_S``) so one faulty worker cannot hold an id forever, and
+  the API server releases a tombstone that stands past
+  ``MSTAR_SESSION_TOMBSTONE_GRACE_S`` (180s) regardless.
+- **Under TP, one rank decides.** A session's state is freed at the same point
+  in the step sequence on every rank: rank 0 forwards both the removal and the
+  teardown stamped with the last step it broadcast, and a follower ignores the
+  conductor's copy. The order idle sessions are offloaded in comes from rank 0
+  too — it numbers each session as it parks its state and forwards the number —
+  so every rank reclaims the same sessions in the same order.
 - **A failure ends the session.** v1 keeps no rollback, so a request that
   failed or was abandoned mid-generation leaves state a later request should
   not continue from. Its session is torn down with it.
@@ -362,12 +388,14 @@ Limits in this version
   with no offload (recurrent state), parked state holds its pages or slots until
   the session ends: size ``max_concurrent_sessions`` times each resource's
   ``max_state`` against the pool, leaving room for the requests
-  ``max_concurrent_requests`` allows. A request that does not fit is not
-  refused: it waits in admission, retrying until pages free up or the client
-  gives up, as on a pool full of running requests. For a recurrent pool, size
-  ``max_slots`` to cover the parked sessions' slots as well as one per label
-  for every running request. (A session's state does follow its request through
-  an offload while that request is running.)
+  ``max_concurrent_requests`` allows. For a resource that cannot offload, the
+  engine refuses that config at load rather than letting it become an
+  admission wait, so a recurrent pool's ``max_slots`` has to cover the parked
+  sessions' slots — plus one per label for every running request, which it
+  cannot check for you. A request that does not fit anyway is not refused: it
+  waits in admission, retrying until pages free up or the client gives up, as
+  on a pool full of running requests. (A session's state does follow its
+  request through an offload while that request is running.)
 - Sessions are reachable through the ``POST /generate`` form, the
   ``/generate/ws`` control-loop socket, ``/v1/chat/completions`` and the SDK. The
   other OpenAI-compatible routes have no use for them (one-shot speech, image

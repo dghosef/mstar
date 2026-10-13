@@ -173,7 +173,12 @@ class RopeManager(PositionManager):
         if held:
             self._counters[rid] = {**self._counters.get(rid, {}), **held}
 
-    def retain_session_state(self, rid: str, session_id: str) -> None:
+    def retain_session_state(
+        self, rid: str, session_id: str, idle_seq: int = -1,
+    ) -> None:
+        # counters are a handful of ints per session, never reclaimed, so
+        # there is no victim order for idle_seq to decide here
+        del idle_seq
         counters = self._counters.pop(rid, None)
         self._matched.pop(rid, None)
         if counters:

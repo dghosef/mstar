@@ -64,12 +64,12 @@ class RemoveRequest(MessageBody):
     # broadcast, so they tear the request down at the same point in the step
     # sequence it did, maintaining KV cache state symmetry.
     after_tp_seq: int = -1
-    # Tear the request's session down with it, and ACK SESSION_TORN_DOWN.
-    end_session: bool = False
-    # The session ``end_session`` ends. Named rather than looked up: a worker
-    # that never admitted the request (held, then drained) has no record of
-    # which session it belonged to, and still owes the teardown and its ACK.
-    session_id: str | None = None
+    # Rank 0's ordering stamp for the session this request hands its state back
+    # to, increasing with each session that parks state. A rank reclaiming
+    # parked state offloads the smallest stamp first, so taking the number from
+    # rank 0 rather than counting locally is what makes every rank pick the
+    # same sessions in the same order. -1 when the request has no session.
+    session_idle_seq: int = -1
 
 
 @dataclass

@@ -23,6 +23,12 @@ from mstar.utils.ipc_format import NewRequest
 logger = logging.getLogger(__name__)
 
 
+def _session_id_of(body: NewRequest) -> str | None:
+    """The session a held ingest belongs to. Only ever held with one."""
+    session = body.request_info.session
+    return session.session_id if session is not None else None
+
+
 @dataclass
 class WorkerSessionManager:
     """The persistent sessions one worker holds state for."""
@@ -34,8 +40,6 @@ class WorkerSessionManager:
 
     _session_rids: dict[str, set[int]] = field(default_factory=dict)
     _rid_session: dict[int, str] = field(default_factory=dict)
-    # deferred removes that also end their session
-    _pending_remove_end_session: set[int] = field(default_factory=set)
     # TEARDOWN_SESSIONs waiting on their requests to finish leaving
     _pending_session_teardowns: set[str] = field(default_factory=set)
     # session id -> the TP followers this worker leads for it, recorded as its
@@ -111,6 +115,15 @@ class WorkerSessionManager:
         self._pending_session_ingests.append(body)
         return True
 
+    def is_held(self, request_id: str) -> bool:
+        """Whether this wire id is a NEW_REQUEST held here, waiting for its
+        session. It has no handle yet, so a message keyed by one cannot act on
+        it; the worker waits for the admission instead."""
+        return any(
+            held.request_id == request_id
+            for held in self._pending_session_ingests
+        )
+
     def drop_held(self, request_id: str) -> bool:
         """Forget a held request (by its wire id) that was removed before it
         could be admitted. True when one was held."""
@@ -124,9 +137,28 @@ class WorkerSessionManager:
 
     def take_held_ingests(self) -> list[NewRequest]:
         """The held requests, for the worker to re-admit. One that is still not
-        ready holds itself again."""
+        ready holds itself again.
+
+        A request held for a session whose teardown is itself waiting is
+        dropped rather than handed back: admitting it would give that session a
+        live request again, so its teardown would never come ready and every
+        later teardown of the same id here would queue behind it.
+        """
         held, self._pending_session_ingests = self._pending_session_ingests, []
-        return held
+        ready = [
+            body for body in held
+            if _session_id_of(body) not in self._pending_session_teardowns
+        ]
+        if len(ready) != len(held):
+            dropped = [
+                body.request_id for body in held
+                if _session_id_of(body) in self._pending_session_teardowns
+            ]
+            logger.info(
+                "Dropped %d request(s) held for a session that is being torn "
+                "down: %s", len(dropped), dropped,
+            )
+        return ready
 
     def bind(
         self, request_id: int, session_id: str | None,
@@ -164,21 +196,12 @@ class WorkerSessionManager:
     def take_overshot(self, request_id: int) -> frozenset[str]:
         return frozenset(self._overshot.pop(request_id, ()))
 
-    def defer_end_session(self, request_id: int) -> None:
-        """Remember that a removal deferred behind a GPU step ends its session,
-        so the flag survives being reconstructed later."""
-        self._pending_remove_end_session.add(request_id)
-
-    def ends_session(self, request_id: int) -> bool:
-        return request_id in self._pending_remove_end_session
-
     def release(self, request_id: int) -> str | None:
         """Drop the request, returning the session it belonged to.
 
         The session itself stays — it keeps what the request built — unless the
         worker follows up with ``forget_session``.
         """
-        self._pending_remove_end_session.discard(request_id)
         self._overshot.pop(request_id, None)
         session_id = self._rid_session.pop(request_id, None)
         if session_id is not None:
@@ -202,10 +225,29 @@ class WorkerSessionManager:
         ]
 
     def forget_session(self, session_id: str) -> None:
-        """Drop every trace of the session; its state is being freed."""
+        """Drop every trace of the session; its state is being freed.
+
+        Including any NEW_REQUEST still held for it: the state it is waiting to
+        adopt is going, and ``_apply_pending_sessions`` admits held ingests
+        first, so leaving it behind would admit a request nobody will schedule
+        and block every later teardown of the same id on this worker.
+        """
         self._pending_session_teardowns.discard(session_id)
         self._session_followers.pop(session_id, None)
         for rid in self._session_rids.pop(session_id, set()):
             self._rid_session.pop(rid, None)
-            self._pending_remove_end_session.discard(rid)
             self._overshot.pop(rid, None)
+        dropped = [
+            held for held in self._pending_session_ingests
+            if _session_id_of(held) == session_id
+        ]
+        if dropped:
+            self._pending_session_ingests = [
+                held for held in self._pending_session_ingests
+                if _session_id_of(held) != session_id
+            ]
+            logger.info(
+                "Dropped %d request(s) held for session %s; it is being torn "
+                "down: %s", len(dropped), session_id,
+                [held.request_id for held in dropped],
+            )

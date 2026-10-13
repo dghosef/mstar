@@ -82,7 +82,7 @@ def _worker():
     w.engine_manager = SimpleNamespace(
         evictable_nodes=lambda: [NODE],
         add_request=lambda rid, cfgs, session=None: None,
-        remove_request=lambda rid, end_session=False, **kw: None,
+        remove_request=lambda rid, **kw: None,
     )
     w.scheduler = SimpleNamespace(
         clear_rid=lambda rid, rid_str: None,
@@ -97,6 +97,8 @@ def _worker():
     w._reads_done_sent = set()
     w._in_flight_rids = set()
     w._pending_removes = set()
+    w._deferred_idle_seq = {}
+    w._session_idle_seq = 0
     w._last_active = {}
     w.streaming_buffers = {}
     w._sessions = WorkerSessionManager(is_leaving=w._rid_is_leaving)

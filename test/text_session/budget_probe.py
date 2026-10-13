@@ -25,12 +25,23 @@ from mstar import MStarClient
 DEFAULT_CONFIG = (
     Path(__file__).resolve().parents[2] / "configs/test_text_session.yaml"
 )
-PAGE_SIZE = 128  # BAGEL's KV page, the unit max_state counts
+PAGE_SIZE = 128  # the KV page both test deployments use, the unit max_state counts
+# What the KV resource is called, which is the model's choice: BAGEL's LLM
+# names it ``kv``, Qwen3.5's ``kv_cache``.
+KV_RESOURCE_NAMES = ("kv", "kv_cache")
 
 
 def _kv_session_config(path: Path) -> dict:
+    """The KV budget from the deployment's sessions block."""
     config = yaml.safe_load(path.read_text())
-    return config["sessions"]["resources"]["kv"]
+    resources = config["sessions"]["resources"]
+    for name in KV_RESOURCE_NAMES:
+        if name in resources:
+            return resources[name]
+    raise SystemExit(
+        f"{path}: no KV resource in sessions.resources; expected one of "
+        f"{list(KV_RESOURCE_NAMES)}, found {sorted(resources)}"
+    )
 
 
 def _end_quietly(client, session_id: str | None) -> None:

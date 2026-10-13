@@ -412,17 +412,24 @@ def _offloading_manager(max_num_pages: int, cpu_offload_pages: int = 32) -> KVMa
     )
 
 
-def _park(kv: KVManager, rid: str, session_id: str, num_pages: int) -> None:
+def _park(
+    kv: KVManager, rid: str, session_id: str, num_pages: int, idle_seq: int = 0,
+) -> None:
     kv.ingest_request(rid, KVReqConfig())
     _grow(kv, rid, num_pages * PAGE_SIZE)
-    kv.retain_session_state(rid, session_id)
+    kv.retain_session_state(rid, session_id, idle_seq)
+
+
+def _idle_pages(kv: KVManager) -> dict[str, int]:
+    return {sid: idle.pages for sid, idle in kv._idle_sessions.items()}
 
 
 def test_retain_records_the_idle_session_s_device_pages():
     kv = _manager()
-    _park(kv, "r0", "s", 3)
+    _park(kv, "r0", "s", 3, idle_seq=7)
 
-    assert kv._idle_session_pages == {"s": 3}
+    assert _idle_pages(kv) == {"s": 3}
+    assert kv._idle_sessions["s"].idle_seq == 7
 
 
 def test_adopt_and_remove_take_the_session_off_the_idle_list():
@@ -434,7 +441,7 @@ def test_adopt_and_remove_take_the_session_off_the_idle_list():
     kv.adopt_session_state("r2", "s")
     kv.remove_session("t")
 
-    assert kv._idle_session_pages == {}
+    assert kv._idle_sessions == {}
 
 
 def test_a_live_request_offloads_an_idle_session_for_its_pages(_host_copies):
@@ -446,7 +453,7 @@ def test_a_live_request_offloads_an_idle_session_for_its_pages(_host_copies):
     _grow(kv, "r1", 10 * PAGE_SIZE)
 
     assert kv._pages_held(kv.session_rid("s")) == 0
-    assert kv._idle_session_pages == {"s": 0}
+    assert _idle_pages(kv) == {"s": 0}
     # still the session's, just on the host
     assert kv.session_state_size("s") == 10
     kv.assert_pages_conserved()
@@ -454,13 +461,80 @@ def test_a_live_request_offloads_an_idle_session_for_its_pages(_host_copies):
 
 def test_the_longest_idle_session_goes_first(_host_copies):
     kv = _offloading_manager(max_num_pages=16)
-    _park(kv, "r0", "old", 5)
-    _park(kv, "r1", "new", 5)
+    _park(kv, "r0", "old", 5, idle_seq=1)
+    _park(kv, "r1", "new", 5, idle_seq=2)
 
     kv.ingest_request("r2", KVReqConfig())
     _grow(kv, "r2", 8 * PAGE_SIZE)
 
-    assert kv._idle_session_pages == {"old": 0, "new": 5}
+    assert _idle_pages(kv) == {"old": 0, "new": 5}
+    kv.assert_pages_conserved()
+
+
+def test_a_stale_candidate_does_not_offload_a_session_out_of_turn(_host_copies):
+    # A session that parks again under a newer stamp leaves its old entry in
+    # the heap. Here that entry (1) sorts ahead of the only other session (2),
+    # so popping it without checking the stamp would offload the *most*
+    # recently idle session first -- and on a rank where the churn went
+    # differently, a different one.
+    kv = _offloading_manager(max_num_pages=16)
+    _park(kv, "r0", "churner", 5, idle_seq=1)
+    kv.ingest_request("r1", KVReqConfig())
+    kv.adopt_session_state("r1", "churner")
+    _park(kv, "r2", "other", 5, idle_seq=2)
+    kv.retain_session_state("r1", "churner", 9)
+    assert len(kv._offload_candidates) == 3, "the stale entry is still there"
+
+    # 5 of 15 free, so this needs exactly one session's worth reclaimed
+    kv.ingest_request("r3", KVReqConfig())
+    _grow(kv, "r3", 8 * PAGE_SIZE)
+
+    # by true stamp 'other' (2) is older than 'churner' (9)
+    assert _idle_pages(kv) == {"churner": 5, "other": 0}
+    kv.assert_pages_conserved()
+
+
+def test_a_candidate_for_a_session_that_ended_is_discarded(_host_copies):
+    kv = _offloading_manager(max_num_pages=16)
+    _park(kv, "r0", "gone", 5, idle_seq=1)
+    _park(kv, "r1", "stays", 5, idle_seq=2)
+    kv.remove_session("gone")  # frees its 5 outright, leaving 10 of 15 free
+    assert len(kv._offload_candidates) == 2, "its entry is still there"
+
+    kv.ingest_request("r2", KVReqConfig())
+    _grow(kv, "r2", 11 * PAGE_SIZE)  # more than the 10 free
+
+    # the pop discards 'gone' and reaches 'stays', rather than stopping there
+    assert _idle_pages(kv) == {"stays": 0}
+    kv.assert_pages_conserved()
+
+
+def test_the_candidate_heap_does_not_grow_with_every_turn():
+    # offload only runs under pressure, so nothing pops the entries a churning
+    # session leaves behind; without pruning the heap grows for the process's life
+    kv = _manager(max_num_pages=512)
+    _park(kv, "r0", "s", 1, idle_seq=0)
+    for turn in range(1, 200):
+        kv.ingest_request(f"t{turn}", KVReqConfig())
+        kv.adopt_session_state(f"t{turn}", "s")
+        kv.retain_session_state(f"t{turn}", "s", turn)
+
+    assert len(kv._idle_sessions) == 1
+    assert len(kv._offload_candidates) <= 2 * 1 + 8
+
+
+def test_the_stamp_decides_the_order_not_the_order_they_parked(_host_copies):
+    # the stamp comes from the TP leader, and a rank that never admitted one of
+    # the requests parks its sessions in a different order than the leader did;
+    # the victim must still be the session the leader idled first
+    kv = _offloading_manager(max_num_pages=16)
+    _park(kv, "r0", "parked-first", 5, idle_seq=9)
+    _park(kv, "r1", "idled-first", 5, idle_seq=2)
+
+    kv.ingest_request("r2", KVReqConfig())
+    _grow(kv, "r2", 8 * PAGE_SIZE)
+
+    assert _idle_pages(kv) == {"parked-first": 5, "idled-first": 0}
     kv.assert_pages_conserved()
 
 
@@ -474,7 +548,7 @@ def test_an_offloaded_session_comes_back_on_reload(_host_copies):
     kv.ingest_request("r2", KVReqConfig())
     kv.adopt_session_state("r2", "s")
 
-    assert "s" not in kv._idle_session_pages
+    assert "s" not in kv._idle_sessions
     assert kv.is_offloaded("r2")
     assert kv.can_reload("r2")
     assert kv.reload("r2")
@@ -491,7 +565,7 @@ def test_reload_counts_and_offloads_idle_sessions(_host_copies):
 
     assert kv.can_reload("r0")
     assert kv.reload("r0")
-    assert kv._idle_session_pages == {"s": 0}
+    assert _idle_pages(kv) == {"s": 0}
     kv.assert_pages_conserved()
 
 
@@ -505,4 +579,4 @@ def test_without_a_host_pool_idle_sessions_keep_their_pages():
         request_ids=("r1",), graph_walk="prefill", slot=0, capture=False,
     )
     assert not kv.admit(step, ctx).ok
-    assert kv._idle_session_pages == {"s": 10}
+    assert _idle_pages(kv) == {"s": 10}

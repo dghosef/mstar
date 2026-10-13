@@ -1246,6 +1246,11 @@ def _ws_session(server, message: dict, request_id: str) -> SessionRequest:
     The control loop is the surface that most wants sessions: a step continues
     from the state the previous one left. The fields are the form's, so a client
     moves between the two without changing what it sends.
+
+    A malformed field is a ``SessionError(400)``, the status the form route
+    would have answered with, rather than a bare ``ValueError``: the latter
+    reaches the client as an error with no ``status`` and logs a traceback for
+    what is a client mistake.
     """
     flags = {
         name: message.get(name, False)
@@ -1254,13 +1259,17 @@ def _ws_session(server, message: dict, request_id: str) -> SessionRequest:
     for name, value in flags.items():
         # not `bool()`: a JSON client sending "false" would start a session
         if not isinstance(value, bool):
-            raise ValueError(f"{name} must be a boolean")
+            raise SessionError(400, f"{name} must be a boolean")
     session_id = message.get("session_id")
     if session_id is not None and not isinstance(session_id, str):
-        raise ValueError("session_id must be a string")
+        raise SessionError(400, "session_id must be a string")
     timeout = message.get("session_timeout_s")
-    if timeout is not None and not isinstance(timeout, (int, float)):
-        raise ValueError("session_timeout_s must be a number")
+    # bool before number: bool is an int in Python, so `true` would otherwise
+    # pass the check and resolve to a 1 s TTL
+    if timeout is not None and (
+        isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+    ):
+        raise SessionError(400, "session_timeout_s must be a number")
     if not any(flags.values()) and session_id is None:
         return SessionRequest()
     return server.sessions.resolve(

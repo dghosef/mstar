@@ -32,7 +32,7 @@ class _Res(Resource):
     def depends_on(self):
         return set(self._deps)
 
-    def retain_session_state(self, rid, session_id):
+    def retain_session_state(self, rid, session_id, idle_seq=-1):
         return
 
 
@@ -162,6 +162,76 @@ def test_a_session_resource_the_model_does_not_declare_is_refused():
         engine._open_session_state(_specs("kv"), _config("recurrent"))
 
 
+# ── a pool too small for its parked sessions ────────────────────────────────
+#
+# A resource that cannot offload parked state holds a session's units out of
+# circulation until it ends, so a pool short of the cap turns into requests
+# waiting at admission for sessions to end rather than anything that says so.
+
+class _Pool(_Res):
+    """A resource with a fixed pool and no way to offload what is parked."""
+
+    def __init__(self, capacity: int, deps: tuple[str, ...] = ()):
+        super().__init__(deps)
+        self._capacity = capacity
+
+    def session_capacity(self):
+        return self._capacity
+
+
+def test_a_pool_that_cannot_fit_every_session_is_refused():
+    engine = _engine({"gdn_state": _Pool(capacity=3)})
+
+    with pytest.raises(ValueError, match="at least 4 of them"):
+        engine._open_session_state(
+            _specs("gdn_state"),
+            _config("gdn_state", max_concurrent_sessions=4),
+        )
+
+
+def test_the_budget_multiplies_what_each_session_needs():
+    engine = _engine({"gdn_state": _Pool(capacity=8)})
+    config = SessionsConfig(
+        resources={"gdn_state": SessionResourceConfig(max_state=3)},
+        max_concurrent_sessions=4,
+    )
+
+    with pytest.raises(ValueError, match="at least 12 of them"):
+        engine._open_session_state(_specs("gdn_state"), config)
+
+
+def test_a_pool_that_fits_them_loads():
+    engine = _engine({"gdn_state": _Pool(capacity=32)})
+
+    engine._open_session_state(
+        _specs("gdn_state"), _config("gdn_state", max_concurrent_sessions=4),
+    )
+
+    assert engine._resources["gdn_state"].session_config is not None
+
+
+def test_a_resource_that_can_offload_what_is_parked_is_not_bounded():
+    # a KV cache with a host pool moves parked pages aside, so a pool short of
+    # the cap costs it page moves rather than a refusal
+    engine = _engine({"kv": _Res()})
+
+    engine._open_session_state(
+        _specs("kv"), _config("kv", max_concurrent_sessions=1000),
+    )
+
+    assert engine._resources["kv"].session_config is not None
+
+
+def test_a_derived_resource_is_checked_against_its_own_pool():
+    # positions over a KV cache hold a handful of ints and never refuse; the
+    # pool that matters is the one that was named
+    engine = _engine({"gdn_state": _Pool(capacity=3), "pos": _Res(deps=("gdn_state",))})
+
+    with pytest.raises(ValueError, match="'gdn_state'"):
+        engine._open_session_state(
+            _specs("gdn_state", "pos"),
+            _config("gdn_state", max_concurrent_sessions=4),
+        )
 
 
 
@@ -244,7 +314,7 @@ def test_a_second_partition_s_ingest_does_not_clear_the_first_s_state():
 # ── telling a continuing session its last token is in the KV ────────────────
 
 class _RemovingRunner:
-    def remove_request(self, rid, session_id=None):
+    def remove_request(self, rid, session_id=None, idle_seq=-1):
         pass
 
     def remove_session(self, session_id):
@@ -310,12 +380,22 @@ def test_a_turn_that_stopped_exactly_clears_an_earlier_turn_s_flag():
     assert _flag(engine, "LLM") is None
 
 
-def test_a_sessionless_or_ending_request_flags_nothing():
+def test_a_sessionless_request_flags_nothing():
     engine = _removing_engine("LLM")
 
     engine.remove_request("r0", overshot_nodes={"LLM"})
-    engine._request_sessions["r1"] = "s"
-    engine.remove_request("r1", end_session=True, overshot_nodes={"LLM"})
+
+    assert engine._submodules["LLM"].submodule.session_states == {}
+
+
+def test_removing_the_session_drops_the_flag_the_last_turn_left():
+    # ending a session is remove_session, not a flag on the removal
+    engine = _removing_engine("LLM")
+    engine._request_sessions["r0"] = "s"
+    engine.remove_request("r0", overshot_nodes={"LLM"})
+    assert _flag(engine, "LLM") is True
+
+    engine.remove_session("s")
 
     assert engine._submodules["LLM"].submodule.session_states == {}
 

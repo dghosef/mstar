@@ -1,3 +1,4 @@
+import heapq
 import logging
 import os
 import threading
@@ -299,6 +300,18 @@ class AllocResult:
 
 
 @dataclass
+class IdleSession:
+    """What a parked session holds, and when it went idle.
+
+    ``idle_seq`` is the TP leader's stamp (``RemoveRequest.session_idle_seq``),
+    which orders the offload victims; taking it from the leader rather than
+    counting locally is what keeps the order the same on every rank.
+    """
+    idle_seq: int
+    pages: int  # on device, so a victim that would free nothing is skipped
+
+
+@dataclass
 class KVPlanState:
     token_to_page: torch.Tensor
     token_to_cache: torch.Tensor
@@ -412,10 +425,13 @@ class KVManager(AttentionResource):
         # step's admit returns first -- see ``remove_request`` / ``reset_request``.
         self._admit_reserved_pages: dict[tuple[int, str], list[int]] = {}
 
-        # session id -> device pages its parked state holds, longest idle
-        # first. Offloaded (``_offload_idle_sessions``) when a live request
-        # needs the pages; adopting or removing the session takes it out.
-        self._idle_session_pages: dict[str, int] = {}
+        # session id -> what its parked state holds; adopting or removing the
+        # session takes it out.
+        self._idle_sessions: dict[str, IdleSession] = {}
+        # (idle_seq, session id) min-heap: which parked session to offload
+        # next, longest idle first. Stale entries are dropped at the pop, not
+        # the change; see _next_offload_candidate.
+        self._offload_candidates: list[tuple[int, str]] = []
 
     @classmethod
     def build(cls, spec: KVSpec, info: EngineResourceInfo):
@@ -1656,7 +1672,7 @@ class KVManager(AttentionResource):
             return False
         with self._lock:
             evictable = 0 if self._index is None else self._index.num_sole_owned()
-            evictable += sum(self._idle_session_pages.values())
+            evictable += sum(idle.pages for idle in self._idle_sessions.values())
             return self._reload_pages_needed(rid) <= self._arena.num_free + evictable
 
     def reload(self, rid: str) -> bool:
@@ -1852,7 +1868,7 @@ class KVManager(AttentionResource):
                     self.name, session_id, rid,
                 )
                 return
-            self._idle_session_pages.pop(session_id, None)
+            self._idle_sessions.pop(session_id, None)
             # Offloaded parked state is not reloaded here: `check_ready` sees
             # the request offloaded and reloads it at admission once it fits,
             # through `Engine.reload_request`, which journals the move for TP
@@ -1870,15 +1886,19 @@ class KVManager(AttentionResource):
                     self.name, rid, session_id,
                 )
 
-    def retain_session_state(self, rid: str, session_id: str) -> None:
+    def retain_session_state(
+        self, rid: str, session_id: str, idle_seq: int = -1,
+    ) -> None:
         with self._lock:
             if not self._move_streams(rid, self.session_rid(session_id)):
                 return
-            # re-inserted, so the dict stays ordered by how long each has idled
-            self._idle_session_pages.pop(session_id, None)
-            self._idle_session_pages[session_id] = self._pages_held(
-                self.session_rid(session_id)
+            pages = self._pages_held(self.session_rid(session_id))
+            self._idle_sessions[session_id] = IdleSession(
+                idle_seq=idle_seq, pages=pages,
             )
+            if pages:  # nothing to reclaim from one already on the host
+                heapq.heappush(self._offload_candidates, (idle_seq, session_id))
+                self._prune_offload_candidates()
             logger.info(
                 "KV %s: session %s keeps %d pages (%s tokens) from %s",
                 self.name, session_id, self.session_state_size(session_id),
@@ -1891,7 +1911,7 @@ class KVManager(AttentionResource):
 
     def remove_session(self, session_id: str) -> None:
         with self._lock:
-            self._idle_session_pages.pop(session_id, None)
+            self._idle_sessions.pop(session_id, None)
         self.remove_request(self.session_rid(session_id))
 
     def session_state_size(self, session_id: str) -> int:
@@ -1903,28 +1923,68 @@ class KVManager(AttentionResource):
                 held += self._reload_pages_needed(rid)
             return held
 
+    def _prune_offload_candidates(self) -> None:
+        """Rebuild the heap once the stale entries outnumber the live ones.
+
+        Offload only runs under pressure, so nothing else would ever pop them.
+        Caller holds the lock.
+        """
+        if len(self._offload_candidates) <= 2 * len(self._idle_sessions) + 8:
+            return
+        self._offload_candidates = [
+            (idle.idle_seq, session_id)
+            for session_id, idle in self._idle_sessions.items()
+            if idle.pages
+        ]
+        heapq.heapify(self._offload_candidates)
+
+    def _next_offload_candidate(self) -> tuple[str, IdleSession] | None:
+        """Take the longest-idle session that still has pages on device.
+
+        Discards an entry whose session has since adopted, ended or been
+        offloaded, and one left behind by a session that parked again under a
+        newer stamp. Caller holds the lock.
+        """
+        while self._offload_candidates:
+            idle_seq, session_id = heapq.heappop(self._offload_candidates)
+            idle = self._idle_sessions.get(session_id)
+            if idle is not None and idle.pages and idle.idle_seq == idle_seq:
+                return session_id, idle
+        return None
+
     def _offload_idle_sessions(self, num_free: int) -> None:
-        """Offload idle sessions, longest idle first, until ``num_free``
-        pages are free or none is left to move.
+        """Offload idle sessions, longest idle first, until ``num_free`` pages
+        are free or none is left to move.
+
+        Longest idle is the smallest ``idle_seq``, the TP leader's stamp, so
+        every rank offloads the same sessions in the same order even though
+        each decides for itself.
 
         Caller holds the lock. Does nothing without a host pool. A session
         whose pages the host pool can't take keeps them; the next one is tried.
         """
         if self._cpu_pool is None:
             return
-        for session_id, held in list(self._idle_session_pages.items()):
-            if self._arena.num_free >= num_free:
-                return
-            if held == 0:
-                continue
+        # held back, not re-popped: the loop would otherwise spin on a session
+        # the host pool keeps refusing
+        refused: list[tuple[int, str]] = []
+        while self._arena.num_free < num_free:
+            nxt = self._next_offload_candidate()
+            if nxt is None:
+                break
+            session_id, idle = nxt
             rid = self.session_rid(session_id)
             freed = self.offload(rid)
-            self._idle_session_pages[session_id] = self._pages_held(rid)
+            idle.pages = self._pages_held(rid)
             if freed:
                 logger.info(
-                    "KV %s: offloaded idle session %s (%d pages)",
-                    self.name, session_id, freed,
+                    "KV %s: offloaded idle session %s (%d pages, idle_seq %d)",
+                    self.name, session_id, freed, idle.idle_seq,
                 )
+            elif idle.pages:
+                refused.append((idle.idle_seq, session_id))
+        for entry in refused:
+            heapq.heappush(self._offload_candidates, entry)
 
     def _pages_held(self, rid: str) -> int:
         with self._lock:
@@ -2215,7 +2275,7 @@ class KVManager(AttentionResource):
             new_pages: list[int] = []
             if num_new_pages > 0:
                 new_pages = self._arena.acquire(num_new_pages)
-                if new_pages is None and self._idle_session_pages:
+                if new_pages is None and self._idle_sessions:
                     # parked state comes back on adoption; a cached page that
                     # is evicted is gone, so idle sessions go first
                     self._offload_idle_sessions(num_new_pages)

@@ -685,6 +685,7 @@ class Engine:
                 derived[key] = SessionResourceConfig()
                 resource.session_config = derived[key]
         self._refuse_partial_session_state(specs_by_key)
+        self._refuse_undersized_session_pools(sessions_config)
         logger.info(
             "Session state held by %s%s", self._runner.session_resource_keys(),
             f" (derived from a dependency: {sorted(derived)})" if derived else "",
@@ -715,6 +716,43 @@ class Engine:
                     "too: a resumed request would continue the one and start "
                     f"{key!r} from zero. Name {key!r} in the sessions config "
                     "as well."
+                )
+
+    def _refuse_undersized_session_pools(self, sessions_config) -> None:
+        """A pool that cannot move parked state aside must fit every session's.
+
+        Recurrent state has no host offload, so a parked session holds its slots
+        out of circulation until it ends. A pool one slot short of what the cap
+        allows does not fail at load today -- it turns into requests waiting at
+        admission for sessions to end, which reads as a hang rather than a
+        misconfiguration.
+
+        A lower bound, so it never refuses a pool that would have worked:
+        running requests need slots of their own on top of this, but
+        ``max_concurrent_requests`` is usually unset, and a session with no
+        ``max_state`` still holds at least one slot.
+        """
+        sessions = sessions_config.max_concurrent_sessions
+        if not sessions:
+            return
+        for key, resource in sorted(self._resources.items()):
+            cfg = resource.session_config
+            capacity = resource.session_capacity()
+            if cfg is None or capacity is None:
+                continue
+            needed = sessions * (cfg.max_state or 1)
+            if needed > capacity:
+                raise ValueError(
+                    f"resource {key!r} holds {capacity} units of state but "
+                    f"max_concurrent_sessions={sessions} parked sessions need "
+                    f"at least {needed} of them"
+                    + (
+                        f" ({sessions} x max_state={cfg.max_state})"
+                        if cfg.max_state else ""
+                    )
+                    + ", and running requests need their own on top. Parked "
+                    f"{key!r} cannot be offloaded, so raise its pool or lower "
+                    "max_concurrent_sessions."
                 )
 
     def _open_prefix_caches(self, specs_by_key, model) -> None:
@@ -2110,24 +2148,28 @@ class Engine:
         )
 
     def remove_request(
-        self, request_id: str, end_session: bool = False,
-        overshot_nodes: Collection[str] = (),
+        self, request_id: str, overshot_nodes: Collection[str] = (),
+        session_idle_seq: int = -1,
     ) -> None:
-        """Drop the request. Its session keeps whatever it built, unless
-        ``end_session`` says the session is over too.
+        """Drop the request. Its session keeps whatever it built; ending the
+        session is ``remove_session``, which the worker calls on its own
+        TEARDOWN_SESSION.
 
         ``overshot_nodes`` are the nodes whose loop ran one speculative step past
         its stop for this request; a continuing session is told so per node
         (``OVERSHOT_LAST_ITER``), since that step wrote the stopping token.
+
+        ``session_idle_seq`` is the TP leader's stamp for the session going
+        idle, which orders it against the others parked here when a resource
+        has to reclaim one of them.
         """
         session_id = self._request_sessions.pop(request_id, None)
-        self._runner.remove_request(request_id, session_id=session_id)
+        self._runner.remove_request(
+            request_id, session_id=session_id, idle_seq=session_idle_seq,
+        )
         for submodule_mgmt in self._submodules.values():
             submodule_mgmt.submodule.cleanup_request(request_id)
         if session_id is None:
-            return
-        if end_session:
-            self.remove_session(session_id)
             return
         for node_name, submodule_mgmt in self._submodules.items():
             submodule = submodule_mgmt.submodule

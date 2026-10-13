@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, ".")
 
+import pytest
 from fastapi.testclient import TestClient
 
 from mstar.api_server import entrypoint
@@ -310,5 +311,30 @@ def test_a_ws_session_flag_must_be_a_boolean(monkeypatch):
     [frame] = _ws_turn(client, start_session="false")
 
     assert "must be a boolean" in frame["error"]
+    # in band, the status the form route would have answered with, rather than
+    # an error with no status and a traceback in the log
+    assert frame["status"] == 400
+    assert server.submitted == []
+    assert server.sessions.snapshot() == []
+
+
+@pytest.mark.parametrize("message, named", [
+    ({"start_session": "false"}, "start_session"),
+    ({"resume_session": 1}, "resume_session"),
+    ({"end_session": None}, "end_session"),
+    ({"start_session": True, "session_id": 7}, "session_id"),
+    ({"start_session": True, "session_timeout_s": "60"}, "session_timeout_s"),
+    # bool is an int in Python, so `true` would otherwise pass the number
+    # check and become a 1 s TTL
+    ({"start_session": True, "session_timeout_s": True}, "session_timeout_s"),
+])
+def test_a_malformed_ws_session_field_is_a_400_in_band(monkeypatch, message, named):
+    server = _WsServer(_config())
+    client = _client(monkeypatch, server)
+
+    [frame] = _ws_turn(client, **message)
+
+    assert frame["status"] == 400
+    assert named in frame["error"]
     assert server.submitted == []
     assert server.sessions.snapshot() == []

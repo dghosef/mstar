@@ -164,11 +164,14 @@ def test_remove_purges_handle_keyed_state_then_frees_the_handle():
     a, b = t.handle("req-a"), t.handle("req-b")
     w._in_flight_rids = set()
     w._pending_removes = set()
+    w._deferred_idle_seq = {}
+    w._session_idle_seq = 0
     w._pending_drains, w._draining_rids, w._reads_done_sent = set(), set(), set()
+    w._drains_awaiting_handle = {}
     w._last_active = {}
     w.streaming_buffers = {a: {}}
     w.engine_manager = SimpleNamespace(
-        remove_request=lambda h, end_session=False, **kw: None,
+        remove_request=lambda h, **kw: None,
         evictable_nodes=lambda: [],
     )
     w.tensor_manager = SimpleNamespace(force_cleanup_request=lambda h: None)
@@ -253,6 +256,7 @@ def test_add_new_request_hands_the_handle_to_every_subsystem():
         start_read_tensors=lambda rid, inputs, graph_walk=None: [],
     )
     w._draining_rids = set()
+    w._drains_awaiting_handle = {}
     w._last_active = {}
     w._my_consumer_connections = []
     w.wakeup_event = SimpleNamespace(register_futures=lambda f: None)
@@ -295,6 +299,7 @@ def test_add_new_request_keeps_the_stream_buffer_and_primes_it_for_its_consumer(
         register_request=lambda rid, sc: None, start_read_tensors=lambda rid, inputs, graph_walk=None: [],
     )
     w._draining_rids, w._last_active, w._unprocessed_messages = set(), {}, {}
+    w._drains_awaiting_handle = {}
     w.wakeup_event = SimpleNamespace(register_futures=lambda f: None)
     w._consumer_node_cache = {"codec_tokens": "Codec"}
     w._my_consumer_connections = [Connection(

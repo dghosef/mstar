@@ -945,7 +945,7 @@ class _ForwardingLeader:
         )
         self.request_state = SimpleNamespace(remove_request=lambda rid: None)
         self.engine_manager = SimpleNamespace(
-            remove_request=lambda rid, end_session=False, **kw: None,
+            remove_request=lambda rid, **kw: None,
             evictable_nodes=lambda: (),
         )
         self.tensor_manager = SimpleNamespace(force_cleanup_request=lambda rid: None)

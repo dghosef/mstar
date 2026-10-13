@@ -190,7 +190,13 @@ class RecurrentStatePool(Resource):
                 rid, len(self._slots.get(rid, {})), session_id,
             )
 
-    def retain_session_state(self, rid: str, session_id: str) -> None:
+    def retain_session_state(
+        self, rid: str, session_id: str, idle_seq: int = -1,
+    ) -> None:
+        # idle_seq is the victim order for a resource that reclaims parked
+        # state; there is no host offload for recurrent state, so a parked slot
+        # stays put and nothing here has to order the sessions.
+        del idle_seq
         if self._move_slots(rid, self.session_rid(session_id)):
             logger.info(
                 "recurrent state: session %s keeps %d slot(s) from %s",
@@ -199,6 +205,12 @@ class RecurrentStatePool(Resource):
 
     def remove_session(self, session_id: str) -> None:
         self.remove_request(self.session_rid(session_id))
+
+    def session_capacity(self) -> int | None:
+        # There is no host offload for recurrent state, so a parked session
+        # holds its slots out of circulation until it ends: the pool has to fit
+        # every session's at once.
+        return self.config.usable_slots
 
     def session_state_size(self, session_id: str) -> int:
         """Slots the session holds."""

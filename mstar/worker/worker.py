@@ -90,6 +90,13 @@ _HOLD_LOG_INTERVAL = 5.0
 # releases the event on every exit, so this only fires if that thread died.
 _ADMIT_FENCE_TIMEOUT_S = 10.0
 
+# How long a DRAIN waits for the admission that mints its request's handle (see
+# ``_drain_request``). The wait is normally one iteration; the bound is for a
+# hold that is dropped rather than admitted, and is well under the conductor's
+# own drain TTL (``MSTAR_DRAIN_TTL_S``, 120 s) so the late ACK still lands
+# inside the barrier rather than after it was forced.
+_HELD_DRAIN_WAIT_S = float(os.environ.get("MSTAR_HELD_DRAIN_WAIT_S", "5"))
+
 
 def _make_graph_runtime(
     communicator,
@@ -437,13 +444,18 @@ class Worker:
         # _pending_removes: deferred REMOVE_REQUESTs.
         self._in_flight_rids: set[int] = set()
         self._pending_removes: set[int] = set()
+        # handle -> the forwarded removal's session_idle_seq, for a follower
+        # whose removal was deferred: _pending_removes keeps only the handle.
+        self._deferred_idle_seq: dict[int, int] = {}
+        # Bumped per session that parks its state here, and forwarded to the
+        # followers, so an offload picks the same victims on every rank. Only a
+        # rank that leads a request mints it. See RemoveRequest.session_idle_seq.
+        self._session_idle_seq = 0
 
         # step seq -> rids rank 0 released after that step, held until this rank
         # has consumed it. See ``_removal_step_reached``.
-        # seq -> the removals parked for it. The whole body, not just the
-        # rid: a replayed removal must still carry what it was asked to do
-        # (end_session, say), or the follower tears the request down
-        # without the session it was supposed to take with it.
+        # seq -> the removals parked for it, the whole body so a replay carries
+        # every field it arrived with.
         self._removes_awaiting_step: dict[int, list[RemoveRequest]] = {}
         # The same for session teardowns rank 0 forwarded.
         self._teardowns_awaiting_step: dict[int, list[TeardownSession]] = {}
@@ -457,6 +469,9 @@ class Worker:
         self._pending_drains: set[str] = set()
         self._draining_rids: set[str] = set()
         self._reads_done_sent: set[str] = set()
+        # wire string -> deadline, for DRAINs that arrived while their request
+        # was held and so had no handle to fan or gate with. See _drain_request.
+        self._drains_awaiting_handle: dict[str, float] = {}
 
         self._sessions = WorkerSessionManager(is_leaving=self._rid_is_leaving)
         # Let the scheduler see deferred removes so it stops initiating new work
@@ -685,6 +700,13 @@ class Worker:
             self._graph_runtime.ingest_inputs_batch(
                 self._one_rids_edges(request_id, signal_only), can_buffer=True,
             )
+        # A DRAIN that arrived while this request was held waited for the handle
+        # it needs to gate the scheduler and to name the TP followers. Before
+        # the out-of-order replay below, so a REMOVE parked behind it finds the
+        # rid already draining.
+        if self._drains_awaiting_handle.pop(body.request_id, None) is not None:
+            self._begin_drain(body.request_id)
+
         # process messages that may have came in out-of-order
         if body.request_id in self._unprocessed_messages:
             self._process_message_list(self._unprocessed_messages[body.request_id])
@@ -719,13 +741,33 @@ class Worker:
             # it can be non-empty for a rid that never got a handle, and no
             # later message would ever pop it.
             self.scheduler.clear_wire_rid(body.request_id)
-            self._remove_unadmitted_session_request(body)
+            # A resumed request held by hold_if_not_ready and drained before
+            # admission: forget the hold, or _apply_pending_sessions would admit
+            # a request nobody will schedule. Unreachable while
+            # _process_message_list parks a REMOVE with no handle; the session's
+            # own teardown drops the hold too (see forget_session).
+            if self._sessions.drop_held(body.request_id):
+                logger.info(
+                    "Dropped held request %s; it was removed before admission",
+                    body.request_id,
+                )
             return
         if request_id in self._in_flight_rids:
             self._pending_removes.add(request_id)
-            if body.end_session:
-                self._sessions.defer_end_session(request_id)
+            # the stamp rides on the message, and _pending_removes keeps only
+            # the handle, so hold it until the deferred removal is rebuilt
+            if body.session_idle_seq >= 0:
+                self._deferred_idle_seq[request_id] = body.session_idle_seq
             return
+
+        # The session this request hands its state back to goes to the back of
+        # the offload victim order. Numbered here, by the rank that leads the
+        # request, and forwarded: a rank counting for itself would skip the
+        # requests it never admitted and order its sessions differently.
+        idle_seq = body.session_idle_seq
+        if not self.is_tp_follower and self._sessions.session_of(request_id):
+            self._session_idle_seq += 1
+            idle_seq = self._session_idle_seq
 
         # If we are the TP leader for this request, signal the followers to
         # remove it too. Followers defer removal until they get this message
@@ -742,14 +784,7 @@ class Worker:
                         # broadcast up to here; followers must do it in the
                         # same gap between steps
                         after_tp_seq=self._tp_broadcast_seq - 1,
-                        end_session=body.end_session,
-                        # a follower may have held the request rather
-                        # than admitted it, and then needs the name
-                        session_id=(
-                            body.session_id
-                            or self._sessions.session_of(request_id)
-                            if body.end_session else None
-                        ),
+                        session_idle_seq=idle_seq,
                     )
                 )
             )
@@ -761,18 +796,18 @@ class Worker:
         # once the api server finished reading the outputs.
         self._draining_rids.discard(body.request_id)
         self._pending_drains.discard(body.request_id)
+        self._drains_awaiting_handle.pop(body.request_id, None)
         self._reads_done_sent.discard(body.request_id)
         overshot_nodes = self._sessions.take_overshot(request_id)
-        session_id = self._sessions.release(request_id)
-        # end_session frees the session's own state alongside the request's;
-        # otherwise the session keeps what this request built.
+        # The session keeps what this request built; ending it is a
+        # TEARDOWN_SESSION of its own, which the conductor sends behind this
+        # removal when the session is over.
+        self._sessions.release(request_id)
         self.engine_manager.remove_request(
-            request_id, end_session=body.end_session,
-            overshot_nodes=overshot_nodes,
+            request_id, overshot_nodes=overshot_nodes,
+            session_idle_seq=idle_seq,
         )
-        if body.end_session and session_id is not None:
-            self._sessions.forget_session(session_id)
-            self._ack_session_torn_down(session_id)
+        self._deferred_idle_seq.pop(request_id, None)
         self.request_state.remove_request(request_id)
         self.tensor_manager.force_cleanup_request(request_id)
         self.profile_info.pop_request(request_id)
@@ -786,26 +821,6 @@ class Worker:
 
         # Last: frees the handle for reuse, so nothing above may run after it.
         self._graph_runtime.remove_request(request_id)
-
-    def _remove_unadmitted_session_request(self, body: RemoveRequest) -> None:
-        """The REMOVE of a resumed request this worker never admitted: held
-        until its session's previous request left, and drained before that.
-
-        Its NEW_REQUEST is dropped (from the hold, or already refused as
-        draining), and a session it was ending still goes, with its ACK; the
-        conductor's barrier would otherwise wait out its TTL.
-        """
-        if self._sessions.drop_held(body.request_id):
-            logger.info(
-                "Dropped held request %s; it was removed before admission",
-                body.request_id,
-            )
-        if body.end_session and body.session_id is not None:
-            # SELF: the removal carrying it was already ordered against the
-            # step sequence
-            self._teardown_session(TeardownSession(
-                session_id=body.session_id, source=MessageSource.SELF,
-            ))
 
     def _drain_request(self, body: DrainRequest) -> None:
         """Phase-1 teardown (abort/fail): stop scheduling and reading this rid,
@@ -822,6 +837,17 @@ class Worker:
         handle = self._rid(body.request_id)
         if handle is not None and handle in self._in_flight_rids:
             self._pending_drains.add(body.request_id)
+            return
+
+        if handle is None and self._sessions.is_held(body.request_id):
+            # Draining now would neither gate the scheduler nor reach the TP
+            # followers: both need the handle, which only admission mints. A
+            # follower ignores the conductor's own copy and waits for rank 0's
+            # forward, so fanning nothing here leaves its READS_DONE unsent and
+            # the barrier waiting out its TTL. Wait for the admission instead.
+            self._drains_awaiting_handle.setdefault(
+                body.request_id, _time.monotonic() + _HELD_DRAIN_WAIT_S,
+            )
             return
 
         self._begin_drain(body.request_id)
@@ -894,6 +920,22 @@ class Worker:
         ]:
             self._pending_drains.discard(rid)
             self._begin_drain(rid)
+        # Drains waiting on a handle: admission drains them itself, so what is
+        # left here is a hold that was dropped (its session went) or one that
+        # outlasted the wait. Drain locally, so this rank still ACKs.
+        for rid, deadline in list(self._drains_awaiting_handle.items()):
+            if self._rid(rid) is not None:
+                self._drains_awaiting_handle.pop(rid, None)  # admission got it
+            elif (
+                not self._sessions.is_held(rid)
+                or _time.monotonic() >= deadline
+            ):
+                self._drains_awaiting_handle.pop(rid, None)
+                logger.info(
+                    "Draining %s without a handle: it was never admitted here",
+                    rid,
+                )
+                self._begin_drain(rid)
         for rid in list(self._draining_rids):
             self._complete_drain_if_ready(rid)
 
@@ -3368,11 +3410,7 @@ class Worker:
             self._pending_removes.discard(rid)
             self._remove_request(RemoveRequest(
                 request_id=self._rid_str(rid), source=MessageSource.SELF,
-                end_session=self._sessions.ends_session(rid),
-                session_id=(
-                    self._sessions.session_of(rid)
-                    if self._sessions.ends_session(rid) else None
-                ),
+                session_idle_seq=self._deferred_idle_seq.pop(rid, -1),
             ))
 
     def _drop_failed_rids(

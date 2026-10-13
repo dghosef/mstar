@@ -240,19 +240,24 @@ class StepRunner:
             if adopt and resource.session_config is not None:
                 resource.adopt_session_state(rid, session.session_id)
 
-    def remove_request(self, rid: str, session_id: str | None = None) -> None:
+    def remove_request(
+        self, rid: str, session_id: str | None = None, idle_seq: int = -1,
+    ) -> None:
         """drop the request's state, or hand it back to its session
 
         A session resource keeps what the request built; every other resource
         frees as usual. The session's budget is applied once the whole handover
         is done, so a clear can take every resource together.
+
+        ``idle_seq`` orders the session against the others parked here, for a
+        resource that reclaims parked state; see ``retain_session_state``.
         """
         for key in self._order:
             resource = self._resources[key]
             if session_id is None or resource.session_config is None:
                 resource.remove_request(rid)
                 continue
-            resource.retain_session_state(rid, session_id)
+            resource.retain_session_state(rid, session_id, idle_seq)
         if session_id is not None:
             self._enforce_session_budget(session_id)
 

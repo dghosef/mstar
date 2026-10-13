@@ -39,6 +39,8 @@ def _fake_worker() -> Worker:
     w._rid_str = str
     w.despeculated = []
     w._pending_removes = set()
+    w._deferred_idle_seq = {}
+    w._session_idle_seq = 0
     w._pending_drains = set()
     w._draining_rids = set()
     w.scheduler = SimpleNamespace(failed_rids=set())

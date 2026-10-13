@@ -214,11 +214,12 @@ class EngineManager:
         self.engine.add_request(request_id, resource_configs, session=session)
 
     def remove_request(
-        self, request_id: str, end_session: bool = False,
-        overshot_nodes: frozenset[str] = frozenset(),
+        self, request_id: str, overshot_nodes: frozenset[str] = frozenset(),
+        session_idle_seq: int = -1,
     ) -> None:
         self.engine.remove_request(
-            request_id, end_session=end_session, overshot_nodes=overshot_nodes,
+            request_id, overshot_nodes=overshot_nodes,
+            session_idle_seq=session_idle_seq,
         )
 
     def remove_session(self, session_id: str) -> None:
