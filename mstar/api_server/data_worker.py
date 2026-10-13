@@ -110,13 +110,13 @@ def _preprocess_loop(**kwargs):
 
 
 def _kv_page_sizes(model: Model, model_config: dict) -> dict[str, int]:
-    """Page size per KV resource, after this deployment's YAML has been applied."""
+    """Page size per KV resource whose prefix cache is on, after this deployment's YAML has been applied."""
     specs = model.get_node_resources()
     apply_yaml_overrides(specs, model_config)
     return {
         spec.resource_key: spec.config.page_size
         for spec in specs
-        if isinstance(spec, KVSpec) and isinstance(spec.config, PagedKVConfig)
+        if isinstance(spec, KVSpec) and isinstance(spec.config, PagedKVConfig) and spec.config.prefix_cache
     }
 
 
@@ -375,14 +375,12 @@ class PreprocessWorkerThread:
     ):
         # keying a stream needs the deployment's page size as well as the
         # model's declaration, so a worker built without a config keys no stream
-        self._prefix_streams = (
-            model.prefix_key_streams()
-            if model is not None and model_config else {}
-        )
+        declared = model.prefix_key_streams() if model is not None and model_config else {}
         # resolved as the worker does at load, so both split a prompt into the same pages
-        self._prefix_page_sizes = (
-            _kv_page_sizes(model, model_config) if self._prefix_streams else {}
-        )
+        self._prefix_page_sizes = _kv_page_sizes(model, model_config) if declared else {}
+        self._prefix_streams = {
+            key: by_label for key, by_label in declared.items() if key in self._prefix_page_sizes
+        }
         self.in_queue = in_queue
         self.result_tensor_queue = result_tensor_queue
         self.cleanup_request_queue = cleanup_request_queue
@@ -515,9 +513,10 @@ class PreprocessWorkerThread:
             layouts = model_kwargs.pop("prefix_layout", {})
             # after the update: the chain keys the tensors the request will
             # actually be prefilled with
-            model_kwargs.update(self._prefix_keys(
-                tensors, layouts, input.file_paths, file_states,
-            ))
+            if model_kwargs.get("prefix_cache") is not False:
+                model_kwargs.update(self._prefix_keys(
+                    tensors, layouts, input.file_paths, file_states,
+                ))
         elif input.text is not None:
             # Fallback: encode as UTF-8 bytes -> uint8 tensor
             byte_data = input.text.encode("utf-8")
