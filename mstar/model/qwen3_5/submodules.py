@@ -680,7 +680,15 @@ class VisionEncoderSubmodule(NodeSubmodule):
 
     def _fits_capture(self, inputs: list[NodeInputs]) -> bool:
         """Whether the batch's segments fit a replay's attention plan: the
-        resource's per-request ceiling, read from it so a YAML override holds."""
+        resource's per-request ceiling, read from it so a YAML override holds.
+
+        TODO: capture more than 64 segments, so long low-res videos replay
+        too. The ceiling is sized for images (16384 patches / 256-patch
+        floor), and raising it pads every replay's plan to it. Sizing each
+        bucket's plan by its own token count over the smallest segment (one
+        2x2 merge block) would hold any prompt that fits, at small buckets'
+        cost unchanged; that is a ragged-resource change.
+        """
         per_request = self.node_resources[VISION_ATTN].max_segments_per_request
         segments = sum(len(inp.tensor_inputs["seq_lengths"]) for inp in inputs)
         return segments <= per_request * len(inputs)
