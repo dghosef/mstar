@@ -414,8 +414,8 @@ def _image(params=("default",), modality="image") -> Span:
     return Span("digest", "prefill_image", 30, 1, (modality, 0), params)
 
 
-def _laid_out_keys(tmp_path, content: bytes, image: Span, rewrites: bytes | None = None) -> list[bytes]:
-    """Preprocess one request with a file holding ``content`` and return the keys the conductor was sent."""
+def _laid_out_kwargs(tmp_path, content: bytes, image: Span, rewrites: bytes | None = None) -> dict:
+    """Preprocess one request with a file holding ``content`` and return the kwargs the conductor was sent."""
     path = tmp_path / "file0"
     path.write_bytes(content)
     modality = image.source[0]
@@ -424,7 +424,7 @@ def _laid_out_keys(tmp_path, content: bytes, image: Span, rewrites: bytes | None
         request_id="r0", text="hello", file_paths={modality: [str(path)]},
         input_modalities=["text", modality], output_modalities=["text"], model_kwargs={},
     ))
-    return worker.communicator.sent[-1].body.model_kwargs["prefix_keys"]["kv"]["main"]
+    return worker.communicator.sent[-1].body.model_kwargs
 
 
 _LARGE = b"\x89PNG" + bytes(range(256)) * 512
@@ -440,7 +440,10 @@ _APART = {
 
 @pytest.mark.parametrize(("one", "other"), _APART.values(), ids=_APART.keys())
 def test_images_that_write_different_kv_key_apart_from_their_first_page(tmp_path, one, other):
-    keys = [_laid_out_keys(tmp_path, content, image) for content, image in (one, other)]
+    keys = [
+        _laid_out_kwargs(tmp_path, content, image)["prefix_keys"]["kv"]["main"]
+        for content, image in (one, other)
+    ]
 
     differs = [page for page, (a, b) in enumerate(zip(*keys, strict=True)) if a != b]
     assert differs[:1] == [len(PROMPT) // PAGE_SIZE], (
@@ -449,6 +452,10 @@ def test_images_that_write_different_kv_key_apart_from_their_first_page(tmp_path
     )
 
 
-def test_a_file_rewritten_while_it_was_loaded_is_not_keyed(tmp_path):
-    with pytest.raises(AssertionError, match="changed while it was loaded"):
-        _laid_out_keys(tmp_path, b"\x89PNG one", _image(), rewrites=b"\x89PNG another")
+def test_a_file_rewritten_while_it_was_loaded_runs_its_request_uncached(tmp_path):
+    kwargs = _laid_out_kwargs(tmp_path, b"\x89PNG one", _image(), rewrites=b"\x89PNG another")
+
+    assert kwargs.get("prefix_cache") is False and "prefix_keys" not in kwargs, (
+        "a file that changed after it was decoded was keyed by bytes nobody decoded, "
+        "or its request was sent on without turning the cache off"
+    )

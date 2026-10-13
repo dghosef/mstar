@@ -59,6 +59,10 @@ def _file_state(path: str) -> tuple[int, int, int]:
     return stat.st_ino, stat.st_size, stat.st_mtime_ns
 
 
+class _FileChangedError(Exception):
+    """A file was rewritten between its load and its hash."""
+
+
 def _video_frame_metadata(
     tensor: torch.Tensor,
     *,
@@ -580,10 +584,11 @@ class PreprocessWorkerThread:
             return {}
         for resource_key, by_label in layouts.items():
             for label in by_label:
-                assert label in self._prefix_streams.get(resource_key, {}), (
-                    f"{type(self.model).__name__} returned a prefix_layout for "
-                    f"{resource_key!r}/{label!r}, which it does not declare"
-                )
+                if label not in self._prefix_streams.get(resource_key, {}):
+                    raise ValueError(
+                        f"{type(self.model).__name__} returned a prefix_layout for "
+                        f"{resource_key!r}/{label!r}, which it does not declare"
+                    )
         keys: dict[str, dict[str, list[bytes]]] = {}
         tails: dict[str, dict[str, list[int]]] = {}
         layout_rows: dict[str, dict[str, list[list]]] = {}
@@ -600,17 +605,23 @@ class PreprocessWorkerThread:
                         "ids", stream.walk, ids[0].numel(), ids[0].numel(),
                         stream.tensor,
                     )]
-                else:
-                    assert stream.layout_walks, (
+                elif not stream.layout_walks:
+                    raise ValueError(
                         f"{type(self.model).__name__} returned a prefix_layout "
                         f"for {resource_key!r}/{label!r}, which declares no "
                         "layout_walks"
                     )
-                digests = [
-                    self._digest(span, file_paths, file_states)
-                    if span.kind == "digest" else None
-                    for span in layout
-                ]
+                try:
+                    digests = [
+                        self._digest(span, file_paths, file_states)
+                        if span.kind == "digest" else None
+                        for span in layout
+                    ]
+                except _FileChangedError as changed:
+                    logger.warning(
+                        "%s changed while it was loaded, so its request runs with the prefix cache off", changed,
+                    )
+                    return {"prefix_cache": False}
                 pages, items = self._page_layout(
                     stream, layout, digests, tensors, page_size,
                 )
@@ -650,36 +661,37 @@ class PreprocessWorkerThread:
         pages: list[list[int]] = [[] for _ in range(-(-total // page_size))]
         at = 0
         for span in layout:
-            assert span.kind in ("ids", "digest"), f"a span of kind {span.kind!r}"
-            assert span.walk in walks, (
-                f"a {span.kind} span names walk {span.walk!r}, which the "
-                f"stream does not declare; it declares {sorted(walks)}"
-            )
-            assert isinstance(span.length, int) and isinstance(span.advance, int), (
-                f"a {span.kind} span's length and advance are "
-                f"{type(span.length).__name__} and {type(span.advance).__name__}"
-            )
+            if span.kind not in ("ids", "digest"):
+                raise ValueError(f"a span of kind {span.kind!r}")
+            if span.walk not in walks:
+                raise ValueError(
+                    f"a {span.kind} span names walk {span.walk!r}, which the "
+                    f"stream does not declare; it declares {sorted(walks)}"
+                )
+            if not (isinstance(span.length, int) and isinstance(span.advance, int)):
+                raise ValueError(
+                    f"a {span.kind} span's length and advance are "
+                    f"{type(span.length).__name__} and {type(span.advance).__name__}"
+                )
             touched = range(at // page_size, -(-(at + span.length) // page_size))
             if span.kind == "ids":
                 entry = entries.get(span.source, 0)
                 entries[span.source] = entry + 1
-                assert entry < len(tensors.get(span.source, ())), (
-                    f"ids span {entry} of {span.source!r} has no entry to key"
-                )
+                if entry >= len(tensors.get(span.source, ())):
+                    raise ValueError(f"ids span {entry} of {span.source!r} has no entry to key")
                 ids = tensors[span.source][entry].flatten().tolist()
-                assert len(ids) == span.length == span.advance, (
-                    f"an ids span of length {span.length} and advance "
-                    f"{span.advance} over {len(ids)} ids of {span.source!r}; "
-                    "an ids span fills one slot and one position per id"
-                )
+                if not len(ids) == span.length == span.advance:
+                    raise ValueError(
+                        f"an ids span of length {span.length} and advance "
+                        f"{span.advance} over {len(ids)} ids of {span.source!r}; "
+                        "an ids span fills one slot and one position per id"
+                    )
                 for page in touched:
                     first = max(at, page * page_size)
                     last = min(at + span.length, (page + 1) * page_size)
                     pages[page].extend(ids[first - at:last - at])
-            else:
-                assert span.length > 0, (
-                    "a zero-length digest span has no slot, so no page to fold into"
-                )
+            elif span.length <= 0:
+                raise ValueError("a zero-length digest span has no slot, so no page to fold into")
             at += span.length
         return pages, page_items(zip((span.length for span in layout), digests, strict=True), page_size)
 
@@ -692,21 +704,18 @@ class PreprocessWorkerThread:
         The digest is never cut short or turned into an id. Either would let two
         images share a key, and one request would be served another's KV.
         """
-        assert type(span.params) is tuple and all(
+        if type(span.params) is not tuple or not all(
             type(param) in (type(None), bool, int, float, str, bytes)
             for param in span.params
-        ), f"digest params {span.params!r} are not a tuple of plain values, whose repr is exact"
+        ):
+            raise ValueError(f"digest params {span.params!r} are not a tuple of plain values, whose repr is exact")
         modality, index = span.source
         paths = (file_paths or {}).get(modality, ())
-        assert 0 <= index < len(paths), (
-            f"a digest span names {modality} {index}, but the request sent "
-            f"{len(paths)}"
-        )
+        if not 0 <= index < len(paths):
+            raise ValueError(f"a digest span names {modality} {index}, but the request sent {len(paths)}")
         raw = _sha256(paths[index])
-        assert _file_state(paths[index]) == file_states[modality][index], (
-            f"{paths[index]} changed while it was loaded, so no key can name "
-            "the bytes its tensors came from"
-        )
+        if _file_state(paths[index]) != file_states[modality][index]:
+            raise _FileChangedError(paths[index])
         return fingerprint(
             raw, modality, self.model.preprocess_fingerprint(), span.advance,
             # Use repr, not str. True and "True" can preprocess differently
