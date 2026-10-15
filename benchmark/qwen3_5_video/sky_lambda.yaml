@@ -1,0 +1,96 @@
+# Qwen3.5-family video (Qwen/Qwen3.8-27B, TP4): correctness gate, then
+# mstar vs vLLM vs SGLang, per the benchmarking skill (mstar#370). One Lambda
+# gpu_4x_h100_sxm5 VM; every engine runs TP4 on all four GPUs, one at a time.
+#
+#   git diff $(git merge-base origin/main HEAD) -- mstar/ > benchmark/qwen3_5_video/branch.patch
+#   sky launch -c qvid benchmark/qwen3_5_video/sky_lambda.yaml -y -d
+#
+# Results: ~/results/video on the node (outside the synced workdir).
+name: qwen3-5-video-bench
+
+resources:
+  infra: lambda
+  accelerators: H100:4      # gpu_4x_h100_sxm5, the GPU of the Qwen3.8 runs
+  autostop:
+    idle_minutes: 30
+    down: true    # Lambda can't stop, only terminate: results are copied off as the run goes
+
+workdir: .        # this worktree (branch qwen3_5-video, PR #427), harness included
+
+envs:
+  VLLM_SPEC: vllm==0.31.0
+  SGLANG_SPEC: sglang[all]==0.5.21
+  BENCH_HOME: /home/ubuntu/video_bench_envs
+  DATA: /home/ubuntu/video_bench_data
+
+setup: |
+  set -euo pipefail
+  command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+  export PATH="$HOME/.local/bin:$PATH"
+  # ffmpeg: torchcodec (mstar's and transformers' video decoder) loads FFmpeg's
+  # shared libraries, and prepare_videos.py cuts the short clips with it.
+  sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libzmq3-dev pkg-config ffmpeg
+  # CUDA 13 forward compatibility for the 570 (CUDA 12.8) driver: the engines ship CUDA 13 builds.
+  if ! ls -d /usr/local/cuda-13.*/compat >/dev/null 2>&1; then
+    wget -q -O /tmp/cuda-keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+    sudo dpkg -i /tmp/cuda-keyring.deb && sudo apt-get update -qq
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $(apt-cache search --names-only '^cuda-compat-13' | awk '{print $1}' | sort -V | tail -1)
+  fi
+  # SGLang's DeepGEMM JIT needs nvcc >= 12.9; the run points SGLang alone at 13.2.
+  [ -x /usr/local/cuda-13.2/bin/nvcc ] || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq cuda-toolkit-13-2
+  [ -x .venv/bin/python ] || uv venv --python 3.12 --managed-python --seed
+  uv pip install --python .venv/bin/python --torch-backend=auto -e ".[all]" pytest
+  uv pip install --python .venv/bin/python --torch-backend=cu132 --reinstall-package torch --reinstall-package torchvision "torch==2.12.1" "torchvision==0.27.1"
+  uv pip install --python .venv/bin/python --torch-backend=cpu --reinstall-package torchaudio --no-deps "torchaudio==2.11.0"
+  # `[all]` resolves transformers 4.57.3 (qwen-tts pins it): no Qwen3.5 classes for the
+  # oracle, and the pre-5.10 video layout. The reference is >= 5.19.
+  uv pip install --python .venv/bin/python "transformers>=5.19"
+  if ! .venv/bin/python -c "import mstar_rust" 2>/dev/null; then
+    command -v cargo >/dev/null || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+    . "$HOME/.cargo/env"
+    uv pip install --python .venv/bin/python maturin
+    VIRTUAL_ENV="$PWD/.venv" .venv/bin/maturin develop --release -m rust/Cargo.toml
+  fi
+  .venv/bin/python -c "import mstar_rust, torchcodec.decoders, transformers; print('mstar env OK, transformers', transformers.__version__)"
+  for e in vllm sglang; do
+    v="$BENCH_HOME/$e"; [ -x "$v/bin/python" ] || uv venv --python 3.12 --managed-python --seed "$v"
+    spec=$([ "$e" = vllm ] && echo "$VLLM_SPEC" || echo "$SGLANG_SPEC")
+    uv pip install --python "$v/bin/python" --torch-backend=auto "$spec"
+    if [ "$e" = vllm ]; then
+      uv pip install --python "$v/bin/python" --torch-backend=cu132 --reinstall-package vllm --reinstall-package torch "$spec"
+      uv pip install --python "$v/bin/python" --torch-backend=cu132 --reinstall-package torchvision "torchvision==0.28.0"
+      uv pip install --python "$v/bin/python" --torch-backend=cpu --reinstall-package torchaudio --no-deps "torchaudio==2.11.0"
+    else
+      uv pip install --python "$v/bin/python" --torch-backend=cu132 --reinstall-package torch --reinstall-package torchvision "torch==2.13.0" "torchvision==0.28.0"
+      uv pip install --python "$v/bin/python" --torch-backend=cpu --reinstall-package torchaudio --no-deps "torchaudio==2.11.0"
+    fi
+  done
+  # SGLang's multimodal-cache size knobs, if this version has any; bench.py sets them to 0
+  grep -rhoE "SGLANG_[A-Z_]*(VLM|MM)[A-Z_]*CACHE[A-Z_]*" "$BENCH_HOME"/sglang/lib/python3.12/site-packages/sglang \
+    2>/dev/null | sort -u > "$BENCH_HOME/sglang_cache_envs.txt" || true
+  cat "$BENCH_HOME/sglang_cache_envs.txt"
+  # Everything the offline run reads: weights, the mstar config's warmup images (also the
+  # parity image), the image A/B's dataset, and the two video workloads.
+  .venv/bin/python - <<'EOF'
+  from huggingface_hub import hf_hub_download, snapshot_download
+  snapshot_download("Qwen/Qwen3.8-27B")
+  for name in ("assets/example_action_fd_umi_first_frame.png", "assets/edge_action_id_av_0_output.png"):
+      hf_hub_download("nvidia/Cosmos3-Edge", name)
+  from benchmark.base import RequestType
+  from benchmark.dataset import Food101Dataset
+  Food101Dataset(num_requests=200, req_type=RequestType.I2T)
+  EOF
+  .venv/bin/python benchmark/qwen3_5_video/bench.py all --out "$HOME/results/video" --stages data --data "$DATA" --bench-home "$BENCH_HOME"
+  chmod +x benchmark/qwen3_5_video/server.sh
+
+run: |
+  set -euo pipefail
+  export PATH="$HOME/.local/bin:$PATH"
+  nvidia-smi --query-gpu=name,driver_version --format=csv
+  nvidia-smi topo -m | head -6 || true
+  export LD_LIBRARY_PATH=$(ls -d /usr/local/cuda-13.*/compat | sort -V | tail -1)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+  # setup downloaded everything; offline keeps a Hub outage from failing a server start
+  export HF_HUB_OFFLINE=1
+  .venv/bin/python benchmark/qwen3_5_video/bench.py all --out "$HOME/results/video" \
+    --stages correctness,sweep,kv,ab,profile,intake --data "$DATA" --bench-home "$BENCH_HOME" \
+    --engine-env sglang:CUDA_HOME=/usr/local/cuda-13.2
