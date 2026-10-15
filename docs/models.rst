@@ -69,7 +69,7 @@ Registry keys live in ``mstar/model/registry.py`` (``MODEL_REGISTRY`` / ``HF_MOD
        attention interleaved with full attention, plus a ViT tower.
    * - ``qwen3_8_27b``
      - ``Qwen/Qwen3.8-27B``
-     - Qwen3.8-27B on the Qwen3.5 code above (same architecture); TP4 only.
+     - Qwen3.8-27B on the Qwen3.5 code above (same architecture); ships a TP4 config.
    * - ``omnivoice``
      - ``k2-fsa/OmniVoice``
      - Massively multilingual zero-shot TTS: masked-diffusion canvas over a Qwen3-0.6B
@@ -178,10 +178,12 @@ code, served from ``configs/qwen3_8_27b_tp4.yaml`` (TP4)::
     mstar serve qwen3_8_27b --gpus 0,1,2,3
 
 Its ``output_gate_type: swish`` names the gated DeltaNet norm's activation,
-which is the SiLU every Qwen3.5 checkpoint already uses (vLLM reads it the same
-way). Video is still refused and the MTP head is skipped. The chat template's
-new ``reasoning_effort`` and ``preserve_thinking`` are left at the template's
-defaults (``xhigh`` and preserved).
+which is the SiLU every Qwen3.5 checkpoint already uses. transformers ignores
+the key and hard-codes SiLU, and vLLM reads it the same way. Video is still
+refused and the MTP head is skipped. The chat template's new
+``reasoning_effort`` and ``preserve_thinking`` are not forwarded: every
+request gets the template's defaults (``xhigh`` and preserved), whatever the
+client sends.
 
 Kokoro notes
 ------------
