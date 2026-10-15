@@ -171,7 +171,9 @@ default, which lowers the token count of short clips. Notes:
   eagerly.
 - Size the KV pool for video. ``configs/qwen3_5_*.yaml`` keep the default
   2048 pages of 128 tokens (262k tokens per deployment); 32 concurrent long
-  videos need about twice that, and requests then wait for pages. Raise
+  videos need about twice that. Measured on Qwen3.8-27B at TP4: 32 concurrent
+  long videos on the default pool gave 67 tok/s with most requests timing out,
+  and 1,585 tok/s with none failing on 8192 pages. Raise
   ``resources: kv_cache: max_num_pages`` to fit the concurrency you serve.
 - Decoding happens in the API server process, before the request is queued.
 
