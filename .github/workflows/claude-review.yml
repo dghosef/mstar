@@ -138,6 +138,11 @@ jobs:
           ref: ${{ steps.pr.outputs.head_sha }}
           path: pr-head
           persist-credentials: false
+          # actions/checkout refuses a fork's code under pull_request_target
+          # unless told otherwise (a July 2026 change, backported to v4). Safe
+          # here because of rule 1 above: pr-head/ is only read, never built or
+          # executed, and holds no credentials.
+          allow-unsafe-pr-checkout: true
 
       # The body and existing comments are untrusted; the prompt says so.
       - name: Collect the diff, description and existing comments
