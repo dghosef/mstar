@@ -669,4 +669,4 @@ def test_adapter_maps_video_url_to_a_video_attachment(tmp_path):
     (path,) = args.file_paths["video"]
     assert Path(path).suffix == ".mp4" and Path(path).read_bytes().startswith(b"\x00\x00\x00\x18")
     assert [p.modality for p in args.prompt_parts] == ["text", "video", "text"]
-    assert args.prompt_parts[1] == PromptPart(modality="video", index=0)
+    assert args.prompt_parts[1] == PromptPart(modality="video", index=0, role="user")
