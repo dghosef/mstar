@@ -106,7 +106,6 @@ jobs:
           gh api "repos/$REPO/pulls/$PR" > pr.json
           {
             echo "number=$PR"
-            echo "base_sha=$(jq -r .base.sha pr.json)"
             echo "head_sha=$(jq -r .head.sha pr.json)"
             echo "head_repo=$(jq -r '.head.repo.full_name // empty' pr.json)"
             if [ "$THOROUGH" = "true" ]; then echo "mode=thorough"; else echo "mode=light"; fi
@@ -118,12 +117,15 @@ jobs:
             exit 1
           fi
 
-      # Trusted: the base branch. AGENTS.md and the review prompt come from here.
+      # Trusted: the tip of the default branch (no `ref` means the event's
+      # GITHUB_SHA, which for both triggers is the latest commit on main).
+      # AGENTS.md and the review prompt come from here, so a PR opened before a
+      # rules change is still reviewed under the current rules. Not the PR's
+      # base.sha: that is where main was when the PR was opened, and can be stale.
       - name: Check out the base branch
         if: steps.pre.outputs.run == 'true'
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.pr.outputs.base_sha }}
           persist-credentials: false
 
       # Untrusted: the PR's tree, for reading changed files in full context.
