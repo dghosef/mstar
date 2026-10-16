@@ -12,6 +12,10 @@ An advisory LLM reviewer runs on contributors' non-draft PRs. It posts each find
 
 Pushes don't trigger a review on their own. The `skip-ai-review` label turns off the automatic run; an explicit `/review` still runs.
 
+A stacked PR (one whose base is another feature branch) gets the automatic review only if its base branch has a current copy of the workflow, because `pull_request_target` runs the base branch's workflow file. Comment `/review` on stacked PRs; that always runs `main`'s. Either way the rules are read from `main`.
+
+The bot reacts 👀 to a `/review` comment when it picks it up. A review that doesn't complete (an API error, running out of turns, a fork that no longer exists) leaves a PR comment linking the log, never a red check.
+
 | File | Role |
 | --- | --- |
 | [`../../AGENTS.md`](../../AGENTS.md) | **The substance.** Numbered invariants the reviewer checks and cites. Also read by contributors' own coding agents. |
@@ -67,4 +71,4 @@ Current levers, roughly in order of effect: only contributors' PRs are reviewed 
 
 ## Threat model
 
-`pull_request_target` and `issue_comment` run with secrets on PRs from forks, so the PR's contents and comments are untrusted input. A comment only selects the mode, by exact match in the job's `if`; its text never reaches a shell or the prompt. The workflow never executes PR code, checks the PR out only into `pr-head/`, reads its rules from the base tree, disables mutation and network tools, and holds write permission on pull requests alone. The residual risk is prompt injection producing a misleading comment — annoying, not dangerous. Preserve all four properties listed in the workflow header when editing it.
+`pull_request_target` and `issue_comment` run with secrets on PRs from forks, so the PR's contents and comments are untrusted input. A comment only selects the mode, by exact match in the job's `if`; its text never reaches a shell or the prompt. The workflow never executes PR code, checks the PR out only into `pr-head/`, reads its rules from the base tree, gives the model no shell and no mutation or network tools, redacts credential-shaped strings from everything it posts, and holds write permission on pull requests alone. The residual risk is prompt injection producing a misleading comment — annoying, not dangerous. Preserve the rules listed in the workflow header when editing it.

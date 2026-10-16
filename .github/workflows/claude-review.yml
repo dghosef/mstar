@@ -5,8 +5,10 @@ name: Claude Review
 #
 # Why pull_request_target: a plain `pull_request` trigger withholds secrets from
 # fork PRs, so the reviewer would silently never run for outside contributors --
-# exactly the people it is for. pull_request_target runs with secrets, and always
-# uses the workflow file and the base tree from `main`, never the PR's version.
+# exactly the people it is for. pull_request_target runs with secrets, and uses
+# the workflow file from the PR's *base branch*, never the PR's version. For a PR
+# into main that is main's; for a stacked PR it is the base branch's copy, which
+# may be old or missing (then use /review, which always runs main's).
 #
 # The safety rules that come with that, and that must hold for any edit here:
 #
@@ -15,11 +17,15 @@ name: Claude Review
 #      only. There is no setup-python, no pip, no cargo, no make.
 #   2. persist-credentials: false on both checkouts, so no token is written into
 #      a working tree the PR controls.
-#   3. Rules are read from the base checkout at the root. The prompt tells the
+#   3. Rules are read from main's checkout at the root. The prompt tells the
 #      model to ignore any AGENTS.md or prompt found under pr-head/, so a PR
 #      cannot rewrite the rules it is judged by.
-#   4. Write permission is pull-requests only, and mutation tools are disabled,
-#      so the worst case for a prompt injection is a bad comment.
+#   4. Write permission is pull-requests only, and the model has no shell and no
+#      mutation tools: it posts inline comments through the action's tool (which
+#      redacts secrets) and returns the summary as data, which a workflow step
+#      redacts and posts. The worst case for a prompt injection is a bad comment.
+#   5. Third-party actions are pinned to a commit SHA, since they run with the
+#      API key. Bump them deliberately.
 
 # Who can trigger it: GitHub author_association OWNER, MEMBER, COLLABORATOR or
 # CONTRIBUTOR, i.e. the team plus anyone who has had a PR merged here. First-time
@@ -34,8 +40,12 @@ name: Claude Review
 # Pushes don't trigger a review on their own; comment /review for that.
 #
 # issue_comment also runs with secrets and the default branch's workflow file,
-# so the same four rules hold. The comment body is only matched by the `if`
-# below, never passed to a shell.
+# so the same rules hold. The comment body is only matched by the `if` below,
+# never passed to a shell.
+#
+# Failures never turn the PR's check red: every step after the preflight is
+# continue-on-error and gated on the one before it, and if the review didn't
+# complete, the last step says so in a PR comment with a link to the log.
 
 on:
   pull_request_target:
@@ -71,10 +81,14 @@ jobs:
       group: claude-review-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number || github.event.issue.number }}
     steps:
       # Secrets can't be tested in a job-level `if`, so short-circuit here
       # instead. Lets this land before ANTHROPIC_API_KEY exists without
@@ -91,48 +105,60 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # The PR's number, refs and title, the same way for both triggers (an
+      # Tell the commenter their /review was picked up; a comment-triggered run
+      # is otherwise invisible from the PR.
+      - name: Acknowledge the /review comment
+        if: steps.pre.outputs.run == 'true' && github.event_name == 'issue_comment'
+        continue-on-error: true
+        env:
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: gh api -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" -f content=eyes > /dev/null
+
+      # The PR's refs and title, the same way for both triggers (an
       # issue_comment event doesn't carry the PR's head or base). The title is
       # untrusted; it only ever reaches the prompt.
       - name: Resolve the PR
         if: steps.pre.outputs.run == 'true'
         id: pr
+        continue-on-error: true
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
           THOROUGH: ${{ (github.event.action == 'labeled' || github.event.comment.body == '/review thorough') && 'true' || 'false' }}
         run: |
           gh api "repos/$REPO/pulls/$PR" > pr.json
+          if [ -z "$(jq -r '.head.repo.full_name // empty' pr.json)" ]; then
+            echo "::warning::The PR's head repository no longer exists; can't check it out."
+            echo "why=its head repository (the fork) no longer exists" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
           {
-            echo "number=$PR"
             echo "head_sha=$(jq -r .head.sha pr.json)"
-            echo "head_repo=$(jq -r '.head.repo.full_name // empty' pr.json)"
+            echo "head_repo=$(jq -r .head.repo.full_name pr.json)"
             if [ "$THOROUGH" = "true" ]; then echo "mode=thorough"; else echo "mode=light"; fi
             delim="TITLE_$(openssl rand -hex 8)"
             echo "title<<$delim"; jq -r .title pr.json; echo "$delim"
           } >> "$GITHUB_OUTPUT"
-          if [ -z "$(jq -r '.head.repo.full_name // empty' pr.json)" ]; then
-            echo "::error::The PR's head repository no longer exists; can't check it out."
-            exit 1
-          fi
 
-      # Trusted: the tip of the default branch (no `ref` means the event's
-      # GITHUB_SHA, which for both triggers is the latest commit on main).
-      # AGENTS.md and the review prompt come from here, so a PR opened before a
-      # rules change is still reviewed under the current rules. Not the PR's
-      # base.sha: that is where main was when the PR was opened, and can be stale.
-      - name: Check out the base branch
-        if: steps.pre.outputs.run == 'true'
-        uses: actions/checkout@v4
+      # Trusted: main's tip, pinned by name. Without a `ref`, pull_request_target
+      # would check out the PR's base branch, which for a stacked PR is another
+      # feature branch, and the PR's base.sha is where main was when the PR was
+      # opened. Either way the PR would be judged by stale rules.
+      # AGENTS.md and the review prompt come from here.
+      - name: Check out main
+        if: steps.pr.outcome == 'success'
+        id: base
+        continue-on-error: true
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
       # Untrusted: the PR's tree, for reading changed files in full context.
       # Never executed.
       - name: Check out the PR into pr-head/
-        if: steps.pre.outputs.run == 'true'
-        uses: actions/checkout@v4
+        if: steps.base.outcome == 'success'
+        id: head
+        continue-on-error: true
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: ${{ steps.pr.outputs.head_repo }}
           ref: ${{ steps.pr.outputs.head_sha }}
@@ -144,47 +170,115 @@ jobs:
           # executed, and holds no credentials.
           allow-unsafe-pr-checkout: true
 
-      # The body and existing comments are untrusted; the prompt says so.
+      # The body and all comments are untrusted; the prompt says so.
       - name: Collect the diff, description and existing comments
-        if: steps.pre.outputs.run == 'true'
+        if: steps.head.outcome == 'success'
         id: diff
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ steps.pr.outputs.number }}
-          REPO: ${{ github.repository }}
+        continue-on-error: true
         run: |
-          gh pr diff "$PR" --repo "$REPO" > pr.diff
+          # GitHub refuses `gh pr diff` past 20,000 lines or 300 files. Fall back
+          # to the files API (up to 3,000 files; it omits the patch of a file
+          # that is too large on its own).
+          if ! gh pr diff "$PR" --repo "$REPO" > pr.diff 2> diff.err; then
+            echo "::warning::gh pr diff failed ($(head -c 300 diff.err)); building pr.diff from the files API."
+            gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[] |
+              (.previous_filename // .filename) as $old |
+              "diff --git a/\($old) b/\(.filename)\n--- a/\($old)\n+++ b/\(.filename)\n\(.patch // "(no patch from GitHub: binary, or too large to show)")"' > pr.diff
+          fi
           gh pr view "$PR" --repo "$REPO" --json body --jq .body > pr-body.md
+
+          # Inline review comments, each marked with its thread's resolved and
+          # outdated state (only GraphQL has those).
           gh api --paginate "repos/$REPO/pulls/$PR/comments" \
-            --jq '[.[] | {id, user: .user.login, path, line, side, in_reply_to_id, body}]' > pr-comments.json
+            --jq '.[] | {id, user: .user.login, path, line, side, in_reply_to_id, body}' | jq -s . > review-comments.json
+          gh api graphql --paginate -F owner="${REPO%/*}" -F name="${REPO#*/}" -F pr="$PR" -f query='
+            query($owner: String!, $name: String!, $pr: Int!, $endCursor: String) {
+              repository(owner: $owner, name: $name) { pullRequest(number: $pr) {
+                reviewThreads(first: 100, after: $endCursor) {
+                  pageInfo { hasNextPage endCursor }
+                  nodes { isResolved isOutdated comments(first: 1) { nodes { databaseId } } }
+                } } } }' \
+            --jq '.data.repository.pullRequest.reviewThreads.nodes[] |
+              {id: .comments.nodes[0].databaseId, resolved: .isResolved, outdated: .isOutdated}' | jq -s . > threads.json
+          jq --slurpfile t threads.json '
+            ($t[0] | map({key: (.id | tostring), value: {resolved, outdated}}) | from_entries) as $m
+            | map(. + ($m[(.in_reply_to_id // .id) | tostring] // {}))' review-comments.json > pr-comments.json
+
+          # The conversation tab: replies to the summary, and the author's answers.
+          gh api --paginate "repos/$REPO/issues/$PR/comments" \
+            --jq '.[] | {id, user: .user.login, created_at, body}' | jq -s . > pr-conversation.json
+
           echo "lines=$(wc -l < pr.diff)" >> "$GITHUB_OUTPUT"
 
       - name: Review
-        if: steps.pre.outputs.run == 'true'
-        # Advisory: an API or action failure (bad key, outage, timeout) shows as
-        # a warning in the log, never as a red check on the PR.
+        if: steps.diff.outcome == 'success'
+        id: review
+        # Advisory: an API or action failure (bad key, outage, out of turns,
+        # timeout) never turns the PR's check red; the last step reports it.
         continue-on-error: true
-        uses: anthropics/claude-code-action@v1
+        timeout-minutes: 25
+        uses: anthropics/claude-code-action@374f254f5efaf968abfe15d399fd90972e8138b9 # v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # The job's own token (pull-requests: write, above). Without it the
           # action tries to mint a Claude GitHub App token over OIDC, which needs
           # `id-token: write` and the app installed, and fails before reviewing.
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # The action refuses an issue_comment from anyone without write access
+          # to the repo, which would make /review a silent no-op for outside
+          # contributors. The job's `if` already limits who can trigger a run,
+          # and the model's only write path is comments (rule 4).
+          allowed_non_write_users: "*"
           prompt: |
             Read .github/review/review-prompt.md from the repository root and follow it
             exactly. It defines your trust boundary, your method, your reporting bar and
             your output format.
 
             Mode: ${{ steps.pr.outputs.mode }}
-            PR #${{ steps.pr.outputs.number }}: ${{ steps.pr.outputs.title }}
+            PR #${{ env.PR }}: ${{ steps.pr.outputs.title }}
+            Head commit (pass as commit_id on every inline comment): ${{ steps.pr.outputs.head_sha }}
             pr.diff is ${{ steps.diff.outputs.lines }} lines.
-          # Read-only. Blocking the mutation and network tools caps a prompt
-          # injection at a bad comment. The only write tools allowed are the
-          # inline-comment tool (which the action loads only when it is listed
-          # here) and `gh pr comment` for the summary.
+          # No shell, no edits, no network. The only write tool is the inline-
+          # comment tool, which the action loads only when it is listed here and
+          # which redacts secrets. The summary comes back as structured output.
           claude_args: |
             --model claude-opus-5-5
             --max-turns 40
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*)"
-            --disallowedTools Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch
+            --allowedTools "mcp__github_inline_comment__create_inline_comment"
+            --disallowedTools Bash,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch
+            --json-schema '{"type":"object","properties":{"summary":{"type":"string","description":"The summary comment, in the format review-prompt.md gives."}},"required":["summary"]}'
+
+      # The summary is model output from untrusted input. It reaches the shell
+      # only through an env var, and credential-shaped strings are redacted
+      # before it's posted. --edit-last updates the bot's previous summary.
+      - name: Post the summary
+        if: steps.review.outcome == 'success'
+        id: post
+        continue-on-error: true
+        env:
+          SUMMARY: ${{ fromJSON(steps.review.outputs.structured_output).summary }}
+        run: |
+          printf '%s\n' "$SUMMARY" | sed -E \
+            -e 's/sk-ant-[A-Za-z0-9_-]+/[REDACTED]/g' \
+            -e 's/(gh[opsur]_|github_pat_)[A-Za-z0-9_]{20,}/[REDACTED]/g' \
+            -e 's/AKIA[0-9A-Z]{16}/[REDACTED]/g' \
+            -e 's/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+/[REDACTED]/g' > summary.md
+          [ -s summary.md ] || { echo "::warning::The review returned an empty summary."; exit 1; }
+          gh pr comment "$PR" --repo "$REPO" --edit-last --body-file summary.md 2> /dev/null \
+            || gh pr comment "$PR" --repo "$REPO" --body-file summary.md
+
+      # Anything above failed: say so on the PR rather than leaving silence.
+      - name: Report a review that didn't complete
+        if: >-
+          always() && steps.pre.outputs.run == 'true' &&
+          (steps.pr.outcome == 'failure' || steps.base.outcome == 'failure' ||
+           steps.head.outcome == 'failure' || steps.diff.outcome == 'failure' ||
+           steps.review.outcome == 'failure' || steps.post.outcome == 'failure')
+        continue-on-error: true
+        env:
+          WHY: ${{ steps.pr.outputs.why || 'a step failed' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          printf 'The automated review didn'"'"'t complete: %s. [Log](%s). Comment `/review` to retry.\n' \
+            "$WHY" "$RUN_URL" > failed.md
+          gh pr comment "$PR" --repo "$REPO" --body-file failed.md
