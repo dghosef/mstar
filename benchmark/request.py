@@ -50,8 +50,9 @@ def _latency_stats(values: list[float], higher_is_better: bool = False) -> Laten
     sorted_vals = sorted(values)
 
     def percentile(p: float) -> float:
-        idx = (p / 100) * (len(sorted_vals) - 1)
-        lo, hi = int(idx), min(int(idx) + 1, len(sorted_vals) - 1)
+        n = len(sorted_vals)
+        idx = (p / 100) * (n - 1)
+        lo, hi = int(idx), min(int(idx) + 1, n)
         return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (idx - lo)
 
     if higher_is_better:
