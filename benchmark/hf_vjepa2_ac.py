@@ -90,7 +90,7 @@ def _percentile(values: list[float], p: float) -> float:
         return 0.0
     if len(values) == 1:
         return values[0]
-    s = sorted(values)
+    s = values  # already sorted by the caller
     k = (len(s) - 1) * (p / 100.0)
     lo = int(k)
     hi = min(lo + 1, len(s) - 1)
