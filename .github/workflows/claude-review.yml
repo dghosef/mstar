@@ -224,7 +224,10 @@ jobs:
       # newest unexpired artifact for this PR wins, and only from this workflow
       # on a trigger that runs the base repository's copy of it. The session's
       # mode is kept; a thorough one needs write access to continue, like
-      # `/review thorough`. Values from meta.json are checked before use.
+      # `/review thorough`. Values from meta.json are checked before use. A
+      # stopped review is resumable only while its "didn't complete" comment is
+      # still open: any later run that finishes rewrites that comment as
+      # resolved, so a session it superseded is never resumed.
       - name: Restore the stopped review
         if: steps.pr.outcome == 'success' && steps.pr.outputs.continue == 'true'
         id: prev
@@ -235,6 +238,10 @@ jobs:
         run: |
           name="claude-review-session-$PR"
           fail() { echo "why=$1" >> "$GITHUB_OUTPUT"; echo "::notice::$1"; exit 1; }
+          open_ids=$(gh api --paginate "repos/$REPO/issues/$PR/comments" --jq '.[] |
+              select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- claude-review-incomplete -->"))) | .id') \
+            || fail "the PR's comments couldn't be read; try \`/review continue\` again"
+          [ -n "$open_ids" ] || fail "there is no stopped review of this PR to continue: none stopped part-way, or a later run already finished (sessions are kept for 7 days); comment \`/review\` for a new one"
           found=""
           for run_id in $(gh api "repos/$REPO/actions/artifacts?name=$name&per_page=30" --jq '
               [.artifacts[] | select(.expired | not)] | sort_by(.created_at) | reverse | .[].workflow_run.id'); do
@@ -245,7 +252,8 @@ jobs:
             esac
           done
           [ -n "$found" ] || fail "there is no stopped review of this PR to continue (sessions are kept for 7 days); comment \`/review\` for a new one"
-          gh run download "$found" --repo "$REPO" -n "$name" -D "$RUNNER_TEMP/prev"
+          gh run download "$found" --repo "$REPO" -n "$name" -D "$RUNNER_TEMP/prev" \
+            || fail "the saved session couldn't be downloaded; try \`/review continue\` again"
           meta="$RUNNER_TEMP/prev/meta.json"
           sid=$(jq -r '.session_id // empty' "$meta")
           mode=$(jq -r '.mode // empty' "$meta")
@@ -511,6 +519,9 @@ jobs:
       # Anything above failed: say so on the PR rather than leaving silence.
       # A run the preflight skipped never gets here. Repeated failures update
       # one comment, found by its marker, so retries don't stack up comments.
+      # A refused /review continue has a marker of its own, so it never writes
+      # over a stopped review's comment (its partial results, and that it can
+      # still be resumed by someone else).
       - name: Report a review that didn't complete
         if: >-
           always() && steps.pre.outputs.run == 'true' &&
@@ -528,13 +539,15 @@ jobs:
         run: |
           if [ "$REFUSED" = "true" ]; then
             # /review continue that had nothing usable to resume; WHY says what to do.
-            printf '<!-- claude-review-incomplete -->\n`/review continue` didn'"'"'t run: %s. [Log](%s).\n' "$WHY" "$RUN_URL" > failed.md
+            marker='<!-- claude-review-continue-refused -->'
+            printf '%s\n`/review continue` didn'"'"'t run: %s. [Log](%s).\n' "$marker" "$WHY" "$RUN_URL" > failed.md
           elif [ "$CAN_CONTINUE" = "true" ]; then
             next='Comment `/review continue` to pick up where it stopped (kept for 7 days), or `/review` to start over.'
           else
             next='Comment `/review` to retry.'
           fi
           if [ "$REFUSED" != "true" ]; then
+            marker='<!-- claude-review-incomplete -->'
             printf '<!-- claude-review-incomplete -->\nThe automated review didn'"'"'t complete: %s%s. [Log](%s). %s\n' \
               "$WHY" "${DETAIL:+ ($DETAIL)}" "$RUN_URL" "$next" > failed.md
           fi
@@ -542,8 +555,8 @@ jobs:
             printf '\nWhat it had so far:\n\n' >> failed.md
             cat partial.md >> failed.md
           fi
-          id=$(gh api --paginate "repos/$REPO/issues/$PR/comments" --jq '.[] |
-            select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- claude-review-incomplete -->"))) | .id' 2> /dev/null | tail -n 1)
+          id=$(gh api --paginate "repos/$REPO/issues/$PR/comments" --jq ".[] |
+            select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" 2> /dev/null | tail -n 1)
           if [ -n "$id" ]; then
             gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@failed.md > /dev/null
           else
