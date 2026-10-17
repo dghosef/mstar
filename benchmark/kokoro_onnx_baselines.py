@@ -31,7 +31,7 @@ def _percentile(values: list[float], q: float) -> float:
 
 def _p99_ms(seconds: list[float]) -> float:
     """99th percentile latency in milliseconds."""
-    return _percentile(seconds, 99) * 1000
+    return _percentile(seconds, 0.99) * 1000
 
 
 class KokoroOnnxEngine:
