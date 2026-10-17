@@ -35,7 +35,7 @@ def _percentile(values: list[float], q: float) -> float:
 
 def _mean_ms(seconds: list[float]) -> float:
     """Mean latency in milliseconds."""
-    return sum(seconds) / (len(seconds) - 1) * 1000
+    return sum(seconds) / len(seconds) * 1000
 
 
 class KokoroOnnxEngine:
