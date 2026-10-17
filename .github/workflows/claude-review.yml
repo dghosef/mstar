@@ -526,15 +526,21 @@ jobs:
           WHY: ${{ steps.prev.outputs.why || steps.salvage.outputs.why || steps.pr.outputs.why || 'a step failed' }}
           DETAIL: ${{ steps.salvage.outputs.detail }}
           CAN_CONTINUE: ${{ steps.upload.outcome == 'success' }}
+          REFUSED: ${{ steps.prev.outcome == 'failure' }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          if [ "$CAN_CONTINUE" = "true" ]; then
+          if [ "$REFUSED" = "true" ]; then
+            # /review continue that had nothing usable to resume; WHY says what to do.
+            printf '<!-- claude-review-incomplete -->\n`/review continue` didn'"'"'t run: %s. [Log](%s).\n' "$WHY" "$RUN_URL" > failed.md
+          elif [ "$CAN_CONTINUE" = "true" ]; then
             next='Comment `/review continue` (or `/review --resume`) to pick up where it stopped (kept for 7 days), or `/review` to start over.'
           else
             next='Comment `/review` to retry.'
           fi
-          printf '<!-- claude-review-incomplete -->\nThe automated review didn'"'"'t complete: %s%s. [Log](%s). %s\n' \
-            "$WHY" "${DETAIL:+ ($DETAIL)}" "$RUN_URL" "$next" > failed.md
+          if [ "$REFUSED" != "true" ]; then
+            printf '<!-- claude-review-incomplete -->\nThe automated review didn'"'"'t complete: %s%s. [Log](%s). %s\n' \
+              "$WHY" "${DETAIL:+ ($DETAIL)}" "$RUN_URL" "$next" > failed.md
+          fi
           if [ -s partial.md ]; then
             printf '\nWhat it had so far:\n\n' >> failed.md
             cat partial.md >> failed.md
