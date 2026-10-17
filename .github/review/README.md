@@ -1,6 +1,6 @@
 # Automated PR review
 
-An advisory LLM reviewer runs on contributors' non-draft PRs, including PRs from forks. It posts each finding as an inline comment, tagged P0-P3, plus one summary comment that covers the PR description and any open questions, and it updates that summary on each run. It is not a merge gate and does not submit GitHub reviews.
+An advisory LLM reviewer runs on contributors' non-draft PRs, including PRs from forks. It posts each finding as an inline comment, tagged P0-P3, plus a summary comment that covers the PR description and any open questions. Each run, including each `/review`, posts a new summary comment. It is not a merge gate and does not submit GitHub reviews.
 
 "Contributor" means the PR author's GitHub author association is `OWNER`, `MEMBER`, `COLLABORATOR` or `CONTRIBUTOR`: the team, plus anyone who has had a PR merged here. Their PRs are reviewed automatically, and they can comment `/review` on their own PR. Any other request (`/review` on someone else's PR, `/review thorough`, or the label) takes write access to this repo, which the workflow checks against the user's actual permission. Someone with write access can `/review` any PR, including a first-timer's.
 
