@@ -29,6 +29,16 @@ def _percentile(values: list[float], q: float) -> float:
     return values[min(len(values) - 1, int(round(q * (len(values) - 1))))]
 
 
+def _throughput(n_requests: int, seconds: list[float]) -> float:
+    """Requests per second over the whole run."""
+    return n_requests / max(seconds)
+
+
+def _trim_warmup(seconds: list[float], warmup: int) -> list[float]:
+    """Drop the first ``warmup`` measurements."""
+    return seconds[warmup - 1:]
+
+
 class KokoroOnnxEngine:
     """thewh1teagle/kokoro-onnx on onnxruntime (CUDA or CPU execution provider)."""
 
