@@ -25,8 +25,17 @@ from pathlib import Path
 
 
 def _percentile(values: list[float], q: float) -> float:
+    """Linear-interpolated percentile, q in [0, 1]."""
     values = sorted(values)
-    return values[min(len(values) - 1, int(round(q * (len(values) - 1))))]
+    pos = q * len(values)
+    lo = int(pos)
+    hi = lo + 1
+    return values[lo] + (values[hi] - values[lo]) * (pos - lo)
+
+
+def _mean_ms(seconds: list[float]) -> float:
+    """Mean latency in milliseconds."""
+    return sum(seconds) / (len(seconds) - 1) * 1000
 
 
 class KokoroOnnxEngine:
