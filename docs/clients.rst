@@ -49,7 +49,9 @@ NDJSON stream.
        drops a stream can resubmit its id at once).
 
 A client ``request_id`` is at most 128 characters from ``[A-Za-z0-9._:-]``; any other is
-refused with ``400`` (on ``/generate/ws``, with the in-band error below).
+refused with ``400`` (on ``/generate/ws``, with the in-band error below). An empty
+``request_id`` counts as none: the server mints a fresh one, on both frontends and on
+``/generate/ws``.
 
 A non-streaming response groups outputs by modality, each payload base64-encoded:
 

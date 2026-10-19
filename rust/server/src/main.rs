@@ -1071,6 +1071,8 @@ async fn generate_finish(
     request_id: Option<String>,
     file_paths: BTreeMap<String, Vec<String>>,
 ) -> Response {
+    // An empty id means none, as the Python /generate's form parsing reads it.
+    let request_id = request_id.filter(|id| !id.is_empty());
     if let Err(msg) = request_id.as_deref().map_or(Ok(()), check_request_id) {
         for path in file_paths.values().flatten() {
             let _ = std::fs::remove_file(path);

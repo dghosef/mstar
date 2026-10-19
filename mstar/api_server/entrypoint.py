@@ -1494,6 +1494,9 @@ async def generate_ws(websocket: WebSocket):
         try:
             if request_id is not None and not isinstance(request_id, str):
                 raise ValueError("request_id must be a string")
+            if request_id == "":
+                # An empty form field reaches /generate as None; same here.
+                request_id = None
             check_request_id(request_id)
             out_mods = _ws_modalities(message.get("output_modalities"), "output_modalities") or ["text"]
             text = message.get("text")

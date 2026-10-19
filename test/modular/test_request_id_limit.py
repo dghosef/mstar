@@ -106,6 +106,20 @@ def test_generate_serves_the_longest_id(server, streaming):
     assert server.submitted == [LONGEST]
 
 
+def test_error_text_matches_the_rust_frontend_test():
+    assert REQUEST_ID_ERROR == "request_id must be at most 128 characters from [A-Za-z0-9._:-]"
+
+
+def test_a_client_sent_empty_request_id_is_none_on_both_routes(server):
+    """A client's empty id means none, as the Rust /generate reads it too.
+    ``submit_request`` itself still pins ``""`` (test_request_id_reuse.py)."""
+    TestClient(entrypoint.app).post("/generate", data={"text": "hi", "streaming": "false", "request_id": ""})
+    with TestClient(entrypoint.app).websocket_connect("/generate/ws") as ws:
+        ws.send_text(json.dumps({"text": "hi", "request_id": ""}))
+        ws.receive_text()
+    assert server.submitted == [None, None]
+
+
 def test_generate_ws_refuses_in_band_and_serves_the_longest_id(server):
     with TestClient(entrypoint.app).websocket_connect("/generate/ws") as ws:
         for request_id in BAD_IDS:
