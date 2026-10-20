@@ -387,7 +387,7 @@ jobs:
             ${{ steps.prev.outputs.session_id && format('--resume {0}', steps.prev.outputs.session_id) || '' }}
             --allowedTools "mcp__github_inline_comment__create_inline_comment"
             --disallowedTools Bash,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch
-            --json-schema '{"type":"object","properties":{"summary":{"type":"string","description":"The summary comment, in the format review-prompt.md gives."},"type":{"type":"string","enum":["new-model","bug","perf","feature","refactor"],"description":"What kind of change the PR is (review-prompt.md defines each): new-model adds a model; bug fixes wrong behavior; perf is for speed or memory with behavior unchanged; feature adds another capability; refactor restructures without changing behavior."}},"required":["summary","type"]}'
+            --json-schema '{"type":"object","properties":{"summary":{"type":"string","description":"The summary comment, in the format review-prompt.md gives."},"type":{"type":"string","enum":["new-model","bug","perf","feature","refactor","test","docs","ci"],"description":"What kind of change the PR is, as review-prompt.md defines each: new-model, bug, perf, feature, refactor, or test, docs or ci for a PR that changes only tests, only docs, or only CI, build, packaging or tooling."}},"required":["summary","type"]}'
 
       # The action fails a run that went past --max-turns even when Claude
       # finished and returned its summary, and on a real failure it still
@@ -496,7 +496,7 @@ jobs:
         run: |
           type=$(printf '%s' "$OUTPUT" | jq -r '.type // empty')
           case "$type" in
-            new-model|bug|perf|feature|refactor) ;;
+            new-model|bug|perf|feature|refactor|test|docs|ci) ;;
             *) echo "::warning::The review returned no valid type; leaving the type label alone."; exit 0 ;;
           esac
           for old in $(gh api "repos/$REPO/issues/$PR/labels" --jq '.[].name | select(startswith("type/"))'); do

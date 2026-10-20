@@ -98,10 +98,15 @@ Keep the body to one short paragraph that names the triggering inputs or state; 
 
 **Type.** Return the `type` field too: the one kind of change that best describes the PR, which the workflow applies as a `type/*` label. Judge it from the code, not the title.
 
-- `new-model`: adds a model (a new folder under `mstar/model/`), with whatever support it needs.
-- `bug`: fixes wrong behavior: a crash, hang, wrong output, or a broken test or CI job.
-- `perf`: its point is speed or memory, with behavior unchanged.
-- `feature`: adds or extends a capability (an API field, a resource, a mode, tooling) other than a new model.
-- `refactor`: restructures code, docs or tests without changing behavior.
+- `new-model`: adds a model users can serve: a new folder under `mstar/model/`, or a new checkpoint registered on existing model code. Engine pieces split out ahead of a model are `feature`.
+- `bug`: fixes wrong behavior of mstar or of the repo's own tooling (eval and benchmark harnesses, launch scripts): a crash, hang, wrong output, a security hole or unsafe default, a memory leak, or a pathological slowdown such as thrashing or a silent fallback to a slow path. A dependency or packaging change that fixes a model or install failing for users is `bug` too.
+- `perf`: makes a path that already works as designed faster or leaner, with outputs unchanged.
+- `feature`: adds or extends a capability other than a new model: an API field, a resource, a mode, a benchmark or eval harness.
+- `refactor`: restructures code without changing behavior.
+- `test`: changes only tests (adds coverage, fixes a flaky or broken test), not the code they test.
+- `docs`: changes only documentation: `docs/`, examples, Markdown including `AGENTS.md` and `.claude/skills/`, comments or docstrings.
+- `ci`: changes only CI, build, packaging, dependencies or repository tooling: workflows, which tests CI runs, scripts, the review bot and its prompt.
+
+`test`, `docs` and `ci` are only for PRs that change nothing else: a bug fix with a new test is `bug`, a feature with its docs is `feature`. If a PR mixes kinds, pick the kind of its main change; if it fixes a crash or wrong output, pick `bug`.
 
 Never approve or request changes, and never push commits or edit files.
