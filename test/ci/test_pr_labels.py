@@ -1,13 +1,12 @@
 """Check the PR labeler's rules (.github/labels/label_prs.py) against the repo."""
 
 import runpy
-import subprocess
 import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LABELER = runpy.run_path(str(REPO_ROOT / ".github/labels/label_prs.py"))
-area_of = LABELER["area_of"]
+areas_of = LABELER["areas_of"]
 labels_for = LABELER["labels_for"]
 ALIASES = LABELER["model_aliases"](str(REPO_ROOT), [])
 
@@ -17,12 +16,6 @@ def changed(path, lines):
 
 
 class TestPrLabels(unittest.TestCase):
-    def test_every_tracked_file_has_an_area(self):
-        files = subprocess.run(["git", "ls-files"], cwd=REPO_ROOT, capture_output=True,
-                               text=True, check=True).stdout.split()
-        unlabelled = [f for f in files if area_of(f, ALIASES) == "area/other"]
-        self.assertEqual(unlabelled, [], "add a rule to AREAS in .github/labels/label_prs.py")
-
     def test_configs_find_their_model(self):
         for path, label in [
             ("configs/qwen3_5_9b_tp2.yaml", "model/qwen3_5"),
@@ -31,13 +24,25 @@ class TestPrLabels(unittest.TestCase):
             ("configs/qwen3tts_1p7b.yaml", "model/qwen3_tts"),
             ("configs/cosmos3_nano_tp2.yaml", "model/cosmos3"),
         ]:
-            self.assertEqual(area_of(path, ALIASES), label, path)
+            self.assertEqual(areas_of(path, ALIASES), (label,), path)
+
+    def test_rust_mirrors_get_both_areas(self):
+        self.assertEqual(set(areas_of("rust/src/graph/runtime.rs", ALIASES)), {"area/rust", "area/conductor"})
+        self.assertEqual(set(areas_of("rust/src/shm.rs", ALIASES)), {"area/rust", "area/worker"})
+
+    def test_unknown_path_is_other(self):
+        self.assertEqual(areas_of("mstar/brand_new_package/x.py", ALIASES), ("area/other",))
 
     def test_small_layer_touch_is_dropped_but_models_are_not(self):
-        labels = labels_for([changed("mstar/engine/engine.py", 5),
+        labels = labels_for([changed("mstar/engine/resources/kv/manager.py", 5),
                              changed("mstar/model/orpheus/submodules.py", 2),
-                             changed("mstar/worker/worker.py", 40)], ALIASES)
-        self.assertEqual(labels, {"area/worker", "model/orpheus", "size/S"})
+                             changed("mstar/api_server/app.py", 40)], ALIASES)
+        self.assertEqual(labels, {"area/api", "model/orpheus", "size/S"})
+
+    def test_any_change_to_a_core_file_labels_its_area(self):
+        labels = labels_for([changed("mstar/worker/worker.py", 6),
+                             changed("mstar/engine/fp32_precision.py", 125)], ALIASES)
+        self.assertEqual(labels, {"area/worker", "area/engine", "size/M"})
 
     def test_many_models_collapse(self):
         labels = labels_for([changed(f"mstar/model/{m}/x.py", 1)

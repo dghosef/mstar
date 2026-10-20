@@ -27,9 +27,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      # Adds and removes labels on PRs; issues: write creates a label the first
-      # time it's needed.
-      issues: write
+      # Creates labels and adds and removes them on PRs.
       pull-requests: write
     steps:
       - name: Check out the default branch
