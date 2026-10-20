@@ -30,7 +30,7 @@ AREAS = [
     ("mstar/client/", "area/api"),
     ("mstar/cli/", "area/api"),
     ("mstar/observability/", "area/api"),
-    ("rust/server/", "area/api"),
+    ("rust/server/", ("area/api", "area/rust")),
     ("mstar/conductor/", "area/conductor"),
     ("mstar/graph/", "area/conductor"),
     ("mstar/worker/", "area/worker"),
@@ -46,7 +46,8 @@ AREAS = [
     ("mstar/default_configs/", "area/infra"),
     ("rust/Cargo.lock", "area/infra"),
     # The Rust graph runtime and transport mirror mstar/graph/ and
-    # mstar/communication/, and change with them (AGENTS.md invariant 5).
+    # mstar/communication/, and change with them (AGENTS.md invariant 5); the
+    # Rust API frontend (rust/server/, above) is both area/api and area/rust.
     ("rust/src/graph/", ("area/rust", "area/conductor")),
     ("rust/src/communicator.rs", ("area/rust", "area/worker")),
     ("rust/src/shm.rs", ("area/rust", "area/worker")),
