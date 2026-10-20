@@ -27,8 +27,8 @@ class TestPrLabels(unittest.TestCase):
             self.assertEqual(areas_of(path, ALIASES), (label,), path)
 
     def test_rust_mirrors_get_both_areas(self):
-        self.assertEqual(set(areas_of("rust/src/graph/runtime.rs", ALIASES)), {"area/rust", "area/conductor"})
-        self.assertEqual(set(areas_of("rust/src/shm.rs", ALIASES)), {"area/rust", "area/worker"})
+        self.assertEqual(set(areas_of("rust/src/graph/runtime.rs", ALIASES)), {"area/rust", "area/graph"})
+        self.assertEqual(set(areas_of("rust/src/shm.rs", ALIASES)), {"area/rust", "area/transport"})
         self.assertEqual(set(areas_of("rust/server/src/main.rs", ALIASES)), {"area/rust", "area/api"})
 
     def test_unknown_path_is_other(self):

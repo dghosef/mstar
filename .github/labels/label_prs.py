@@ -25,40 +25,45 @@ MANAGED = ("area/", "model/", "size/")
 # and configs/ are handled in areas_of(), since their label depends on the
 # model name. A file nothing matches is area/other, which shows a rule is missing.
 AREAS = [
+    # The layers follow AGENTS.md's layer map and the PR title tags in use.
     ("mstar/__init__.py", "area/api"),
     ("mstar/api_server/", "area/api"),
     ("mstar/client/", "area/api"),
     ("mstar/cli/", "area/api"),
-    ("mstar/observability/", "area/api"),
-    ("rust/server/", ("area/api", "area/rust")),
     ("mstar/conductor/", "area/conductor"),
-    ("mstar/graph/", "area/conductor"),
+    ("mstar/graph/", "area/graph"),
     ("mstar/worker/", "area/worker"),
-    ("mstar/communication/", "area/worker"),
     ("mstar/streaming/", "area/worker"),
+    ("mstar/communication/", "area/transport"),
+    ("mstar/engine/resources/", "area/resources"),
     ("mstar/engine/", "area/engine"),
-    ("mstar/distributed/", "area/engine"),
     ("mstar/platforms/", "area/engine"),
+    ("mstar/distributed/", "area/distributed"),
+    ("mstar/observability/", "area/observability"),
+    ("mstar/profile/", "area/observability"),
+    # GPU kernels models build on; the rest of utils/ is engine plumbing.
+    ("mstar/utils/adarms_norm.py", "area/model-shared"),
+    ("mstar/utils/attention.py", "area/model-shared"),
+    ("mstar/utils/causal_conv1d/", "area/model-shared"),
+    ("mstar/utils/fused_moe/", "area/model-shared"),
     ("mstar/utils/", "area/engine"),
     # The model API (base.py, registry.py, ...) and components/ and loader/.
     ("mstar/model/", "area/model-shared"),
     ("mstar/integrations/", "area/integrations"),
     ("mstar/default_configs/", "area/infra"),
+    # The Rust frontend, graph runtime and transport mirror their Python
+    # counterparts and change with them (AGENTS.md invariant 5).
+    ("rust/server/", ("area/rust", "area/api")),
+    ("rust/src/graph/", ("area/rust", "area/graph")),
+    ("rust/src/communicator.rs", ("area/rust", "area/transport")),
+    ("rust/src/shm.rs", ("area/rust", "area/transport")),
+    ("rust/src/tensors.rs", ("area/rust", "area/transport")),
     ("rust/Cargo.lock", "area/infra"),
-    # The Rust graph runtime and transport mirror mstar/graph/ and
-    # mstar/communication/, and change with them (AGENTS.md invariant 5); the
-    # Rust API frontend (rust/server/, above) is both area/api and area/rust.
-    ("rust/src/graph/", ("area/rust", "area/conductor")),
-    ("rust/src/communicator.rs", ("area/rust", "area/worker")),
-    ("rust/src/shm.rs", ("area/rust", "area/worker")),
-    ("rust/src/tensors.rs", ("area/rust", "area/worker")),
     ("rust/", "area/rust"),
-    ("benchmark/", "area/perf"),
-    ("perf_testing/", "area/perf"),
-    ("results/", "area/perf"),
-    ("mstar/profile/", "area/perf"),
+    ("benchmark/", "area/benchmark"),
+    ("perf_testing/", "area/benchmark"),
+    ("results/", "area/benchmark"),
     (".github/", "area/infra"),
-    (".claude/", "area/infra"),
     ("packaging/", "area/infra"),
     ("scripts/", "area/infra"),
     ("tools/", "area/infra"),
@@ -69,6 +74,8 @@ AREAS = [
     ("uv.lock", "area/infra"),
     (".gitignore", "area/infra"),
     (".sample.env", "area/infra"),
+    # Agent skills are docs, like AGENTS.md.
+    (".claude/", "area/docs"),
     ("docs/", "area/docs"),
     ("examples/", "area/docs"),
     ("assets/", "area/docs"),
