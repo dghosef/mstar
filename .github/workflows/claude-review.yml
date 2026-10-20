@@ -387,7 +387,7 @@ jobs:
             ${{ steps.prev.outputs.session_id && format('--resume {0}', steps.prev.outputs.session_id) || '' }}
             --allowedTools "mcp__github_inline_comment__create_inline_comment"
             --disallowedTools Bash,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch
-            --json-schema '{"type":"object","properties":{"summary":{"type":"string","description":"The summary comment, in the format review-prompt.md gives."}},"required":["summary"]}'
+            --json-schema '{"type":"object","properties":{"summary":{"type":"string","description":"The summary comment, in the format review-prompt.md gives."},"type":{"type":"string","enum":["new-model","bug","perf","feature","refactor"],"description":"What kind of change the PR is (review-prompt.md defines each): new-model adds a model; bug fixes wrong behavior; perf is for speed or memory with behavior unchanged; feature adds another capability; refactor restructures without changing behavior."}},"required":["summary","type"]}'
 
       # The action fails a run that went past --max-turns even when Claude
       # finished and returned its summary, and on a real failure it still
@@ -408,7 +408,7 @@ jobs:
           turns=$(jq -r '.num_turns // "?"' <<< "$res")
           subtype=$(jq -r '.subtype // empty' <<< "$res")
           summary=$(jq -c 'select(.subtype == "success" and (.is_error | not) and ((.structured_output.summary // "") != ""))
-            | {summary: .structured_output.summary}' <<< "$res")
+            | {summary: .structured_output.summary, type: .structured_output.type}' <<< "$res")
           if [ -z "$summary" ]; then
             jq -r '[.[] | select(.type == "assistant") | .message.content[]?
                 | select(.type == "tool_use" and (.name | endswith("create_inline_comment"))) | .input]
@@ -467,6 +467,28 @@ jobs:
             printf '<!-- claude-review-incomplete-resolved -->\nAn earlier review run didn'"'"'t complete; a later run finished: %s\n' "$url" > resolved.md
             gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@resolved.md > /dev/null || true
           done
+
+      # The PR's type/* label, from the review's structured output. Model
+      # output, so it's checked against the fixed list before it reaches the
+      # API; any other type/* label on the PR is removed. Area and size labels
+      # come from pr-labels.yml.
+      - name: Set the type label
+        if: steps.post.outcome == 'success'
+        continue-on-error: true
+        env:
+          OUTPUT: ${{ steps.review.outputs.structured_output || steps.salvage.outputs.structured_output }}
+        run: |
+          type=$(printf '%s' "$OUTPUT" | jq -r '.type // empty')
+          case "$type" in
+            new-model|bug|perf|feature|refactor) ;;
+            *) echo "::warning::The review returned no valid type; leaving the type label alone."; exit 0 ;;
+          esac
+          for old in $(gh api "repos/$REPO/issues/$PR/labels" --jq '.[].name | select(startswith("type/"))'); do
+            [ "$old" = "type/$type" ] || gh api -X DELETE "repos/$REPO/issues/$PR/labels/${old//\//%2F}" > /dev/null
+          done
+          gh api "repos/$REPO/labels/type%2F$type" > /dev/null 2>&1 ||
+            gh api -X POST "repos/$REPO/labels" -f name="type/$type" -f color=fbca04 > /dev/null
+          gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=type/$type" > /dev/null
 
       # A review that stopped before it finished: keep its Claude Code session
       # (the transcript Claude Code writes as it goes, so this works after a
