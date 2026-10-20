@@ -91,7 +91,7 @@ def test_generate_refuses_with_400(server, streaming, request_id):
 
 def test_generate_refuses_before_saving_uploads(server, tmp_path):
     response = TestClient(entrypoint.app).post(
-        "/generate", data={"request_id": "a b"}, files={"files": ("obs.png", b"PNG")},
+        "/generate", data={"request_id": "a b", "streaming": "true"}, files={"files": ("obs.png", b"PNG")},
     )
     assert response.status_code == 400
     assert list(tmp_path.iterdir()) == []
