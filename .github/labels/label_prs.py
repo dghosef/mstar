@@ -22,11 +22,14 @@ from urllib.parse import quote
 MANAGED = ("area/", "model/", "size/")
 
 # First matching prefix wins. mstar/model/<name>/ and configs/ are handled in
-# area_of(), since their label depends on the model name.
+# area_of(), since their label depends on the model name. A file nothing
+# matches is area/other; test/ci/test_pr_labels.py keeps main free of those.
 AREAS = [
+    ("mstar/__init__.py", "area/api"),
     ("mstar/api_server/", "area/api"),
     ("mstar/client/", "area/api"),
     ("mstar/cli/", "area/api"),
+    ("mstar/observability/", "area/api"),
     ("rust/server/", "area/api"),
     ("mstar/conductor/", "area/conductor"),
     ("mstar/graph/", "area/conductor"),
@@ -40,26 +43,33 @@ AREAS = [
     # The model API (base.py, registry.py, ...) and components/ and loader/.
     ("mstar/model/", "area/model-shared"),
     ("mstar/integrations/", "area/integrations"),
+    ("mstar/default_configs/", "area/infra"),
+    ("rust/Cargo.lock", "area/infra"),
     ("rust/", "area/rust"),
     ("benchmark/", "area/perf"),
     ("perf_testing/", "area/perf"),
+    ("results/", "area/perf"),
     ("mstar/profile/", "area/perf"),
     (".github/", "area/infra"),
     (".claude/", "area/infra"),
     ("packaging/", "area/infra"),
     ("scripts/", "area/infra"),
+    ("tools/", "area/infra"),
+    ("docker/", "area/infra"),
     ("pyproject.toml", "area/infra"),
     ("setup.py", "area/infra"),
     ("MANIFEST.in", "area/infra"),
+    ("uv.lock", "area/infra"),
     (".gitignore", "area/infra"),
     (".sample.env", "area/infra"),
     ("docs/", "area/docs"),
     ("examples/", "area/docs"),
     ("assets/", "area/docs"),
+    ("LICENSE", "area/docs"),
     ("test/", "area/tests"),
 ]
-# Lockfiles say nothing about review effort.
-IGNORED = ("uv.lock", "rust/Cargo.lock")
+# Lockfiles say nothing about review effort, so they don't count toward size.
+NOT_SIZED = ("uv.lock", "rust/Cargo.lock")
 
 # A layer (area/*) needs this many changed lines, so a one-line touch doesn't
 # label a PR with every layer it brushed against. Any change to a model's code
@@ -109,30 +119,30 @@ def model_of_config(path, aliases):
 
 
 def area_of(path, aliases):
-    if path in IGNORED:
-        return None
     if path.startswith("mstar/model/"):
         parts = path.split("/")
         if len(parts) > 3 and parts[2] not in ("components", "loader"):
             return f"model/{parts[2]}"
     if path.startswith("configs/"):
         folder = model_of_config(path, aliases)
-        return f"model/{folder}" if folder else None
+        return f"model/{folder}" if folder else "area/configs"
     for prefix, label in AREAS:
         if path.startswith(prefix):
             return label
     if "/" not in path and path.endswith(".md"):
         return "area/docs"
-    return None
+    return "area/other"
 
 
 def labels_for(files, aliases):
     lines = defaultdict(int)
+    size_lines = 0
     for f in files:
         area = area_of(f["filename"], aliases)
-        if area:
-            lines[area] += f["additions"] + f["deletions"]
-    size_lines = sum(n for a, n in lines.items() if a not in ("area/tests", "area/docs"))
+        n = f["additions"] + f["deletions"]
+        lines[area] += n
+        if area not in ("area/tests", "area/docs") and f["filename"] not in NOT_SIZED:
+            size_lines += n
     # Tests count toward no area, and docs only on a docs-only PR: nearly every
     # PR touches them. Test-only and docs-only PRs still get a label.
     code = {a: n for a, n in lines.items() if a not in ("area/tests", "area/docs")}
