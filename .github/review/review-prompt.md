@@ -96,4 +96,12 @@ Keep the body to one short paragraph that names the triggering inputs or state; 
 <sub>Advisory, not a merge gate. Rules: `AGENTS.md`. Reply to discuss.</sub>
 ```
 
+**Type.** Return the `type` field too: the one kind of change that best describes the PR, which the workflow applies as a `type/*` label. Judge it from the code, not the title.
+
+- `new-model`: adds a model (a new folder under `mstar/model/`), with whatever support it needs.
+- `bug`: fixes wrong behavior: a crash, hang, wrong output, or a broken test or CI job.
+- `perf`: its point is speed or memory, with behavior unchanged.
+- `feature`: adds or extends a capability (an API field, a resource, a mode, tooling) other than a new model.
+- `refactor`: restructures code, docs or tests without changing behavior.
+
 Never approve or request changes, and never push commits or edit files.
