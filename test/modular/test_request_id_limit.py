@@ -58,6 +58,9 @@ def server(monkeypatch, tmp_path):
 @pytest.mark.parametrize("request_id", [
     "", "warmup-0", "obs.1:a_b-C", LONGEST, str(uuid.uuid4()), rid("img"),
     f"{rid('speech')}-3", f"tensor-{uuid.uuid4()}", rid(f"rt-{uuid.uuid4().hex[:16]}"),
+], ids=[
+    "empty", "warmup", "punctuation", "longest", "uuid", "minted", "minted-suffix",
+    "tensor-uuid", "minted-realtime",
 ])
 def test_check_accepts_client_and_minted_ids(request_id):
     check_request_id(request_id)
