@@ -398,19 +398,26 @@ jobs:
         if: steps.review.outcome == 'failure'
         id: salvage
         continue-on-error: true
+        env:
+          EVENT: ${{ github.event_name }}
         run: |
           f="$RUNNER_TEMP/claude-execution-output.json"
           if [ ! -s "$f" ]; then
             echo "why=it stopped before Claude Code returned (a timeout or a setup error)" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Out of API credit: skip the review with a warning in the log, rather
-          # than leave a "didn't complete" comment on every PR until it's topped up.
+          # Out of API credit: an automatic review skips with a warning in the
+          # log, rather than leave a "didn't complete" comment on every PR until
+          # it's topped up. A /review someone asked for gets a one-line answer.
           if jq -e 'any(.[]; .type == "assistant" and (.error == "billing_error" or
                 ([.message.content[]? | select(.type == "text") | .text] | join("") | startswith("Credit balance is too low"))))' \
               "$f" > /dev/null; then
             echo "::warning::The Anthropic API account is out of credit; skipping the review."
             echo "billing=true" >> "$GITHUB_OUTPUT"
+            if [ "$EVENT" = "issue_comment" ]; then
+              gh pr comment "$PR" --repo "$REPO" \
+                --body "The review didn't run: the API account for the review bot is out of credit." > /dev/null
+            fi
             exit 0
           fi
           res=$(jq -c '[.[] | select(.type == "result")] | last // {}' "$f")

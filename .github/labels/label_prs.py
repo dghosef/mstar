@@ -21,9 +21,9 @@ from urllib.parse import quote
 
 MANAGED = ("area/", "model/", "size/")
 
-# First matching prefix wins. mstar/model/<name>/ and configs/ are handled in
-# area_of(), since their label depends on the model name. A file nothing
-# matches is area/other; test/ci/test_pr_labels.py keeps main free of those.
+# First matching prefix wins; a file can have more than one area. mstar/model/<name>/
+# and configs/ are handled in areas_of(), since their label depends on the
+# model name. A file nothing matches is area/other, which shows a rule is missing.
 AREAS = [
     ("mstar/__init__.py", "area/api"),
     ("mstar/api_server/", "area/api"),
@@ -45,6 +45,12 @@ AREAS = [
     ("mstar/integrations/", "area/integrations"),
     ("mstar/default_configs/", "area/infra"),
     ("rust/Cargo.lock", "area/infra"),
+    # The Rust graph runtime and transport mirror mstar/graph/ and
+    # mstar/communication/, and change with them (AGENTS.md invariant 5).
+    ("rust/src/graph/", ("area/rust", "area/conductor")),
+    ("rust/src/communicator.rs", ("area/rust", "area/worker")),
+    ("rust/src/shm.rs", ("area/rust", "area/worker")),
+    ("rust/src/tensors.rs", ("area/rust", "area/worker")),
     ("rust/", "area/rust"),
     ("benchmark/", "area/perf"),
     ("perf_testing/", "area/perf"),
@@ -75,6 +81,18 @@ NOT_SIZED = ("uv.lock", "rust/Cargo.lock")
 # label a PR with every layer it brushed against. Any change to a model's code
 # or config labels that model.
 MIN_LINES = 10
+# Files every model and request goes through: any change to one labels its area.
+CORE_FILES = {
+    "mstar/conductor/conductor.py",
+    "mstar/engine/engine.py",
+    "mstar/engine/resources/base.py",
+    "mstar/engine/resources/runner.py",
+    "mstar/graph/runtime/base.py",
+    "mstar/model/base.py",
+    "mstar/model/submodule_base.py",
+    "mstar/worker/micro_scheduler.py",
+    "mstar/worker/worker.py",
+}
 # A change across many models (an engine API every model implements, say) gets
 # one model/many label rather than one per model.
 MAX_MODELS = 3
@@ -118,36 +136,40 @@ def model_of_config(path, aliases):
     return None
 
 
-def area_of(path, aliases):
+def areas_of(path, aliases):
     if path.startswith("mstar/model/"):
         parts = path.split("/")
         if len(parts) > 3 and parts[2] not in ("components", "loader"):
-            return f"model/{parts[2]}"
+            return (f"model/{parts[2]}",)
     if path.startswith("configs/"):
         folder = model_of_config(path, aliases)
-        return f"model/{folder}" if folder else "area/configs"
-    for prefix, label in AREAS:
+        return (f"model/{folder}" if folder else "area/configs",)
+    for prefix, labels in AREAS:
         if path.startswith(prefix):
-            return label
+            return labels if isinstance(labels, tuple) else (labels,)
     if "/" not in path and path.endswith(".md"):
-        return "area/docs"
-    return "area/other"
+        return ("area/docs",)
+    return ("area/other",)
 
 
 def labels_for(files, aliases):
     lines = defaultdict(int)
+    core = set()
     size_lines = 0
     for f in files:
-        area = area_of(f["filename"], aliases)
+        areas = areas_of(f["filename"], aliases)
         n = f["additions"] + f["deletions"]
-        lines[area] += n
-        if area not in ("area/tests", "area/docs") and f["filename"] not in NOT_SIZED:
+        for area in areas:
+            lines[area] += n
+        if f["filename"] in CORE_FILES:
+            core.update(areas)
+        if not {"area/tests", "area/docs"} & set(areas) and f["filename"] not in NOT_SIZED:
             size_lines += n
     # Tests count toward no area, and docs only on a docs-only PR: nearly every
     # PR touches them. Test-only and docs-only PRs still get a label.
     code = {a: n for a, n in lines.items() if a not in ("area/tests", "area/docs")}
     if code:
-        wanted = {a for a, n in code.items() if n >= MIN_LINES or a.startswith("model/")}
+        wanted = {a for a, n in code.items() if n >= MIN_LINES or a in core or a.startswith("model/")}
         if not wanted:
             wanted = {max(code, key=code.get)}
     elif "area/docs" in lines:
