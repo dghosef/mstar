@@ -404,6 +404,15 @@ jobs:
             echo "why=it stopped before Claude Code returned (a timeout or a setup error)" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # Out of API credit: skip the review with a warning in the log, rather
+          # than leave a "didn't complete" comment on every PR until it's topped up.
+          if jq -e 'any(.[]; .type == "assistant" and (.error == "billing_error" or
+                ([.message.content[]? | select(.type == "text") | .text] | join("") | startswith("Credit balance is too low"))))' \
+              "$f" > /dev/null; then
+            echo "::warning::The Anthropic API account is out of credit; skipping the review."
+            echo "billing=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           res=$(jq -c '[.[] | select(.type == "result")] | last // {}' "$f")
           turns=$(jq -r '.num_turns // "?"' <<< "$res")
           subtype=$(jq -r '.subtype // empty' <<< "$res")
@@ -498,7 +507,7 @@ jobs:
       - name: Save the session for /review continue
         if: >-
           always() && steps.review.outcome == 'failure' &&
-          steps.salvage.outputs.structured_output == ''
+          steps.salvage.outputs.structured_output == '' && steps.salvage.outputs.billing != 'true'
         id: save
         continue-on-error: true
         env:
@@ -546,7 +555,7 @@ jobs:
       # still be resumed by someone else).
       - name: Report a review that didn't complete
         if: >-
-          always() && steps.pre.outputs.run == 'true' &&
+          always() && steps.pre.outputs.run == 'true' && steps.salvage.outputs.billing != 'true' &&
           (steps.pr.outcome == 'failure' || steps.prev.outcome == 'failure' ||
            steps.base.outcome == 'failure' || steps.head.outcome == 'failure' ||
            steps.diff.outcome == 'failure' || steps.post.outcome == 'failure' ||
