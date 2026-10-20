@@ -12,6 +12,7 @@ the PR (type/*, set by the review bot, or a human's labels) is left alone.
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -36,8 +37,9 @@ AREAS = [
     ("mstar/distributed/", "area/engine"),
     ("mstar/platforms/", "area/engine"),
     ("mstar/utils/", "area/engine"),
-    ("mstar/model/components/", "area/model-shared"),
-    ("mstar/model/loader/", "area/model-shared"),
+    # The model API (base.py, registry.py, ...) and components/ and loader/.
+    ("mstar/model/", "area/model-shared"),
+    ("mstar/integrations/", "area/integrations"),
     ("rust/", "area/rust"),
     ("benchmark/", "area/perf"),
     ("perf_testing/", "area/perf"),
@@ -49,7 +51,11 @@ AREAS = [
     ("pyproject.toml", "area/infra"),
     ("setup.py", "area/infra"),
     ("MANIFEST.in", "area/infra"),
+    (".gitignore", "area/infra"),
+    (".sample.env", "area/infra"),
     ("docs/", "area/docs"),
+    ("examples/", "area/docs"),
+    ("assets/", "area/docs"),
     ("test/", "area/tests"),
 ]
 # Lockfiles say nothing about review effort.
@@ -65,6 +71,11 @@ MAX_MODELS = 3
 SIZES = [(20, "size/XS"), (100, "size/S"), (700, "size/M"), (2000, "size/L"), (5000, "size/XL")]
 
 COLORS = {"area/": "1d76db", "model/": "5319e7", "size/": "c5def5"}
+
+# Registry entries, `"<key>": ("mstar.model.<folder>...` or
+# `MODEL_REGISTRY["<key>"] = ("mstar.model.<folder>...`, so a config named after
+# a registry key (qwen3_8_27b_tp4.yaml) finds its model folder.
+REGISTRY_ENTRY = re.compile(r'"([\w.-]+)"\]?\s*[:=]\s*\(\s*"mstar\.model\.(\w+)\.')
 
 
 def gh(*args, data=None):
@@ -82,7 +93,22 @@ def gh_pages(path):
     return [item for page in json.loads(out) for item in page]
 
 
-def area_of(path, models):
+def model_of_config(path, aliases):
+    """The model folder a config belongs to, from its file name.
+
+    Matched on whole underscore-separated words, ignoring the underscores, so
+    qwen3omni_2gpu.yaml finds qwen3_omni. The longest match wins: qwen3_5_9b
+    over a shorter name that is also a prefix.
+    """
+    words = os.path.basename(path).split(".")[0].split("_")
+    for n in range(len(words), 0, -1):
+        folder = aliases.get("".join(words[:n]))
+        if folder:
+            return folder
+    return None
+
+
+def area_of(path, aliases):
     if path in IGNORED:
         return None
     if path.startswith("mstar/model/"):
@@ -90,12 +116,8 @@ def area_of(path, models):
         if len(parts) > 3 and parts[2] not in ("components", "loader"):
             return f"model/{parts[2]}"
     if path.startswith("configs/"):
-        stem = path[len("configs/"):]
-        # Longest name first, so qwen3_5_9b.yaml is qwen3_5, not some qwen3 model.
-        for name in sorted(models, key=len, reverse=True):
-            if stem == name or stem.startswith((name + "_", name + ".")):
-                return f"model/{name}"
-        return None
+        folder = model_of_config(path, aliases)
+        return f"model/{folder}" if folder else None
     for prefix, label in AREAS:
         if path.startswith(prefix):
             return label
@@ -104,10 +126,10 @@ def area_of(path, models):
     return None
 
 
-def labels_for(files, models):
+def labels_for(files, aliases):
     lines = defaultdict(int)
     for f in files:
-        area = area_of(f["filename"], models)
+        area = area_of(f["filename"], aliases)
         if area:
             lines[area] += f["additions"] + f["deletions"]
     size_lines = sum(n for a, n in lines.items() if a not in ("area/tests", "area/docs"))
@@ -133,7 +155,8 @@ def labels_for(files, models):
     return wanted
 
 
-def model_names(repo_root, files):
+def model_aliases(repo_root, files):
+    """Model folder names and registry keys, without underscores, to the folder."""
     names = set()
     model_dir = os.path.join(repo_root, "mstar", "model")
     if os.path.isdir(model_dir):
@@ -143,7 +166,17 @@ def model_names(repo_root, files):
         parts = f["filename"].split("/")
         if len(parts) > 3 and parts[:2] == ["mstar", "model"]:
             names.add(parts[2])
-    return names - {"components", "loader", "__pycache__"}
+    names -= {"components", "loader", "__pycache__"}
+    aliases = {}
+    try:
+        with open(os.path.join(model_dir, "registry.py")) as fh:
+            for key, folder in REGISTRY_ENTRY.findall(fh.read()):
+                if folder in names:
+                    aliases[key.replace("_", "")] = folder
+    except OSError:
+        pass
+    aliases.update({name.replace("_", ""): name for name in names})
+    return aliases
 
 
 def sync(repo, number, wanted, current, existing, dry_run):
@@ -185,7 +218,7 @@ def main():
     for number, current in targets:
         try:
             files = gh_pages(f"repos/{a.repo}/pulls/{number}/files?per_page=100")
-            sync(a.repo, number, labels_for(files, model_names(a.root, files)),
+            sync(a.repo, number, labels_for(files, model_aliases(a.root, files)),
                  set(current), existing, a.dry_run)
         except RuntimeError as e:
             print(f"#{number}: {e}", file=sys.stderr)
