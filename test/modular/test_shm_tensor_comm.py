@@ -907,3 +907,31 @@ def test_host_copies_not_kept_for_device_transports():
         )
         for uuid in [infos["tok"][0].uuid, *stored.flat_uuids]:
             assert mgr.tensor_store.get_cpu_tensor(uuid) is None
+
+
+def test_a_held_output_is_sent_from_its_own_tensor_not_the_reused_host_copy():
+    """A step's host copies are views of the worker's pinned buffers, which the
+    next step overwrites. An output sent in a later step (a loop's accumulated
+    output) must not be read from them: once the step releases them, the send
+    falls back to the stored tensor."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        sender = _make_manager(tmpdir, entity_id="worker_0", request_id="req1")
+        receiver = _make_manager(tmpdir, entity_id="worker_1", request_id="req1")
+        produced = torch.randn(4, 8)
+        pinned = produced.clone()  # the stop check's host copy of this step
+        stored = sender.store_and_return_tensor_info_batch(
+            ["req1"], {"req1": {"out": [produced]}}, ["out"],
+            cpu_tensors={"req1": {"out": [pinned]}},
+        )
+        uuid = stored.flat_uuids[0]
+        assert sender.tensor_store.get_cpu_tensor(uuid) is pinned
+        sender.release_host_copies(stored.flat_uuids)
+        pinned.fill_(0)  # the next step reuses the buffer
+
+        edge = GraphEdge(next_node="client", name="out")
+        edge.tensor_info = [sender.tensor_store.get_info(uuid)]
+        sender.increment_ref(uuid, 1)
+        sender.register_for_send("req1", edge.tensor_info)
+        receiver.start_read_tensors("req1", [edge], graph_walk="w")
+        assert "req1" in receiver.get_ready_tensors(graph_walk="w")
+        assert torch.equal(receiver.get_tensor(uuid), produced)
