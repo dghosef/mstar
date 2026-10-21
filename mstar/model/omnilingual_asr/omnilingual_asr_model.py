@@ -38,6 +38,7 @@ from mstar.graph.special_destinations import EMIT_TO_CLIENT
 from mstar.model.base import ForwardPassArgs, Model, TensorAndMetadata
 from mstar.model.omnilingual_asr.audio import load_waveform, preprocess
 from mstar.model.omnilingual_asr.config import (
+    ENCODER_ATTN,
     ENCODER_NODE,
     MAX_AUDIO_SECONDS,
     SAMPLE_RATE,
@@ -120,8 +121,27 @@ class OmnilingualASRModel(Model):
     # -- graph -------------------------------------------------------------
 
     def get_node_resources(self) -> list[NodeResourceSpec]:
-        """Not autoregressive: no KV cache, no sampler."""
-        return []
+        """Not autoregressive: no KV cache, no sampler. A half-precision encoder
+        attends through a varlen kernel over the step's packed rows; fp32 (the
+        reference's numerics) keeps the padded SDPA path."""
+        if self.dtype not in (torch.bfloat16, torch.float16):
+            return []
+        from mstar.engine.resources.attn.ragged.config import RaggedAttentionConfig, RaggedAttentionSpec
+
+        return [
+            RaggedAttentionSpec(
+                resource_key=ENCODER_ATTN, nodes={ENCODER_NODE},
+                config=RaggedAttentionConfig(
+                    num_qo_heads=self.config.num_heads,
+                    num_kv_heads=self.config.num_heads,
+                    head_dim=self.config.model_dim // self.config.num_heads,
+                    dtype=self.dtype,
+                    # one segment per request, and a captured step packs a
+                    # whole batch into one row
+                    max_segments_per_request=self.max_batch_size,
+                ),
+            ),
+        ]
 
     def get_graph_walk_graphs(self) -> dict[str, GraphSection]:
         return {
