@@ -23,8 +23,9 @@ from mstar.distributed.communication import CommGroup
 from mstar.model.components import ParallelSparseMoeBlockWithSharedExpert, RMSNorm
 from mstar.model.components.distributed import ParallelGatedMLP
 from mstar.model.qwen3_omni.components.attention import Qwen3OmniAttention
+from mstar.model.qwen3_omni.components.cp_kernels import cp_qk_norm_rope_kv_write
 from mstar.model.qwen3_omni.config import TALKER_ATTN, TALKER_KV, TALKER_POS, Qwen3OmniModelConfig, TalkerTextConfig
-from mstar.utils.attention import decode_attn_nhd, fused_qk_norm_rope
+from mstar.utils.attention import decode_attn_nhd
 
 # ---------------------------------------------------------------------------
 # Projection MLP (Thinker -> Talker)
@@ -498,35 +499,17 @@ class Qwen3OmniCodePredictor(nn.Module):
 
             hidden_states = layer.input_layernorm(hidden_states)
 
-            total_tokens = bs * seq_len
             qkv = F.linear(hidden_states, layer.self_attn.qkv_proj.weight)
             q_size = n_q_heads * head_dim
-            kv_size = n_kv_heads * head_dim
-            q, k, v = qkv.split((q_size, kv_size, kv_size), dim=-1)
-            q = q.view(total_tokens, n_q_heads, head_dim)
-            k = k.view(total_tokens, n_kv_heads, head_dim)
-
-            rope_theta = float(attn.rope_theta)
-            q = fused_qk_norm_rope(
-                q, attn.q_norm.weight,
-                pos=flat_pos,
-                eps=attn.q_norm.variance_epsilon,
-                rope_theta=rope_theta
+            # q normed and roped in place; k (normed, roped) and v into the cache
+            # at cache_pos .. cache_pos + seq_len.
+            cp_qk_norm_rope_kv_write(
+                qkv.view(bs * seq_len, -1), attn.q_norm.weight, attn.k_norm.weight,
+                flat_pos, kv_cache[layer_idx], cache_pos, seq_len,
+                attn.q_norm.variance_epsilon, attn.k_norm.variance_epsilon,
+                float(attn.rope_theta), n_q_heads, n_kv_heads, head_dim,
             )
-            k = fused_qk_norm_rope(
-                k, attn.k_norm.weight,
-                pos=flat_pos,
-                eps=attn.k_norm.variance_epsilon,
-                rope_theta=rope_theta
-            )
-
-            q = q.view(bs, seq_len, n_q_heads, head_dim)
-            k = k.view(bs, seq_len, n_kv_heads, head_dim)
-            v = v.view(bs, seq_len, n_kv_heads, head_dim)
-
-            # Append K, V into dense cache at cache_pos .. cache_pos+seq_len.
-            kv_cache[layer_idx, :, 0, cache_pos:cache_pos + seq_len] = k
-            kv_cache[layer_idx, :, 1, cache_pos:cache_pos + seq_len] = v
+            q = qkv[..., :q_size].view(bs, seq_len, n_q_heads, head_dim)
 
             # Read K, V for all positions up to and including the new tokens.
             valid_len = cache_pos + seq_len
