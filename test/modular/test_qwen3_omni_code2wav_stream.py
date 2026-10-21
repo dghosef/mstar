@@ -114,6 +114,17 @@ def _expected_samples_per_step(steps: list[tuple], tail: int) -> list[int]:
     return expected
 
 
+def _with_live_eos(steps: list[tuple], num_frames: int, full: torch.Tensor) -> torch.Tensor:
+    """``full`` plus the frame of silence a codec_eos frame emits when it was a
+    new item of a window that was not the stream's last."""
+    live = any(
+        not info.is_final and info.start_offset + info.num_items == num_frames + 1
+        and info.num_items > info.context_items
+        for info, _, _ in steps
+    )
+    return torch.cat([full, torch.zeros(UPSAMPLE, dtype=full.dtype)]) if live else full
+
+
 # ---------------------------------------------------------------------------
 # A fake decoder with the real output length: exact trim arithmetic
 # ---------------------------------------------------------------------------
@@ -184,7 +195,8 @@ def test_a_small_first_chunk_stitches_into_the_full_decode(schedule, num_frames,
     steps = _stream(submodule, frames, schedule)
     full = _to_pcm(decoder(codes.t()[None], torch.arange(num_frames)[None]))[0, 0]
 
-    assert torch.equal(torch.cat([audio for _, audio, _ in steps]), full)
+    expected = _with_live_eos(steps, num_frames, full) if eos else full
+    assert torch.equal(torch.cat([audio for _, audio, _ in steps]), expected)
     first_info, first_audio, _ = steps[0]
     assert first_info.context_items == 0 and first_info.num_items == min(schedule[0], frames.shape[0])
 
@@ -208,8 +220,10 @@ def test_a_trailing_codec_eos_frame_adds_no_audio_and_no_decode(num_frames):
     """Served streams end with the Talker's codec_eos frame. A reply of
     k * 25 frames then ends with a flush of 25 context frames and the EOS
     frame, which emits nothing and decodes nothing; for k * 25 - 1 frames the
-    EOS frame is the last new item of a window and then a context item of the
-    flush."""
+    EOS frame is the last new item of a live window and then a context item
+    of the flush. A live window decodes it as padding without reading it on
+    the host and emits one frame of silence for it (the last real frame's
+    look-ahead samples included, which a dropped frame never emits)."""
     decoder = _LookaheadDecoder()
     config = Qwen3OmniModelConfig()
     submodule = Code2WavSubmodule(decoder, config)
@@ -220,7 +234,7 @@ def test_a_trailing_codec_eos_frame_adds_no_audio_and_no_decode(num_frames):
     assert decoder.calls == math.ceil(num_frames / 25)
     full = _to_pcm(decoder(codes.t()[None], torch.arange(num_frames)[None]))[0, 0]
 
-    assert torch.equal(torch.cat([audio for _, audio, _ in steps]), full)
+    assert torch.equal(torch.cat([audio for _, audio, _ in steps]), _with_live_eos(steps, num_frames, full))
     flush_info, flush_audio, flush_decoded = steps[-1]
     assert flush_info.is_final
     if num_frames % 25 == 0:

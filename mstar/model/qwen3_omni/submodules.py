@@ -992,17 +992,13 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 [layer_0_embed, layer_0_embed], dim=-1,
             )
 
-        outputs: dict[str, NameToTensorList] = {}
-        for i, rid in enumerate(request_ids):
-            req_out: NameToTensorList = {
-                "thinker_states": [thinker_states[i : i + 1]],
-                "new_token": [new_tokens[i:i+1]]
-            }
-            if masks_for_talker is not None and rid in masks_for_talker:
-                req_out["thinker_mask"] = [masks_for_talker[rid]]
-            outputs[rid] = req_out
-
-        return outputs
+        # Row i is request i: one clone per output and one host copy of the
+        # tokens per step. A decode row's Talker mask is the constant one,
+        # which postprocess attaches.
+        return BatchedModelOutput(
+            row_outputs={"thinker_states": thinker_states, "new_token": new_tokens},
+            check_stop_buffers={"new_token": new_tokens},
+        )
 
     def unpack_packed_outputs(
         self,
@@ -1019,8 +1015,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
         reattach the per-request talker masks, which live on the original
         ARNodeInputs (the captured graph never saw them — masks vary in
         shape with text content). Drops per-rid emission for requests with
-        ``audio_output=False``, mirroring ``filter_batched_output``'s gating
-        for the decode path.
+        ``audio_output=False``, as postprocess does for the decode path.
         """
         packed_states = static_output.get("__batched_thinker_states__")
         if packed_states is None:
@@ -1070,7 +1065,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
             # shipping both hidden states for every token.
             ts_list = outputs.get("thinker_states")
             mask_list = outputs.get("thinker_mask")
-            if ts_list and mask_list and request_info.graph_walk == "thinker_decode":
+            if ts_list and request_info.graph_walk == "thinker_decode":
                 # A decode token is text the Talker keeps (``prepare_inputs``
                 # gives it the constant ``[[0], [1]]`` mask), so it is layer 0
                 # as is. The boolean indexing below would sync the host on
@@ -1113,28 +1108,6 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 (request_info.dynamic_loop_iter_counts.get("thinker_decode_loop", 0) + 1 >= request_info.max_tokens):
             return {"thinker_decode_loop"}
         return set()
-
-    def filter_batched_output(
-        self,
-        request_info: CurrentForwardPassInfo,
-        rid_output: dict[str, list[torch.Tensor]],
-    ) -> dict[str, list[torch.Tensor]]:
-        """Drop ``thinker_states`` + ``thinker_mask`` for text-only requests.
-
-        ``forward_batched`` always emits these keys so the captured CUDA
-        graph's output shape is static.  Here, outside the captured
-        region, we gate them on the real request's ``audio_output`` flag
-        so the Talker edge stays unrouted for text-only requests (matches
-        the pre-capture eager-mode behaviour).
-        """
-        if request_info is None:
-            return rid_output
-        if request_info.step_metadata.get("audio_output", True):
-            return rid_output
-        return {
-            k: v for k, v in rid_output.items()
-            if k not in ("thinker_states", "thinker_mask")
-        }
 
 
 # ===================================================================
@@ -1179,6 +1152,7 @@ class TalkerSubmodule(ARNodeSubmodule):
 
         # Lazy-built CodePredictor scratch KV cache, overwritten every step.
         self._cp_kv_cache: torch.Tensor | None = None
+        self._cp_positions: torch.Tensor | None = None
 
     def _get_cp_kv_cache(self):
         # TODO: make this a resource
@@ -1192,6 +1166,16 @@ class TalkerSubmodule(ARNodeSubmodule):
                 device=self.get_device(),
             )
         return self._cp_kv_cache
+
+    def _get_cp_positions(self) -> torch.Tensor:
+        """``[g, b, 0] = g``: the code predictor's position for depth step g,
+        the same for every row. Constant, so a step slices it instead of
+        counting up a buffer with a launch per depth step."""
+        if self._cp_positions is None:
+            self._cp_positions = torch.arange(
+                self.num_codes, device=self.get_device(),
+            ).view(-1, 1, 1).expand(-1, self.MAX_BATCH_SIZE, 1).contiguous()
+        return self._cp_positions
 
     def init_tts_embeds(self, thinker_embed_tokens: nn.Embedding) -> None:
         """Pre-compute TTS pad/bos/eos hidden states using the Thinker's
@@ -1422,20 +1406,6 @@ class TalkerSubmodule(ARNodeSubmodule):
             extra_args["text_raw"] = torch.cat(
                 [inp.tensor_inputs["text_raw"] for inp in inputs], dim=0,
             ).to(dtype)
-        # codec scratch is decode-only; talker_prefill runs the LLM backbone
-        # alone and interning these would clash (codec_emb_sum's hidden dim
-        # aliases the token-bucket seq dim).
-        if graph_walk != "talker_prefill":
-            extra_args["suppress_mask"] = self._get_suppress_mask()
-            extra_args["all_codes"] = torch.zeros(
-                (len(inputs), self.num_codes), device=device, dtype=torch.long
-            )
-            extra_args["codec_emb_sum"] = torch.zeros(
-                (len(inputs), self.cp_cfg.hidden_size), device=device
-            )
-            extra_args["pos_buf"] = torch.zeros(
-                (len(inputs), 1), device=device, dtype=torch.long
-            )
         if graph_walk == "talker_last_prefill":
             extra_args["last_token_indices"] = (
                 torch.tensor(seq_lens, device=device, dtype=torch.long).cumsum(0) - 1
@@ -1466,10 +1436,6 @@ class TalkerSubmodule(ARNodeSubmodule):
         self, request_ids: list[str],
         talker_sampler: SamplerResource,
         code_pred_sampler: SamplerResource,
-        suppress_mask: torch.Tensor,
-        all_codes: torch.Tensor,
-        codec_emb_sum: torch.Tensor,
-        pos_buf: torch.Tensor,
         is_batched_decode: bool,
         input_embeds: torch.Tensor,
         last_token_indices: torch.Tensor | None = None,
@@ -1497,7 +1463,7 @@ class TalkerSubmodule(ARNodeSubmodule):
         else:
             last_hidden = hidden
         logits = self.model.codec_head(last_hidden)
-        logits = logits.masked_fill(suppress_mask.unsqueeze(0), float("-inf"))
+        logits = logits.masked_fill(self._get_suppress_mask().unsqueeze(0), float("-inf"))
         # Apply the repetition penalty to the Talker's layer-0 codes (the code
         # predictor depth loop below samples through its own aux config and
         # stays penalty-free). The penalty is baked into the captured graph.
@@ -1507,9 +1473,13 @@ class TalkerSubmodule(ARNodeSubmodule):
 
         # code predictor section
         embed = self.talker_code_emb(layer0_codes)  # [bs, hidden]
-        codec_emb_sum.add_(embed)
+        bs = embed.shape[0]
+        # Scratch made here rather than passed in, so a captured step zeroes it
+        # in the graph instead of copying zeros into static inputs.
+        codec_emb_sum = embed.float()
+        all_codes = torch.zeros((bs, self.num_codes), device=embed.device, dtype=torch.long)
         all_codes[:, 0] = layer0_codes
-        bs = all_codes.shape[0]
+        positions = self._get_cp_positions()
 
         kv_cache = self._get_cp_kv_cache()[:, :bs]
 
@@ -1519,15 +1489,13 @@ class TalkerSubmodule(ARNodeSubmodule):
         cp = self.code_predictor
         codec_embedding = cp.model.codec_embedding
         cp.forward_depth_unrolled(
-            last_hidden.unsqueeze(1), pos_buf, kv_cache, cache_pos=0,
+            last_hidden.unsqueeze(1), positions[0, :bs], kv_cache, cache_pos=0,
         )
-        pos_buf += 1
 
         for group_idx in range(1, self.num_codes):
             hidden = cp.forward_depth_unrolled(
-                embed.unsqueeze(1), pos_buf, kv_cache, cache_pos=group_idx,
+                embed.unsqueeze(1), positions[group_idx, :bs], kv_cache, cache_pos=group_idx,
             ).squeeze(1)
-            pos_buf += 1
 
             logits = torch.matmul(
                 hidden, cp.lm_head_weight[group_idx - 1].t()
@@ -1846,8 +1814,14 @@ class Code2WavSubmodule(NodeSubmodule):
             else:
                 codec_tokens = codec_tokens.unsqueeze(0)
 
-        # Filter out codec_eos frames
-        if codec_tokens.dim() == 2 and codec_tokens.shape[0] > 0:
+        chunk = kwargs.get("input_metadata", EMPTY_INPUT_METADATA).stream_chunks.get("codec_tokens")
+        # The Talker's codec_eos frame ends its stream. A stream's last chunk
+        # drops it here, which reads the frames on the host. Any other window
+        # can hold it only as its last new frame (it arrived before the
+        # producer's done signal); reading every window for that would sync
+        # the GPU thread on each chunk, so ``forward_batched`` decodes the
+        # frame as padding and silences its samples instead.
+        if (chunk is None or chunk.is_final) and codec_tokens.dim() == 2 and codec_tokens.shape[0] > 0:
             eos_mask = codec_tokens[:, 0] == codec_eos
             if eos_mask.any():
                 codec_tokens = codec_tokens[~eos_mask]
@@ -1871,7 +1845,6 @@ class Code2WavSubmodule(NodeSubmodule):
         # The leading frames already decoded by an earlier window: none for
         # the first, then up to ``codec_left_context_frames`` (fewer while the
         # stream is shorter than that, as in HF's ``chunked_decode``).
-        chunk = kwargs.get("input_metadata", EMPTY_INPUT_METADATA).stream_chunks.get("codec_tokens")
         context = chunk.context_items if chunk is not None else 0
         # The frame and context counts ride with this pass rather than in
         # request state, so postprocess reads this window's counts even if the
@@ -1942,9 +1915,19 @@ class Code2WavSubmodule(NodeSubmodule):
                 for rid in request_ids
             }
 
+        # A codec_eos frame left in a live window (see prepare_inputs) decodes
+        # as the zero padding it would have been, and the samples from its
+        # frame on, which a dropped frame would not have produced, are silenced.
+        eos = codec_tokens[:, :1, :] == self.config.talker.codec_eos_token_id
+        codec_tokens = codec_tokens.masked_fill(eos, 0)
         wavs = self.code2wav(
             codec_tokens, position_ids
         )
+        frames = codec_tokens.shape[-1]
+        tail = frames * self.total_upsample - wavs.shape[-1]
+        first_eos = torch.where(eos.any(-1), eos.int().argmax(-1), frames).unsqueeze(-1)  # (bs, 1, 1)
+        sample = torch.arange(wavs.shape[-1], device=wavs.device)
+        wavs = torch.where(sample < first_eos * self.total_upsample - tail, wavs, 0.0)
 
         results: dict[str, NameToTensorList] = {}
         for i, rid in enumerate(request_ids):
