@@ -115,6 +115,7 @@ def test_wan22_declares_only_dit_attention_resources():
     specs = model.get_node_resources()
     assert [spec.resource_key for spec in specs] == [Wan22DitSubmodule.SELF_ATTN]
     assert all(spec.nodes == {"dit"} for spec in specs)
+    assert all(not spec.config.shard_heads for spec in specs)
     model.config = Wan22Config(attention_backend="sdpa")
     assert model.get_node_resources() == []
     assert model.get_request_resource_configs(partition_fwd_args={}) == {}
@@ -975,8 +976,14 @@ def test_wan22_config_echo_normalizes_bogus_decode_override(monkeypatch, caplog)
 
 
 # ----------------------------------------------------------------------
-# dit attention layout
+# dit attention layout and guidance-branch split
 # ----------------------------------------------------------------------
+
+
+class _FakeSPGroup:
+    def __init__(self, world_size: int, rank: int = 0):
+        self.world_size = world_size
+        self.rank = rank
 
 
 def _dit_info(guidance: float) -> CurrentForwardPassInfo:
@@ -985,12 +992,16 @@ def _dit_info(guidance: float) -> CurrentForwardPassInfo:
     return info
 
 
-@pytest.mark.parametrize("guidance,branches", [
-    (5.0, 2),  # both guidance branches in one batch-2 forward
-    (1.0, 1),  # guidance off: the conditional branch alone
+@pytest.mark.parametrize("world_size,guidance,branches", [
+    (None, 5.0, 2),  # one GPU: both guidance branches in one batch-2 forward
+    (None, 1.0, 1),  # guidance off: the conditional branch alone
+    (2, 5.0, 1),     # two ranks split the branches
+    (2, 1.0, 1),     # nothing to split: both ranks run the one branch
+    (4, 5.0, 2),     # more ranks than branches: every rank runs both
 ])
-def test_wan22_dit_attention_layout(guidance, branches):
-    submodule = Wan22DitSubmodule(transformer=None, config=Wan22Config())
+def test_wan22_dit_branches_per_rank(world_size, guidance, branches):
+    group = _FakeSPGroup(world_size) if world_size else None
+    submodule = Wan22DitSubmodule(transformer=None, config=Wan22Config(), sp_group=group)
     node_inputs = submodule.prepare_inputs(
         graph_walk=Wan22Model.VIDEO_GEN_WALK, fwd_info=_dit_info(guidance), inputs=_dit_loop_inputs(k=1),
     )
