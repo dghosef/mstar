@@ -33,7 +33,7 @@ from mstar.engine.resources import AttentionStep, KVStep, PositionStep, SamplerS
 from mstar.engine.resources.attn.flashinfer import FlashInferManager
 from mstar.engine.resources.sampler.resource import SamplerResource
 from mstar.model.qwen3_omni.components.code2wav import Qwen3OmniMoeCode2Wav
-from mstar.model.qwen3_omni.components.cp_kernels import cp_embed_accumulate, cp_linear
+from mstar.model.qwen3_omni.components.cp_kernels import cp_embed_accumulate
 from mstar.model.qwen3_omni.components.rope import (
     compute_3d_cos_sin,
     compute_rope_freqs,
@@ -1502,7 +1502,9 @@ class TalkerSubmodule(ARNodeSubmodule):
                 embed.unsqueeze(1), positions[group_idx, :bs], kv_cache, cache_pos=group_idx,
             ).squeeze(1)
 
-            logits = cp_linear(hidden, cp.lm_head_weight[group_idx - 1])
+            logits = torch.matmul(
+                hidden, cp.lm_head_weight[group_idx - 1].t()
+            )
 
             # Params come from the "code_predictor" aux sampler's static
             # buffers, so per-request values survive graph replay.

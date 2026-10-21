@@ -23,7 +23,7 @@ from mstar.distributed.communication import CommGroup
 from mstar.model.components import ParallelSparseMoeBlockWithSharedExpert, RMSNorm
 from mstar.model.components.distributed import ParallelGatedMLP
 from mstar.model.qwen3_omni.components.attention import Qwen3OmniAttention
-from mstar.model.qwen3_omni.components.cp_kernels import cp_linear, cp_qk_norm_rope_kv_write
+from mstar.model.qwen3_omni.components.cp_kernels import cp_qk_norm_rope_kv_write
 from mstar.model.qwen3_omni.config import TALKER_ATTN, TALKER_KV, TALKER_POS, Qwen3OmniModelConfig, TalkerTextConfig
 from mstar.utils.attention import decode_attn_nhd
 
@@ -505,7 +505,7 @@ class Qwen3OmniCodePredictor(nn.Module):
             else:
                 hidden_states, residual = layer.input_layernorm.forward_residual(hidden_states, residual)
 
-            qkv = cp_linear(hidden_states, layer.self_attn.qkv_proj.weight)
+            qkv = F.linear(hidden_states, layer.self_attn.qkv_proj.weight)
             q_size = n_q_heads * head_dim
             # q normed and roped in place; k (normed, roped) and v into the cache
             # at cache_pos .. cache_pos + seq_len.
@@ -525,11 +525,7 @@ class Qwen3OmniCodePredictor(nn.Module):
             attn_out = decode_attn_nhd(
                 q, k_full, v_full, valid_len
             )
-            attn_out = attn_out.reshape(bs, seq_len, -1)
-            attn_out = (
-                cp_linear(attn_out, attn.o_proj.weight) if attn.o_proj.bias is None
-                else attn.o_proj(attn_out)
-            )
+            attn_out = attn.o_proj(attn_out.reshape(bs, seq_len, -1))
             if layer_idx == 0:
                 residual = residual + attn_out
                 hidden_states = layer.post_attention_layernorm(residual)
