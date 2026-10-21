@@ -38,3 +38,40 @@ warmup_requests:
     files: [hf://nvidia/Cosmos3-Edge/assets/example_i2v_input.jpg]
     output_modalities: [action]
     model_kwargs: {action_mode: policy, domain_name: droid_lerobot, raw_action_dim: 10}
+  # Concurrent policy requests batch, and the batched step compiles once per
+  # batch size: warm each size up to the batch cap.
+  - text: warmup
+    files: [hf://nvidia/Cosmos3-Edge/assets/example_i2v_input.jpg]
+    output_modalities: [action]
+    model_kwargs: {action_mode: policy, domain_name: droid_lerobot, raw_action_dim: 10}
+    concurrency: 2
+  - text: warmup
+    files: [hf://nvidia/Cosmos3-Edge/assets/example_i2v_input.jpg]
+    output_modalities: [action]
+    model_kwargs: {action_mode: policy, domain_name: droid_lerobot, raw_action_dim: 10}
+    concurrency: 3
+  - text: warmup
+    files: [hf://nvidia/Cosmos3-Edge/assets/example_i2v_input.jpg]
+    output_modalities: [action]
+    model_kwargs: {action_mode: policy, domain_name: droid_lerobot, raw_action_dim: 10}
+    concurrency: 4
+  - text: warmup
+    files: [hf://nvidia/Cosmos3-Edge/assets/example_i2v_input.jpg]
+    output_modalities: [action]
+    model_kwargs: {action_mode: policy, domain_name: droid_lerobot, raw_action_dim: 10}
+    concurrency: 5
+  - text: warmup
+    files: [hf://nvidia/Cosmos3-Edge/assets/example_i2v_input.jpg]
+    output_modalities: [action]
+    model_kwargs: {action_mode: policy, domain_name: droid_lerobot, raw_action_dim: 10}
+    concurrency: 6
+  - text: warmup
+    files: [hf://nvidia/Cosmos3-Edge/assets/example_i2v_input.jpg]
+    output_modalities: [action]
+    model_kwargs: {action_mode: policy, domain_name: droid_lerobot, raw_action_dim: 10}
+    concurrency: 7
+  - text: warmup
+    files: [hf://nvidia/Cosmos3-Edge/assets/example_i2v_input.jpg]
+    output_modalities: [action]
+    model_kwargs: {action_mode: policy, domain_name: droid_lerobot, raw_action_dim: 10}
+    concurrency: 8
