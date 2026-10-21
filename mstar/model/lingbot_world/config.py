@@ -83,10 +83,11 @@ class LingBotWorldConfig:
     vae_decode_compile: bool = True
 
     # False trades bit-parity with the reference for speed: flash-attn-4
-    # attention (needs flash-attn-4, see docs/installation.rst) and compiled
-    # block pointwise ops, 12.5 -> 15.7 fps at 480x832 on an H200. A free-running
-    # rollout then drifts from the reference's as far as it does under any other
-    # attention kernel (26.5 dB over 93 frames, the same as FA2 vs FA4 alone).
+    # attention (needs flash-attn-4, see docs/installation.rst), compiled block
+    # pointwise ops, a cuDNN-autotuned condition encoder and a bf16 decode:
+    # 12.6 -> 18.6 fps at 480x832 on an H200. A free-running rollout then drifts
+    # from the reference's about as far as it does under any other attention
+    # kernel (24.6 dB over 93 frames; FA4 instead of FA2 alone gives 26.5 dB).
     reference_numerics: bool = True
 
     @property
