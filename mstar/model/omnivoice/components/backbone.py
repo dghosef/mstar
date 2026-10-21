@@ -6,11 +6,13 @@ ragged attention rather than by a mask, or one document when it turned CFG off.
 Nothing is padded, so a batch mixing a 2-second and a 25-second utterance wastes
 nothing, and the head GEMM runs only at the positions whose logits are read.
 
-The per-step kernel path is the reference's own fastest mode, reused rather than
-re-derived: ``apply_flashinfer`` fuses QKV, swaps in flashinfer RoPE, RMSNorm
-and ``silu_and_mul``, and keeps the whole layer in ``(S, H, D)`` so no transpose
-copies happen.  Re-implementing that here would mean a second copy of tuned
-kernels whose only job is to end up numerically identical.
+The per-step kernels are the reference's own fastest mode: ``apply_flashinfer``
+fuses QKV and gate/up, and the layer runs in ``(S, H, D)`` with flashinfer RoPE,
+RMSNorm and ``silu_and_mul``.  ``OmniVoiceBackbone.encode`` drives those fused
+weights with its own layer loop rather than through the patched ``llm``: it
+norms q and k straight off the fused QKV output (the reference copies each out
+first) and folds every residual add into the next RMSNorm.  At 16 requests a
+step those copies and adds were a tenth of the step's GPU time.
 
 What M* adds on top is what the reference cannot do from inside one
 ``generate()`` call: the documents in a step come from *different concurrent
@@ -27,6 +29,7 @@ import threading
 from dataclasses import dataclass, field
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 logger = logging.getLogger(__name__)
@@ -222,10 +225,10 @@ def build_packed_canvas(
 class OmniVoiceBackbone(nn.Module):
     """The patched reference model, driven one packed step at a time.
 
-    Holding the reference instance rather than borrowing its submodules is what
-    keeps the embedding merge, the audio head reshape and the fused attention
-    path byte-for-byte the upstream ones; every line of per-step math that could
-    drift is theirs.
+    Holding the reference instance keeps the embedding merge, the audio head
+    reshape and the fused weights the upstream ones. ``encode`` runs the layer
+    stack over them itself (see the module docstring); ``forward`` is the
+    reference's own packed forward, the path with backbone graphs off.
     """
 
     def __init__(self, model: nn.Module, plan_dtype: torch.dtype):
@@ -244,7 +247,6 @@ class OmniVoiceBackbone(nn.Module):
         self,
         input_ids: torch.Tensor,
         audio_mask: torch.Tensor,
-        position_ids: torch.Tensor,
         pos_ids: torch.Tensor,
         attn,
     ) -> torch.Tensor:
@@ -253,22 +255,42 @@ class OmniVoiceBackbone(nn.Module):
         Token-major inputs (``input_ids`` ``[N, C]``, the rest ``[N]``, ``pos_ids``
         int32) so a captured replay can copy a shorter row into its bucket.
         ``attn`` is the engine's ragged attention resource, planned for this
-        row's documents; the reference's patched attention reads it, and the
-        positions its fused RoPE applies, from ``_CTX``.
+        row's documents.
         """
-        fi = assert_flashinfer_api()
-        fi._CTX["wrapper"] = attn
-        fi._CTX["pos_ids"] = pos_ids
-        fi._CTX["doc_slots"] = None
-        embeds = self.model._prepare_embed_inputs(
+        import flashinfer
+
+        hidden = self.model._prepare_embed_inputs(
             input_ids.t().unsqueeze(0), audio_mask.unsqueeze(0)
-        )
-        return self.model.llm(
-            inputs_embeds=embeds,
-            attention_mask={"full_attention": None},
-            return_dict=True,
-            position_ids=position_ids.unsqueeze(0),
-        )[0][0]
+        )[0]
+        llm = self.model.llm
+        residual = None
+        for layer in llm.layers:
+            sa, mlp = layer.self_attn, layer.mlp
+            norm = layer.input_layernorm
+            if residual is None:
+                residual = hidden
+                x = flashinfer.norm.rmsnorm(hidden, norm.weight, eps=norm.variance_epsilon)
+            else:
+                # residual += hidden; hidden = norm(residual), in place
+                flashinfer.norm.fused_add_rmsnorm(hidden, residual, norm.weight, eps=norm.variance_epsilon)
+                x = hidden
+            n, d = x.shape[0], sa.head_dim
+            heads_q, heads_k, _ = (width // d for width in sa._fi_qkv_split)
+            qkv = F.linear(x, sa._fi_w_qkv).view(n, -1, d)
+            # the q/k norms read their heads straight off the fused output
+            q = flashinfer.norm.rmsnorm(qkv[:, :heads_q], sa.q_norm.weight, eps=sa.q_norm.variance_epsilon)
+            k = flashinfer.norm.rmsnorm(
+                qkv[:, heads_q:heads_q + heads_k], sa.k_norm.weight, eps=sa.k_norm.variance_epsilon,
+            )
+            flashinfer.rope.apply_rope_pos_ids_inplace(
+                q, k, pos_ids, rope_theta=sa._fi_rope_theta, interleave=False,
+            )
+            hidden = sa.o_proj(attn.run(q, k, qkv[:, heads_q + heads_k:]).reshape(n, -1))
+            norm = layer.post_attention_layernorm
+            flashinfer.norm.fused_add_rmsnorm(hidden, residual, norm.weight, eps=norm.variance_epsilon)
+            hidden = mlp.down_proj(flashinfer.activation.silu_and_mul(F.linear(hidden, mlp._fi_w_gate_up)))
+        flashinfer.norm.fused_add_rmsnorm(hidden, residual, llm.norm.weight, eps=llm.norm.variance_epsilon)
+        return hidden
 
     def head(self, hidden: torch.Tensor, tgt_index: torch.Tensor) -> torch.Tensor:
         """The audio head at the logits-consuming positions, laid out as
