@@ -486,7 +486,7 @@ jobs:
         run: |
           python3 .github/review/session.py usage --pr "$PR" --head "$HEAD_SHA" --mode "$MODE" \
             --continue "$CONTINUE" --outcome "$OUTCOME" --summary "$GITHUB_STEP_SUMMARY" \
-            --out "$RUNNER_TEMP/usage/review-usage-$PR-$GITHUB_RUN_ID.json" \
+            --out "$RUNNER_TEMP/usage/review-usage-$PR-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.json" \
             "$RUNNER_TEMP/claude-execution-output.json" "$HOME/.claude/projects"
 
       - name: Upload the usage record
@@ -494,7 +494,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: review-usage-${{ env.PR }}-${{ github.run_id }}
+          name: review-usage-${{ env.PR }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/usage
           retention-days: 30
           if-no-files-found: ignore

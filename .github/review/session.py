@@ -22,9 +22,11 @@ from pathlib import Path
 
 TOKENS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 # The prompt asks for notes that start with "Progress:"; tolerate Markdown around it.
-PROGRESS = re.compile(r"[#*_\s]*progress\b", re.IGNORECASE)
+PROGRESS = re.compile(r"[#*_\s]*progress[*_\s]*:", re.IGNORECASE)
 NOTE_CHARS = 6000
 LAST_TEXT_CHARS = 3000
+# The "didn't complete" comment is public and the note lists unverified leads, so it shows less.
+COMMENT_NOTE_CHARS = 1500
 
 
 def load(paths):
@@ -112,7 +114,7 @@ def handoff(messages, root, diff_paths, previous=None):
         for b in blocks(m):
             if b.get("type") == "tool_result" and b.get("tool_use_id"):
                 results[b["tool_use_id"]] = b
-    comments = {c["id"]: c for c in prev.get("comments", [])}
+    comments = {c.get("id") or f"earlier-{i}": c for i, c in enumerate(prev.get("comments", []))}
     reads = set(prev.get("reads", []))
     note, last_text = None, None
     prefix = root.rstrip("/") + "/"
@@ -125,8 +127,9 @@ def handoff(messages, root, diff_paths, previous=None):
             if kind == "tool_use" and str(b.get("name", "")).endswith("create_inline_comment"):
                 res = results.get(b.get("id"))
                 status = "unknown" if res is None else "failed" if res.get("is_error") else "posted"
-                comments[b["id"]] = {
-                    "id": b["id"], "path": inp.get("path"), "line": inp.get("line") or inp.get("startLine"),
+                key = b.get("id") or f"no-id-{len(comments)}"
+                comments[key] = {
+                    "id": key, "path": inp.get("path"), "line": inp.get("line") or inp.get("startLine"),
                     "body": str(inp.get("body", "")).strip().split("\n")[0][:160], "status": status,
                     "error": first_line(res.get("content"))[:200] if status == "failed" else "",
                 }
@@ -158,7 +161,9 @@ def first_line(content):
 
 def diff_paths(diff_text):
     """The files ``pr.diff`` adds or changes, in order (deleted files have nothing to open)."""
-    return [line[len("+++ b/"):].rstrip("\t\r") for line in diff_text.splitlines() if line.startswith("+++ b/")]
+    lines = diff_text.splitlines()
+    return [line[len("+++ b/"):].rstrip("\t\r") for i, line in enumerate(lines)
+            if i and line.startswith("+++ b/") and lines[i - 1].startswith("--- ")]
 
 
 def comment_lines(h, status):
@@ -194,14 +199,15 @@ def handoff_md(h, pr, head, mode):
 
 def partial_md(h):
     """The part of the handoff the "didn't complete" comment shows."""
-    made = [c for c in h["comments"] if c["status"] != "failed"]
+    made = [c for c in h["comments"] if c["status"] == "posted"]
     out = ""
     if made:
         out += f"**Inline comments it made ({len(made)}):**\n" + "\n".join(
             f"- `{c['path']}:{c['line']}` {c['body']}" for c in made) + "\n"
     notes = h["note"] or h["last_text"]
     if notes:
-        out += "\n**Its latest notes:**\n\n" + quote(notes) + "\n"
+        cut = notes[:COMMENT_NOTE_CHARS] + (" …" if len(notes) > COMMENT_NOTE_CHARS else "")
+        out += "\n**Its latest notes:**\n\n" + quote(cut) + "\n"
     return out
 
 
@@ -214,19 +220,25 @@ def main():
     ap.add_argument("--mode", required=True)
     ap.add_argument("--out", required=True, help="usage: the JSON record; handoff: a directory")
     ap.add_argument("--continue", dest="cont", default="false", help="usage: whether this was /review continue")
-    ap.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
     ap.add_argument("--outcome", default="", help="usage: the review step's outcome")
     ap.add_argument("--summary", help="usage: a Markdown file to append the table to, e.g. $GITHUB_STEP_SUMMARY")
     ap.add_argument("--diff", help="handoff: pr.diff")
     ap.add_argument("--previous", help="handoff: the handoff.json this run continued from")
     ap.add_argument("--comment", help="handoff: where to write the \"didn't complete\" comment's part")
-    ap.add_argument("--root", default=os.getcwd(), help="handoff: the workspace that tool paths are under")
     a = ap.parse_intermixed_args()
     if a.command == "usage":
         return record_usage(a)
-    previous = json.loads(Path(a.previous).read_text()) if a.previous else None
+    previous = None
+    if a.previous:
+        try:
+            previous = json.loads(Path(a.previous).read_text())
+        except (OSError, ValueError) as e:
+            print(f"::warning::Couldn't read the earlier handoff, so this one starts afresh: {e}")
+    if not isinstance(previous, dict):
+        previous = None
     diff = Path(a.diff).read_text(errors="replace") if a.diff and Path(a.diff).is_file() else ""
-    h = handoff(load(a.sources), a.root, diff_paths(diff), previous)
+    # Tool paths are absolute, under the workspace the workflow runs this from.
+    h = handoff(load(a.sources), os.getcwd(), diff_paths(diff), previous)
     if not h.pop("seen_assistant"):
         print("No Claude Code messages to hand off.", file=sys.stderr)
         return 1
@@ -242,7 +254,8 @@ def main():
 def record_usage(a):
     """Never fails: a record that couldn't be read says why in its ``error`` field."""
     record = {"pr": a.pr, "head_sha": a.head, "mode": a.mode, "continue": a.cont == "true",
-              "run_id": a.run_id, "outcome": a.outcome}
+              "run_id": os.environ.get("GITHUB_RUN_ID", ""), "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+              "outcome": a.outcome}
     try:
         record.update(usage(load(a.sources)))
     except Exception as e:

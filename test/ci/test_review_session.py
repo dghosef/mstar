@@ -1,10 +1,15 @@
 """Check .github/review/session.py: the review's usage record and its /review continue handoff."""
 
+import argparse
+import contextlib
+import io
 import json
 import runpy
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SESSION = runpy.run_path(str(REPO_ROOT / ".github/review/session.py"))
@@ -37,6 +42,19 @@ def text(t):
 COMMENT = "mcp__github_inline_comment__create_inline_comment"
 
 
+def run_main(*argv):
+    """``session.py`` as the workflow runs it, with its output kept out of the test log."""
+    quiet = io.StringIO()
+    with mock.patch.object(sys, "argv", ["session.py", *argv]), \
+            contextlib.redirect_stdout(quiet), contextlib.redirect_stderr(quiet):
+        return SESSION["main"]()
+
+
+def usage_args(d, *sources):
+    return argparse.Namespace(pr="1", head="abc", mode="light", cont="false", outcome="failure",
+                              out=str(Path(d, "u.json")), summary=str(Path(d, "summary.md")), sources=list(sources))
+
+
 class TestUsage(unittest.TestCase):
     def test_one_response_over_several_lines_counts_once(self):
         msgs = [assistant("msg_a", text("x"), out=5), assistant("msg_a", tool("t1", "Read"), out=40),
@@ -62,6 +80,21 @@ class TestUsage(unittest.TestCase):
             u = usage(load([str(Path(d, "exec.json")), str(Path(d, "projects")), str(Path(d, "missing.json"))]))
         self.assertEqual(u["api_calls"], 2)
         self.assertIsNone(u["num_turns"], "a run without a result message has no turn count")
+
+    def test_a_corrupt_or_missing_execution_file_still_records(self):
+        with tempfile.TemporaryDirectory() as d:
+            truncated, odd = Path(d, "truncated.json"), Path(d, "odd.json")
+            truncated.write_text('[{"type": "assistant", "message": ')
+            odd.write_text('[{"type": "assistant", "message": "not an object"}]')
+            quiet = io.StringIO()
+            with contextlib.redirect_stdout(quiet):
+                for source in (truncated, Path(d, "missing.json"), odd):
+                    self.assertEqual(SESSION["record_usage"](usage_args(d, str(source))), 0, source.name)
+            record = json.loads(Path(d, "u.json").read_text())
+            summary = Path(d, "summary.md").read_text()
+        self.assertIn("error", record, "a message of the wrong shape should be reported, not raised")
+        self.assertEqual(summary.count("### Review usage"), 3)
+        self.assertIn("| API calls | 0 |", summary)
 
 
 class TestHandoff(unittest.TestCase):
@@ -100,9 +133,52 @@ class TestHandoff(unittest.TestCase):
         self.assertTrue(second["note"].startswith("Progress:"), "the last progress note would be lost")
         self.assertEqual(second["last_text"], "No note here")
 
-    def test_diff_paths_skip_deleted_files(self):
-        diff = "diff --git a/x b/x\n--- a/x\n+++ /dev/null\ndiff --git a/y b/y\n--- a/y\n+++ b/y\n"
+    def test_only_a_note_that_starts_with_progress_colon_counts(self):
+        h = handoff([assistant("m1", text("**Progress:** P1 `a.py:3`, verified")),
+                     assistant("m2", text("Progress was slow on this file."))], ROOT, [])
+        self.assertEqual(h["note"], "**Progress:** P1 `a.py:3`, verified", "prose would replace the real note")
+
+    def test_diff_paths_skip_deleted_files_and_hunk_lines(self):
+        diff = ("diff --git a/x b/x\n--- a/x\n+++ /dev/null\ndiff --git a/y b/y\n--- a/y\n+++ b/y\n"
+                "@@ -1 +1,2 @@\n+++ b/not-a-file\n")
         self.assertEqual(diff_paths(diff), ["y"])
+
+
+class TestCli(unittest.TestCase):
+    def test_handoff_with_options_before_files_and_a_previous_handoff(self):
+        with tempfile.TemporaryDirectory() as d:
+            ex, prev, out, partial = Path(d, "exec.json"), Path(d, "prev.json"), Path(d, "out"), Path(d, "partial.md")
+            ex.write_text(json.dumps([
+                assistant("m1", tool("c1", COMMENT, path="a.py", line=3, body="**[P2]** failed one")),
+                result("c1", error="line 3 is not in the diff"),
+                assistant("m2", text("**Progress:** P1 `b.py:7` unverified"),
+                          tool("c2", COMMENT, path="b.py", line=7, body="**[P1]** unknown one")),
+            ]))
+            prev.write_text(json.dumps({"runs": 1, "comments": [], "reads": ["pr-head/z.py"], "note": "",
+                                        "last_text": ""}))
+            code = run_main("handoff", "--pr", "7", "--head", "abc", "--mode", "light", "--out", str(out),
+                            "--comment", str(partial), "--previous", str(prev), str(ex))
+            h = json.loads(Path(out, "handoff.json").read_text())
+            md = Path(out, "handoff.md").read_text()
+            comment = partial.read_text()
+        self.assertEqual(code, 0)
+        self.assertEqual((h["pr"], h["runs"], h["reads"]), ("7", 2, ["pr-head/z.py"]))
+        self.assertIn("## Inline comments that failed to post\n\n"
+                      "- `a.py:3` **[P2]** failed one (line 3 is not in the diff)", md)
+        self.assertIn("## Inline comments whose result is unknown (check pr-comments.json)\n\n"
+                      "- `b.py:7` **[P1]** unknown one", md)
+        self.assertNotIn("Inline comments it made", comment, "a comment that may not have posted would show as made")
+        self.assertIn("**Progress:** P1 `b.py:7` unverified", comment)
+
+    def test_a_corrupt_previous_handoff_starts_afresh(self):
+        with tempfile.TemporaryDirectory() as d:
+            ex, prev, out = Path(d, "exec.json"), Path(d, "prev.json"), Path(d, "out")
+            ex.write_text(json.dumps([assistant("m1", text("Progress: nothing yet"))]))
+            prev.write_text("{not json")
+            code = run_main("handoff", "--pr", "7", "--head", "abc", "--mode", "light", "--out", str(out),
+                            "--previous", str(prev), str(ex))
+            h = json.loads(Path(out, "handoff.json").read_text())
+        self.assertEqual((code, h["runs"]), (0, 1))
 
 
 if __name__ == "__main__":
