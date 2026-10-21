@@ -292,6 +292,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # request per step.  Helps keep the captured graph's output-dict
         # contents self-evidently constant, too.
         self._decode_thinker_mask: torch.Tensor | None = None
+        self._decode_talker_mm_mask: torch.Tensor | None = None
 
         self._audio_bos_embed: torch.Tensor | None = None
         self._audio_eos_embed: torch.Tensor | None = None
@@ -320,6 +321,13 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 [[0], [1]], dtype=torch.bool, device=device,
             )
         return self._decode_thinker_mask
+
+    def _get_decode_talker_mm_mask(self, device: torch.device) -> torch.Tensor:
+        """The 1D multimodal mask ``postprocess`` emits for a decode token:
+        ``[False]``, lazily allocated per device. Never written after."""
+        if self._decode_talker_mm_mask is None or self._decode_talker_mm_mask.device != device:
+            self._decode_talker_mm_mask = torch.zeros(1, dtype=torch.bool, device=device)
+        return self._decode_talker_mm_mask
 
     def _get_talker_text_mask(self, input_ids: torch.Tensor) -> torch.Tensor:
         """
@@ -1059,7 +1067,15 @@ class ThinkerSubmodule(ARNodeSubmodule):
             # shipping both hidden states for every token.
             ts_list = outputs.get("thinker_states")
             mask_list = outputs.get("thinker_mask")
-            if ts_list and mask_list:
+            if ts_list and mask_list and request_info.graph_walk == "thinker_decode":
+                # A decode token is text the Talker keeps (``prepare_inputs``
+                # gives it the constant ``[[0], [1]]`` mask), so it is layer 0
+                # as is. The boolean indexing below would sync the host on
+                # every row of every decode step.
+                thinker_hidden = self.config.thinker_hidden_size
+                outputs["thinker_states"] = [ts_list[0][..., :thinker_hidden]]
+                outputs["thinker_mask"] = [self._get_decode_talker_mm_mask(ts_list[0].device)]
+            elif ts_list and mask_list:
                 ts = ts_list[0]                # (seq_len, 2*hidden)
                 mask = mask_list[0]            # (2, seq_len)
                 thinker_hidden = self.config.thinker_hidden_size
