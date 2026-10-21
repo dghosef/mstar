@@ -171,7 +171,10 @@ class LingBotDitSubmodule(_SingleRequestMixin, NodeSubmodule):
         self.schedule = make_fast_schedule(config.sample_shift, config.timesteps_index, config.num_train_timesteps)
         if vae is not None and config.vae_decode_channels_last:
             wan_vae.to_channels_last(vae)
-        self._decode_step = wan_vae.DecoderStep(vae, compile=False) if vae is not None else None
+        self._decode_step = (
+            wan_vae.DecoderStep(vae, compile=config.vae_decode_compile, deterministic=True)
+            if vae is not None else None
+        )
         # Debug hook for the parity harness: keep the last chunk's latents and
         # float frames in the request state.
         self.keep_chunk_outputs = False
@@ -271,7 +274,7 @@ class LingBotDitSubmodule(_SingleRequestMixin, NodeSubmodule):
         mean = torch.tensor(self.vae.config.latents_mean).view(1, cfg.vae_z_dim, 1, 1, 1).to(z)
         inv_std = 1.0 / torch.tensor(self.vae.config.latents_std).view(1, cfg.vae_z_dim, 1, 1, 1).to(z)
         z = z / inv_std + mean
-        with torch.amp.autocast("cuda", enabled=False):
+        with torch.amp.autocast("cuda", enabled=False), wan_vae.cudnn_benchmark(cfg.vae_decode_cudnn_benchmark):
             return wan_vae.decode_causal(
                 self.vae, z, state["feat_cache"], self._decode_step, clip_start=clip_start, latents_per_call=1,
             )
