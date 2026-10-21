@@ -59,9 +59,17 @@ def require_flash_attn() -> None:
         ) from e
 
 
-def _flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+def _flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, fa4: bool = False) -> torch.Tensor:
     """The reference ``flash_attention`` for one unpadded sequence: q/k/v
-    ``[1, L, H, D]`` bf16 through FA2 varlen; returns ``[1, Lq, H, D]``."""
+    ``[1, L, H, D]`` bf16 through FA2 varlen; returns ``[1, Lq, H, D]``.
+    ``fa4`` runs flash-attn-4's sm90 kernel instead (not the reference's
+    numerics; see ``LingBotWorldConfig.reference_numerics``)."""
+    if fa4:
+        from flash_attn.cute import flash_attn_func
+
+        out = flash_attn_func(q.to(v.dtype), k.to(v.dtype), v)
+        out = out[0] if isinstance(out, tuple) else out
+        return out.type(q.dtype)
     import flash_attn
 
     b, lq, lk, out_dtype = q.size(0), q.size(1), k.size(1), q.dtype
@@ -228,21 +236,24 @@ class CausalSelfAttention(nn.Module):
         self.o = nn.Linear(dim, dim)
         self.norm_q = WanRMSNorm(dim, eps=eps)
         self.norm_k = WanRMSNorm(dim, eps=eps)
+        self.fa4 = False
 
     def forward(
         self, x: torch.Tensor, grid: tuple[int, int, int], freqs: torch.Tensor,
         start_frame: int, cache: RollingKVCache, layer: int, plan: _WritePlan,
     ) -> torch.Tensor:
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
-        q = self.norm_q(self.q(x)).view(b, s, n, d)
-        k = self.norm_k(self.k(x)).view(b, s, n, d)
-        v = self.v(x).view(b, s, n, d)
+        q, k, v = self._qkv(x)
+        q, k, v = q.view(b, s, n, d), k.view(b, s, n, d), v.view(b, s, n, d)
         roped_query = causal_rope_apply(q, grid, freqs, start_frame).type_as(v)
         roped_key = causal_rope_apply(k, grid, freqs, start_frame).type_as(v)
         cache.write(layer, roped_key, v, plan)
         window = slice(max(0, plan.local_end - cache.capacity), plan.local_end)
-        x = _flash_attention(roped_query, cache.k[layer][:, window], cache.v[layer][:, window])
+        x = _flash_attention(roped_query, cache.k[layer][:, window], cache.v[layer][:, window], self.fa4)
         return self.o(x.flatten(2))
+
+    def _qkv(self, x):
+        return self.norm_q(self.q(x)), self.norm_k(self.k(x)), self.v(x)
 
 
 class CrossAttention(nn.Module):
@@ -259,6 +270,7 @@ class CrossAttention(nn.Module):
         self.o = nn.Linear(dim, dim)
         self.norm_q = WanRMSNorm(dim, eps=eps)
         self.norm_k = WanRMSNorm(dim, eps=eps)
+        self.fa4 = False
 
     def text_kv(self, context: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         b, n, d = context.size(0), self.num_heads, self.head_dim
@@ -266,8 +278,11 @@ class CrossAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         b, n, d = x.size(0), self.num_heads, self.head_dim
-        q = self.norm_q(self.q(x)).view(b, -1, n, d)
-        return self.o(_flash_attention(q, k, v).flatten(2))
+        q = self._q(x).view(b, -1, n, d)
+        return self.o(_flash_attention(q, k, v, self.fa4).flatten(2))
+
+    def _q(self, x):
+        return self.norm_q(self.q(x))
 
 
 class CausalBlock(nn.Module):
@@ -298,18 +313,26 @@ class CausalBlock(nn.Module):
     ) -> torch.Tensor:
         with torch.amp.autocast("cuda", dtype=torch.float32):
             e = (self.modulation.unsqueeze(0) + e).chunk(6, dim=2)
-        y = self.self_attn(self.norm1(x).float() * (1 + e[1].squeeze(2)) + e[0].squeeze(2), **attn_args)
-        with torch.amp.autocast("cuda", dtype=torch.float32):
-            x = x + y * e[2].squeeze(2)
+        y = self.self_attn(self._pre(x, e[0], e[1]), **attn_args)
+        x = self._post_self(x, y, e[2], *cam_mod)
+        x = x + self.cross_attn(self._norm3(x), cross_k, cross_v)
+        return self._ffn(x, e[3], e[4], e[5])
 
-        cam_scale, cam_shift = cam_mod
-        x = (1.0 + cam_scale) * x + cam_shift
+    def _pre(self, x, e0, e1):
+        return self.norm1(x).float() * (1 + e1.squeeze(2)) + e0.squeeze(2)
 
-        x = x + self.cross_attn(self.norm3(x), cross_k, cross_v)
-        y = self.ffn(self.norm2(x).float() * (1 + e[4].squeeze(2)) + e[3].squeeze(2))
+    def _post_self(self, x, y, e2, cam_scale, cam_shift):
         with torch.amp.autocast("cuda", dtype=torch.float32):
-            x = x + y * e[5].squeeze(2)
-        return x
+            x = x + y * e2.squeeze(2)
+        return (1.0 + cam_scale) * x + cam_shift
+
+    def _norm3(self, x):
+        return self.norm3(x)
+
+    def _ffn(self, x, e3, e4, e5):
+        y = self.ffn(self.norm2(x).float() * (1 + e4.squeeze(2)) + e3.squeeze(2))
+        with torch.amp.autocast("cuda", dtype=torch.float32):
+            return x + y * e5.squeeze(2)
 
 
 class CausalHead(nn.Module):
@@ -351,6 +374,26 @@ class LingBotCausalDiT(nn.Module):
             rope_params(n, 2 * (d // 6)),
         ], dim=1)
         self._freqs: dict[torch.device, torch.Tensor] = {}
+        if not config.reference_numerics:
+            self._fast_numerics()
+
+    def _fast_numerics(self) -> None:
+        """Trade bit-parity with the reference for speed: flash-attn-4
+        attention, and each block's pointwise chains (modulation, norms, FFN
+        activation, gated residuals) compiled around the GEMMs. Attention, RoPE
+        and the cache writes stay eager: they take the chunk's Python-int
+        cache indices, which would recompile per chunk."""
+        from mstar.model.components.diffusion.compile_utils import with_inductor_rounding
+
+        def compiled(fn):
+            return with_inductor_rounding(torch.compile(fn, dynamic=False), eager_rounding=True)
+
+        for block in self.blocks:
+            block.self_attn.fa4 = block.cross_attn.fa4 = True
+            for name in ("_pre", "_post_self", "_norm3", "_ffn"):
+                setattr(block, name, compiled(getattr(block, name)))
+            block.self_attn._qkv = compiled(block.self_attn._qkv)
+            block.cross_attn._q = compiled(block.cross_attn._q)
 
     def freqs(self, device: torch.device) -> torch.Tensor:
         if device not in self._freqs:
