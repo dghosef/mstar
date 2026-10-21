@@ -55,6 +55,7 @@ from mstar.model.qwen3_omni.config import (
     Qwen3OmniModelConfig,
 )
 from mstar.model.submodule_base import (
+    EMPTY_INPUT_METADATA,
     ARNodeInputs,
     ARNodeSubmodule,
     InputMetadata,
@@ -1724,13 +1725,6 @@ class Code2WavSubmodule(NodeSubmodule):
         super().__init__()
         self.code2wav = code2wav_model
         self.config = config
-        # Per-request set of request_ids that have already emitted their first
-        # audio chunk. The first chunk has no prior audio to overlap with, so
-        # its output must NOT be trimmed — the left-context trim only applies
-        # to subsequent chunks. Matches HF chunked_decode's ``context_size =
-        # left_context_size if start_index - left_context_size > 0 else start_index``
-        # logic, where the first iteration has context_size=0.
-        self._first_chunk_emitted: set[str] = set()
 
         # Pre-compute the total upsample factor. HF defines this as
         # ``np.prod(upsample_rates + upsampling_ratios)`` — both tuples
@@ -1745,10 +1739,6 @@ class Code2WavSubmodule(NodeSubmodule):
 
         self.full_seqlen = self.config.code2wav.codec_left_context_frames + \
             self.config.code2wav.codec_chunk_frames
-
-    def cleanup_request(self, request_id):
-        super().cleanup_request(request_id)
-        self._first_chunk_emitted.discard(request_id)
 
     @staticmethod
     def _chunk(rid, per_request_input_metadata: Mapping[str, InputMetadata] | None):
@@ -1841,15 +1831,20 @@ class Code2WavSubmodule(NodeSubmodule):
 
         # Transpose to (Q, T)
         codec_tokens = codec_tokens.T  # (Q, T)
-        # The frame count rides with this pass rather than in request state,
-        # so postprocess reads this window's count even if the request's next
-        # window is prepared first.
+        # The leading frames already decoded by an earlier window: none for
+        # the first, then up to ``codec_left_context_frames`` (fewer while the
+        # stream is shorter than that, as in HF's ``chunked_decode``).
+        chunk = kwargs.get("input_metadata", EMPTY_INPUT_METADATA).stream_chunks.get("codec_tokens")
+        context = chunk.context_items if chunk is not None else 0
+        # The frame and context counts ride with this pass rather than in
+        # request state, so postprocess reads this window's counts even if the
+        # request's next window is prepared first.
         return NodeInputs(
             tensor_inputs={
                 "codec_tokens": codec_tokens,
                 "position_ids": torch.arange(codec_tokens.shape[1], device=codec_tokens.device)
             },
-            kwargs={"frames": orig_seq_len},
+            kwargs={"frames": orig_seq_len, "context": context},
         )
 
     def preprocess(
@@ -1967,9 +1962,7 @@ class Code2WavSubmodule(NodeSubmodule):
             raise ValueError("Code2Wav postprocess needs the pass's inputs for its frame count")
 
         orig_seq_len = int(inputs.kwargs["frames"])
-        cfg_ctx = self.config.code2wav.codec_left_context_frames
-        left_context_size = 0 if request_id not in self._first_chunk_emitted else cfg_ctx
-        self._first_chunk_emitted.add(request_id)
+        left_context_size = int(inputs.kwargs["context"])
         audio = outputs["audio_chunk"][0].reshape(-1)
         if audio.numel() == 0:
             outputs["audio_chunk"][0] = audio
