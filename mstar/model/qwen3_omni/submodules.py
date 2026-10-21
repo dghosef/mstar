@@ -59,6 +59,7 @@ from mstar.model.submodule_base import (
     EMPTY_INPUT_METADATA,
     ARNodeInputs,
     ARNodeSubmodule,
+    BatchedModelOutput,
     InputMetadata,
     ModelInputsFromEngine,
     NodeInputs,
@@ -1620,14 +1621,18 @@ class TalkerSubmodule(ARNodeSubmodule):
             **kwargs
         )
 
-        outputs = {
-            rid: {
-                "talker_input_embeds": [fwd_out["talker_input_embeds"][0][i:i+1]],
-                "codec_tokens": [fwd_out["codec_tokens"][0][i]],
-                "new_token": [fwd_out["new_token"][0][i]],
-            } for i, rid in enumerate(engine_inputs.request_ids)
-        }
-        return outputs
+        # Row i is request i: the engine clones each output once for the batch
+        # and the stop check reads one host copy, instead of three clones and
+        # a device-to-host copy per request.
+        layer0_codes = fwd_out["new_token"][0]
+        return BatchedModelOutput(
+            row_outputs={
+                "talker_input_embeds": fwd_out["talker_input_embeds"][0],
+                "codec_tokens": fwd_out["codec_tokens"][0],
+                "layer0_codes": layer0_codes,
+            },
+            check_stop_buffers={"layer0_codes": layer0_codes},
+        )
 
     def postprocess(
         self, request_id: str,
@@ -1829,6 +1834,9 @@ class Code2WavSubmodule(NodeSubmodule):
         num_quantizers = self.config.code2wav.num_quantizers  # 16
         codec_eos = self.config.talker.codec_eos_token_id
         codec_tokens = inputs["codec_tokens"][0]
+        if codec_tokens.dim() == 3:
+            # stacked (1, groups) frames, the Talker's batched rows
+            codec_tokens = codec_tokens.flatten(0, 1)
 
         # Reshape to (num_frames, num_code_groups) if flat
         if codec_tokens.dim() == 1:
