@@ -258,6 +258,46 @@ class OmniVoiceBackbone(nn.Module):
         # request attending with another's document boundaries.
         self._ctx_lock = threading.Lock()
 
+    def encode(
+        self,
+        input_ids: torch.Tensor,
+        audio_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+        pos_ids: torch.Tensor,
+        attn,
+    ) -> torch.Tensor:
+        """Embeddings and the Qwen3 body over one packed row: ``[N, hidden]``.
+
+        Token-major inputs (``input_ids`` ``[N, C]``, the rest ``[N]``, ``pos_ids``
+        int32) so a captured replay can copy a shorter row into its bucket.
+        ``attn`` is the engine's ragged attention resource, planned for this
+        row's documents; the reference's patched attention reads it, and the
+        positions its fused RoPE applies, from ``_CTX``.
+        """
+        fi = assert_flashinfer_api()
+        fi._CTX["wrapper"] = attn
+        fi._CTX["pos_ids"] = pos_ids
+        fi._CTX["doc_slots"] = None
+        embeds = self.model._prepare_embed_inputs(
+            input_ids.t().unsqueeze(0), audio_mask.unsqueeze(0)
+        )
+        return self.model.llm(
+            inputs_embeds=embeds,
+            attention_mask={"full_attention": None},
+            return_dict=True,
+            position_ids=position_ids.unsqueeze(0),
+        )[0][0]
+
+    def head(self, hidden: torch.Tensor, tgt_index: torch.Tensor) -> torch.Tensor:
+        """The audio head at the logits-consuming positions, laid out as
+        ``_forward_logits`` returns it: ``[1, C, len(tgt_index), V]``."""
+        cfg = self.model.config
+        tgt_hidden = hidden[tgt_index]
+        logits = self.model.audio_heads(tgt_hidden)
+        return logits.view(
+            1, tgt_hidden.shape[0], cfg.num_audio_codebook, cfg.audio_vocab_size
+        ).permute(0, 2, 1, 3)
+
     @torch.inference_mode()
     def forward(self, canvas: PackedCanvas) -> torch.Tensor:
         """One packed forward; returns ``[1, C, 2 * flat_target_total, V]``.
