@@ -26,7 +26,7 @@ from mstar.model.qwen3_omni.components.code2wav import Qwen3OmniMoeCode2Wav
 from mstar.model.qwen3_omni.config import Code2WavConfig, Qwen3OmniModelConfig
 from mstar.model.qwen3_omni.submodules import Code2WavSubmodule
 from mstar.model.submodule_base import InputMetadata, ModelInputsFromEngine
-from mstar.streaming.chunk_policy import LeftContextChunkPolicy
+from mstar.streaming.chunk_policy import LeftContextChunkPolicy, ScheduledLeftContextChunkPolicy
 from mstar.streaming.stream_buffer import StreamBuffer, StreamChunkInfo
 
 UPSAMPLE = 1920
@@ -37,18 +37,26 @@ def _to_pcm(wav: torch.Tensor) -> torch.Tensor:
     return (wav.clamp(-1, 1) * 32767).to(torch.int16)
 
 
-def _stream_batched(submodule: Code2WavSubmodule, frames: dict[str, torch.Tensor]) -> tuple[dict, list]:
+def _stream_batched(
+    submodule: Code2WavSubmodule, frames: dict[str, torch.Tensor], schedule: tuple[int, ...] | None = None,
+) -> tuple[dict, list]:
     """Stream each request's ``frames`` ``[T, 16]`` through its own buffer
-    with the edge's policy. Every step batches the requests that still have a
+    with fixed 25-frame chunks, or with ``schedule`` ahead of them as the
+    served edge does. Every step batches the requests that still have a
     chunk, the way the scheduler batches Code2Wav. Returns, per request, its
     ``(chunk_info, audio, decoded)`` per step (``decoded``: whether the step
     ran the vocoder), and each step's ``cg_key_info``."""
     cfg = submodule.config.code2wav
+
+    def policy():
+        if schedule is None:
+            return LeftContextChunkPolicy(chunk=cfg.codec_chunk_frames, left_context=cfg.codec_left_context_frames)
+        return ScheduledLeftContextChunkPolicy(schedule, cfg.codec_chunk_frames, cfg.codec_left_context_frames)
+
     buffers = {}
     for rid, request_frames in frames.items():
         buffers[rid] = StreamBuffer(
-            request_id=rid, edge_name="codec_tokens", from_partition="Talker",
-            policy=LeftContextChunkPolicy(chunk=cfg.codec_chunk_frames, left_context=cfg.codec_left_context_frames),
+            request_id=rid, edge_name="codec_tokens", from_partition="Talker", policy=policy(),
         )
         for i, frame in enumerate(request_frames):
             buffers[rid].pre_read_register(f"t{i}")
@@ -90,9 +98,9 @@ def _stream_batched(submodule: Code2WavSubmodule, frames: dict[str, torch.Tensor
     return steps, keys
 
 
-def _stream(submodule: Code2WavSubmodule, frames: torch.Tensor) -> list[tuple]:
+def _stream(submodule: Code2WavSubmodule, frames: torch.Tensor, schedule: tuple[int, ...] | None = None) -> list[tuple]:
     """``_stream_batched`` for a single request."""
-    return _stream_batched(submodule, {"r": frames})[0]["r"]
+    return _stream_batched(submodule, {"r": frames}, schedule)[0]["r"]
 
 
 def _expected_samples_per_step(steps: list[tuple], tail: int) -> list[int]:
@@ -104,6 +112,17 @@ def _expected_samples_per_step(steps: list[tuple], tail: int) -> list[int]:
         new = info.num_items - info.context_items
         expected.append(max(new * UPSAMPLE - tail, 0) if info.context_items == 0 else new * UPSAMPLE)
     return expected
+
+
+def _with_live_eos(steps: list[tuple], num_frames: int, full: torch.Tensor) -> torch.Tensor:
+    """``full`` plus the frame of silence a codec_eos frame emits when it was a
+    new item of a window that was not the stream's last."""
+    live = any(
+        not info.is_final and info.start_offset + info.num_items == num_frames + 1
+        and info.num_items > info.context_items
+        for info, _, _ in steps
+    )
+    return torch.cat([full, torch.zeros(UPSAMPLE, dtype=full.dtype)]) if live else full
 
 
 # ---------------------------------------------------------------------------
@@ -160,13 +179,51 @@ def test_streamed_chunks_stitch_into_the_full_decode(num_frames):
     assert torch.equal(streamed, full)
 
 
+@pytest.mark.parametrize("schedule", [(8,), (1, 3), (25,)])
+@pytest.mark.parametrize("num_frames", [1, 7, 8, 9, 32, 33, 34, 57, 58, 120, 125])
+@pytest.mark.parametrize("eos", [False, True])
+def test_a_small_first_chunk_stitches_into_the_full_decode(schedule, num_frames, eos):
+    """The served edge's first chunks are smaller than the 25-frame steady
+    chunk, so the second window carries fewer than 25 context frames; the
+    trim follows the window's real context and the stream is unchanged."""
+    decoder = _LookaheadDecoder()
+    config = Qwen3OmniModelConfig()
+    submodule = Code2WavSubmodule(decoder, config)
+    codes = _codes(num_frames)
+    frames = torch.cat([codes, torch.full((1, 16), config.talker.codec_eos_token_id)]) if eos else codes
+
+    steps = _stream(submodule, frames, schedule)
+    full = _to_pcm(decoder(codes.t()[None], torch.arange(num_frames)[None]))[0, 0]
+
+    expected = _with_live_eos(steps, num_frames, full) if eos else full
+    assert torch.equal(torch.cat([audio for _, audio, _ in steps]), expected)
+    first_info, first_audio, _ = steps[0]
+    assert first_info.context_items == 0 and first_info.num_items == min(schedule[0], frames.shape[0])
+
+
+def test_the_served_edge_uses_the_configured_schedule():
+    """The model wires ``codec_chunk_schedule`` into the Talker -> Code2Wav edge."""
+    from mstar.model.qwen3_omni.qwen3_omni_model import Qwen3OmniModel
+
+    model = Qwen3OmniModel.__new__(Qwen3OmniModel)
+    model.config = Qwen3OmniModelConfig()
+    (connection,) = [
+        c for c in model.get_partition_topology().connections if c.edge_name == "codec_tokens"
+    ]
+    policy = connection.chunk_policy_factory()
+    assert isinstance(policy, ScheduledLeftContextChunkPolicy)
+    assert policy.window_size() == model.config.code2wav.codec_chunk_schedule[0]
+
+
 @pytest.mark.parametrize("num_frames", [1, 24, 25, 26, 49, 50, 51, 125])
 def test_a_trailing_codec_eos_frame_adds_no_audio_and_no_decode(num_frames):
     """Served streams end with the Talker's codec_eos frame. A reply of
     k * 25 frames then ends with a flush of 25 context frames and the EOS
     frame, which emits nothing and decodes nothing; for k * 25 - 1 frames the
-    EOS frame is the last new item of a window and then a context item of the
-    flush."""
+    EOS frame is the last new item of a live window and then a context item
+    of the flush. A live window decodes it as padding without reading it on
+    the host and emits one frame of silence for it (the last real frame's
+    look-ahead samples included, which a dropped frame never emits)."""
     decoder = _LookaheadDecoder()
     config = Qwen3OmniModelConfig()
     submodule = Code2WavSubmodule(decoder, config)
@@ -177,7 +234,7 @@ def test_a_trailing_codec_eos_frame_adds_no_audio_and_no_decode(num_frames):
     assert decoder.calls == math.ceil(num_frames / 25)
     full = _to_pcm(decoder(codes.t()[None], torch.arange(num_frames)[None]))[0, 0]
 
-    assert torch.equal(torch.cat([audio for _, audio, _ in steps]), full)
+    assert torch.equal(torch.cat([audio for _, audio, _ in steps]), _with_live_eos(steps, num_frames, full))
     flush_info, flush_audio, flush_decoded = steps[-1]
     assert flush_info.is_final
     if num_frames % 25 == 0:
@@ -245,7 +302,6 @@ def test_mixed_batch_of_a_terminal_flush_and_a_live_window():
         full = _to_pcm(decoder(request_codes.t()[None], torch.arange(request_codes.shape[0])[None]))[0, 0]
         streamed = torch.cat([audio for _, audio, _ in steps[rid]])
         assert torch.equal(streamed, full), rid
-    assert not submodule._first_chunk_emitted
 
 
 # ---------------------------------------------------------------------------
