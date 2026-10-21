@@ -366,8 +366,9 @@ class ARSubmodule(ARNodeSubmodule):
         self, device: torch.device, tp_world_size: int = 1
     ) -> list[AcceleratorGraphConfig]:
         """Capture the whole one-token decode step (both ARs and sampling) per
-        batch bucket, and plain prefills packed into token buckets. The clone
-        prefill stays eager (its reference frames make it long and rare)."""
+        batch bucket, and prefills packed into token buckets. A voice clone's
+        prefill is the same forward over a prompt that embeds the reference
+        frames, so it replays the same captures when it fits the buckets."""
         del tp_world_size
         dtype = self.slow_ar.semantic_head.dtype
 
@@ -381,6 +382,7 @@ class ARSubmodule(ARNodeSubmodule):
         return [
             PackedAcceleratorGraphConfig(
                 capture_graph_walk="ar_prefill",
+                replay_graph_walks=["ar_prefill", "ar_prefill_clone"],
                 capture_token_lengths=self.PREFILL_TOKEN_BUCKETS,
                 make_node_input=prefill_input,
                 capture_batch_sizes=self.PREFILL_CAPTURE_BATCH_SIZES,
@@ -399,7 +401,9 @@ class ARSubmodule(ARNodeSubmodule):
         ]
 
     def can_use_accelerator_graphs(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
-        if batch.graph_walk not in ("ar_decode", "ar_prefill") or not self.can_batch(batch, model_inputs):
+        if batch.graph_walk not in ("ar_decode", "ar_prefill", "ar_prefill_clone") or not self.can_batch(
+            batch, model_inputs,
+        ):
             return False
         return super().can_use_accelerator_graphs(batch, model_inputs)
 
