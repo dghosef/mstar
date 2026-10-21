@@ -37,7 +37,7 @@ from mstar.graph.base import (
     TensorPointerInfo,
 )
 from mstar.graph.special_destinations import EMIT_TO_CLIENT
-from mstar.model.base import ForwardPassArgs, Model, TensorAndMetadata
+from mstar.model.base import ForwardPassArgs, Model, ProcessPromptOutput, TensorAndMetadata
 from mstar.model.media_limits import read_image
 from mstar.model.multimodal import (
     TEXT,
@@ -135,6 +135,13 @@ class PrefillStep:
     # one list per name: a `prefill_vision` step carries every span and image
     input_tensors: dict[str, list[TensorPointerInfo]]
     order: tuple[int, ...] = ()
+    # each image's (t, h, w) patch grid, as `image_grid_thw` holds it on the
+    # device; the nodes read these instead of syncing on that tensor
+    image_grids: tuple[tuple[int, int, int], ...] = ()
+
+
+# model_kwargs key: every image's (t, h, w) patch grid, in attachment order
+IMAGE_GRIDS_KEY = "image_grids"
 
 
 # TODO: implement MoE variants
@@ -145,6 +152,7 @@ class Qwen3_5DenseModel(Model):
     # 35-130 ms); at 4, preprocessing held at 7-10 ms and p95 at 49 ms. One
     # thread is steadier but slower (13 ms).
     PREPROCESS_TORCH_THREADS = 4
+    INTERNAL_KWARGS = (IMAGE_GRIDS_KEY,)
 
     def __init__(
         self,
@@ -402,7 +410,7 @@ class Qwen3_5DenseModel(Model):
         tensors: NameToTensorList | None = None,
         prompt_parts: list[PromptPart] | None = None,
         **kwargs,
-    ) -> NameToTensorList:
+    ) -> NameToTensorList | ProcessPromptOutput:
         """Render the request once, tokenize once, split at the attachments.
 
         ``text_inputs`` comes back as one span per text step of the prefill
@@ -473,7 +481,8 @@ class Qwen3_5DenseModel(Model):
             )
             result["pixel_values"].append(out["pixel_values"])
             result["image_grid_thw"] += out["image_grid_thw"]
-        return result
+        grids = [tuple(int(v) for v in g.tolist()) for g in result["image_grid_thw"]]
+        return ProcessPromptOutput(result, {IMAGE_GRIDS_KEY: grids})
 
 
     def postprocess(
@@ -506,6 +515,7 @@ class Qwen3_5DenseModel(Model):
         self,
         input_modalities: list[str],
         signals: dict[str, list[TensorPointerInfo]],
+        host_grids: list | None = None,
     ) -> list[PrefillStep]:
         """The prefill walks a request runs.
 
@@ -519,7 +529,9 @@ class Qwen3_5DenseModel(Model):
         }
         grids = signals.get("image_grid_thw", [])
 
+        host_grids = host_grids or []
         order: list[int] = []
+        image_grids: list[tuple[int, int, int]] = []
         picked: dict[str, list[TensorPointerInfo]] = {
             "text_inputs": [], "pixel_values": [], "image_grid_thw": [],
         }
@@ -546,6 +558,8 @@ class Qwen3_5DenseModel(Model):
                 order.append(IMAGE_PART)
                 picked["pixel_values"].append(pool[step.index])
                 picked["image_grid_thw"].append(grids[step.index])
+                if step.index < len(host_grids):
+                    image_grids.append(tuple(host_grids[step.index]))
 
         if not order:
             return []
@@ -558,7 +572,10 @@ class Qwen3_5DenseModel(Model):
         # TODO: one walk holds every image, so a many-image prompt makes one
         # very wide step. Cap images per walk here and emit several steps,
         # each with its share of `order`.
-        return [PrefillStep("prefill_vision", picked, tuple(order))]
+        # all or nothing: the nodes fall back to the device grids without them
+        if len(image_grids) != len(picked["image_grid_thw"]):
+            image_grids = []
+        return [PrefillStep("prefill_vision", picked, tuple(order), tuple(image_grids))]
 
     def get_initial_forward_pass_args(
         self,
@@ -568,7 +585,10 @@ class Qwen3_5DenseModel(Model):
         input_signals: dict[str, list[TensorPointerInfo]],
         model_kwargs: dict | None = None,
     ) -> ForwardPassArgs:
-        schedule = self._prefill_schedule(input_modalities, input_signals)
+        schedule = self._prefill_schedule(
+            input_modalities, input_signals,
+            (model_kwargs or {}).get(IMAGE_GRIDS_KEY),
+        )
         if not schedule:
             # every step was skipped for want of a tensor
             raise ValueError(
@@ -588,15 +608,18 @@ class Qwen3_5DenseModel(Model):
         metadata.kwargs["prefill_schedule"] = schedule[1:]
 
         inputs = self._walk_inputs(step)
+        step_metadata = {
+            "is_prefill": True,
+            "last_prefill": len(schedule) == 1,
+            "prefill_order": step.order,
+        }
+        if step.image_grids:
+            step_metadata[IMAGE_GRIDS_KEY] = step.image_grids
         return ForwardPassArgs(
             full_metadata=metadata,
             inputs=inputs,
             unpersist_tensors=sum((inp.tensor_info for inp in inputs), start=[]),
-            step_metadata={
-                "is_prefill": True,
-                "last_prefill": len(schedule) == 1,
-                "prefill_order": step.order,
-            },
+            step_metadata=step_metadata,
         )
 
     @classmethod
@@ -629,6 +652,7 @@ class Qwen3_5DenseModel(Model):
         last_prefill = len(remaining) == 1
 
         order: tuple[int, ...] = ()
+        image_grids: tuple[tuple[int, int, int], ...] = ()
         if metadata.is_prefill and remaining:
             # each prefill step carries its own tensors; only decode reads
             # back what the previous step emitted
@@ -636,6 +660,7 @@ class Qwen3_5DenseModel(Model):
             metadata.graph_walk = step.walk
             inputs = self._walk_inputs(step)
             order = step.order
+            image_grids = step.image_grids
         elif metadata.is_prefill:
             metadata.is_prefill = False
             metadata.graph_walk = "decode"
@@ -653,15 +678,18 @@ class Qwen3_5DenseModel(Model):
                 request_done=True,
             )
 
+        step_metadata = {
+            "is_prefill": metadata.is_prefill,
+            "last_prefill": last_prefill,
+            "prefill_order": order,
+        }
+        if image_grids:
+            step_metadata[IMAGE_GRIDS_KEY] = image_grids
         return ForwardPassArgs(
             full_metadata=metadata,
             inputs=inputs,
             unpersist_tensors=sum((inp.tensor_info for inp in inputs), start=[]),
-            step_metadata={
-                "is_prefill": metadata.is_prefill,
-                "last_prefill": last_prefill,
-                "prefill_order": order,
-            },
+            step_metadata=step_metadata,
         )
 
     # ------------------------------------------------------------------
