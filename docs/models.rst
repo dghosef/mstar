@@ -928,7 +928,10 @@ rank runs one branch at batch 1 and the two noise predictions are all-gathered
 every step, so a guided step costs one branch's forward (502 vs 1000 ms at
 1280x704x81 on H200s; one request 13.4 s vs 23.3 s end to end at 20 steps). The
 text encoder and VAE run on rank 0. Without guidance both ranks compute the same
-step, correct but no faster.
+step, correct but no faster. For throughput under concurrency,
+``configs/wan22_dp2.yaml`` serves a whole replica per GPU instead: 5.2 videos/min
+at 4 concurrent vs 4.7 for sp2 (sp2's rank 1 idles through rank 0's VAE
+decode), while one request takes the 1-GPU time.
 
 LTX-2.5 (``ltx2_5``)
 --------------------
