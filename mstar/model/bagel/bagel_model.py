@@ -75,6 +75,7 @@ from mstar.model.bagel.components.vit_encoder import VIT_ATTN, BagelVisionModel
 from mstar.model.bagel.config import MIXED_TEXT, load_bagel_config
 from mstar.model.bagel.submodules import (
     IMAGE_ADVANCE,
+    IMAGE_GEN_LOOP,
     IMAGE_SENTINELS,
     CombineCFGSubmodule,
     LLMSubmodule,
@@ -267,10 +268,13 @@ class BagelModel(Model):
         model_path_hf: str,
         cache_dir: str | None = None,
         accelerator_graph: bool | None = None,
+        cfg_prune: bool | None = None,
         **kwargs
     ):
         if accelerator_graph is not None and not isinstance(accelerator_graph, bool):
             raise ValueError("accelerator_graph must be a boolean")
+        if cfg_prune is not None and not isinstance(cfg_prune, bool):
+            raise ValueError("cfg_prune must be a boolean")
         self.cache_dir = cache_dir
 
         config_path = hf_hub_download(
@@ -281,6 +285,8 @@ class BagelModel(Model):
             self.config = load_bagel_config(json.load(f))
         if accelerator_graph is not None:
             self.config.accelerator_graph = accelerator_graph
+        if cfg_prune is not None:
+            self.config.cfg_prune = cfg_prune
 
         self.model_path_hf = model_path_hf
 
@@ -1062,6 +1068,9 @@ class BagelModel(Model):
         # there are N-1 intervals, so N-1 Euler steps are needed.
         image_gen = Sequential([
             Loop(
+                # named: LLMSubmodule reads this loop's iteration count to
+                # pick the step's CFG branches on the host (cfg_branches)
+                name=IMAGE_GEN_LOOP,
                 section=GraphNode(
                     name="LLM",
                     input_names=["latents", "time_index"],
@@ -1098,6 +1107,8 @@ class BagelModel(Model):
         # combine_cfg applies the CFG formula + Euler step after each iteration.
         image_gen_cfg = Sequential([
             Loop(
+                # named, as image_gen's: every node of the step reads the counter (cfg_branches)
+                name=IMAGE_GEN_LOOP,
                 section=Sequential([
                     Parallel([
                         GraphNode(
