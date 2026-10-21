@@ -633,7 +633,7 @@ class VJepa2Model(Model):
             frames = torch.stack([decoder[i] for i in indices])
         logger.info("load_video: decoded frames shape=%s", tuple(frames.shape))
 
-        video = frames.float() / 255.0
+        video = frames.float().div_(255.0)
 
         try:
             metadata = video_metadata_dict(metadata_obj) if metadata_obj is not None else {}
