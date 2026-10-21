@@ -674,6 +674,15 @@ class TensorStore:
                 if cpu_tensor is not None:
                     self._tensors_cpu[uuid] = cpu_tensor
 
+    def drop_cpu_tensors(self, uuids: list[int]) -> None:
+        """Forget the host copies stored for ``uuids``. They are views of the
+        producer's pinned buffers, which its next step overwrites, so a send
+        after that (a tensor held across steps) must read the device tensor."""
+        if self._tensors_cpu:
+            pop = self._tensors_cpu.pop
+            for uuid in uuids:
+                pop(uuid, None)
+
     def check_uuid_presence(self, uuid: int) -> bool:
         return uuid in self._tensors
 
