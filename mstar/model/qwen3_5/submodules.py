@@ -765,10 +765,13 @@ class VisionEncoderSubmodule(NodeSubmodule):
 
     def __init__(
         self, model: Qwen3_5VisionModel, config: Qwen3_5VisionConfig,
+        pixel_normalizer: tuple[torch.Tensor, torch.Tensor] | None = None,
     ):
         super().__init__()
         self.model = model
         self.config = config
+        # per-column (mean, std) for byte patches; see `Qwen3_5DenseModel.pixel_normalizer`
+        self._pixel_normalizer = pixel_normalizer
         self._embed = torch.compile(model.embed, dynamic=True)
         self._merger = torch.compile(model.merger, dynamic=True)
 
@@ -919,7 +922,7 @@ class VisionEncoderSubmodule(NodeSubmodule):
             return (parts[0] if len(parts) == 1 else torch.cat(parts)).to(device)
 
         return {
-            "pixel_values": packed("pixel_values"),
+            "pixel_values": self._normalize(packed("pixel_values")),
             "indices": packed("indices"),
             "weights": packed("weights"),
             "position_ids": packed("position_ids"),
@@ -932,6 +935,18 @@ class VisionEncoderSubmodule(NodeSubmodule):
                 for inp in inputs
             ),
         }
+
+    def _normalize(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """Byte patches to the processor's float pixels. Eager, not in the
+        compiled embed, so the arithmetic (a subtract, a true divide) is the
+        processor's exactly."""
+        if pixel_values.dtype != torch.uint8:
+            return pixel_values
+        mean, std = self._pixel_normalizer
+        if mean.device != pixel_values.device:
+            mean, std = mean.to(pixel_values.device), std.to(pixel_values.device)
+            self._pixel_normalizer = (mean, std)
+        return (pixel_values.to(torch.float32) - mean) / std
 
     def forward(
         self,
