@@ -1892,6 +1892,9 @@ def _set_preprocess_threads(model, config: dict) -> None:
     torch.set_num_threads(int(threads))
 
 
+API_SERVER_SWITCH_INTERVAL_S = 0.001
+
+
 def main(argv: list[str] | None = None):
     import argparse
 
@@ -1970,6 +1973,12 @@ def main(argv: list[str] | None = None):
              "$PATH, then rust/server/target/release)",
     )
     args = parser.parse_args(argv)
+    # This process runs three busy Python threads under streaming load: the
+    # event loop writing every chunk, the message thread and the data worker.
+    # At the default 5 ms switch interval a thread that becomes runnable can
+    # wait that long for the GIL; 1 ms measured +8% output tok/s at c=64 on
+    # Qwen3.5-0.8B. Spawned processes (conductor, workers) keep the default.
+    sys.setswitchinterval(API_SERVER_SWITCH_INTERVAL_S)
     if args.enable_metrics and MISSING_DEPENDENCY is not None:
         parser.error(INSTALL_HINT)
     if args.socket_path_prefix is None:
