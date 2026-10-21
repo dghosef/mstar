@@ -282,6 +282,7 @@ class ViTEncoderSubmodule(NodeSubmodule):
         # request, so the segment ceiling is the batch size. Raise only if that
         # changes — and raise the resource's `max_segments_per_request` with it.
         self._max_images_per_request = 1
+        self._cu_seqlens: dict[tuple, torch.Tensor] = {}
 
     def prepare_inputs(
         self,
@@ -325,9 +326,13 @@ class ViTEncoderSubmodule(NodeSubmodule):
             "not the count `vit_patches` gives a layout to key it by"
         )
 
-        cu_seqlens = torch.tensor(
-            [0, num_tokens], dtype=torch.int32, device=device
-        )
+        # built once per (length, device): `torch.tensor(..., device=)` syncs the stream, which
+        # held this request's prepare until the in-flight decode steps of others had finished
+        cu_seqlens = self._cu_seqlens.get((num_tokens, device))
+        if cu_seqlens is None:
+            cu_seqlens = self._cu_seqlens[(num_tokens, device)] = torch.tensor(
+                [0, num_tokens], dtype=torch.int32, device=device
+            )
 
         return NodeInputs(
             tensor_inputs={
