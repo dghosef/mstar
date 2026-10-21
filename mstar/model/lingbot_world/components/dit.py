@@ -161,6 +161,9 @@ class RollingKVCache:
     local_end: int = 0
     cross_k: list[torch.Tensor] = field(default_factory=list)
     cross_v: list[torch.Tensor] = field(default_factory=list)
+    # Per-block camera (scale, shift) for the chunk whose rays are ``cam_rays``.
+    cam_rays: torch.Tensor | None = None
+    cam_mod: list[tuple[torch.Tensor, torch.Tensor]] = field(default_factory=list)
 
     @classmethod
     def allocate(
@@ -282,8 +285,15 @@ class CausalBlock(nn.Module):
         self.cam_scale_layer = nn.Linear(dim, dim)
         self.cam_shift_layer = nn.Linear(dim, dim)
 
+    def cam_modulation(self, cam: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """The block's camera scale and shift; a function of the chunk's Plucker
+        rays alone, so the same for all of a chunk's forwards."""
+        cam_hidden = self.cam_injector_layer2(F.silu(self.cam_injector_layer1(cam)))
+        cam_hidden = cam_hidden + cam
+        return self.cam_scale_layer(cam_hidden), self.cam_shift_layer(cam_hidden)
+
     def forward(
-        self, x: torch.Tensor, e: torch.Tensor, cam: torch.Tensor, cross_k: torch.Tensor,
+        self, x: torch.Tensor, e: torch.Tensor, cam_mod: tuple[torch.Tensor, torch.Tensor], cross_k: torch.Tensor,
         cross_v: torch.Tensor, attn_args: dict,
     ) -> torch.Tensor:
         with torch.amp.autocast("cuda", dtype=torch.float32):
@@ -292,9 +302,8 @@ class CausalBlock(nn.Module):
         with torch.amp.autocast("cuda", dtype=torch.float32):
             x = x + y * e[2].squeeze(2)
 
-        cam_hidden = self.cam_injector_layer2(F.silu(self.cam_injector_layer1(cam)))
-        cam_hidden = cam_hidden + cam
-        x = (1.0 + self.cam_scale_layer(cam_hidden)) * x + self.cam_shift_layer(cam_hidden)
+        cam_scale, cam_shift = cam_mod
+        x = (1.0 + cam_scale) * x + cam_shift
 
         x = x + self.cross_attn(self.norm3(x), cross_k, cross_v)
         y = self.ffn(self.norm2(x).float() * (1 + e[4].squeeze(2)) + e[3].squeeze(2))
@@ -402,12 +411,17 @@ class LingBotCausalDiT(nn.Module):
                 cache.cross_k.append(k)
                 cache.cross_v.append(v)
 
-        cam = rearrange(
-            plucker, "1 c (f c1) (h c2) (w c3) -> 1 (f h w) (c c1 c2 c3)",
-            c1=cfg.patch_size[0], c2=cfg.patch_size[1], c3=cfg.patch_size[2],
-        ).contiguous()
-        cam = self.patch_embedding_wancamctrl(cam)
-        cam = cam + self.c2ws_hidden_states_layer2(F.silu(self.c2ws_hidden_states_layer1(cam)))
+        # A chunk's denoise and commit forwards share its Plucker rays, so the
+        # camera path (four GEMMs a block) runs once per chunk.
+        if cache.cam_rays is not plucker:
+            cam = rearrange(
+                plucker, "1 c (f c1) (h c2) (w c3) -> 1 (f h w) (c c1 c2 c3)",
+                c1=cfg.patch_size[0], c2=cfg.patch_size[1], c3=cfg.patch_size[2],
+            ).contiguous()
+            cam = self.patch_embedding_wancamctrl(cam)
+            cam = cam + self.c2ws_hidden_states_layer2(F.silu(self.c2ws_hidden_states_layer1(cam)))
+            cache.cam_mod = [block.cam_modulation(cam) for block in self.blocks]
+            cache.cam_rays = plucker
 
         plan = cache.plan(current_start, seq_len)
         start_frame = current_start // frame_seqlen
@@ -416,7 +430,7 @@ class LingBotCausalDiT(nn.Module):
                 f"latent frame {start_frame + grid[0]} is past the RoPE table ({freqs.shape[0]} frames)")
         for i, block in enumerate(self.blocks):
             attn_args = dict(grid=grid, freqs=freqs, start_frame=start_frame, cache=cache, layer=i, plan=plan)
-            x = block(x, e0, cam, cache.cross_k[i], cache.cross_v[i], attn_args)
+            x = block(x, e0, cache.cam_mod[i], cache.cross_k[i], cache.cross_v[i], attn_args)
         cache.global_end = plan.current_end
         cache.local_end = plan.local_end
 
