@@ -341,7 +341,7 @@ Qwen3-TTS notes
 - Talker prefill replays a packed CUDA Graph for the smallest token bucket
   (32 to 1024 tokens) that holds the batch; only the clone prefill, which also
   pushes the reference clip's frames into the codec stream, runs eager. Decode
-  always uses the whole-walk CUDA Graph, with the 15-step
+  always uses the whole-walk CUDA Graph (up to 64 rows a step), with the 15-step
   CodePredictor loop captured inside it; request-local EOS suppression is
   carried as a graph tensor input so replay does not consult capture-slot dummy
   request state. Residual ``subtalker_*`` sampling is per-request through the
