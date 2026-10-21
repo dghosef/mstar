@@ -187,8 +187,10 @@ Higgs Audio notes
 - The audio tower runs outside ``torch.compile`` (a clip's chunk count changes
   its shape, and every new shape recompiled on the serving path). Requests
   whose 4 s chunks share a mel width are encoded together, and full-width
-  chunks replay a CUDA graph per chunk count; ``model_kwargs:
-  {encoder_graphs: false}`` runs the tower eagerly.
+  chunks replay a CUDA graph per chunk count; a clip under one chunk is padded
+  to the full width and masked (``HiggsAudioTower``'s ``valid_frames``) so it
+  replays a graph too. ``model_kwargs: {encoder_graphs: false}`` runs the
+  tower eagerly.
 - One prefill step per request: the ChatML text around the audio and the audio
   embeddings go into the KV cache as one span.
 
