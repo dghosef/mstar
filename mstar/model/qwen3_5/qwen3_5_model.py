@@ -37,7 +37,8 @@ from mstar.graph.base import (
     TensorPointerInfo,
 )
 from mstar.graph.special_destinations import EMIT_TO_CLIENT
-from mstar.model.base import ForwardPassArgs, Model
+from mstar.model.base import ForwardPassArgs, Model, TensorAndMetadata
+from mstar.model.media_limits import read_image
 from mstar.model.multimodal import (
     TEXT,
     PromptPart,
@@ -380,6 +381,19 @@ class Qwen3_5DenseModel(Model):
             )
         return self._image_processor
 
+    def load_image(self, filepath: str, device: str) -> TensorAndMetadata:
+        """The decoded image, left uint8 ``(C, H, W)``.
+
+        The base class hands out floats in [0, 1], which `_as_hwc_uint8` only
+        turns back into bytes for the processor: two full-image passes that
+        cost more than the processor itself on a large image.
+        """
+        try:
+            img = read_image(filepath, rgb=True)
+        except (RuntimeError, OSError) as exc:  # torchvision's decoders raise RuntimeError, Pillow's OSError
+            raise ValueError("could not decode image: the file is corrupt or truncated") from exc
+        return TensorAndMetadata(img.to(device))
+
     def process_prompt(
         self,
         prompt: str | None,
@@ -450,6 +464,9 @@ class Qwen3_5DenseModel(Model):
 
         result["pixel_values"] = []
         result["image_grid_thw"] = []
+        # The raw images are not a graph input (the encoder reads
+        # `pixel_values`), so do not ship them to the workers.
+        result["image_inputs"] = []
         for image in raw_images:
             out = self.image_processor(
                 images=[_as_hwc_uint8(image)], return_tensors="pt",
