@@ -728,6 +728,10 @@ Cosmos3 environment requirements
   (Nano 832x480x189x35: 1.47 -> 0.78 s per step), while
   ``configs/cosmos3_nano_dp2.yaml`` (a whole replica per GPU) serves more under
   concurrency: 2.13 videos/min at 2 concurrent vs 1.63 for sp2 and 1.07 on one GPU.
+  For Edge (832x480x121, 20 steps): ``configs/cosmos3_edge_sp2.yaml`` takes one
+  request from 6.3 to 4.4 s (generation only: the reasoner has no SP path), and
+  ``configs/cosmos3_edge_dp2.yaml`` serves 15.8 videos/min at 4 concurrent vs 7.9 on
+  one GPU.
 
 Cosmos3-Edge reasoner and action loop
 -------------------------------------
