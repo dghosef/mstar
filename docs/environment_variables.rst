@@ -514,10 +514,13 @@ Worker scheduling
        synchronous host-to-device copy per step. ``0`` keeps every node on
        the per-request tensor path.
    * - ``MSTAR_INGRAPH_DECODE_ROPE``
-     - ``0``
+     - ``1``
      - A captured decode step builds its rotary tables inside the graph from
-       the position resource's planned positions instead of staging them.
-       Experiment knob, measured and gated on its own.
+       the position resource's planned positions instead of building and
+       staging them on the GPU thread before the replay (Qwen3.5 reads it).
+       That eager build sits on the per-step critical path: on 0.8B (H200)
+       turning it on measured +13% output tok/s at c=32 and +14% at c=1.
+       ``0`` stages the tables, the former behaviour.
    * - ``MSTAR_SAMPLER_INGRAPH_SCATTER``
      - ``0``
      - The captured sampler gathers its RNG offsets from the slot masters
