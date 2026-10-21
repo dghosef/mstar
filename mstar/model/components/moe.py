@@ -130,6 +130,13 @@ class TopKRouter(nn.Module):
         """
         hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
         router_logits = F.linear(hidden_states, self.weight)
+        if router_logits.is_cuda:
+            from mstar.utils.fused_moe.router import softmax_topk
+
+            routing_weights, router_indices = softmax_topk(
+                router_logits, self.top_k, self.norm_topk_prob,
+            )
+            return routing_weights, router_indices, None
         router_logits = F.softmax(router_logits, dtype=torch.float, dim=-1)
 
         router_top_value, router_indices = torch.topk(router_logits, self.top_k, dim=-1)
