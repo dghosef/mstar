@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from mstar.communication.tensors import NameToTensorList
@@ -65,7 +66,10 @@ class HiggsAudioEncoderSubmodule(NodeSubmodule):
     The chunk count and, for a clip under one chunk, the mel width change
     per request; compiled, every new shape recompiled on the serving path
     (tens of seconds with the worker blocked). So the tower runs eagerly,
-    and full-width chunks replay a CUDA graph by chunk count.
+    and full-width chunks replay a CUDA graph by chunk count. A clip under
+    one chunk is padded to the full width and replays a second graph whose
+    tower masks the padding out (``HiggsAudioTower.forward``'s
+    ``valid_frames``), so short clips batch together too.
     """
 
     disable_torch_compile = True
@@ -73,6 +77,7 @@ class HiggsAudioEncoderSubmodule(NodeSubmodule):
     MAX_BATCH_SIZE = 16
     CAPTURE_CHUNK_COUNTS = [1, 2, 4, 8, 16, 32, 64]
     TOWER = "tower"
+    MASKED_TOWER = "tower_masked"
 
     def __init__(
         self,
@@ -110,12 +115,17 @@ class HiggsAudioEncoderSubmodule(NodeSubmodule):
             input_seq_len=features.shape[0],
         )
 
+    def _padded(self, width: int) -> bool:
+        """A clip under one chunk: run at the full width, its tail masked."""
+        return self.graphs and width < self.chunk_frames
+
     def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
-        # chunks are padded to their own request's longest, so only requests
-        # of one mel width share a batch
+        # chunks are padded to their own request's longest, so only requests of
+        # one mel width share a batch -- or, padded and masked, short clips
         widths = {inp.tensor_inputs["audio_features"].shape[-1] for inp in model_inputs}
         chunks = sum(inp.input_seq_len for inp in model_inputs)
-        return len(widths) == 1 and chunks <= self.CAPTURE_CHUNK_COUNTS[-1]
+        same_kind = len(widths) == 1 or all(self._padded(w) for w in widths)
+        return same_kind and chunks <= self.CAPTURE_CHUNK_COUNTS[-1]
 
     def max_batch_size(self, graph_walk: str) -> int:
         return self.MAX_BATCH_SIZE
@@ -127,18 +137,32 @@ class HiggsAudioEncoderSubmodule(NodeSubmodule):
         inputs: list[NodeInputs],
     ) -> dict[str, Any]:
         dtype = next(self.audio_tower.parameters()).dtype
-        return {
-            "audio_features": torch.cat(
-                [inp.tensor_inputs["audio_features"] for inp in inputs], dim=0,
-            ).to(device=self.get_device(), dtype=dtype),
+        features = [inp.tensor_inputs["audio_features"] for inp in inputs]
+        widths = [f.shape[-1] for f in features]
+        padded = self._padded(widths[0])
+        if padded:
+            features = [F.pad(f, (0, self.chunk_frames - f.shape[-1])) for f in features]
+        out = {
+            "audio_features": torch.cat(features, dim=0).to(device=self.get_device(), dtype=dtype),
             "valid_lengths": [inp.kwargs["valid_lengths"] for inp in inputs],
         }
+        if padded:
+            frames = torch.tensor(widths, dtype=torch.long)
+            if out["audio_features"].is_cuda:
+                frames = frames.pin_memory()
+            out["valid_frames"] = frames.to(self.get_device(), non_blocking=True)
+        return out
 
-    def _encode(self, features: torch.Tensor) -> torch.Tensor:
-        return self.projector(self.audio_tower(features))
+    def _encode(self, features: torch.Tensor, valid_frames: torch.Tensor | None = None) -> torch.Tensor:
+        return self.projector(self.audio_tower(features, valid_frames))
 
     def _capture_tower(self, inp: PiecewiseCallInputs) -> dict[str, torch.Tensor]:
         return {"projected": self._encode(inp.static_inputs["audio_features"])}
+
+    def _capture_masked_tower(self, inp: PiecewiseCallInputs) -> dict[str, torch.Tensor]:
+        s = inp.static_inputs
+        # padding rows replay zeroed: give them one valid frame
+        return {"projected": self._encode(s["audio_features"], s["valid_frames"].clamp(min=1))}
 
     def get_piecewise_accelerator_graph_configs(
         self, device: torch.device, autocast_dtype: torch.dtype, tp_world_size: int = 1, **kwargs: Any,
@@ -157,7 +181,17 @@ class HiggsAudioEncoderSubmodule(NodeSubmodule):
                 },
                 seq_len=frames,
                 capture_batch_sizes=list(self.CAPTURE_CHUNK_COUNTS),
-            )
+            ),
+            # clips under one chunk, one per row, padded to the full width
+            self.MASKED_TOWER: PiecewiseBatchedConfig(
+                capture_fn=self._capture_masked_tower,
+                make_static_inputs=lambda shape: {
+                    "audio_features": torch.zeros(shape.bs, mels, frames, dtype=dtype, device=device),
+                    "valid_frames": torch.full((shape.bs,), frames, dtype=torch.long, device=device),
+                },
+                seq_len=frames,
+                capture_batch_sizes=[bs for bs in self.CAPTURE_CHUNK_COUNTS if bs <= self.MAX_BATCH_SIZE],
+            ),
         }
 
     def forward_batched(
@@ -166,20 +200,22 @@ class HiggsAudioEncoderSubmodule(NodeSubmodule):
         engine_inputs: ModelInputsFromEngine,
         audio_features: torch.Tensor,
         valid_lengths: list[list[int]],
+        valid_frames: torch.Tensor | None = None,
         **kwargs,
     ) -> dict[str, NameToTensorList]:
         num_chunks = audio_features.shape[0]
-        runner = engine_inputs.piecewise_runners.get(self.TOWER)
+        static_inputs = {"audio_features": audio_features}
+        if valid_frames is not None:
+            static_inputs["valid_frames"] = valid_frames
+        runner = engine_inputs.piecewise_runners.get(self.TOWER if valid_frames is None else self.MASKED_TOWER)
         if (
             runner is not None
             and audio_features.shape[-1] == self.chunk_frames
             and runner.can_run(num_chunks)
         ):
-            projected = runner.run(
-                static_inputs={"audio_features": audio_features}, real_bs=num_chunks,
-            ).get_view("projected")
+            projected = runner.run(static_inputs=static_inputs, real_bs=num_chunks).get_view("projected")
         else:
-            projected = self._encode(audio_features)
+            projected = self._encode(audio_features, valid_frames)
 
         outputs: dict[str, NameToTensorList] = {}
         chunk = 0
