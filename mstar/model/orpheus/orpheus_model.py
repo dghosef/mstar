@@ -15,9 +15,9 @@ Partitions:
     SNAC — walks: snac_chunk (streaming decode, triggered when tokens accumulate)
 
 The LLM and SNAC partitions run asynchronously. The LLM produces tokens that
-stream directly to the SNAC worker via StreamingGraphEdge. The conductor
-triggers SNAC chunks using a sliding window (28 tokens, stride 7) and extracts
-the middle region of the decoded audio for low-latency output.
+stream directly to the SNAC worker via StreamingGraphEdge, which releases
+windows of frames with left and right context (``OrpheusModelConfig.snac_*``);
+the SNAC decoder emits the audio of each window's own frames.
 """
 
 import logging
@@ -45,7 +45,6 @@ from mstar.graph.special_destinations import EMIT_TO_CLIENT, EMPTY_DESTINATION
 from mstar.model.base import ForwardPassArgs, Model, PrefixStream
 from mstar.model.orpheus.config import ATTN, KV_CACHE, ROPE, SAMPLER, OrpheusModelConfig
 from mstar.model.submodule_base import NodeSubmodule
-from mstar.streaming.chunk_policy import SlidingWindowChunkPolicy
 from mstar.streaming.topology import Connection, PartitionTopology, StreamingGraphEdge
 
 logger = logging.getLogger(__name__)
@@ -73,11 +72,23 @@ class OrpheusModel(Model):
         self,
         model_path_hf: str,
         cache_dir: str | None = None,
+        snac_chunk_schedule: list[int] | None = None,
+        snac_chunk_frames: int | None = None,
+        snac_left_context_frames: int | None = None,
+        snac_right_context_frames: int | None = None,
         **kwargs,
     ):
         self.cache_dir = cache_dir
         self.model_path_hf = model_path_hf
-        self.config = OrpheusModelConfig()
+        snac_overrides = {
+            "snac_chunk_schedule": snac_chunk_schedule,
+            "snac_chunk_frames": snac_chunk_frames,
+            "snac_left_context_frames": snac_left_context_frames,
+            "snac_right_context_frames": snac_right_context_frames,
+        }
+        self.config = OrpheusModelConfig(
+            **{k: v for k, v in snac_overrides.items() if v is not None}
+        )
 
         tokenizer_source = _resolve_local_hf_snapshot(
             "canopylabs/orpheus-3b-0.1-pretrained",
@@ -94,6 +105,9 @@ class OrpheusModel(Model):
     # -------------------------------------------------------------------
     # Model ABC: graph walk definitions
     # -------------------------------------------------------------------
+
+    def get_combined_graph_walks(self) -> dict[str, dict[str, set[str]]]:
+        return {"LLM": {"mixed": {"prefill", "decode"}}}
 
     def get_graph_walk_graphs(self) -> dict[str, GraphSection]:
         prefill = GraphNode(
@@ -165,10 +179,7 @@ class OrpheusModel(Model):
                     from_partition="LLM",
                     to_partition="SNAC",
                     edge_name="new_token",
-                    chunk_policy_factory=lambda: SlidingWindowChunkPolicy(
-                        window=self.config.snac_window_tokens,
-                        stride=self.config.snac_stride_tokens,
-                    ),
+                    chunk_policy_factory=self.config.snac_chunk_policy,
                 ),
             ],
         )
@@ -280,8 +291,11 @@ class OrpheusModel(Model):
         **kwargs,
     ) -> NameToTensorList:
         # Orpheus is text-only; raw multimodal tensors are unused.
-        if prompt is None:
-            return {}
+        # Refused here, where it is a 400 before admission: the LLM's prefill
+        # has no input without text, and blank text would generate from the voice
+        # prefix alone.
+        if prompt is None or not prompt.strip():
+            raise ValueError("Orpheus requires a non-empty text prompt")
 
         # An explicit empty/None voice keeps the unprefixed prompt.
         voice = kwargs.get("voice", self.config.default_voice)
@@ -301,6 +315,17 @@ class OrpheusModel(Model):
         start_token = torch.tensor([self.config.start_token_id], dtype=torch.long)
         end_tokens = torch.tensor(self.config.end_token_ids, dtype=torch.long)
         all_input_ids = torch.cat([start_token, prompt_tokens.input_ids[0], end_tokens])
+
+        # The decode loop writes up to get_max_output_tokens() more positions
+        # after the prompt, and all of them must fit the context.
+        context = self.config.max_position_embeddings
+        limit = context - self.get_max_output_tokens()
+        if all_input_ids.numel() > limit:
+            raise ValueError(
+                f"The prompt is {all_input_ids.numel()} tokens; Orpheus takes at most "
+                f"{limit} (its {context}-token context less the "
+                f"{self.get_max_output_tokens()} audio tokens it can generate)"
+            )
 
         return {"text_inputs": [all_input_ids]}
 

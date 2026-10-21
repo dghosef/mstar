@@ -513,7 +513,7 @@ def test_vision_block_loop_leases_only_what_a_replay_holds():
     from mstar.model.submodule_base import NodeInputs
 
     encoder = _encoder(max_segments=4)
-    config = encoder.get_piecewise_cuda_graph_configs(
+    config = encoder.get_piecewise_accelerator_graph_configs(
         torch.device("cpu"), torch.bfloat16,
     )[VISION_BLOCK_LOOP]
 

@@ -8,7 +8,7 @@ leased as before.
 
 from types import SimpleNamespace
 
-from mstar.engine.cuda_graph_runner import PiecewiseCudaGraphRunner
+from mstar.engine.accelerator_graph_runner import PiecewiseAcceleratorGraphRunner
 from mstar.engine.engine import Engine
 
 
@@ -53,5 +53,5 @@ def test_runner_defers_to_the_configs_predicate():
     def runner(predicate):
         return SimpleNamespace(_config=SimpleNamespace(can_lease=predicate))
 
-    assert PiecewiseCudaGraphRunner.can_lease(runner(None), [])
-    assert not PiecewiseCudaGraphRunner.can_lease(runner(lambda inputs: len(inputs) < 2), [1, 2])
+    assert PiecewiseAcceleratorGraphRunner.can_lease(runner(None), [])
+    assert not PiecewiseAcceleratorGraphRunner.can_lease(runner(lambda inputs: len(inputs) < 2), [1, 2])

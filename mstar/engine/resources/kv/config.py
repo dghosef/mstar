@@ -19,7 +19,10 @@ if TYPE_CHECKING:
 
 class KVLayout(Enum):
     NHD = "NHD"
-    # TODO: can add more, like HND, MLA
+    # Multi-head Latent Attention: one compressed latent per token per layer,
+    # ``[num_layers, max_num_pages, page_size, kv_lora_rank + qk_rope_head_dim]``.
+    # No K/V axis and a single (replicated) KV head; only query heads shard.
+    MLA = "MLA"
 
 
 @dataclass(kw_only=True)
@@ -86,6 +89,29 @@ class PagedKVConfig(KVConfig):
     # folded into the root, not checked at match time
     prefix_cache_salt: str = ""
     prefix_cache: bool = True
+    # MLA only: the latent is ``[ckv (kv_lora_rank) | kpe (qk_rope_head_dim)]``
+    kv_lora_rank: int | None = None
+    qk_rope_head_dim: int | None = None
+    # MLA: whether num_qo_heads was given. Unset it defaults to the one latent KV head, which
+    # the attention backend would plan; a cache only stored (index keys) needs no query heads
+    qo_heads_given: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        if self.layout == KVLayout.MLA:
+            if self.kv_lora_rank is None or self.qk_rope_head_dim is None:
+                raise ValueError("KVLayout.MLA needs kv_lora_rank and qk_rope_head_dim")
+            self.qo_heads_given = self.num_qo_heads is not None
+            # the cache stores one latent per token: a single KV "head" of the
+            # latent width, whatever the model's head counts are
+            self.num_kv_heads = 1
+            self.head_dim = self.kv_lora_rank + self.qk_rope_head_dim
+        super().__post_init__()
+
+    @property
+    def latent_dim(self) -> int:
+        """Per-token cache width under MLA."""
+        assert self.layout == KVLayout.MLA
+        return self.kv_lora_rank + self.qk_rope_head_dim
 
     def apply_yaml_overrides(
         self,
@@ -180,6 +206,22 @@ class RingKVConfig(KVConfig):
             self.num_sessions = num_sessions
 
 
+@dataclass(frozen=True)
+class PrefixSpan:
+    """One write to a keyed stream, as the preprocess worker laid it out.
+
+    ``length`` is how many slots the write fills and ``advance`` is how far it
+    moves the position counter. ``digest`` is an item's digest, and None for
+    ids. ``end_key`` is set for an item that ends inside a page, and keys that
+    page up to the item's end.
+    """
+    length: int
+    advance: int
+    walk: str
+    digest: bytes | None = None
+    end_key: bytes | None = None
+
+
 @dataclass
 class KVReqConfig(ResourceReqConfig):
     # NOTE: this may need to be refined
@@ -203,6 +245,8 @@ class KVReqConfig(ResourceReqConfig):
     prefix_tail: dict[str, list[int]] | None = None
     # label -> the output tensor its sampled ids arrive in, if the stream keys generation
     prefix_decode: dict[str, str] | None = None
+    # label -> the layout its keys were chained over, one span per write
+    prefix_layout: dict[str, list[PrefixSpan]] | None = None
     prefix_cache: bool = True
 
     def apply_conductor_config(
@@ -210,6 +254,7 @@ class KVReqConfig(ResourceReqConfig):
         prefix_keys: dict[str, list[bytes]] | None=None,
         prefix_tail: dict[str, list[int]] | None=None,
         prefix_decode: dict[str, str] | None=None,
+        prefix_layout: dict[str, list[list]] | None=None,
         prefix_cache: bool | None=None,
         **kwargs,
     ):
@@ -219,6 +264,12 @@ class KVReqConfig(ResourceReqConfig):
             self.prefix_tail = prefix_tail
         if prefix_decode is not None:
             self.prefix_decode = prefix_decode
+        if prefix_layout is not None:
+            # sent as plain lists, which keeps the request's kwargs on the wire's plain msgpack path
+            self.prefix_layout = {
+                label: [PrefixSpan(*row) for row in rows]
+                for label, rows in prefix_layout.items()
+            }
         if prefix_cache is not None:
             self.prefix_cache = prefix_cache
 
@@ -310,6 +361,9 @@ class KVStep(ResourceStep):
     combined_labels: dict[tuple[str, ...], str] = field(default_factory=dict)
     pre_forks: tuple[tuple[str, str], ...] = ()
     post_forks: tuple[tuple[str, str], ...] = ()
+    # the rows the forks apply to; None is every row (a chunked prompt
+    # pre-forks on its first chunk and post-forks on its last)
+    fork_rids: frozenset | None = None
     # (request_id, label) -> the retention a committing stream declares for
     # itself this step, applied at commit. It rides with the step rather than
     # living on the stream, so an offload has nothing to lose.
