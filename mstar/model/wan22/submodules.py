@@ -1,4 +1,4 @@
-"""Wan2.2-TI2V-5B node submodules (all four declare no engine resources).
+"""Wan2.2-TI2V-5B node submodules (nothing is cached; the dit declares a ragged attention resource).
 
     text_encoder -> Wan22TextEncoderSubmodule (UMT5-XXL, thin HF wrapper)
     vae_encoder  -> Wan22VaeEncoderSubmodule  (Wan2.2-VAE encode, I2V only)
@@ -340,8 +340,9 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
     """Dense 5B video DiT with the UniPC step run inline.
 
     One loop iteration is one batch-2 transformer forward (the positive and
-    negative prompt embeddings stacked on the batch axis) plus one UniPC
-    predictor/corrector update from ``components/unipc.py``.
+    negative prompt embeddings stacked on the batch axis; on a two-rank sp
+    instance, one branch per rank) plus one UniPC predictor/corrector update
+    from ``components/unipc.py``.
 
     Loop-carried edges, all float32 over the latent grid:
 
