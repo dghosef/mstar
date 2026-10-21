@@ -33,7 +33,7 @@ from mstar.engine.resources import AttentionStep, KVStep, PositionStep, SamplerS
 from mstar.engine.resources.attn.flashinfer import FlashInferManager
 from mstar.engine.resources.sampler.resource import SamplerResource
 from mstar.model.qwen3_omni.components.code2wav import Qwen3OmniMoeCode2Wav
-from mstar.model.qwen3_omni.components.cp_kernels import cp_embed_accumulate
+from mstar.model.qwen3_omni.components.cp_kernels import cp_embed_accumulate, cp_linear
 from mstar.model.qwen3_omni.components.rope import (
     compute_3d_cos_sin,
     compute_rope_freqs,
@@ -98,6 +98,11 @@ class AudioEncoderSubmodule(NodeSubmodule):
 
     Runs once per request (not batched across requests).
     """
+
+    # The HF encoder splits its input by host-side chunk lengths (``.tolist()``),
+    # so compiled frames guard on the chunk count and recompile for nearly
+    # every new clip length, seconds each, on the request's critical path.
+    disable_torch_compile = True
 
     def __init__(self, audio_encoder: nn.Module, config: Qwen3OmniModelConfig):
         super().__init__()
@@ -1497,9 +1502,7 @@ class TalkerSubmodule(ARNodeSubmodule):
                 embed.unsqueeze(1), positions[group_idx, :bs], kv_cache, cache_pos=group_idx,
             ).squeeze(1)
 
-            logits = torch.matmul(
-                hidden, cp.lm_head_weight[group_idx - 1].t()
-            )
+            logits = cp_linear(hidden, cp.lm_head_weight[group_idx - 1])
 
             # Params come from the "code_predictor" aux sampler's static
             # buffers, so per-request values survive graph replay.
