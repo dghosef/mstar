@@ -243,6 +243,7 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
             # 1-D, not 0-dim: the worker's output fanout reads dims[0] of
             # every routed edge.
             step_index = torch.zeros(1, dtype=torch.int64, device=device)
+            k = 0
         else:
             step_index = inputs["step_index"][0]
             k = _loop_step(fwd_info, step_index)
@@ -268,7 +269,9 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
                 "audio_tokens": tokens,
                 "step_index": step_index,
             },
-            kwargs={"request_id": fwd_info.request_id, "doc_lens": (cond_len, uncond_len)},
+            # the iteration, for postprocess: at iteration 0 the loop counter
+            # is not there yet, and reading the step edge would sync
+            kwargs={"request_id": fwd_info.request_id, "doc_lens": (cond_len, uncond_len), "step": k},
             # The row's packed contribution: its conditional document plus,
             # with CFG on, the target again as the unconditional one.
             input_seq_len=cond_len + uncond_len,
@@ -482,12 +485,12 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
 
         Scoring, the reveal schedule and the in-place write are per-request and
         data-dependent, which is what keeps them out of ``forward_batched``.
-        The iteration index is the engine's loop counter (see ``_loop_step``);
-        everything else comes from step metadata.
+        The iteration index is the one ``prepare_inputs`` took from the loop
+        counter (see ``_loop_step``); everything else comes from step metadata.
         """
         assert inputs is not None, "OmniVoice backbone postprocess needs its inputs"
         meta = request_info.step_metadata
-        k = _loop_step(request_info, inputs.tensor_inputs["step_index"])
+        k = inputs.kwargs["step"]
 
         # Cloned because apply_reveal writes in place and this tensor is the
         # edge the engine routed in from the previous iteration; mutating it
