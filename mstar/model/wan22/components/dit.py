@@ -232,6 +232,16 @@ class Wan22TimeTextEmbedding(nn.Module):
         return temb, timestep_proj, self.text_embedder(encoder_hidden_states)
 
 
+def _ffn_gelu_epilogue(mlp: MLP, x: torch.Tensor) -> torch.Tensor:
+    """``mlp(x)`` with the tanh-GELU in the up-projection's cuBLASLt epilogue: one
+    kernel instead of a GEMM plus a pass over its [tokens, 14336] output. The GELU
+    reads the fp32 accumulator, so this rounds once fewer than the reference."""
+    hidden = torch._addmm_activation(
+        mlp.linear_in.bias, x.flatten(0, -2), mlp.linear_in.weight.t(), use_gelu=True,
+    )
+    return mlp.linear_out(hidden.unflatten(0, x.shape[:-1]))
+
+
 class Wan22DiTBlock(nn.Module):
     """One transformer block: adaLN-modulated self-attention, cross-attention
     to the text stream, adaLN-modulated FFN (reference ``WanTransformerBlock``,
@@ -251,6 +261,9 @@ class Wan22DiTBlock(nn.Module):
         self.ffn = MLP(dim, ffn_dim, dim, activation="gelu_tanh", bias=True)
         self.norm3 = WanFP32LayerNorm(dim, eps, elementwise_affine=False)
         self.scale_shift_table = nn.Parameter(torch.empty(1, 6, dim))
+        # Serving sets this (Wan22DiT.fuse_ffn_gelu); the reference path keeps
+        # the separate GELU.
+        self.fuse_ffn_gelu = False
 
     def forward(
         self,
@@ -281,7 +294,7 @@ class Wan22DiTBlock(nn.Module):
         hidden_states = hidden_states + attn_output
 
         norm_hidden = (self.norm3(hidden_states.float()) * (1 + c_scale_msa) + c_shift_msa).type_as(hidden_states)
-        ff_output = self.ffn(norm_hidden)
+        ff_output = _ffn_gelu_epilogue(self.ffn, norm_hidden) if self.fuse_ffn_gelu else self.ffn(norm_hidden)
         return (hidden_states.float() + ff_output.float() * c_gate_msa).type_as(hidden_states)
 
 
@@ -316,6 +329,13 @@ class Wan22DiT(nn.Module):
         self.norm_out = WanFP32LayerNorm(dim, config.eps, elementwise_affine=False)
         self.proj_out = nn.Linear(dim, config.out_channels * math.prod(config.patch_size))
         self.scale_shift_table = nn.Parameter(torch.empty(1, 2, dim))
+
+    def set_fuse_ffn_gelu(self, enabled: bool) -> None:
+        """Run every block's FFN GELU in the GEMM epilogue (see
+        ``_ffn_gelu_epilogue``); off by default, so the module alone stays the
+        reference port."""
+        for block in self.blocks:
+            block.fuse_ffn_gelu = enabled
 
     @property
     def dtype(self) -> torch.dtype:

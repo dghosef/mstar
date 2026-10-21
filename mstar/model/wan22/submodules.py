@@ -406,6 +406,9 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
         self._compile_dit = bool(config.compile_dit)
         self._compiled_shapes: set[tuple[int, ...]] = set()
         if self._compile_dit and transformer is not None:
+            # Serving numerics, like the compile itself: the reference gates build
+            # with compile_dit off and keep the exact GELU path.
+            transformer.set_fuse_ffn_gelu(True)
             transformer.forward = torch.compile(
                 transformer.forward, fullgraph=False, dynamic=False,
             )
