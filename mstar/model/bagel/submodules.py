@@ -845,6 +845,8 @@ class LLMSubmodule(ARNodeSubmodule):
         self.eos_token_id = eos_token_id
         # image_gen runs only the CFG branches a step needs (`cfg_branches`)
         self._cfg_prune = config.cfg_prune
+        self._image_gen_shape_cache: dict[tuple, dict[str, torch.Tensor]] = {}
+        self._sentinel_ids: dict[torch.device, tuple[torch.Tensor, torch.Tensor]] = {}
         self._warned_loop_counter = False
 
     def _image_gen_cfg_branches(
@@ -1033,15 +1035,10 @@ class LLMSubmodule(ARNodeSubmodule):
             node_inputs.tensor_inputs = self._get_text_vae_idxs(seq_len, device)
 
         if graph_walk in ("image_gen", "image_gen_cfg"):
-            tensor_inputs = {}
             H = fwd_info.step_metadata.get("height", 1024)
             W = fwd_info.step_metadata.get("width", 1024)
-
-            tensor_inputs["vae_position_ids"] = get_flattened_position_ids_extrapolate(
-                H, W,
-                self.config.latent_downsample,
-                max_num_patches_per_side=self.config.max_latent_size
-            )
+            shape_inputs = self._image_gen_shape_inputs(H, W, device)
+            tensor_inputs = {"vae_position_ids": shape_inputs["vae_position_ids"]}
             first_iter = "latents" not in inputs or len(inputs["latents"]) == 0
             if first_iter:
                 node_inputs.input_embeds, tensor_inputs["time_index"] = _init_latents_and_time_index(
@@ -1071,10 +1068,31 @@ class LLMSubmodule(ARNodeSubmodule):
             )
             node_inputs.tensor_inputs = {
                 **tensor_inputs,
-                **self._get_text_vae_idxs(seq_len, device)
+                "text_indexes": shape_inputs["text_indexes"],
+                "vae_token_indexes": shape_inputs["vae_token_indexes"],
+                "text_mask": shape_inputs["text_mask"],
             }
 
         return node_inputs
+
+    def _image_gen_shape_inputs(self, H: int, W: int, device) -> dict[str, torch.Tensor]:
+        """The image_gen inputs that depend only on the output size, on the device, built once.
+
+        Building them per step copied host data to the device (``torch.tensor(..., device=)`` and
+        a CPU ``vae_position_ids`` indexing a device table), each a stream sync that held the next
+        step's ``prepare_inputs`` until the current step had finished. Read-only downstream.
+        """
+        key = (H, W, str(device))
+        cached = self._image_gen_shape_cache.get(key)
+        if cached is None:
+            pos = get_flattened_position_ids_extrapolate(
+                H, W, self.config.latent_downsample, max_num_patches_per_side=self.config.max_latent_size,
+            ).to(device)
+            cached = self._image_gen_shape_cache[key] = {
+                "vae_position_ids": pos,
+                **self._get_text_vae_idxs(pos.shape[0] + IMAGE_SENTINELS, device),
+            }
+        return cached
 
     def declare_step(
         self,
@@ -1778,8 +1796,16 @@ class LLMSubmodule(ARNodeSubmodule):
         assert self.boi_token_id is not None and self.eoi_token_id is not None
 
         device = emb.device
-        boi_ids = torch.tensor([self.boi_token_id], device=device)
-        eoi_ids = torch.tensor([self.eoi_token_id], device=device)
+        # built once per device: `torch.tensor(..., device=)` is a host copy that syncs the
+        # stream, which held every image_gen step's prepare_inputs until the step before it
+        # had finished (no speculation across denoising steps)
+        ids = self._sentinel_ids.get(device)
+        if ids is None:
+            ids = self._sentinel_ids[device] = (
+                torch.tensor([self.boi_token_id], device=device),
+                torch.tensor([self.eoi_token_id], device=device),
+            )
+        boi_ids, eoi_ids = ids
         with torch.no_grad():
             boi_emb = self.embed_tokens(boi_ids).to(emb.dtype)
             eoi_emb = self.embed_tokens(eoi_ids).to(emb.dtype)
