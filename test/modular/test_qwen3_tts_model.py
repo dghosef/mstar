@@ -1340,6 +1340,17 @@ def test_qwen3_tts_talker_preprocess_packs_the_tensors_the_per_row_device_copies
     _assert_same_tensor(capture["suppress_eos"], torch.ones(3, dtype=torch.bool))
 
 
+class _IdentityNorm(torch.nn.Module):
+    """A CPU stand-in for the FlashInfer RMSNorm, fused residual add included."""
+
+    def forward(self, hidden_states):
+        return hidden_states
+
+    def forward_residual(self, hidden_states, residual):
+        summed = hidden_states + residual
+        return summed, summed
+
+
 def test_qwen3_tts_code_predictor_projects_wider_talker_inputs():
     """1.7B: Talker width 2048 vs predictor width 1024 -> biased projection on
     every depth input; 0.6B (equal widths) -> identity, no extra parameters."""
@@ -1363,11 +1374,11 @@ def test_qwen3_tts_code_predictor_projects_wider_talker_inputs():
     )
 
     for layer in predictor.model.layers:
-        layer.input_layernorm = torch.nn.Identity()
-        layer.post_attention_layernorm = torch.nn.Identity()
+        layer.input_layernorm = _IdentityNorm()
+        layer.post_attention_layernorm = _IdentityNorm()
         layer.self_attn.q_norm = torch.nn.Identity()
         layer.self_attn.k_norm = torch.nn.Identity()
-    predictor.model.norm = torch.nn.Identity()
+    predictor.model.norm = _IdentityNorm()
     import mstar.model.qwen3_tts.components.talker as talker_module
     original_rope = talker_module.apply_rope_pos_ids
     original_attn = talker_module.decode_attn_nhd
@@ -1402,11 +1413,11 @@ def test_qwen3_tts_code_predictor_uses_decode_attn_nhd(monkeypatch):
     # RMSNorm and the Triton attention kernel are CUDA-only, so replace them
     # without changing attention geometry.
     for layer in predictor.model.layers:
-        layer.input_layernorm = torch.nn.Identity()
-        layer.post_attention_layernorm = torch.nn.Identity()
+        layer.input_layernorm = _IdentityNorm()
+        layer.post_attention_layernorm = _IdentityNorm()
         layer.self_attn.q_norm = torch.nn.Identity()
         layer.self_attn.k_norm = torch.nn.Identity()
-    predictor.model.norm = torch.nn.Identity()
+    predictor.model.norm = _IdentityNorm()
     rope_calls = []
 
     def capture_rope(q, k, position_ids, rope_theta):
