@@ -169,6 +169,9 @@ class LingBotDitSubmodule(_SingleRequestMixin, NodeSubmodule):
         self.encoder_vae = encoder_vae
         self.config = config
         self.schedule = make_fast_schedule(config.sample_shift, config.timesteps_index, config.num_train_timesteps)
+        if vae is not None and not config.vae_decode_fp32:
+            # The latents are cast to bf16 for the decode, so the weights must be too.
+            vae.to(torch.bfloat16)
         if vae is not None and config.vae_decode_channels_last:
             wan_vae.to_channels_last(vae)
         self._decode_step = (
@@ -231,7 +234,10 @@ class LingBotDitSubmodule(_SingleRequestMixin, NodeSubmodule):
         cs = cfg.chunk_size
         frames = slice(chunk * cs, (chunk + 1) * cs)
         latent = state["noise"][:, frames]
-        y = encode_condition_chunk(self.encoder_vae, image, state["encoder_stream"], chunk * cs, cs, cfg)
+        # Autotuned convs pick other algorithms than the reference's, which a
+        # rollout amplifies; only off reference numerics.
+        with wan_vae.cudnn_benchmark(not cfg.reference_numerics):
+            y = encode_condition_chunk(self.encoder_vae, image, state["encoder_stream"], chunk * cs, cs, cfg)
         _, height, width = image.shape
         plucker = plucker_embedding(
             camera_poses[frames].float().to(device), intrinsics.float(), height, width,
