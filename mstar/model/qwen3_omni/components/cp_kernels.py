@@ -119,3 +119,43 @@ def cp_embed_accumulate(
     )
     return emb
 
+
+
+@triton.jit
+def _cp_attn_kernel(Q, K, V, O, cache_pos, sm_scale,
+                    sq_b, sq_s, sq_h, sk_b, sk_n, sk_h, so_b, so_s, so_h,
+                    GROUP: tl.constexpr, D: tl.constexpr, BLOCK_N: tl.constexpr):
+    b = tl.program_id(0)
+    h = tl.program_id(1)
+    s = tl.program_id(2)
+    hk = h // GROUP
+    d = tl.arange(0, D)
+    n = tl.arange(0, BLOCK_N)
+    q = tl.load(Q + b * sq_b + s * sq_s + h * sq_h + d).to(tl.float32) * sm_scale
+    valid = n <= cache_pos + s  # causal within the depth sequence
+    kv = b * sk_b + n[:, None] * sk_n + hk * sk_h + d[None, :]
+    k = tl.load(K + kv, mask=valid[:, None], other=0.0).to(tl.float32)
+    qk = tl.where(valid, tl.sum(k * q[None, :], 1), float("-inf"))
+    p = tl.exp(qk - tl.max(qk, 0))
+    v = tl.load(V + kv, mask=valid[:, None], other=0.0).to(tl.float32)
+    out = tl.sum(p[:, None] * v, 0) / tl.sum(p, 0)
+    tl.store(O + b * so_b + s * so_s + h * so_h + d, out.to(O.dtype.element_ty))
+
+
+def cp_attention(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, cache_pos: int) -> torch.Tensor:
+    """Causal attention of the code predictor's ``q (bs, S, Hq, D)``, whose tokens sit
+    at depth positions ``cache_pos .. cache_pos + S - 1``, over its dense cache
+    ``(bs, max_depth, Hkv, D)``. The depth sequence is at most 16 long, so one
+    program holds a (batch row, head, token)'s whole key range."""
+    bs, seq, hq, d = q.shape
+    hkv, max_depth = k_cache.shape[2], k_cache.shape[1]
+    assert k_cache.stride() == v_cache.stride() and q.stride(-1) == 1 and k_cache.stride(-1) == 1
+    out = torch.empty(bs, seq, hq, d, device=q.device, dtype=q.dtype)
+    _cp_attn_kernel[(bs, hq, seq)](
+        q, k_cache, v_cache, out, cache_pos, d ** -0.5,
+        q.stride(0), q.stride(1), q.stride(2),
+        k_cache.stride(0), k_cache.stride(1), k_cache.stride(2),
+        out.stride(0), out.stride(1), out.stride(2),
+        GROUP=hq // hkv, D=d, BLOCK_N=triton.next_power_of_2(max_depth), num_warps=4,
+    )
+    return out
