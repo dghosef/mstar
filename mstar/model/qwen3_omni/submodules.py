@@ -175,6 +175,46 @@ class AudioEncoderSubmodule(NodeSubmodule):
 
         return {"audio_embeds": [audio_embeds]}
 
+    def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
+        return True
+
+    def preprocess(
+        self,
+        graph_walk: str,
+        engine_inputs: ModelInputsFromEngine,
+        inputs: list[NodeInputs],
+    ) -> dict[str, torch.Tensor | Any]:
+        # The encoder packs clips along time and windows its attention within
+        # each clip (``feature_lens``), so a batch is one call over the
+        # concatenated mel frames.
+        return {
+            "audio_features": torch.cat([inp.tensor_inputs["audio_features"] for inp in inputs], dim=-1),
+            "audio_seqlens": torch.cat([inp.tensor_inputs["audio_seqlens"].reshape(-1) for inp in inputs]),
+        }
+
+    def forward_batched(
+        self,
+        graph_walk: str,
+        engine_inputs: ModelInputsFromEngine,
+        audio_features: torch.Tensor,
+        audio_seqlens: torch.Tensor,
+        **kwargs,
+    ) -> dict[str, NameToTensorList]:
+        """Encode several requests' clips in one call (each ~10 ms on an H200,
+        mostly launches, whatever the clip length) and split the packed
+        embeddings back by each clip's output length."""
+        from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+            _get_feat_extract_output_lengths,
+        )
+
+        embeds = self.forward(graph_walk, engine_inputs, audio_features, audio_seqlens)["audio_embeds"][0]
+        # the encoder already reads its chunk lengths on the host
+        counts = _get_feat_extract_output_lengths(audio_seqlens).tolist()
+        return {
+            rid: {"audio_embeds": [part]}
+            for rid, part in zip(engine_inputs.request_ids, embeds.split(counts), strict=True)
+        }
+
 
 # ===================================================================
 # 2. VisionEncoderSubmodule (enc_dec engine)
@@ -1173,6 +1213,7 @@ class TalkerSubmodule(_CachedDeviceMixin, ARNodeSubmodule):
         # Lazy-built CodePredictor scratch KV cache, overwritten every step.
         self._cp_kv_cache: torch.Tensor | None = None
         self._cp_positions: torch.Tensor | None = None
+        self._cp_pair_positions: torch.Tensor | None = None
 
     def _get_cp_kv_cache(self):
         # TODO: make this a resource
@@ -1196,6 +1237,14 @@ class TalkerSubmodule(_CachedDeviceMixin, ARNodeSubmodule):
                 self.num_codes, device=self.get_device(),
             ).view(-1, 1, 1).expand(-1, self.MAX_BATCH_SIZE, 1).contiguous()
         return self._cp_positions
+
+    def _get_cp_pair_positions(self) -> torch.Tensor:
+        """``[b] = [0, 1]``: the positions of the depth sequence's opening pair."""
+        if self._cp_pair_positions is None:
+            self._cp_pair_positions = torch.arange(
+                2, device=self.get_device(),
+            ).expand(self.MAX_BATCH_SIZE, 2).contiguous()
+        return self._cp_pair_positions
 
     def init_tts_embeds(self, thinker_embed_tokens: nn.Embedding) -> None:
         """Pre-compute TTS pad/bos/eos hidden states using the Thinker's
@@ -1503,19 +1552,21 @@ class TalkerSubmodule(_CachedDeviceMixin, ARNodeSubmodule):
 
         kv_cache = self._get_cp_kv_cache()[:, :bs]
 
-        # forward over [last_hidden] to update kv cache with the Talker's final hidden
-        # state as context for the code prediction. This returns nothing because the
-        # layer 0 code is already provided by the talker LLM
+        # The depth sequence opens with the Talker's hidden state and the layer-0
+        # code's embedding (as in HF's code-predictor prefill): one two-token pass
+        # whose second token predicts layer 1, then one token per layer.
         cp = self.code_predictor
         codec_embedding = cp.model.codec_embedding
-        cp.forward_depth_unrolled(
-            last_hidden.unsqueeze(1), positions[0, :bs], kv_cache, cache_pos=0,
-        )
-
         for group_idx in range(1, self.num_codes):
-            hidden = cp.forward_depth_unrolled(
-                embed.unsqueeze(1), positions[group_idx, :bs], kv_cache, cache_pos=group_idx,
-            ).squeeze(1)
+            if group_idx == 1:
+                hidden = cp.forward_depth_unrolled(
+                    torch.stack([last_hidden, embed], dim=1), self._get_cp_pair_positions()[:bs],
+                    kv_cache, cache_pos=0,
+                )[:, 1]
+            else:
+                hidden = cp.forward_depth_unrolled(
+                    embed.unsqueeze(1), positions[group_idx, :bs], kv_cache, cache_pos=group_idx,
+                ).squeeze(1)
 
             logits = torch.matmul(
                 hidden, cp.lm_head_weight[group_idx - 1].t()
