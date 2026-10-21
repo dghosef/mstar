@@ -719,6 +719,15 @@ Cosmos3 environment requirements
 - The Wan-VAE decode dtype is gated on the cuDNN build: bf16 needs cuDNN >=
   9.16 (fast Hopper bf16 conv3d); older cuDNN serves the decode in fp32/TF32
   automatically.
+- Whole-clip decodes (``vae_decode_fast``, default on) run the shared Wan VAE
+  decoder channels-last and compiled per latent, on the decoder node's own
+  decoder-only copy of the VAE: 17% off the decode on an H200 (Nano 832x480x189
+  2.9 -> 2.4 s, Edge 832x480x121 1.84 -> 1.54 s), within ~40 dB PSNR of the stock
+  decode. ``vae_decode_fast: false`` restores the compiled stock ``vae.decode``.
+- Two GPUs: ``configs/cosmos3_nano_sp2.yaml`` halves one request's denoise
+  (Nano 832x480x189x35: 1.47 -> 0.78 s per step), while
+  ``configs/cosmos3_nano_dp2.yaml`` (a whole replica per GPU) serves more under
+  concurrency: 2.13 videos/min at 2 concurrent vs 1.63 for sp2 and 1.07 on one GPU.
 
 Cosmos3-Edge reasoner and action loop
 -------------------------------------
@@ -945,12 +954,18 @@ travels with the request rather than living in a scheduler object on one rank.
 Requests are therefore independent and the loop is resumable across ranks.
 
 **What is accelerated by default.** The DiT runs under ``torch.compile``
-(``compile_dit``) and the untiled VAE decode runs the shared Wan VAE decoder,
+(``compile_dit``); its self-attention runs on the engine's ragged attention
+resource (FlashInfer, FA3 on Hopper) as an opaque op inside the compiled graph,
+6% off a 1280x704x81 denoise step on an H200 against cuDNN SDPA
+(``model_kwargs: attention_backend: sdpa`` restores the reference kernel; the
+cross-attention over the 512 text tokens stays on SDPA, which is faster at that
+shape). The untiled VAE decode runs the shared Wan VAE decoder,
 channels-last and compiled (``vae_decode_fast``; set it to ``false`` under the
 yaml's ``model_kwargs`` for stock ``vae.decode``). Both compile on first use:
 the DiT once per resolution, frame count and CFG setting, so the first request
 at a new size is slower. The VAE decode compiles once per resolution, and only
-for the sizes in ``vae_decode_fast_sizes`` (default ``1280x704``); any other
+for the sizes in ``vae_decode_fast_sizes`` (model default ``1280x704``; the
+shipped configs add ``832x480``, where it decodes 1.59x faster); any other
 size decodes with stock ``vae.decode``, frames identical to
 ``vae_decode_fast: false``. The compile uses Inductor's deterministic mode, so
 every server process decodes the same latents to the same frames; torch 2.9.1
@@ -960,6 +975,17 @@ tiles only when free VRAM at decode time is short of the untiled estimate
 (the ``auto`` policy; ``WAN22_VAE_DECODE_TILING`` forces a path), which keeps the untiled conv3d from OOMing a
 32 GiB card. No CUDA-graph capture, no continuous batching (one request per
 step) and no component offload.
+
+**Two GPUs.** ``configs/wan22_sp2.yaml`` runs the dit as a two-rank lockstep
+instance (``sp_size: 2``) that splits the classifier-free guidance batch: each
+rank runs one branch at batch 1 and the two noise predictions are all-gathered
+every step, so a guided step costs one branch's forward (502 vs 1000 ms at
+1280x704x81 on H200s; one request 13.4 s vs 23.3 s end to end at 20 steps). The
+text encoder and VAE run on rank 0. Without guidance both ranks compute the same
+step, correct but no faster. For throughput under concurrency,
+``configs/wan22_dp2.yaml`` serves a whole replica per GPU instead: 5.2 videos/min
+at 4 concurrent vs 4.7 for sp2 (sp2's rank 1 idles through rank 0's VAE
+decode), while one request takes the 1-GPU time.
 
 LTX-2.5 (``ltx2_5``)
 --------------------
