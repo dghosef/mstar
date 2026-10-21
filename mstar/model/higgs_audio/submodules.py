@@ -208,16 +208,15 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
     """Dense Qwen3 LLM.
 
     Dispatches on graph_walk:
-      - prefill_text:  embed a text span, extend the KV cache.
-      - prefill_audio: splice the encoder's audio embeddings, extend the
-        KV cache.
+      - prefill_audio: the ChatML text around the encoder's audio
+        embeddings, one span into the KV cache.
       - decode:        embed the previous token, single-step decode.
 
-    Every walk samples a token; ``postprocess`` drops it for the prefill
-    steps that are not the last one, so the captured graph's output keys
-    stay the same whatever the step metadata says. The two prefill walks
-    share one packed capture — both hand the forward ``input_embeds`` —
-    while decode carries bare ``input_ids`` and embeds inside the graph.
+    Every walk samples a token; ``postprocess`` drops it for a prefill step
+    that is not the last one, so the captured graph's output keys stay the
+    same whatever the step metadata says. Prefill replays a packed capture
+    keyed on ``input_embeds``, while decode carries bare ``input_ids`` and
+    embeds inside the graph.
     """
 
     PREFILL_TOKEN_BUCKETS = [64, 128, 256, 512, 1024, 2048]
@@ -242,8 +241,7 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
                 capture_batch_sizes=self.DECODE_CAPTURE_BATCH_SIZES,
             ),
             PackedAcceleratorGraphConfig(
-                capture_graph_walk="prefill_text",
-                replay_graph_walks=["prefill_text", "prefill_audio"],
+                capture_graph_walk="prefill_audio",
                 make_node_input=lambda n: ARNodeInputs(
                     input_seq_len=n,
                     input_embeds=torch.zeros(
@@ -266,25 +264,24 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
         device = self.get_device()
 
         if graph_walk == "prefill_audio":
-            audio_embeds = inputs["audio_embeds"][0].to(device)
+            # the audio between the ChatML text around it, prefilled as one span
+            audio = inputs["audio_embeds"][0].to(device)
+            pre, post = (
+                self.model.embed_tokens(inputs[name][0].to(device).reshape(-1))
+                if inputs.get(name) else None
+                for name in ("text_pre", "text_post")
+            )
+            dtype = (pre if pre is not None else audio).dtype
+            embeds = torch.cat([t.to(dtype) for t in (pre, audio, post) if t is not None], dim=0)
             return ARNodeInputs(
-                input_seq_len=audio_embeds.shape[0],
-                input_embeds=audio_embeds,
+                input_seq_len=embeds.shape[0],
+                input_embeds=embeds,
             )
 
+        # decode: embedding happens inside the captured graph; a decode row
+        # is one id, so staging it costs 8 bytes instead of a hidden vector
         token_ids = inputs["text_inputs"][0].to(device).reshape(-1)
-        if graph_walk == "decode":
-            # embedding happens inside the captured graph; a decode row is
-            # one id, so staging it costs 8 bytes instead of a hidden vector
-            return ARNodeInputs(input_seq_len=1, input_ids=token_ids)
-
-        # prefill_text shares prefill_audio's capture, which is keyed on
-        # embeddings, so the text span is embedded here
-        return ARNodeInputs(
-            input_seq_len=token_ids.shape[0],
-            input_ids=token_ids,
-            input_embeds=self.model.embed_tokens(token_ids),
-        )
+        return ARNodeInputs(input_seq_len=1, input_ids=token_ids)
 
     def declare_step(
         self,
