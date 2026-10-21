@@ -752,7 +752,7 @@ class VisionEncoderSubmodule(NodeSubmodule):
     BLOCK_LOOP_PATCH_BUCKETS = [256, 512, 1024, 2048, 4096, 8192, 16384]
     # Requests per encoder step. They share one replay, so a burst of image
     # requests pays the per-step host cost once per this many, not per image.
-    MAX_BATCH_SIZE = int(os.environ.get("MSTAR_QWEN35_VISION_BATCH", "8"))
+    MAX_BATCH_SIZE = 8
 
     # The engine would compile `forward_batched` whole, and its per-step
     # bookkeeping (each request's slice of the output, the segment lengths)
