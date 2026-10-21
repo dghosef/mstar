@@ -253,7 +253,9 @@ default, which lowers the token count of short clips. Notes:
   long videos on the default pool gave 67 tok/s with most requests timing out,
   and 1,585 tok/s with none failing on 8192 pages. Raise
   ``resources: kv_cache: max_num_pages`` to fit the concurrency you serve.
-- Decoding happens in the API server process, before the request is queued.
+- Decoding happens in the API server process, before the request is queued,
+  and counts against ``MSTAR_MAX_VIDEO_PIXELS``: at the default, a 1080p
+  video over about 259 s gets a 400.
 
 Most layers are gated DeltaNet, so a request holds a recurrent-state slot as
 well as a KV allocation. Set ``gdn_state.max_slots`` in

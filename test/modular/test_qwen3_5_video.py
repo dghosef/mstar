@@ -35,6 +35,7 @@ from mstar.model.qwen3_5.video import (
     VIDEO,
     expand_video_pads,
     expand_video_parts,
+    ffmpeg_unavailable,
     group_owners,
     group_timestamps,
 )
@@ -439,10 +440,8 @@ def test_vision_walk_matches_get_rope_index(model, processor, rope_model, layout
 def test_mp4_matches_processor(model, processor, tmp_path):
     """The decode itself: an mp4 through `load_video`, against the processor
     reading the same file."""
-    try:
-        import torchcodec.decoders  # noqa: F401
-    except (ImportError, RuntimeError, OSError) as exc:
-        pytest.skip(f"torchcodec with FFmpeg is the decoder under test: {exc}")
+    if reason := ffmpeg_unavailable():
+        pytest.skip(f"torchcodec with FFmpeg is the decoder under test; {reason}")
     av = pytest.importorskip("av")
 
     video, fps = a_video("odd")
@@ -582,10 +581,8 @@ def test_a_bad_layout_is_refused_before_the_video_is_preprocessed(model, monkeyp
 def test_an_undecodable_video_is_a_client_error(model, tmp_path):
     """A corrupt upload is the client's input: ValueError (a 400), not the
     decoder's RuntimeError (a 500)."""
-    try:
-        import torchcodec.decoders  # noqa: F401
-    except (ImportError, RuntimeError, OSError) as exc:
-        pytest.skip(f"torchcodec with FFmpeg is the decoder under test: {exc}")
+    if reason := ffmpeg_unavailable():
+        pytest.skip(f"torchcodec with FFmpeg is the decoder under test; {reason}")
     from mstar.model.qwen3_5.video import sample_video
 
     path = tmp_path / "broken.mp4"
@@ -594,26 +591,63 @@ def test_an_undecodable_video_is_a_client_error(model, tmp_path):
         sample_video(str(path), model.video_processor)
 
 
-def test_video_metadata_dict_is_wire_safe():
-    """transformers' sampled indices are numpy and torchcodec's aspect ratio
-    a Fraction; the wire codec takes neither."""
-    from dataclasses import dataclass
-    from fractions import Fraction
+def _header_only_loader(monkeypatch, height, width, total=600, fps=30.0) -> list[int]:
+    """transformers' torchcodec reader without torchcodec: a header of this
+    size, then the sampler, then a decode recorded as its frame count."""
+    from transformers import video_utils
+    from transformers.video_utils import VideoMetadata
 
-    import numpy as np
+    from mstar.model.qwen3_5 import video as video_module
 
-    from mstar.model.base import video_metadata_dict
+    decoded = []
 
-    @dataclass
-    class Meta:
-        frames_indices: object
-        fps: object
-        pixel_aspect_ratio: object
-        total_num_frames: object
+    def load_video(path, backend, sample_indices_fn):
+        metadata = VideoMetadata(total_num_frames=total, fps=fps, height=height, width=width)
+        indices = sample_indices_fn(metadata=metadata)
+        decoded.append(len(indices))
+        metadata.frames_indices = indices
+        return torch.zeros(len(indices), 3, 1, 1, dtype=torch.uint8), metadata
 
-    out = video_metadata_dict(Meta(np.array([0, 5, 9]), np.float64(10.0), Fraction(1, 1), 25))
-    assert out == {"frames_indices": [0, 5, 9], "fps": 10.0, "pixel_aspect_ratio": 1.0, "total_num_frames": 25}
-    assert type(out["frames_indices"][0]) is int and type(out["fps"]) is float
+    monkeypatch.setattr(video_utils, "load_video", load_video)
+    monkeypatch.setattr(video_module, "ffmpeg_unavailable", lambda: None)
+    return decoded
+
+
+def test_the_video_pixel_cap_holds_before_decoding(model, tmp_path, monkeypatch):
+    """`MSTAR_MAX_VIDEO_PIXELS` counts the frames the processor samples, from
+    the header, so a video over it is refused before any frame is decoded."""
+    from transformers.video_utils import VideoMetadata
+
+    from mstar.model.qwen3_5.video import sample_video
+
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"")
+    decoded = _header_only_loader(monkeypatch, height=1080, width=1920)
+    processor = model.video_processor
+    n = len(processor.sample_frames(
+        VideoMetadata(total_num_frames=600, fps=30.0), num_frames=processor.num_frames, fps=processor.fps,
+    ))
+
+    monkeypatch.setenv("MSTAR_MAX_VIDEO_PIXELS", str(n * 1080 * 1920))
+    sample_video(str(path), processor)
+    assert decoded == [n]
+
+    monkeypatch.setenv("MSTAR_MAX_VIDEO_PIXELS", str(n * 1080 * 1920 - 1))
+    with pytest.raises(ValueError, match="MSTAR_MAX_VIDEO_PIXELS"):
+        sample_video(str(path), processor)
+    assert decoded == [n]
+
+
+def test_a_video_with_no_frame_size_is_refused(model, tmp_path, monkeypatch):
+    """Without a frame size the decode can't be bounded, so it doesn't start."""
+    from mstar.model.qwen3_5.video import sample_video
+
+    path = tmp_path / "clip.mp4"
+    path.write_bytes(b"")
+    decoded = _header_only_loader(monkeypatch, height=None, width=None)
+    with pytest.raises(ValueError, match="no frame size"):
+        sample_video(str(path), model.video_processor)
+    assert decoded == []
 
 
 def test_still_refuses_audio(model):

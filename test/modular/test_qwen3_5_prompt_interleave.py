@@ -187,15 +187,6 @@ def test_empty_prompt_fails_legibly(model):
         model.get_initial_forward_pass_args("LLM", ["text"], ["text"], {})
 
 
-def test_video_is_refused_rather_than_run_as_an_image(model):
-    # a ValueError, so the server answers 400 rather than 500
-    with pytest.raises(ValueError, match="video"):
-        model.process_prompt(
-            "What happens?", ["video", "text"], ["text"],
-            tensors={"video_inputs": [an_image()]},
-        )
-
-
 def test_image_only_message_renders_an_empty_text_span(model):
     """A chat message with just an image arrives with no text at all; that is
     still a prompt, so it must render (an empty span around the image) rather

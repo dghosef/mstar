@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from functools import partial
 from typing import NamedTuple
 
 import torch
@@ -44,6 +43,21 @@ class ProcessedVideo(NamedTuple):
     timestamps: list[float]
 
 
+def ffmpeg_unavailable() -> str | None:
+    """Why torchcodec can't decode video in this process, or None if it can."""
+    try:
+        import torchcodec
+        import torchcodec.decoders  # noqa: F401
+    except (ImportError, RuntimeError, OSError) as exc:
+        # torchcodec 0.9 and earlier raise here when FFmpeg is missing
+        return f"it failed to load: {exc}"
+    # 0.16 imports without FFmpeg and fails only at decode (0.8 has no
+    # ffmpeg_major_version, and has already raised above)
+    if getattr(torchcodec, "ffmpeg_major_version", 0) is None:
+        return "it found no FFmpeg shared libraries"
+    return None
+
+
 def sample_video(path: str, video_processor) -> SampledVideo:
     """Decode the frames the checkpoint's video processor would sample.
 
@@ -62,21 +76,28 @@ def sample_video(path: str, video_processor) -> SampledVideo:
         from transformers.video_utils import load_video
     except ImportError as exc:
         raise ValueError(f"Qwen3.5 video input needs transformers: {exc}") from exc
-    try:
-        import torchcodec.decoders  # noqa: F401
-    except (ImportError, RuntimeError, OSError) as exc:
-        # torchcodec raises RuntimeError when FFmpeg's shared libraries are missing
+    if reason := ffmpeg_unavailable():
         raise ValueError(
             "Qwen3.5 video input needs torchcodec with FFmpeg, the decoder "
-            f"transformers uses; it failed to load: {exc}"
-        ) from exc
+            f"transformers uses; {reason}"
+        )
 
     from mstar.model.base import video_metadata_dict
+    from mstar.model.media_limits import VideoBudget
 
-    sampler = partial(
-        video_processor.sample_frames,
-        num_frames=video_processor.num_frames, fps=video_processor.fps,
-    )
+    budget = VideoBudget()
+
+    def sampler(metadata, **kwargs):
+        indices = video_processor.sample_frames(
+            metadata, num_frames=video_processor.num_frames, fps=video_processor.fps, **kwargs,
+        )
+        # transformers samples from the header before decoding, so the cap
+        # holds before any frame is in memory
+        if not (metadata.height and metadata.width):
+            raise ValueError(f"Qwen3.5 video {path!r} has no frame size in its header")
+        budget.add(metadata.height, metadata.width, len(indices))
+        return indices
+
     try:
         frames, metadata = load_video(path, backend="torchcodec", sample_indices_fn=sampler)
     except RuntimeError as exc:
@@ -95,7 +116,8 @@ def group_timestamps(
     the same way) and its 24 fps fallback.
     """
     fps = 24 if fps is None else fps
-    indices = list(frames_indices)
+    # plain ints: transformers samples numpy, and these become prompt metadata
+    indices = [int(i) for i in frames_indices]
     if pad := -len(indices) % temporal_patch_size:
         indices += [indices[-1]] * pad
     times = [i / fps for i in indices]
