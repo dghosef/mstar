@@ -36,9 +36,12 @@ from mstar.model.higgs_audio.config import ATTN, KV_CACHE, ROPE, SAMPLER, HiggsA
 from mstar.model.submodule_base import (
     ARNodeInputs,
     ARNodeSubmodule,
+    BatchedModelOutput,
+    HostRows,
     ModelInputsFromEngine,
     NodeInputs,
     NodeSubmodule,
+    device_loopback_enabled,
 )
 
 logger = logging.getLogger(__name__)
@@ -255,6 +258,9 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
     embeds inside the graph.
     """
 
+    # the decode walk reads its input ids off the sampler's slot masters
+    reads_device_loopback = True
+
     PREFILL_TOKEN_BUCKETS = [64, 128, 256, 512, 1024, 2048]
     PREFILL_CAPTURE_BATCH_SIZES = [1, 2, 4, 8]
     DECODE_CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16, 32]
@@ -295,9 +301,14 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
         graph_walk: str,
         fwd_info: CurrentForwardPassInfo,
         inputs: NameToTensorList,
+        has_loopback: bool = False,
         **kwargs,
     ) -> ARNodeInputs:
         device = self.get_device()
+
+        if graph_walk == "decode" and has_loopback and self._device_loopback():
+            # the token is read off the sampler's slot master in `preprocess`
+            return ARNodeInputs(input_seq_len=1)
 
         if graph_walk == "prefill_audio":
             # the audio between the ChatML text around it, prefilled as one span
@@ -318,6 +329,21 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
         # is one id, so staging it costs 8 bytes instead of a hidden vector
         token_ids = inputs["text_inputs"][0].to(device).reshape(-1)
         return ARNodeInputs(input_seq_len=1, input_ids=token_ids)
+
+    def uniform_row_inputs(
+        self, graph_walk: str, has_loopback: bool = False,
+    ) -> ARNodeInputs | None:
+        if graph_walk == "decode" and has_loopback and self._device_loopback():
+            return ARNodeInputs(input_seq_len=1)
+        return None
+
+    def _device_loopback(self) -> bool:
+        return device_loopback_enabled() and self.node_resources[SAMPLER].has_slot_masters
+
+    def device_loopback_signals(self, graph_walk: str) -> frozenset[str]:
+        if graph_walk == "decode" and self._device_loopback():
+            return frozenset({"text_inputs"})
+        return frozenset()
 
     def declare_step(
         self,
@@ -360,9 +386,19 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
         inputs: list[ARNodeInputs],
     ) -> dict[str, torch.Tensor | Any]:
         if graph_walk == "decode":
-            return {
-                "input_ids": torch.cat([inp.input_ids for inp in inputs]),
-            }
+            if all(inp.input_ids is not None for inp in inputs):
+                return {"input_ids": torch.cat([inp.input_ids for inp in inputs])}
+            # device loop-back: each row's last sampled token, read by slot;
+            # rows whose previous step was the prefill brought theirs
+            sampler: SamplerResource = engine_inputs.resources[SAMPLER]
+            ids = sampler.loopback_tokens(engine_inputs.request_ids)
+            routed = [i for i, inp in enumerate(inputs) if inp.input_ids is not None]
+            if routed:
+                ids.index_copy_(
+                    0, torch.tensor(routed, device=ids.device),
+                    torch.cat([inputs[i].input_ids for i in routed]).to(ids.dtype),
+                )
+            return {"input_ids": ids}
         return {
             "input_embeds": torch.cat(
                 [inp.input_embeds for inp in inputs], dim=0
@@ -380,6 +416,8 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
         sampler: SamplerResource = engine_inputs.resources[SAMPLER]
         attn: AttentionManager = engine_inputs.resources[ATTN]
 
+        if input_ids is None and input_embeds is None:
+            input_ids = sampler.loopback_tokens(engine_inputs.request_ids)
         if input_embeds is None:
             input_embeds = self.model.embed_tokens(input_ids)
         hidden = self.model(input_embeds=input_embeds, label="main")
@@ -421,17 +459,18 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
         input_ids: torch.Tensor | None = None,
         input_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> dict[str, NameToTensorList]:
+    ) -> BatchedModelOutput:
         new_tokens = self._forward(
             graph_walk=graph_walk,
             engine_inputs=engine_inputs,
             input_ids=input_ids,
             input_embeds=input_embeds,
         )
-        return {
-            rid: {"new_token": [new_tokens[i:i + 1]]}
-            for i, rid in enumerate(engine_inputs.request_ids)
-        }
+        # row i is request i: one clone and one device-to-host copy per step
+        return BatchedModelOutput(
+            row_outputs={"new_token": new_tokens},
+            check_stop_buffers={"new_token": new_tokens},
+        )
 
     def postprocess(
         self,
@@ -465,3 +504,43 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
                 decoded_tokens >= request_info.max_tokens:
             return {"decode_loop"}
         return set()
+
+    def step_is_input_free(self, graph_walk: str) -> bool:
+        # a decode row is one token, like the capture template's
+        return graph_walk == "decode"
+
+    def inline_client_signals(self, graph_walk: str) -> dict[str, str]:
+        # the decode loop's client edge carries the token the stop check
+        # already has on the host; prefill's client edge is persisted
+        return {"text_inputs": "new_token"} if graph_walk == "decode" else {}
+
+    def check_stop_batched(
+        self,
+        request_ids: list[str],
+        request_infos: dict[str, CurrentForwardPassInfo],
+        host_rows: HostRows,
+        step_walk: str | None = None,
+    ) -> dict[str, set[str]] | None:
+        """``check_stop`` for the whole batch off one ``tolist``."""
+        if step_walk is not None and step_walk != "decode":
+            return {}
+        tokens = host_rows.buffers.get("new_token")
+        if not torch.is_tensor(tokens) or tokens.dim() == 0:
+            return None
+        values = tokens.reshape(tokens.shape[0], -1)[:, 0].tolist()
+        row_of = {rid: i for i, rid in enumerate(host_rows.request_ids)}
+        stop_ids = self.config.stop_token_ids
+        stops: dict[str, set[str]] = {}
+        for rid in request_ids:
+            i = row_of.get(rid)
+            if i is None or i >= len(values):
+                continue  # no row, no output: the per-request path skips it too
+            info = request_infos[rid]
+            if step_walk is None and info.graph_walk != "decode":
+                continue
+            if (
+                values[i] in stop_ids
+                and not info.resource_configs[SAMPLER].ignore_eos
+            ) or info.dynamic_loop_iter_counts.get("decode_loop", 0) + 1 >= info.max_tokens:
+                stops[rid] = {"decode_loop"}
+        return stops
