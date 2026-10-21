@@ -116,7 +116,8 @@ def causal_rope_apply(
         freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1),
     ], dim=-1).reshape(seq_len, 1, -1)
     x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
-    x_i = torch.cat([x_i, x[0, seq_len:]])
+    if seq_len < x.size(1):
+        x_i = torch.cat([x_i, x[0, seq_len:]])
     return x_i.unsqueeze(0).type_as(x)
 
 
@@ -378,6 +379,7 @@ class LingBotCausalDiT(nn.Module):
         x = x.flatten(2).transpose(1, 2)
         seq_len = x.size(1)
 
+        per_token_t = None if t.dim() == 1 else t
         if t.dim() == 1:
             t = t.expand(t.size(0), seq_len)
         with torch.amp.autocast("cuda", dtype=torch.float32):
@@ -385,6 +387,12 @@ class LingBotCausalDiT(nn.Module):
             e = self.time_embedding(
                 sinusoidal_embedding_1d(cfg.freq_dim, t.flatten()).unflatten(0, (bt, seq_len)).float())
             e0 = self.time_projection(e).unflatten(2, (6, cfg.dim))
+        if per_token_t is None:
+            # One timestep for the whole chunk: every token's row of e/e0 is
+            # the same bits, so keep one and let the modulation broadcast. The
+            # per-token [L, 6, dim] fp32 tensors otherwise cost ~10% of a
+            # forward in elementwise traffic, in every block.
+            e, e0 = e[:, :1], e0[:, :1]
 
         if not cache.cross_k:
             padded = torch.cat([context, context.new_zeros(cfg.text_len - context.size(0), context.size(1))])
