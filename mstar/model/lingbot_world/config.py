@@ -82,6 +82,13 @@ class LingBotWorldConfig:
     vae_decode_cudnn_benchmark: bool = True
     vae_decode_compile: bool = True
 
+    # False trades bit-parity with the reference for speed: flash-attn-4
+    # attention (needs flash-attn-4, see docs/installation.rst) and compiled
+    # block pointwise ops, 12.5 -> 15.7 fps at 480x832 on an H200. A free-running
+    # rollout then drifts from the reference's as far as it does under any other
+    # attention kernel (26.5 dB over 93 frames, the same as FA2 vs FA4 alone).
+    reference_numerics: bool = True
+
     @property
     def head_dim(self) -> int:
         return self.dim // self.num_heads
