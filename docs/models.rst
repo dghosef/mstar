@@ -598,6 +598,16 @@ Chatterbox notes
   window stays as close to the whole-utterance decode as the full history
   does (log-mel correlation 0.988 vs 0.985 on CPU). Requests whose chunks
   are ready together share one padded flow solve (up to 8 per step).
+- ``configs/chatterbox_split.yaml`` (and ``chatterbox_turbo_split.yaml``,
+  ``chatterbox_multilingual_split.yaml``) runs S3Gen on a second worker that
+  shares GPU 0 (``rank_devices``), so T3's decode steps stop alternating with
+  S3Gen's flow solves on one worker loop. It only pays with a user-level CUDA
+  MPS daemon (``nvidia-cuda-mps-control -d`` before ``mstar serve``), which
+  lets the two workers' kernels overlap: on an H200 at concurrency 32 Chatterbox
+  went from 36-38 to 58-61 audio-s/s and Turbo from 69 to 94, at the cost of a
+  later first chunk (TTFA p50 1.6-1.8 s -> 1.9-2.1 s; Turbo 0.36 s -> 1.0 s);
+  concurrency 1 is unchanged, and WER held (1.22% -> 1.08%). Without MPS the
+  split measured the same as one worker.
 - S3Gen runs from CUDA graphs by default (``s3gen_graphs``): the flow solve
   (one graph per rows x frames x steps; the estimator's hundreds of tiny
   kernels per Euler step make the eager solve launch-bound, 170 ms vs 45 ms
