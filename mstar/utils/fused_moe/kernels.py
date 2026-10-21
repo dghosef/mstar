@@ -619,6 +619,40 @@ def moe_sum_reduce_triton(
 # ---------------------------------------------------------------------------
 
 
+def _tile(bn: int, bk: int, warps: int, stages: int) -> Dict[str, int]:
+    return {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": bn, "BLOCK_SIZE_K": bk, "GROUP_SIZE_M": 1,
+            "num_warps": warps, "num_stages": stages}
+
+
+# (E, N of the gate/up GEMM, K = hidden) -> rows of (max tokens, gate/up tile, down tile),
+# swept on an H200 with uniform random routing for Qwen3-Omni's Thinker
+# (128 experts, 2048 hidden, 768 inter, top-8) and Talker (1024 / 384, top-6).
+# Above the last row the default applies; at those batch sizes the GEMMs read most
+# experts and the default is within a few percent.
+_TUNED: Dict[tuple, tuple] = {
+    (128, 1536, 2048): (
+        (1, _tile(32, 128, 4, 4), _tile(64, 64, 4, 3)),
+        (2, _tile(64, 64, 4, 4), _tile(64, 64, 4, 4)),
+        (4, _tile(64, 64, 4, 3), _tile(64, 64, 4, 3)),
+        (8, _tile(64, 128, 4, 4), _tile(64, 128, 4, 3)),
+    ),
+    (128, 768, 1024): (
+        (1, _tile(64, 64, 4, 5), _tile(64, 64, 8, 3)),
+        (2, _tile(64, 64, 4, 3), _tile(32, 64, 4, 3)),
+        (4, _tile(64, 64, 4, 4), _tile(64, 64, 4, 3)),
+    ),
+}
+
+
+def get_tuned_configs(M: int, E: int, N: int, K: int) -> tuple[Dict[str, int], Dict[str, int]] | None:
+    """Swept ``(gate/up, down)`` tiles for a known shape and batch size, else None.
+    Both share ``BLOCK_SIZE_M``: the token alignment is computed once for the two."""
+    for max_m, gate_up, down in _TUNED.get((E, N, K), ()):
+        if M <= max_m:
+            return dict(gate_up), dict(down)
+    return None
+
+
 def get_default_config(M: int, E: int, N: int, K: int, top_k: int) -> Dict[str, int]:
     """Pick Triton tile sizes based on problem shape.
 
