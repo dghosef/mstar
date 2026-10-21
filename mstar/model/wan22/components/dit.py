@@ -2,8 +2,9 @@
 
 Exact port of diffusers 0.39.0 ``WanTransformer3DModel``, restricted to the
 TI2V-5B checkpoint's configuration: no image-conditioning branch, and the
-per-token timestep path (the dit submodule always feeds a ``[batch, seq]``
-timestep grid).
+per-token timestep path (``expand_timesteps``; the dit submodule feeds one
+timestep per latent frame, which is the same thing since it is constant within
+a frame).
 
 Numerics contract (bf16 weights with fp32 islands):
 
@@ -232,6 +233,16 @@ class Wan22TimeTextEmbedding(nn.Module):
         return temb, timestep_proj, self.text_embedder(encoder_hidden_states)
 
 
+def _groups(tokens: torch.Tensor, groups: int) -> torch.Tensor:
+    """``[B, seq, dim]`` viewed as ``[B, groups, seq / groups, dim]``: the token
+    groups that share one timestep, hence one adaLN modulation row. Per-token
+    timesteps are ``groups == seq``; the serving path passes one per latent frame
+    (``expand_timesteps`` is constant within a frame), which embeds and projects
+    the timestep once per frame instead of once per token, with the same
+    elementwise math on every token."""
+    return tokens.unflatten(1, (groups, -1))
+
+
 def _ffn_gelu_epilogue(mlp: MLP, x: torch.Tensor) -> torch.Tensor:
     """``mlp(x)`` with the tanh-GELU in the up-projection's cuBLASLt epilogue: one
     kernel instead of a GEMM plus a pass over its [tokens, 14336] output. The GELU
@@ -273,18 +284,21 @@ class Wan22DiTBlock(nn.Module):
         rotary_emb: tuple[torch.Tensor, torch.Tensor],
         attn_fns: Wan22AttentionFns | None = None,
     ) -> torch.Tensor:
-        # [1, 1, 6, dim] + [B, seq, 6, dim] -> six [B, seq, dim] fp32 tensors.
+        # [1, 1, 6, dim] + [B, G, 6, dim] -> six [B, G, 1, dim] fp32 tensors, one
+        # row per group of seq / G consecutive tokens (see _groups).
+        groups = timestep_proj.shape[1]
         shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = (
             (self.scale_shift_table.unsqueeze(0) + timestep_proj.float()).chunk(6, dim=2)
         )
-        shift_msa, scale_msa, gate_msa = shift_msa.squeeze(2), scale_msa.squeeze(2), gate_msa.squeeze(2)
-        c_shift_msa, c_scale_msa, c_gate_msa = c_shift_msa.squeeze(2), c_scale_msa.squeeze(2), c_gate_msa.squeeze(2)
 
-        norm_hidden = (self.norm1(hidden_states.float()) * (1 + scale_msa) + shift_msa).type_as(hidden_states)
+        grouped = _groups(hidden_states, groups)
+        norm_hidden = (self.norm1(grouped.float()) * (1 + scale_msa) + shift_msa).type_as(hidden_states)
         attn_output = self.self_attn(
-            norm_hidden, rotary_emb=rotary_emb, attn_fn=attn_fns.self_attn if attn_fns else None,
+            norm_hidden.flatten(1, 2), rotary_emb=rotary_emb, attn_fn=attn_fns.self_attn if attn_fns else None,
         )
-        hidden_states = (hidden_states.float() + attn_output * gate_msa).type_as(hidden_states)
+        hidden_states = (
+            (grouped.float() + _groups(attn_output, groups) * gate_msa).type_as(hidden_states).flatten(1, 2)
+        )
 
         norm_hidden = self.norm2(hidden_states.float()).type_as(hidden_states)
         attn_output = self.cross_attn(
@@ -293,9 +307,14 @@ class Wan22DiTBlock(nn.Module):
         )
         hidden_states = hidden_states + attn_output
 
-        norm_hidden = (self.norm3(hidden_states.float()) * (1 + c_scale_msa) + c_shift_msa).type_as(hidden_states)
+        grouped = _groups(hidden_states, groups)
+        norm_hidden = (
+            (self.norm3(grouped.float()) * (1 + c_scale_msa) + c_shift_msa).type_as(hidden_states).flatten(1, 2)
+        )
         ff_output = _ffn_gelu_epilogue(self.ffn, norm_hidden) if self.fuse_ffn_gelu else self.ffn(norm_hidden)
-        return (hidden_states.float() + ff_output.float() * c_gate_msa).type_as(hidden_states)
+        return (
+            (grouped.float() + _groups(ff_output, groups).float() * c_gate_msa).type_as(hidden_states).flatten(1, 2)
+        )
 
 
 class Wan22DiT(nn.Module):
@@ -371,9 +390,11 @@ class Wan22DiT(nn.Module):
         batch_size, _, num_frames, height, width = hidden_states.shape
         p_t, p_h, p_w = self.config.patch_size
         grid = (num_frames // p_t, height // p_h, width // p_w)
-        if timestep.ndim != 2:
+        seq_len = math.prod(grid)
+        if timestep.ndim != 2 or seq_len % timestep.shape[1]:
             raise ValueError(
-                f"Wan22DiT requires a per-token [batch, seq] timestep grid; got ndim={timestep.ndim}."
+                "Wan22DiT requires a [batch, groups] timestep, one per group of consecutive "
+                f"tokens (per token or per latent frame); got {tuple(timestep.shape)} for {seq_len} tokens."
             )
 
         rotary_emb = self.rope(grid, hidden_states.device)
@@ -390,9 +411,9 @@ class Wan22DiT(nn.Module):
         # Output head: 2-chunk adaLN in fp32 ([1, 1, 2, dim] island table +
         # bf16 temb promotes), then project and unpatchify.
         shift, scale = (self.scale_shift_table.unsqueeze(0) + temb.unsqueeze(2)).chunk(2, dim=2)
-        shift, scale = shift.squeeze(2), scale.squeeze(2)
-        hidden_states = (self.norm_out(hidden_states.float()) * (1 + scale) + shift).type_as(hidden_states)
-        hidden_states = self.proj_out(hidden_states)
+        grouped = _groups(hidden_states, temb.shape[1])
+        hidden_states = (self.norm_out(grouped.float()) * (1 + scale) + shift).type_as(hidden_states)
+        hidden_states = self.proj_out(hidden_states.flatten(1, 2))
 
         hidden_states = hidden_states.reshape(batch_size, *grid, p_t, p_h, p_w, -1)
         hidden_states = hidden_states.permute(0, 7, 1, 4, 2, 5, 3, 6)
