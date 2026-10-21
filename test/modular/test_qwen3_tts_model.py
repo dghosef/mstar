@@ -975,6 +975,7 @@ def test_qwen3_tts_prefill_frame_counts_toward_generation_limit():
     submodule.request_state("request").add("generated_frames", 0)
     outputs = {"new_token": [torch.tensor(1)]}
     request_info = SimpleNamespace(
+        graph_walk="talker_decode",
         step_metadata={"talker_max_tokens": 1},
         resource_configs={},
         max_tokens=8192,
@@ -999,6 +1000,7 @@ def test_qwen3_tts_stops_on_eos_from_routed_codec_tokens():
         config.talker.codec_eos_token_id, 1, 2, 3
     ])]}
     request_info = SimpleNamespace(
+        graph_walk="talker_decode",
         step_metadata={"talker_max_tokens": 100},
         resource_configs={TALKER_SAMPLER: SimpleNamespace(ignore_eos=False)},
         max_tokens=8192,
@@ -1024,6 +1026,7 @@ def test_qwen3_tts_honors_ignore_eos_for_fixed_length_benchmarks():
         config.talker.codec_eos_token_id
     )]}
     request_info = SimpleNamespace(
+        graph_walk="talker_decode",
         step_metadata={"talker_max_tokens": 100},
         resource_configs={TALKER_SAMPLER: SimpleNamespace(ignore_eos=True)},
         max_tokens=8192,
@@ -1044,6 +1047,7 @@ def test_qwen3_tts_batched_stop_check_agrees_with_the_per_request_one():
 
     def info(ignore_eos: bool, limit: int) -> SimpleNamespace:
         return SimpleNamespace(
+            graph_walk="talker_decode",
             step_metadata={"talker_max_tokens": limit},
             resource_configs={TALKER_SAMPLER: SimpleNamespace(ignore_eos=ignore_eos)},
             max_tokens=8192,
@@ -1088,8 +1092,17 @@ def test_qwen3_tts_talker_returns_row_outputs_except_for_the_clone_prefill():
     assert isinstance(out, BatchedModelOutput)
     assert out.row_outputs is frame
     assert torch.equal(out.check_stop_buffers["layer0_codes"], frame["new_token"])
-    per_rid = submodule.forward_batched("talker_prefill_clone", engine_inputs, *tensors)
-    assert set(per_rid) == {"a", "b"}
+    # The clone prefill returns rows too; postprocess leads its codec items
+    # with the reference tail, so the captured forward serves it as well.
+    assert isinstance(submodule.forward_batched("talker_prefill_clone", engine_inputs, *tensors), BatchedModelOutput)
+    reference = torch.arange(3 * groups).view(3, groups)
+    submodule.request_state("a").add_all(reference_frames=reference, generated_frames=0)
+    row = {"codec_tokens": [frame["codec_tokens"][0:1]], "new_token": [frame["new_token"][0:1]]}
+    submodule.postprocess("a", SimpleNamespace(graph_walk="talker_prefill_clone"), row)
+    left = config.codec.left_context_frames
+    assert [item.shape for item in row["codec_tokens"]] == [(1, groups)] * (min(left, 3) + 1)
+    assert torch.equal(row["codec_tokens"][-1], frame["codec_tokens"][0:1])
+    assert torch.equal(torch.cat(row["codec_tokens"][:-1]), reference[-left:])
 
     codec = CodecSubmodule(_FakeCodecDecoder(4), config)
     window = torch.arange(3 * groups).view(3, 1, groups) % 7   # three [1, groups] row views
@@ -1217,7 +1230,8 @@ def test_qwen3_tts_talker_batches_and_captures_decode():
     padding = prefill_config.make_node_input(7)
     assert padding.input_embeds.shape == (7, 16) and padding.input_seq_len == 7
     assert padding.kwargs == {"suppress_eos": True} and not padding.tensor_inputs
-    assert prefill_config.replay_graph_walks == ["talker_prefill"]   # the clone prefill stays eager
+    # the clone prefill is the same forward: it replays the plain prefill's captures
+    assert prefill_config.replay_graph_walks == ["talker_prefill", "talker_prefill_clone"]
     prefill_batch = ExecutingBatch(
         node_name="Talker", step_context=_step_context("talker_prefill", ["a", "b"]),
         per_request_input_tensors={}, per_request_info=info,
@@ -1227,7 +1241,7 @@ def test_qwen3_tts_talker_batches_and_captures_decode():
         node_name="Talker", step_context=_step_context("talker_prefill_clone", ["a", "b"]),
         per_request_input_tensors={}, per_request_info=info,
     )
-    assert not submodule.can_use_accelerator_graphs(clone_batch, model_inputs)
+    assert submodule.can_use_accelerator_graphs(clone_batch, model_inputs)
     # Residual sampling params live in per-request sampler buffers, so requests
     # that disagree about them still batch AND still replay the decode graph.
     # (They used to fall out of both.)

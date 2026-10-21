@@ -363,9 +363,9 @@ Qwen3-TTS notes
   stack's causal receptive field, derived from the decoder's modules at load
   (10 frames for the 12 Hz decoder; the new frames' audio equals the
   whole-window decode). It also fuses the SnakeBeta activations into one kernel.
-- Talker prefill replays a packed CUDA Graph for the smallest token bucket
-  (32 to 1024 tokens) that holds the batch; only the clone prefill, which also
-  pushes the reference clip's frames into the codec stream, runs eager. Decode
+- Talker prefill, the clone prefill included, replays a packed CUDA Graph for
+  the smallest token bucket (32 to 1024 tokens) that holds the batch; a clone's
+  reference frames join the codec stream in ``postprocess``. Decode
   always uses the whole-walk CUDA Graph (up to 64 rows a step), with the 15-step
   CodePredictor loop captured inside it; request-local EOS suppression is
   carried as a graph tensor input so replay does not consult capture-slot dummy

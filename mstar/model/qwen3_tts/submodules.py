@@ -716,10 +716,10 @@ class TalkerSubmodule(ARNodeSubmodule):
         output = self._run_frame(
             engine_inputs, input_embeds, last_token_indices, suppress_eos
         )
-        request_id = engine_inputs.request_ids[0]
+        del graph_walk
         return {
             "talker_input_embeds": [output["talker_input_embeds"]],
-            "codec_tokens": self._codec_stream_items(graph_walk, request_id, output["codec_tokens"][:1]),
+            "codec_tokens": [output["codec_tokens"][:1]],
             "new_token": [output["new_token"]],
         }
 
@@ -736,25 +736,14 @@ class TalkerSubmodule(ARNodeSubmodule):
         output = self._run_frame(
             engine_inputs, input_embeds, last_token_indices, suppress_eos
         )
-        if graph_walk != "talker_prefill_clone":
-            # One frame per row: the engine clones each batch tensor once and
-            # the stop check copies one host buffer, rather than three of each
-            # per request. A clone prefill also streams its reference frames,
-            # so it keeps per-request outputs.
-            return BatchedModelOutput(
-                row_outputs=output,
-                check_stop_buffers={"layer0_codes": output["new_token"]},
-            )
-        return {
-            request_id: {
-                "talker_input_embeds": [output["talker_input_embeds"][i:i + 1]],
-                "codec_tokens": self._codec_stream_items(
-                    graph_walk, request_id, output["codec_tokens"][i:i + 1],
-                ),
-                "new_token": [output["new_token"][i]],
-            }
-            for i, request_id in enumerate(engine_inputs.request_ids)
-        }
+        del graph_walk
+        # One frame per row: the engine clones each batch tensor once and the
+        # stop check copies one host buffer, rather than three of each per
+        # request. A clone prefill's reference frames join in ``postprocess``.
+        return BatchedModelOutput(
+            row_outputs=output,
+            check_stop_buffers={"layer0_codes": output["new_token"]},
+        )
 
     def postprocess(
         self,
@@ -770,7 +759,11 @@ class TalkerSubmodule(ARNodeSubmodule):
         as a fallback.  This keeps EOS detection correct even if an execution
         path filters the sampler-only output before slow-path ``check_stop``.
         """
-        del request_info, kwargs
+        del kwargs
+        if request_info.graph_walk == "talker_prefill_clone" and "codec_tokens" in outputs:
+            outputs["codec_tokens"] = self._codec_stream_items(
+                request_info.graph_walk, request_id, outputs["codec_tokens"][-1],
+            )
         if "new_token" in outputs:
             outputs["layer0_codes"] = outputs.pop("new_token")
         elif "layer0_codes" not in outputs and "codec_tokens" in outputs:
@@ -864,9 +857,8 @@ class TalkerSubmodule(ARNodeSubmodule):
 
         Dynamic EOS suppression is carried by ``ARNodeInputs`` and packed into
         a graph input, so replay never consults capture-slot dummy request state.
-        Prefill replays a packed capture of the smallest token bucket that
-        holds the batch; the clone prefill stays eager because it also pushes
-        the reference clip's frames into the codec stream.
+        Prefill (the clone prefill too) replays a packed capture of the
+        smallest token bucket that holds the batch.
         """
         del tp_world_size
         dtype = self.model.model.codec_embedding.weight.dtype
@@ -881,6 +873,9 @@ class TalkerSubmodule(ARNodeSubmodule):
 
         prefill = PackedAcceleratorGraphConfig(
             capture_graph_walk="talker_prefill",
+            # The clone prefill is the same forward over a longer prompt; its
+            # reference frames join the codec stream in ``postprocess``.
+            replay_graph_walks=["talker_prefill", "talker_prefill_clone"],
             capture_token_lengths=self.PREFILL_TOKEN_BUCKETS,
             make_node_input=prefill_input,
             capture_batch_sizes=self.PREFILL_CAPTURE_BATCH_SIZES,
@@ -972,7 +967,7 @@ class TalkerSubmodule(ARNodeSubmodule):
     ) -> bool:
         """Replay the whole decode graph or a packed prefill; sampling params
         are read from buffers, so no request's settings can disqualify it."""
-        if batch.graph_walk not in ("talker_decode", "talker_prefill") or not self.can_batch(
+        if batch.graph_walk not in ("talker_decode", "talker_prefill", "talker_prefill_clone") or not self.can_batch(
             batch, model_inputs
         ):
             return False
