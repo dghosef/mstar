@@ -139,7 +139,7 @@ def test_in_graph_rope_knob_drops_only_the_staged_tables(monkeypatch):
         embed_tokens=SimpleNamespace(weight=torch.zeros(1)),
     ))
     sub._position_ids_3d = lambda inputs: torch.zeros(3, len(inputs))
-    monkeypatch.delenv("MSTAR_INGRAPH_DECODE_ROPE", raising=False)
+    monkeypatch.setenv("MSTAR_INGRAPH_DECODE_ROPE", "0")
     out = LLMSubmodule.preprocess(sub, "decode", leased, rows)
     assert out["input_ids"].tolist() == [3, 4] and "cos_3d" in out
     monkeypatch.setenv("MSTAR_INGRAPH_DECODE_ROPE", "1")
@@ -199,7 +199,7 @@ def test_forward_in_graph_rope_reads_planned_positions_at_capture(monkeypatch):
         assert out == ("sampled", ["r1", "r2"])
         return dict(calls)
 
-    monkeypatch.delenv("MSTAR_INGRAPH_DECODE_ROPE", raising=False)
+    monkeypatch.setenv("MSTAR_INGRAPH_DECODE_ROPE", "0")
     c = run(object())
     assert c["ids"] == [9, 9] and c["cos"] is static_cos and "built" not in c
     monkeypatch.setenv("MSTAR_INGRAPH_DECODE_ROPE", "1")
