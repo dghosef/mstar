@@ -181,6 +181,17 @@ OmniVoice notes
   concurrency-32 throughput on an H200 from ~153 to 176-184 audio-s/s and cut
   TTFA p95 from ~9 s to ~3 s; concurrency 1 is ~10% slower.
 
+Higgs Audio notes
+~~~~~~~~~~~~~~~~~
+
+- The audio tower runs outside ``torch.compile`` (a clip's chunk count changes
+  its shape, and every new shape recompiled on the serving path). Requests
+  whose 4 s chunks share a mel width are encoded together, and full-width
+  chunks replay a CUDA graph per chunk count; ``model_kwargs:
+  {encoder_graphs: false}`` runs the tower eagerly.
+- One prefill step per request: the ChatML text around the audio and the audio
+  embeddings go into the KV cache as one span.
+
 Omnilingual ASR notes
 ~~~~~~~~~~~~~~~~~~~~~
 
