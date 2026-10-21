@@ -326,7 +326,6 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
         return {
             "input_ids": torch.zeros(n, self.config.num_audio_codebook, dtype=torch.long, device=device),
             "audio_mask": torch.zeros(n, dtype=torch.bool, device=device),
-            "position_ids": torch.zeros(n, dtype=torch.long, device=device),
             "pos_ids": torch.zeros(n, dtype=torch.int32, device=device),
         }
 
@@ -334,7 +333,7 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
         s = inp.static_inputs
         return {
             "hidden": self.backbone.encode(
-                s["input_ids"], s["audio_mask"], s["position_ids"], s["pos_ids"],
+                s["input_ids"], s["audio_mask"], s["pos_ids"],
                 self.node_resources[BACKBONE_ATTN],
             )
         }
@@ -349,7 +348,6 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
         static_inputs = {
             "input_ids": canvas.packed_ids[0].t(),
             "audio_mask": canvas.audio_mask[0],
-            "position_ids": position_ids,
             "pos_ids": position_ids.to(torch.int32),
         }
         num_requests = len(canvas.items)

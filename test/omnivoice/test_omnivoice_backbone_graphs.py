@@ -7,7 +7,7 @@
 ``test_encode_head_matches_forward``
     GPU + checkpoint. ``encode`` + ``head`` -- what the captured region and the
     eager fallback run -- against the reference's packed ``forward`` through
-    the same planned kernel: bit-identical logits.
+    the same planned kernel: the same logits up to half-precision rounding.
 """
 
 import os
@@ -90,10 +90,12 @@ def test_encode_head_matches_forward():
 
     with torch.inference_mode():
         want = backbone(canvas)
-        position_ids = canvas.position_ids[0]
         hidden = backbone.encode(
-            canvas.packed_ids[0].t(), canvas.audio_mask[0], position_ids, position_ids.to(torch.int32),
+            canvas.packed_ids[0].t(), canvas.audio_mask[0], canvas.position_ids[0].to(torch.int32),
             attn=model._fi_runner.wrapper,  # planned for this canvas by forward
         )
         got = backbone.head(hidden, canvas.tgt_index)
-    assert torch.equal(got, want)
+    # the residual adds fold into the next RMSNorm (a float sum, not a rounded
+    # half-precision one), so the logits agree to rounding, not bit for bit
+    assert torch.allclose(got.float(), want.float(), atol=0.25, rtol=0.02)
+    assert (got.argmax(-1) == want.argmax(-1)).float().mean() > 0.95

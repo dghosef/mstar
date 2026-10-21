@@ -23,6 +23,7 @@ from mstar.model.submodule_base import (
     ARNodeInputs,
     ARNodeSubmodule,
     BatchedModelOutput,
+    HostRows,
     InputMetadata,
     ModelInputsFromEngine,
     NodeInputs,
@@ -204,7 +205,10 @@ class OrpheusLLMSubmodule(ARNodeSubmodule):
             text_inputs=text_inputs
         )
         # row i is request i; a per-rid dict here would guard the compiled frame on the ids
-        return BatchedModelOutput(row_outputs={"new_token": new_tokens})
+        return BatchedModelOutput(
+            row_outputs={"new_token": new_tokens},
+            check_stop_buffers={"new_token": new_tokens},
+        )
 
     def postprocess(
         self, request_id: str,
@@ -232,6 +236,33 @@ class OrpheusLLMSubmodule(ARNodeSubmodule):
                 (request_info.dynamic_loop_iter_counts.get("decode_loop", 0) + 1 >= request_info.max_tokens):
             return {"decode_loop"}
         return set()
+
+
+    def check_stop_batched(
+        self,
+        request_ids: list[str],
+        request_infos: dict[str, CurrentForwardPassInfo],
+        host_rows: HostRows,
+        step_walk: str | None = None,
+    ) -> dict[str, set[str]] | None:
+        """``check_stop`` for every row off one host copy of the step's tokens."""
+        tokens = host_rows.buffers.get("new_token")
+        if not torch.is_tensor(tokens) or tokens.dim() == 0:
+            return None
+        values = tokens.reshape(-1).tolist()
+        row_of = {rid: i for i, rid in enumerate(host_rows.request_ids)}
+        eos = self.config.stop_token_id
+        stops: dict[str, set[str]] = {}
+        for rid in request_ids:
+            i = row_of.get(rid)
+            if i is None or i >= len(values):
+                continue  # no row, no output: the per-request path skips it too
+            info = request_infos[rid]
+            if (values[i] == eos and not info.resource_configs[SAMPLER].ignore_eos) or (
+                info.dynamic_loop_iter_counts.get("decode_loop", 0) + 1 >= info.max_tokens
+            ):
+                stops[rid] = {"decode_loop"}
+        return stops
 
 
 class SNACDecoderSubmodule(NodeSubmodule):
