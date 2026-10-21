@@ -184,8 +184,8 @@ def test_omnivoice_first_step_prep_unchanged():
 
 
 def test_omnivoice_postprocess_reads_no_tensor():
-    """The unmask step's postprocess takes the iteration from the loop counter:
-    same canvas as reading the step edge, and no host read."""
+    """The unmask step's postprocess takes the iteration prepare_inputs read off
+    the loop counter: same canvas as reading the step edge, and no host read."""
     from mstar.model.omnivoice.components.unmask import build_reveal_schedule
 
     sub, cfg = _omnivoice()
@@ -199,19 +199,18 @@ def test_omnivoice_postprocess_reads_no_tensor():
     for k in range(steps):
         inputs = _omnivoice_inputs(cfg, k, target_len)
         inputs["audio_tokens"] = [torch.full((cfg.num_audio_codebook, target_len), cfg.audio_mask_id)]
-        node_inputs = sub.prepare_inputs("speech_gen", _fwd("r", "speech_gen", _omnivoice_meta(steps)), inputs)
         logits = torch.randn(shape, generator=torch.Generator().manual_seed(100 + k))
         results = {}
         for name, info in (
             ("counter", _fwd("r", "speech_gen", _omnivoice_meta(steps), UNMASK_LOOP_NAME, k)),
             ("edge", _fwd("r", "speech_gen", _omnivoice_meta(steps))),
         ):
+            node_inputs = sub.prepare_inputs("speech_gen", info, inputs)
             outputs = {"c_logits": [logits.clone()], "u_logits": [logits.flip(-1)]}
             with _HostReads() as reads:
                 sub.postprocess("r", info, outputs, inputs=node_inputs)
             results[name] = (outputs, reads.reads)
-        assert results["counter"][1] == [], f"step {k}: host reads {results['counter'][1]}"
-        assert results["edge"][1], "the edge path should read the step on the host"
+            assert reads.reads == [], f"step {k} ({name}): host reads {reads.reads}"
         assert torch.equal(results["counter"][0]["audio_tokens"][0], results["edge"][0]["audio_tokens"][0])
         assert torch.equal(results["counter"][0]["step_index"][0], results["edge"][0]["step_index"][0])
 
