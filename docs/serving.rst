@@ -284,6 +284,14 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
      - *(optional)* Largest message, in KiB, the symmetric-memory path takes;
        larger ones go to NCCL. It is also the size of the buffer each group
        rendezvouses. Default 512.
+   * - ``api_switch_interval_s``
+     - *(optional)* GIL switch interval of the API server process, in seconds
+       (``sys.setswitchinterval``); unset keeps Python's 5 ms. Under streaming load
+       that process keeps three threads busy (event loop, message thread, data
+       worker), and a shorter interval hands the GIL between them sooner. The
+       Qwen3.5 configs set ``0.001``: Qwen3.5-0.8B text, c=64, +4 to +8% tok/s. A
+       model whose preprocessing runs long on the data-worker thread can lose from
+       it (Kokoro's G2P: about -3.6% at c=32), so it is per deployment.
    * - ``tp_async_sched``
      - *(optional)* Async scheduling for the parallel nodes: ``true``, ``false``
        (default) or a list of node names (see ``MSTAR_TP_ASYNC_SCHED``, which

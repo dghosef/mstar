@@ -1892,6 +1892,19 @@ def _set_preprocess_threads(model, config: dict) -> None:
     torch.set_num_threads(int(threads))
 
 
+def _set_switch_interval(config: dict) -> None:
+    """``api_switch_interval_s`` from the config: the GIL switch interval of
+    this process only (the conductor and workers are spawned fresh). Unset
+    keeps Python's 5 ms. Streaming many small chunks keeps three of this
+    process's threads busy (event loop, message thread, data worker); a
+    shorter interval hands the GIL between them sooner, which also preempts a
+    model's preprocessing on the data-worker thread more often."""
+    interval = config.get("api_switch_interval_s")
+    if interval is not None:
+        sys.setswitchinterval(float(interval))
+        logger.info("API server GIL switch interval: %s s", interval)
+
+
 def main(argv: list[str] | None = None):
     import argparse
 
@@ -2002,6 +2015,7 @@ def main(argv: list[str] | None = None):
         **{**model_init_kwargs(model_name), **yaml_model_kwargs},
     )
     _set_preprocess_threads(model, config)
+    _set_switch_interval(config)
 
     global api_server
     log_stats = args.log_stats or args.log_stats_file is not None
