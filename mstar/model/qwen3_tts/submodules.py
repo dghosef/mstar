@@ -692,14 +692,16 @@ class TalkerSubmodule(ARNodeSubmodule):
         ``left_context_frames`` matter, since that is all the context a
         window ever carries, and every reference frame the stream carries
         costs a codec pass whose audio ``CodecSubmodule`` then trims. Decode
-        steps (the captured path) always push exactly one frame.
+        steps (the captured path) always push exactly one frame. Every item is
+        ``[1, groups]``, the shape of a row of the batched outputs, so one
+        stream's items always stack.
         """
         if graph_walk != "talker_prefill_clone":
             return [frame]
         reference = self.request_state(request_id).get("reference_frames")
         if reference is None:
             return [frame]
-        return [*reference[-self.config.codec.left_context_frames:].unbind(0), frame]
+        return [*reference[-self.config.codec.left_context_frames:].split(1), frame]
 
     def forward(
         self,
@@ -717,7 +719,7 @@ class TalkerSubmodule(ARNodeSubmodule):
         request_id = engine_inputs.request_ids[0]
         return {
             "talker_input_embeds": [output["talker_input_embeds"]],
-            "codec_tokens": self._codec_stream_items(graph_walk, request_id, output["codec_tokens"][0]),
+            "codec_tokens": self._codec_stream_items(graph_walk, request_id, output["codec_tokens"][:1]),
             "new_token": [output["new_token"]],
         }
 
@@ -746,7 +748,9 @@ class TalkerSubmodule(ARNodeSubmodule):
         return {
             request_id: {
                 "talker_input_embeds": [output["talker_input_embeds"][i:i + 1]],
-                "codec_tokens": self._codec_stream_items(graph_walk, request_id, output["codec_tokens"][i]),
+                "codec_tokens": self._codec_stream_items(
+                    graph_walk, request_id, output["codec_tokens"][i:i + 1],
+                ),
                 "new_token": [output["new_token"][i]],
             }
             for i, request_id in enumerate(engine_inputs.request_ids)
