@@ -309,6 +309,12 @@ class Code2WavConfig:
     # same bare name with different semantics).
     codec_chunk_frames: int = 25
     codec_left_context_frames: int = 25
+    # New frames in the first chunks, before ``codec_chunk_frames`` takes
+    # over: a small first chunk is the first audio after that many Talker
+    # steps instead of 25. The vocoder is causal (the one-frame lookahead is
+    # trimmed and re-emitted by the next window), so this moves only
+    # time-to-first-audio, not the waveform.
+    codec_chunk_schedule: Tuple[int, ...] = (8,)
     attention_bias: bool = False
     attention_dropout: float = 0.0
     codebook_dim: int = 512
