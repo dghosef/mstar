@@ -964,8 +964,14 @@ class CodecSubmodule(ARNodeSubmodule):
     # 12 Hz decoder, 2.8 s of audio) whatever the window, so its activations stay small
     # enough to capture batches of 32 next to the Talker; ``can_batch`` keeps
     # the ceiling.
-    MAX_BATCH_SIZE = 32
-    CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16, 32]
+    # The codec's cost is linear in rows (about 2.3 ms a full window at any
+    # batch size on an H200), so every padding row of a bucket costs a real
+    # row's decode: the buckets are dense.
+    CAPTURE_BATCH_SIZES = [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 28, 32]
+    MAX_BATCH_SIZE = CAPTURE_BATCH_SIZES[-1]
+    # The opt-in watermark's captures are per chunk length and cost far more
+    # memory each (see docs/models.rst), so they keep power-of-two buckets.
+    WATERMARK_BATCH_SIZES = [1, 2, 4, 8, 16, 32]
 
     def __init__(
         self,
@@ -1255,7 +1261,7 @@ class CodecSubmodule(ARNodeSubmodule):
         ]
         if not lengths:
             return {}
-        return self.watermarker.piecewise_configs(lengths, self.CAPTURE_BATCH_SIZES)
+        return self.watermarker.piecewise_configs(lengths, self.WATERMARK_BATCH_SIZES)
 
     def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
         """Any mix of windows batches (``preprocess`` pads to the widest)."""
@@ -1265,6 +1271,17 @@ class CodecSubmodule(ARNodeSubmodule):
     def max_batch_size(self, graph_walk: str) -> int:
         del graph_walk
         return self.MAX_BATCH_SIZE
+
+    def split_batches_by_capture_key(self, graph_walk: str) -> bool:
+        """Batch each window bucket apart.
+
+        A mixed batch pads every row to its widest window, and the codec's
+        cost is per padded frame: a ramp window (1 to 28 frames) batched with
+        a full one decodes 35 frames instead of a few. Kept apart, the small
+        ramp windows, a stream's first audio among them, also do not wait
+        behind a batch of full windows.
+        """
+        return graph_walk == "codec_chunk"
 
     def cg_key_info(
         self,

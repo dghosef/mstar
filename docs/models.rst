@@ -330,9 +330,12 @@ Qwen3-TTS notes
   transformer stacks 8 such layers, so a window still differs slightly from a
   whole-utterance decode once an utterance outgrows the context; 25 frames of
   context differed far more. Each window size is a CUDA-graph bucket captured
-  for batch sizes 1 to 32; the stream buffer reports how many leading frames of
-  a window are repeated context, and the codec trims their audio. A voice
-  clone's reference tail (its last 72 frames) is the first window's context.
+  for batch sizes 1 to 32 (densely: the codec's cost is per row, so a padding
+  row costs as much as a real one); the stream buffer reports how many leading
+  frames of a window are repeated context, and the codec trims their audio. The
+  scheduler batches each window size apart, so a stream's small first windows
+  are not padded to a full window's width or queued behind a batch of them. A
+  voice clone's reference tail (its last 72 frames) is the first window's context.
 - The codec runs its transformer over the whole window but its conv stack (all
   but a few percent of the codec's time) only over the new frames plus the
   stack's causal receptive field, derived from the decoder's modules at load
