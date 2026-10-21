@@ -85,6 +85,7 @@ from mstar.model.submodule_base import (
     ARNodeInputs,
     ARNodeSubmodule,
     BatchedModelOutput,
+    HostRows,
     InputMetadata,
     ModelInputsFromEngine,
     NodeInputs,
@@ -728,11 +729,20 @@ class TalkerSubmodule(ARNodeSubmodule):
         last_token_indices: torch.Tensor,
         suppress_eos: torch.Tensor,
         **kwargs: Any,
-    ) -> dict[str, NameToTensorList]:
+    ) -> dict[str, NameToTensorList] | BatchedModelOutput:
         del kwargs
         output = self._run_frame(
             engine_inputs, input_embeds, last_token_indices, suppress_eos
         )
+        if graph_walk != "talker_prefill_clone":
+            # One frame per row: the engine clones each batch tensor once and
+            # the stop check copies one host buffer, rather than three of each
+            # per request. A clone prefill also streams its reference frames,
+            # so it keeps per-request outputs.
+            return BatchedModelOutput(
+                row_outputs=output,
+                check_stop_buffers={"layer0_codes": output["new_token"]},
+            )
         return {
             request_id: {
                 "talker_input_embeds": [output["talker_input_embeds"][i:i + 1]],
@@ -797,6 +807,33 @@ class TalkerSubmodule(ARNodeSubmodule):
             logger.debug("talker %s: stop after %d frames (eos=%s)", request_id, generated, reached_eos)
             return {"talker_decode_loop"}
         return set()
+
+    def check_stop_batched(
+        self,
+        request_ids: list[str],
+        request_infos: dict[str, CurrentForwardPassInfo],
+        host_rows: HostRows,
+        step_walk: str | None = None,
+    ) -> dict[str, set[str]] | None:
+        """``check_stop`` for every row off one host copy of the group-0 codes."""
+        codes = host_rows.buffers.get("layer0_codes")
+        if not torch.is_tensor(codes) or codes.dim() == 0:
+            return None
+        values = codes.reshape(-1).tolist()
+        row_of = {rid: i for i, rid in enumerate(host_rows.request_ids)}
+        eos = self.talker_config.codec_eos_token_id
+        stops: dict[str, set[str]] = {}
+        for rid in request_ids:
+            i = row_of.get(rid)
+            if i is None or i >= len(values):
+                continue  # no row, no output: the per-request path skips it too
+            info = request_infos[rid]
+            generated = int(self.request_state(rid).get("generated_frames", 0))
+            max_tokens = info.step_metadata.get("talker_max_tokens", info.max_tokens)
+            ignore_eos = bool(getattr(info.resource_configs.get(TALKER_SAMPLER), "ignore_eos", False))
+            if (values[i] == eos and not ignore_eos) or generated >= max_tokens:
+                stops[rid] = {"talker_decode_loop"}
+        return stops
 
     def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
         """Admit compatible prefill/decode requests to continuous batching.
@@ -1069,12 +1106,13 @@ class CodecSubmodule(ARNodeSubmodule):
         codes = inputs["codec_tokens"][0].to(
             device=self.get_device(), dtype=torch.long
         )
-        if codes.ndim == 1:
-            codes = codes.view(-1, self.config.num_code_groups)
-        if codes.ndim != 2:
+        # Items are one frame each, ``[groups]`` or ``[1, groups]`` (a row
+        # view of the Talker's batch output), so the window flattens to frames.
+        if codes.shape[-1] != self.config.num_code_groups:
             raise ValueError(
                 f"Expected codec tokens with shape (frames, groups), got {codes.shape}"
             )
+        codes = codes.reshape(-1, self.config.num_code_groups)
         num_items = codes.shape[0]
         # EOS belongs to Talker loop control and is not a valid codec codebook
         # index for waveform reconstruction. It is only ever the last frame of
