@@ -171,6 +171,15 @@ OmniVoice notes
 - The backbone is not autoregressive: it fills a fixed canvas of eight codebook
   rows over a few unmasking steps, so there is no KV cache and no per-token
   sampling loop. Serve it with ``mstar serve omnivoice --gpus 0``.
+- The backbone's layer stack replays CUDA graphs per (requests, packed-token
+  bucket up to 4096 tokens) with attention through a ragged attention resource;
+  larger steps are GPU-bound and run eagerly. ``model_kwargs:
+  {backbone_graphs: false}`` keeps the reference's eager packed path.
+- ``configs/omnivoice_split.yaml`` runs code2wav (codec decode and the
+  host-side silence trim) on a second worker sharing GPU 0, so the unmask loop
+  no longer stops for each finished request. With a CUDA MPS daemon it raised
+  concurrency-32 throughput on an H200 from ~153 to 176-184 audio-s/s and cut
+  TTFA p95 from ~9 s to ~3 s; concurrency 1 is ~10% slower.
 
 Omnilingual ASR notes
 ~~~~~~~~~~~~~~~~~~~~~
