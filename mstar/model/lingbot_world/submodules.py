@@ -171,7 +171,10 @@ class LingBotDitSubmodule(_SingleRequestMixin, NodeSubmodule):
         self.schedule = make_fast_schedule(config.sample_shift, config.timesteps_index, config.num_train_timesteps)
         if vae is not None and config.vae_decode_channels_last:
             wan_vae.to_channels_last(vae)
-        self._decode_step = wan_vae.DecoderStep(vae, compile=False) if vae is not None else None
+        self._decode_step = (
+            wan_vae.DecoderStep(vae, compile=config.vae_decode_compile, deterministic=True)
+            if vae is not None else None
+        )
         # Debug hook for the parity harness: keep the last chunk's latents and
         # float frames in the request state.
         self.keep_chunk_outputs = False
