@@ -173,6 +173,10 @@ class RaggedAttentionCallable:
 _RAGGED_CALLABLES: list[RaggedAttentionCallable] = []
 
 
+# Eager even when the callable is built inside a compiled region (a node that
+# creates its callables lazily on first forward): traced, the append is not
+# replayed but the handle Dynamo read is still baked into the graph.
+@torch.compiler.disable
 def _register_ragged(fn: RaggedAttentionCallable) -> int:
     _RAGGED_CALLABLES.append(fn)
     return len(_RAGGED_CALLABLES) - 1
