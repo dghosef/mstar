@@ -391,7 +391,7 @@ class ARSubmodule(ARNodeSubmodule):
                     kwargs={"suppress_eos": False},
                 ),
                 capture_batch_sizes=self.DECODE_CAPTURE_BATCH_SIZES,
-                compile=False,
+                compile=True,
             )
         ]
 
