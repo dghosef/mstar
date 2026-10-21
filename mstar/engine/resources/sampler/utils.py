@@ -1043,12 +1043,6 @@ def sample_accelerator_graphable_gpu(
     elif logits.device.type == "cuda":
         import flashinfer
 
-        from mstar.engine.resources.sampler.small_vocab import MAX_VOCAB, small_vocab_sample
-
-        if logits.shape[1] <= MAX_VOCAB and not apply_penalty and min_p is None:
-            # a codec-sized vocabulary: the whole filter and draw in one launch
-            with torch.cuda.device(logits.device):
-                return small_vocab_sample(logits, temperature, top_k, top_p, seed, offset)
         with torch.cuda.device(logits.device):
             probs = fused_temperature_softmax(
                 logits, temperature,
