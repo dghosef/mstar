@@ -271,7 +271,7 @@ class LingBotDitSubmodule(_SingleRequestMixin, NodeSubmodule):
         mean = torch.tensor(self.vae.config.latents_mean).view(1, cfg.vae_z_dim, 1, 1, 1).to(z)
         inv_std = 1.0 / torch.tensor(self.vae.config.latents_std).view(1, cfg.vae_z_dim, 1, 1, 1).to(z)
         z = z / inv_std + mean
-        with torch.amp.autocast("cuda", enabled=False):
+        with torch.amp.autocast("cuda", enabled=False), wan_vae.cudnn_benchmark(cfg.vae_decode_cudnn_benchmark):
             return wan_vae.decode_causal(
                 self.vae, z, state["feat_cache"], self._decode_step, clip_start=clip_start, latents_per_call=1,
             )
