@@ -484,6 +484,22 @@ def test_frame_lengths_follow_the_conv_arithmetic():
     assert real.frame_lengths([16000, 640000, 400, 399]) == [49, 1999, 1, 0]
 
 
+def test_unfolded_positional_conv_matches_the_grouped_conv():
+    """A wide-group deployment runs the positional conv as per-group GEMMs (in
+    chunks of frames): the same values as the grouped conv, padding masked."""
+    from mstar.model.omnilingual_asr.components.wav2vec2 import PositionEncoder
+
+    torch.manual_seed(0)
+    pos = PositionEncoder(model_dim=32, kernel_size=8, num_groups=4).double()
+    x = torch.randn(3, 37, 32, dtype=torch.float64)
+    mask = torch.arange(37)[None, :] < torch.tensor([37, 20, 5])[:, None]
+    ref = pos(x, mask)
+    pos.unfolded = True
+    torch.testing.assert_close(pos(x, mask), ref)
+    pos.UNFOLD_CHUNK_ELEMS = 3 * 32 * 8 * 5  # five frames a chunk
+    torch.testing.assert_close(pos(x, mask), ref)
+
+
 def test_padded_batch_matches_single_runs_and_needs_the_mask():
     model = _random_model(_tiny_config())
     torch.manual_seed(1)

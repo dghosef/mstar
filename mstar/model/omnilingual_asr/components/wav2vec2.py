@@ -106,11 +106,50 @@ class PositionEncoder(nn.Module):
             bias=True,
         )
         self.remove_pad = kernel_size % 2 == 0
+        # Set by a server on an accelerator: run the conv as per-group GEMMs
+        # (see `_conv_unfolded`) instead of through cuDNN
+        self.unfolded = False
+
+    # elements of the unfolded input one GEMM chunk may materialize (1 GiB in bf16)
+    UNFOLD_CHUNK_ELEMS = 1 << 29
+
+    def _conv_unfolded(self, x: torch.Tensor) -> torch.Tensor:
+        """``conv`` on channels-last ``(N, T, C)`` as one batched GEMM per chunk
+        of frames: the windows of each group, ``(N * T, C/G * K)``, times that
+        group's weight. The same products as the conv, summed in another order.
+
+        cuDNN's grouped kernels for this shape (wide groups, a 128-tap kernel)
+        are erratic: 0.8 ms or 35 ms for a single clip at 2048 channels,
+        depending on its length."""
+        conv = self.conv
+        n, t, c = x.shape
+        groups, (kernel,), (pad,) = conv.groups, conv.kernel_size, conv.padding
+        per_group = c // groups
+        # group-major first (a copy of x), so the windows below take one copy
+        xg = F.pad(x, (0, 0, pad, pad)).view(n, t + 2 * pad, groups, per_group)
+        xg = xg.permute(2, 0, 1, 3).contiguous()  # (G, N, T + 2 * pad, C/G)
+        t_out = t + 2 * pad - kernel + 1
+        weight = conv.weight.reshape(groups, per_group, per_group * kernel).transpose(1, 2)
+        chunk = max(1, self.UNFOLD_CHUNK_ELEMS // (n * c * kernel))
+        outs = []
+        for start in range(0, t_out, chunk):
+            stop = min(start + chunk, t_out)
+            # (G, N, T', C/G, K) -> (G, N * T', C/G * K), k fastest like the weight
+            win = xg[:, :, start:stop + kernel - 1].unfold(2, kernel, 1)
+            y = torch.bmm(win.reshape(groups, n * (stop - start), per_group * kernel), weight)
+            outs.append(y.view(groups, n, stop - start, per_group).permute(1, 2, 0, 3).reshape(n, stop - start, c))
+        y = outs[0] if len(outs) == 1 else torch.cat(outs, dim=1)
+        return y + conv.bias if conv.bias is not None else y
 
     def forward(self, x: torch.Tensor, frame_mask: torch.Tensor | None) -> torch.Tensor:
         if frame_mask is not None:
             # padded frames must be zero, or they leak into the valid ones' encodings
             x = x * frame_mask.unsqueeze(-1).to(x.dtype)
+        if self.unfolded:
+            enc = self._conv_unfolded(x)
+            if self.remove_pad:
+                enc = enc[:, :-1]
+            return x + F.gelu(enc)
         enc = self.conv(x.transpose(1, 2))
         if self.remove_pad:
             enc = enc[:, :, :-1]
