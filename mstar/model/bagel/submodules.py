@@ -185,6 +185,16 @@ def image_gen_branches(inputs: list) -> int:
     return max(inp.kwargs.get(CFG_BRANCHES, 3) for inp in inputs)
 
 
+# The CFG branches in the order `cfg_branches` counts them: a step running n branches runs the first n.
+CFG_BRANCH_LABELS = ("main", "cfg_text", "cfg_img")
+
+
+def cfg_branch_skipped(label: str, n_branches: int | None) -> bool:
+    """Whether the parallel-CFG node owning ``label`` sits out a step that runs ``n_branches``
+    (None: no count was stamped, so every branch runs)."""
+    return n_branches is not None and CFG_BRANCH_LABELS.index(label) >= n_branches
+
+
 def combine_cfg_velocity(
     v_main: torch.Tensor,
     v_cfg_text: torch.Tensor,
@@ -1053,7 +1063,7 @@ class LLMSubmodule(ARNodeSubmodule):
                node_inputs.input_embeds = inputs["latents"][0]
                tensor_inputs["time_index"] = inputs["time_index"][0]
 
-            if graph_walk == "image_gen":
+            if graph_walk in ("image_gen", "image_gen_cfg"):
                 n_branches = self._image_gen_cfg_branches(fwd_info, first_iter)
                 if n_branches is not None:
                     node_inputs.kwargs[CFG_BRANCHES] = n_branches
@@ -1117,6 +1127,12 @@ class LLMSubmodule(ARNodeSubmodule):
         ``NodeInputs.resource_step_info`` from ``prepare_inputs`` rather than
         being read off the batch here.
         """
+        if graph_walk == "image_gen_cfg" and all(
+            cfg_branch_skipped(NODE_TO_CFG_LABEL.get(self.node_name, "main"), inp.kwargs.get(CFG_BRANCHES))
+            for inp in inputs
+        ):
+            # this branch sits the step out (`cfg_branches`): no plan, no attention
+            return None
         requires_cfg = requires_cfg_for_inputs(inputs)
         labels = self._get_active_labels(graph_walk, requires_cfg)
         if graph_walk == "image_gen" and requires_cfg:
@@ -1274,7 +1290,7 @@ class LLMSubmodule(ARNodeSubmodule):
         # `declare_step` planned for, or not at all (the old 3-branch step).
         result.pop("kwargs", None)
         result.pop(CFG_BRANCHES, None)
-        if graph_walk == "image_gen" and CFG_BRANCHES in inputs[0].kwargs:
+        if graph_walk in ("image_gen", "image_gen_cfg") and CFG_BRANCHES in inputs[0].kwargs:
             result[CFG_BRANCHES] = image_gen_branches(inputs)
         result["sample_token"] = any([
             info.step_metadata.get("sample_prefill_token", True) \
@@ -1664,8 +1680,18 @@ class LLMSubmodule(ARNodeSubmodule):
         kwargs.pop("cfg_renorm_type", None)
         kwargs.pop("cfg_interval", None)
         kwargs.pop("cfg_renorm_min", None)
+        n_branches = kwargs.pop(CFG_BRANCHES, None)
 
         latents = input_embeds
+        output_name = {
+            "LLM": "v_main",
+            "LLM_cfg_text": "v_cfg_text",
+            "LLM_cfg_img": "v_cfg_img",
+        }.get(self.node_name, "v_main")
+        if cfg_branch_skipped(self._NODE_TO_CFG_LABEL.get(self.node_name, "main"), n_branches):
+            # sits this step out: combine_cfg never reads the velocity (see `cfg_branches`),
+            # but the edge still has to carry a tensor of the right shape
+            return {output_name: [torch.zeros_like(latents)]}
 
         # See _forward_image_gen: tie the separately-passed sequence dims so
         # torch.compile's dynamic shapes can prove the adds below line up.
@@ -1699,12 +1725,6 @@ class LLMSubmodule(ARNodeSubmodule):
 
         # Output velocity. Main LLM also passes through latents/time_index
         # for the combine_cfg node.
-        output_name = {
-            "LLM": "v_main",
-            "LLM_cfg_text": "v_cfg_text",
-            "LLM_cfg_img": "v_cfg_img",
-        }.get(self.node_name, "v_main")
-
         result: NameToTensorList = {output_name: [projected]}
         if self.node_name == "LLM":
             result["time_index"] = [time_index]
@@ -1974,9 +1994,28 @@ class CombineCFGSubmodule(NodeSubmodule):
                 "time_index": inputs["time_index"][0],
                 **result,
             }
-        return NodeInputs(
-            tensor_inputs=result,
-            kwargs=fwd_info.step_metadata
+        kwargs = dict(fwd_info.step_metadata)
+        n_branches = self._cfg_branches(fwd_info, first_iter="latents" not in inputs or not inputs["latents"])
+        if n_branches is not None:
+            kwargs[CFG_BRANCHES] = n_branches
+        return NodeInputs(tensor_inputs=result, kwargs=kwargs)
+
+    def _cfg_branches(self, fwd_info: CurrentForwardPassInfo, first_iter: bool) -> int | None:
+        """The step's CFG branch count (`cfg_branches`), as the LLM nodes stamp it, or None to
+        combine all three branches as before (pruning off, or a counter that is not tracking
+        this loop)."""
+        meta = fwd_info.step_metadata
+        if not (self.config.cfg_prune and meta.get("requires_cfg", False)):
+            return None
+        k = fwd_info.dynamic_loop_iter_counts.get(IMAGE_GEN_LOOP, 0)
+        if (k == 0) != first_iter:
+            return None
+        t = image_gen_timestep(k, self.config.num_timesteps, self.config.timestep_shift)
+        return cfg_branches(
+            t,
+            tuple(meta.get("cfg_interval", self.config.cfg_interval)),
+            meta.get("cfg_text_scale", self.config.cfg_text_scale),
+            meta.get("cfg_img_scale", self.config.cfg_img_scale),
         )
 
     def forward(
@@ -1993,6 +2032,7 @@ class CombineCFGSubmodule(NodeSubmodule):
         cfg_renorm_type: str = None,
         cfg_renorm_min: float = None,
         cfg_interval: tuple = None,
+        cfg_branches: int | None = None,
         **kwargs,
     ) -> NameToTensorList:
         if cfg_text_scale is None:
@@ -2030,6 +2070,21 @@ class CombineCFGSubmodule(NodeSubmodule):
         v_m = v_main
         v_ct = v_cfg_text
         v_ci = v_cfg_img
+
+        if cfg_branches is not None:
+            # decided on the host (`cfg_branches`): outside the interval the combine is v_main,
+            # and the image branch is read only with image guidance on; no device-side test
+            if cfg_branches == 1:
+                v_final = v_m
+            else:
+                v_final = combine_cfg_velocity(
+                    v_m, v_ct, v_ci if cfg_branches == 3 else None,
+                    cfg_text_scale, cfg_img_scale, cfg_renorm_type, cfg_renorm_min,
+                )
+            new_latents = latents - v_final * dt
+            if torch.is_autocast_enabled():
+                new_latents = new_latents.to(torch.get_autocast_gpu_dtype())
+            return {"latents": [new_latents], "time_index": [time_index + 1]}
 
         # CFG interval
         cfg_lo, cfg_hi = cfg_interval

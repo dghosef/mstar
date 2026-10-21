@@ -1107,6 +1107,8 @@ class BagelModel(Model):
         # combine_cfg applies the CFG formula + Euler step after each iteration.
         image_gen_cfg = Sequential([
             Loop(
+                # named, as image_gen's: every node of the step reads the counter (cfg_branches)
+                name=IMAGE_GEN_LOOP,
                 section=Sequential([
                     Parallel([
                         GraphNode(

@@ -264,3 +264,52 @@ def test_image_gen_walk_names_the_loop_the_counter_is_read_from():
     loops = model.get_graph_walk_graphs()["image_gen"].get_loops()
     assert IMAGE_GEN_LOOP in loops
     assert loops[IMAGE_GEN_LOOP].max_iters == N - 1
+
+
+# --- parallel CFG (image_gen_cfg) ---------------------------------------------
+
+
+def test_parallel_branch_nodes_sit_out_the_branches_a_step_does_not_read():
+    from mstar.model.bagel.submodules import cfg_branch_skipped
+
+    # main always runs; cfg_text runs from 2 branches; cfg_img only at 3
+    assert [cfg_branch_skipped("main", n) for n in (1, 2, 3)] == [False, False, False]
+    assert [cfg_branch_skipped("cfg_text", n) for n in (1, 2, 3)] == [True, False, False]
+    assert [cfg_branch_skipped("cfg_img", n) for n in (1, 2, 3)] == [True, True, False]
+    # no count stamped (pruning off): every branch runs
+    assert not any(cfg_branch_skipped(label, None) for label in ("main", "cfg_text", "cfg_img"))
+
+
+def test_parallel_combine_reduces_to_the_old_combine():
+    """combine_cfg with a host branch count gives what the device-side interval test gave."""
+    from mstar.model.bagel.submodules import CombineCFGSubmodule
+
+    cfg = types.SimpleNamespace(**{k: _DEFAULTS[k] for k in (
+        "num_timesteps", "timestep_shift", "cfg_text_scale", "cfg_img_scale",
+        "cfg_interval", "cfg_renorm_type", "cfg_renorm_min",
+    )})
+    node = CombineCFGSubmodule(cfg)
+    g = torch.Generator().manual_seed(0)
+    v = [torch.randn(16, 8, generator=g) for _ in range(3)]
+    latents = torch.randn(16, 8, generator=g)
+    for k in (0, N - 2):
+        time_index = torch.full((16,), float(k))
+        n = _branches(k, **T2I)
+        old = node.forward("image_gen_cfg", None, *v, latents, time_index)["latents"][0]
+        new = node.forward("image_gen_cfg", None, *v, latents, time_index, cfg_branches=n)["latents"][0]
+        torch.testing.assert_close(new, old, rtol=0, atol=1e-6)
+
+
+def test_image_gen_cfg_walk_names_the_loop_too():
+    from mstar.model.bagel.bagel_model import BagelModel
+
+    model = BagelModel.__new__(BagelModel)
+    model.config = types.SimpleNamespace(
+        num_timesteps=N, temperature=1.0, top_k=0, top_p=1.0,
+        repetition_penalty=1.0, ignore_eos=False, vocab_size=32,
+    )
+    model._has_cfg_parallel = True
+    model._has_llm_disaggregation = False
+    model._image_gen_remote_handoff = False
+    loops = model.get_graph_walk_graphs()["image_gen_cfg"].get_loops()
+    assert IMAGE_GEN_LOOP in loops
