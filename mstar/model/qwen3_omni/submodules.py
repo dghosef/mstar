@@ -33,6 +33,7 @@ from mstar.engine.resources import AttentionStep, KVStep, PositionStep, SamplerS
 from mstar.engine.resources.attn.flashinfer import FlashInferManager
 from mstar.engine.resources.sampler.resource import SamplerResource
 from mstar.model.qwen3_omni.components.code2wav import Qwen3OmniMoeCode2Wav
+from mstar.model.qwen3_omni.components.cp_kernels import cp_embed_accumulate
 from mstar.model.qwen3_omni.components.rope import (
     compute_3d_cos_sin,
     compute_rope_freqs,
@@ -1160,6 +1161,11 @@ class TalkerSubmodule(ARNodeSubmodule):
         self._tts_pad_embed_cached: torch.Tensor | None = None
         self._tts_bos_embed_cached: torch.Tensor | None = None
         self._tts_eos_embed_cached: torch.Tensor | None = None
+        # The same pad/eos before ``text_projection``: a decode step projects
+        # its rows' text inputs in the captured forward, so these stand in
+        # for the Thinker state once the Thinker has finished.
+        self._tts_pad_raw: torch.Tensor | None = None
+        self._tts_eos_raw: torch.Tensor | None = None
 
         # Lazy-built suppress mask for layer-0 logits.  Shape (vocab_size,)
         # with True at positions to suppress.  Cached on first forward.
@@ -1209,6 +1215,7 @@ class TalkerSubmodule(ARNodeSubmodule):
             eos_raw = thinker_embed_tokens(
                 torch.tensor([self.config.tts_eos_token_id], device=device)
             ).to(proj_dtype)
+            self._tts_pad_raw, self._tts_eos_raw = pad_raw, eos_raw
             self._tts_pad_embed_cached = self.model.text_projection(pad_raw).squeeze(0)
             self._tts_bos_embed_cached = self.model.text_projection(bos_raw).squeeze(0)
             self._tts_eos_embed_cached = self.model.text_projection(eos_raw).squeeze(0)
@@ -1334,23 +1341,24 @@ class TalkerSubmodule(ARNodeSubmodule):
             seq_len = input_embeds.shape[0]
 
         elif graph_walk == "talker_decode":
-            dtype = self.model.text_projection.linear_fc1.weight.dtype
-            input_embeds = inputs["talker_input_embeds"][0].to(dtype)
-
+            # The previous step's codec embedding sum plus this step's text
+            # conditioning, which the forward projects for the whole batch:
+            # the Thinker's next token state (decode is always text), then
+            # tts_eos for one step, then tts_pad.
             thinker_states = inputs.get("thinker_states", [])
             rid = fwd_info.rid_handle
             if thinker_states:
-                # Decode is always text → text_projection.
-                text_hidden = self.model.text_projection(
-                    thinker_states[0].to(dtype)
-                )
+                text_raw = thinker_states[0]
             elif rid not in self._eos_embed_sent:
-                text_hidden = self._tts_eos_embed_cached
+                text_raw = self._tts_eos_raw
                 self._eos_embed_sent.add(rid)
             else:
-                text_hidden = self._tts_pad_embed_cached
-            input_embeds += text_hidden
-            seq_len = 1
+                text_raw = self._tts_pad_raw
+            return ARNodeInputs(
+                input_embeds=inputs["talker_input_embeds"][0],
+                input_seq_len=1,
+                tensor_inputs={"text_raw": text_raw},
+            )
 
         return ARNodeInputs(
             input_embeds=input_embeds,
@@ -1407,6 +1415,12 @@ class TalkerSubmodule(ARNodeSubmodule):
         device = self.get_device()
 
         extra_args = {}
+        if graph_walk == "talker_decode":
+            dtype = self.model.text_projection.linear_fc1.weight.dtype
+            input_embeds = input_embeds.to(dtype)
+            extra_args["text_raw"] = torch.cat(
+                [inp.tensor_inputs["text_raw"] for inp in inputs], dim=0,
+            ).to(dtype)
         # codec scratch is decode-only; talker_prefill runs the LLM backbone
         # alone and interning these would clash (codec_emb_sum's hidden dim
         # aliases the token-bucket seq dim).
@@ -1429,6 +1443,15 @@ class TalkerSubmodule(ARNodeSubmodule):
             "input_embeds": input_embeds,
             **extra_args
         }
+
+    def _add_text_conditioning(
+        self, input_embeds: torch.Tensor, text_raw: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """A decode step's input: its codec embedding sum plus the projected
+        text conditioning, one ``text_projection`` for the batch."""
+        if text_raw is None:
+            return input_embeds
+        return input_embeds + self.model.text_projection(text_raw)
 
     def _forward_prefill(
         self, input_embeds: torch.Tensor,
@@ -1514,9 +1537,9 @@ class TalkerSubmodule(ARNodeSubmodule):
             tokens = code_pred_sampler.sample(
                 request_ids, logits,
             )
-            all_codes[:, group_idx] = tokens
-            embed = codec_embedding[group_idx - 1](tokens)
-            codec_emb_sum.add_(embed)
+            embed = cp_embed_accumulate(
+                tokens, codec_embedding[group_idx - 1].weight, codec_emb_sum, all_codes, group_idx,
+            )
 
         return {
             "talker_input_embeds": [codec_emb_sum],
@@ -1535,6 +1558,7 @@ class TalkerSubmodule(ARNodeSubmodule):
             return self._forward_prefill(
                 input_embeds=input_embeds
             )
+        input_embeds = self._add_text_conditioning(input_embeds, kwargs.pop("text_raw", None))
         return self._forward_decode_like(
             request_ids=engine_inputs.request_ids,
             talker_sampler=engine_inputs.resources[TALKER_SAMPLER],
@@ -1579,6 +1603,7 @@ class TalkerSubmodule(ARNodeSubmodule):
             }
 
         last_token_indices = kwargs.pop("last_token_indices", None)
+        input_embeds = self._add_text_conditioning(input_embeds, kwargs.pop("text_raw", None))
         if graph_walk == "talker_last_prefill":
             assert last_token_indices is not None, (
                 "talker_last_prefill forward_batched requires "
@@ -1666,6 +1691,10 @@ class TalkerSubmodule(ARNodeSubmodule):
                         device=device, dtype=torch.bfloat16
                     ),
                     input_seq_len=1,
+                    tensor_inputs={"text_raw": torch.zeros(
+                        (1, self.config.thinker_hidden_size),
+                        device=device, dtype=torch.bfloat16,
+                    )},
                 ),
                 capture_batch_sizes=[1, 2, 4, 8, 16, 32],
                 compile=True
