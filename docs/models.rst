@@ -330,25 +330,29 @@ Qwen3-TTS notes
   transformer stacks 8 such layers, so a window still differs slightly from a
   whole-utterance decode once an utterance outgrows the context; 25 frames of
   context differed far more. Each window size is a CUDA-graph bucket captured
-  for batch sizes 1 to 32; the stream buffer reports how many leading frames of
-  a window are repeated context, and the codec trims their audio. A voice
-  clone's reference tail (its last 72 frames) is the first window's context.
+  for batch sizes 1 to 32 (densely: the codec's cost is per row, so a padding
+  row costs as much as a real one); the stream buffer reports how many leading
+  frames of a window are repeated context, and the codec trims their audio. The
+  scheduler batches each window size apart, so a stream's small first windows
+  are not padded to a full window's width or queued behind a batch of them. A
+  voice clone's reference tail (its last 72 frames) is the first window's context.
 - The codec runs its transformer over the whole window but its conv stack (all
   but a few percent of the codec's time) only over the new frames plus the
   stack's causal receptive field, derived from the decoder's modules at load
   (10 frames for the 12 Hz decoder; the new frames' audio equals the
   whole-window decode). It also fuses the SnakeBeta activations into one kernel.
-- Talker prefill replays a packed CUDA Graph for the smallest token bucket
-  (32 to 1024 tokens) that holds the batch; only the clone prefill, which also
-  pushes the reference clip's frames into the codec stream, runs eager. Decode
-  always uses the whole-walk CUDA Graph, with the 15-step
+- Talker prefill, the clone prefill included, replays a packed CUDA Graph for
+  the smallest token bucket (32 to 1024 tokens) that holds the batch; a clone's
+  reference frames join the codec stream in ``postprocess``. Decode
+  always uses the whole-walk CUDA Graph (up to 64 rows a step), with the 15-step
   CodePredictor loop captured inside it; request-local EOS suppression is
   carried as a graph tensor input so replay does not consult capture-slot dummy
   request state. Residual ``subtalker_*`` sampling is per-request through the
   ``code_predictor`` aux sampler, so custom values neither block batching nor
   fall off the graph. On the 1.7B checkpoints the CodePredictor projects the
   Talker-width inputs through ``small_to_mtp_projection`` before its depth loop.
-- ``configs/qwen3tts_1p7b_split.yaml`` runs the Codec on a second worker that
+- ``configs/qwen3tts_1p7b_split.yaml`` (and ``configs/qwen3tts_split.yaml``
+  for the 0.6B) runs the Codec on a second worker that
   shares GPU 0 (``rank_devices``) and caps the Talker KV pool so both fit.
   On its own it lowers first-audio latency at high concurrency; with a
   user-level CUDA MPS daemon (``nvidia-cuda-mps-control -d`` before
@@ -438,9 +442,13 @@ Fish Audio S2-Pro notes
   while the reference takes top-p over the untempered ones, so at the same
   values M\* keeps a slightly different set of tokens per step. ``max_new_tokens`` (default 2048, at most
   4096 frames of 2048 samples at 44.1 kHz) and ``ignore_eos`` pass through.
-- Streamed audio matches the whole-utterance decode to within one int16 step:
-  each codec window carries the decoder's whole receptive field as context, and
-  the codec runs in fp32 with TF32 off.
+- Each codec window carries the decoder's whole receptive field as context.
+  With ``model_kwargs: {codec_exact_fp32: true}`` the codec runs in fp32 with
+  TF32 off and the streamed audio matches the whole-utterance decode to within
+  one int16 step. The shipped ``configs/fish_s2_pro.yaml`` sets it to ``false``:
+  TF32 halves the codec's conv stack, most of the GPU time under concurrency
+  (c=32 throughput +35% on an H200), and the audio stays within ~60 dB SNR of
+  the exact decode.
 
 Nemotron VoiceChat (``nemotron_duplex``) notes
 ----------------------------------------------
