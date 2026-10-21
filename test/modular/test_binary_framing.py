@@ -236,6 +236,12 @@ class _ChunkServer:
         for chunk in self._chunks:
             yield chunk
 
+    async def iter_result_chunk_batches(self, request_id):
+        # several chunks per drain, as under load: NDJSON joins each batch
+        # into one write, which must read back as the same lines
+        for i in range(0, len(self._chunks), 2):
+            yield self._chunks[i:i + 2]
+
 
 def _post(monkeypatch, chunks, headers=None):
     monkeypatch.setattr(entrypoint, "api_server", _ChunkServer(chunks))
