@@ -258,6 +258,12 @@ class OmnilingualASRModel(Model):
             model = Wav2Vec2CTC(self.config)
         load_into(model, convert_state_dict(read_checkpoint(path), self.dtype, device))
         model.eval()
+        pos = model.encoder_frontend.pos_encoder
+        # cuDNN's grouped kernels for the positional conv are erratic once its
+        # groups are wide (1b and up): 0.8-40 ms for one 2048-channel clip by
+        # length, against ~1.3 ms per 1000 frames as per-group GEMMs. At 300m's
+        # 64-channel groups cuDNN is the faster (0.4-1.5 ms a step).
+        pos.unfolded = torch.device(device).type != "cpu" and pos.conv.in_channels // pos.conv.groups >= 80
         logger.info(
             "Loaded Omnilingual ASR CTC %s (%s, %s) from %s on %s",
             self.size,
