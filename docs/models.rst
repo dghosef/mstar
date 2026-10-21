@@ -171,6 +171,28 @@ OmniVoice notes
 - The backbone is not autoregressive: it fills a fixed canvas of eight codebook
   rows over a few unmasking steps, so there is no KV cache and no per-token
   sampling loop. Serve it with ``mstar serve omnivoice --gpus 0``.
+- The backbone's layer stack replays CUDA graphs per (requests, packed-token
+  bucket up to 4096 tokens) with attention through a ragged attention resource;
+  larger steps are GPU-bound and run eagerly. ``model_kwargs:
+  {backbone_graphs: false}`` keeps the reference's eager packed path.
+- ``configs/omnivoice_split.yaml`` runs code2wav (codec decode and the
+  host-side silence trim) on a second worker sharing GPU 0, so the unmask loop
+  no longer stops for each finished request. With a CUDA MPS daemon it raised
+  concurrency-32 throughput on an H200 from ~153 to 176-184 audio-s/s and cut
+  TTFA p95 from ~9 s to ~3 s; concurrency 1 is ~10% slower.
+
+Higgs Audio notes
+~~~~~~~~~~~~~~~~~
+
+- The audio tower runs outside ``torch.compile`` (a clip's chunk count changes
+  its shape, and every new shape recompiled on the serving path). Requests
+  whose 4 s chunks share a mel width are encoded together, and full-width
+  chunks replay a CUDA graph per chunk count; a clip under one chunk is padded
+  to the full width and masked (``HiggsAudioTower``'s ``valid_frames``) so it
+  replays a graph too. ``model_kwargs: {encoder_graphs: false}`` runs the
+  tower eagerly.
+- One prefill step per request: the ChatML text around the audio and the audio
+  embeddings go into the KV cache as one span.
 
 Omnilingual ASR notes
 ~~~~~~~~~~~~~~~~~~~~~
@@ -606,6 +628,16 @@ Chatterbox notes
   window stays as close to the whole-utterance decode as the full history
   does (log-mel correlation 0.988 vs 0.985 on CPU). Requests whose chunks
   are ready together share one padded flow solve (up to 8 per step).
+- ``configs/chatterbox_split.yaml`` (and ``chatterbox_turbo_split.yaml``,
+  ``chatterbox_multilingual_split.yaml``) runs S3Gen on a second worker that
+  shares GPU 0 (``rank_devices``), so T3's decode steps stop alternating with
+  S3Gen's flow solves on one worker loop. It only pays with a user-level CUDA
+  MPS daemon (``nvidia-cuda-mps-control -d`` before ``mstar serve``), which
+  lets the two workers' kernels overlap: on an H200 at concurrency 32 Chatterbox
+  went from 36-38 to 58-61 audio-s/s and Turbo from 69 to 94, at the cost of a
+  later first chunk (TTFA p50 1.6-1.8 s -> 1.9-2.1 s; Turbo 0.36 s -> 1.0 s);
+  concurrency 1 is unchanged, and WER held (1.22% -> 1.08%). Without MPS the
+  split measured the same as one worker.
 - S3Gen runs from CUDA graphs by default (``s3gen_graphs``): the flow solve
   (one graph per rows x frames x steps; the estimator's hundreds of tiny
   kernels per Euler step make the eager solve launch-bound, 170 ms vs 45 ms
