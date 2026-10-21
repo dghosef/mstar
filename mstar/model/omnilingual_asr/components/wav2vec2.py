@@ -135,7 +135,14 @@ class SelfAttention(nn.Module):
         self.v_proj = nn.Linear(model_dim, model_dim)
         self.output_proj = nn.Linear(model_dim, model_dim)
 
-    def forward(self, x: torch.Tensor, attn_mask: torch.Tensor | None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, attn_mask: torch.Tensor | None, attn_fn=None) -> torch.Tensor:
+        if attn_fn is not None:
+            # packed rows: (T, M) -> (T, H, K), attending within each row's span
+            q, k, v = (
+                proj(x).unflatten(-1, (self.num_heads, -1))
+                for proj in (self.q_proj, self.k_proj, self.v_proj)
+            )
+            return self.output_proj(attn_fn(q, k, v).flatten(-2))
         # (N, S, M) -> (N, S, H, K) -> (N, H, S, K)
         q = self.q_proj(x).unflatten(-1, (self.num_heads, -1)).transpose(1, 2)
         k = self.k_proj(x).unflatten(-1, (self.num_heads, -1)).transpose(1, 2)
@@ -164,8 +171,8 @@ class EncoderLayer(nn.Module):
         self.ffn_layer_norm = nn.LayerNorm(cfg.model_dim, eps=cfg.layer_norm_eps)
         self.ffn = FeedForward(cfg.model_dim, cfg.ffn_inner_dim)
 
-    def forward(self, x: torch.Tensor, attn_mask: torch.Tensor | None) -> torch.Tensor:
-        x = self.self_attn(self.self_attn_layer_norm(x), attn_mask) + x
+    def forward(self, x: torch.Tensor, attn_mask: torch.Tensor | None, attn_fn=None) -> torch.Tensor:
+        x = self.self_attn(self.self_attn_layer_norm(x), attn_mask, attn_fn) + x
         return self.ffn(self.ffn_layer_norm(x)) + x
 
 
@@ -175,9 +182,9 @@ class Encoder(nn.Module):
         self.layers = nn.ModuleList(EncoderLayer(cfg) for _ in range(cfg.num_layers))
         self.layer_norm = nn.LayerNorm(cfg.model_dim, eps=cfg.layer_norm_eps)
 
-    def forward(self, x: torch.Tensor, attn_mask: torch.Tensor | None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, attn_mask: torch.Tensor | None, attn_fn=None) -> torch.Tensor:
         for layer in self.layers:
-            x = layer(x, attn_mask)
+            x = layer(x, attn_mask, attn_fn)
         return self.layer_norm(x)
 
 
@@ -198,6 +205,33 @@ class Wav2Vec2CTC(nn.Module):
         self.encoder = Encoder(cfg)
         self.final_proj = nn.Linear(cfg.model_dim, cfg.vocab_size)
 
+    def frontend(
+        self, waveforms: torch.Tensor, seq_lens: list[int] | None = None, features=None,
+    ) -> tuple[torch.Tensor, list[int], torch.Tensor | None]:
+        """``(N, S)`` waveforms -> ``(N, T, model_dim)`` encoder inputs (padded
+        frames zeroed), each row's valid frame count, and the ``(N, T)`` frame
+        mask (None when no row is padded). ``features`` stands in for the
+        feature extractor (e.g. a compiled copy of it)."""
+        front = self.encoder_frontend
+        x = (front.feature_extractor if features is None else features)(waveforms)
+        n, t = x.shape[:2]
+        frame_lens = [t] * n if seq_lens is None else self.frame_lengths(seq_lens)
+        frame_mask = None
+        if any(f < t for f in frame_lens):
+            lens = torch.tensor(frame_lens)
+            if x.is_cuda:
+                lens = lens.pin_memory()
+            lens = lens.to(x.device, non_blocking=True)
+            frame_mask = torch.arange(t, device=x.device)[None, :] < lens[:, None]
+        x = front.model_dim_proj(front.post_extract_layer_norm(x))
+        return front.pos_encoder(x, frame_mask), frame_lens, frame_mask
+
+    def encode_packed(self, x: torch.Tensor, attn_fn) -> torch.Tensor:
+        """``(T, model_dim)``, every row's valid frames end to end -> ``(T, vocab)``
+        logits. ``attn_fn(q, k, v)`` attends within each row's span (a varlen
+        kernel): no padding reaches the encoder."""
+        return self.final_proj(self.encoder(x, None, attn_fn))
+
     def frame_lengths(self, seq_lens: list[int]) -> list[int]:
         return [self.encoder_frontend.feature_extractor.output_length(n) for n in seq_lens]
 
@@ -211,21 +245,8 @@ class Wav2Vec2CTC(nn.Module):
         ``(N, T, vocab)`` logits and each row's valid frame count.
 
         The lengths are host ints, so a padded batch is masked without reading
-        anything back from the device. ``features`` stands in for the feature
-        extractor (e.g. a compiled copy of it)."""
-        front = self.encoder_frontend
-        x = (front.feature_extractor if features is None else features)(waveforms)
-        n, t = x.shape[:2]
-        frame_lens = [t] * n if seq_lens is None else self.frame_lengths(seq_lens)
-        frame_mask = None
-        if any(f < t for f in frame_lens):
-            lens = torch.tensor(frame_lens)
-            if x.is_cuda:
-                lens = lens.pin_memory()
-            lens = lens.to(x.device, non_blocking=True)
-            frame_mask = torch.arange(t, device=x.device)[None, :] < lens[:, None]
-        x = front.model_dim_proj(front.post_extract_layer_norm(x))
-        x = front.pos_encoder(x, frame_mask)
+        anything back from the device."""
+        x, frame_lens, frame_mask = self.frontend(waveforms, seq_lens, features)
         # cuDNN attention builds a plan per new sequence length, and nearly
         # every upload has its own length
         with sdpa_kernel(_ATTENTION_BACKENDS):
