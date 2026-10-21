@@ -816,6 +816,26 @@ class Conductor:
         """
         # _group_id -> chosen DP-replica index within that group's ranks
         group_id_to_replica_idx: dict[int, int] = {}
+        # worker id -> requests it currently serves; built only when a group
+        # actually has more than one replica to choose from
+        load: dict[str, int] | None = None
+
+        def pick(replicas: list[list[int]]) -> int:
+            """The least-loaded replica (by live requests on its workers), ties at
+            random. A random pick alone puts two of two concurrent requests on one
+            replica half the time, leaving the other idle."""
+            nonlocal load
+            if len(replicas) == 1:
+                return 0
+            if load is None:
+                load = defaultdict(int)
+                for request_data in self.requests.values():
+                    for worker_id in self._request_workers(request_data):
+                        load[worker_id] += 1
+            loads = [sum(load[f"worker_{r}"] for r in ranks) for ranks in replicas]
+            least = min(loads)
+            return int(np.random.choice([i for i, n in enumerate(loads) if n == least]))
+
         result = {}
         for wg_id, wg in self.worker_graphs.items():
             if wg._instance_ranks:
@@ -823,16 +843,14 @@ class Conductor:
                 # tp*sp instance runs the request together, so its TP all-reduce
                 # and SP all-to-all collectives stay in sync. Picking a single TP
                 # row here would desync the SP all-to-all across rows.
-                replica_idx = group_id_to_replica_idx.setdefault(
-                    wg._group_id, np.random.randint(len(wg._instance_ranks)),
-                )
-                ranks = wg._instance_ranks[replica_idx]
+                if wg._group_id not in group_id_to_replica_idx:
+                    group_id_to_replica_idx[wg._group_id] = pick(wg._instance_ranks)
+                ranks = wg._instance_ranks[group_id_to_replica_idx[wg._group_id]]
                 result[wg_id] = [f"worker_{r}" for r in ranks]
             else:
-                replica_idx = group_id_to_replica_idx.setdefault(
-                    wg._group_id, np.random.randint(len(wg.ranks)),
-                )
-                result[wg_id] = [f"worker_{wg.ranks[replica_idx]}"]
+                if wg._group_id not in group_id_to_replica_idx:
+                    group_id_to_replica_idx[wg._group_id] = pick([[r] for r in wg.ranks])
+                result[wg_id] = [f"worker_{wg.ranks[group_id_to_replica_idx[wg._group_id]]}"]
         return result
 
     def _build_request_sharding_config(
