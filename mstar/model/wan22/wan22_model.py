@@ -1,6 +1,6 @@
 """Wan22Model: Wan2.2-TI2V-5B text/image-to-video generation.
 
-Architecture (4 nodes, no engine resources — nothing here is cached):
+Architecture (4 nodes; nothing here is cached, the dit's self-attention is a ragged resource):
     text_encoder - UMT5-XXL prompt encoder (thin HF wrapper)
     vae_encoder  - Wan2.2-VAE encode of the conditioning frame (I2V)
     dit          - dense 5B video DiT; CFG as one batch-2 forward,
