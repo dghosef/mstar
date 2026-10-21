@@ -23,9 +23,8 @@ from mstar.distributed.communication import CommGroup
 from mstar.model.components import ParallelSparseMoeBlockWithSharedExpert, RMSNorm
 from mstar.model.components.distributed import ParallelGatedMLP
 from mstar.model.qwen3_omni.components.attention import Qwen3OmniAttention
-from mstar.model.qwen3_omni.components.cp_kernels import cp_qk_norm_rope_kv_write
+from mstar.model.qwen3_omni.components.cp_kernels import cp_attention, cp_qk_norm_rope_kv_write
 from mstar.model.qwen3_omni.config import TALKER_ATTN, TALKER_KV, TALKER_POS, Qwen3OmniModelConfig, TalkerTextConfig
-from mstar.utils.attention import decode_attn_nhd
 
 # ---------------------------------------------------------------------------
 # Projection MLP (Thinker -> Talker)
@@ -517,14 +516,8 @@ class Qwen3OmniCodePredictor(nn.Module):
             )
             q = qkv[..., :q_size].view(bs, seq_len, n_q_heads, head_dim)
 
-            # Read K, V for all positions up to and including the new tokens.
-            valid_len = cache_pos + seq_len
-            k_full = kv_cache[layer_idx, :, 0]
-            v_full = kv_cache[layer_idx, :, 1]
-
-            attn_out = decode_attn_nhd(
-                q, k_full, v_full, valid_len
-            )
+            # Each new token attends causally over the depth positions so far.
+            attn_out = cp_attention(q, kv_cache[layer_idx, :, 0], kv_cache[layer_idx, :, 1], cache_pos)
             attn_out = attn.o_proj(attn_out.reshape(bs, seq_len, -1))
             if layer_idx == 0:
                 residual = residual + attn_out

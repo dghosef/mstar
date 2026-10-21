@@ -104,3 +104,21 @@ def test_cp_embed_accumulate_matches_the_unfused_ops(bs):
     assert torch.equal(emb_sum, ref_sum)
     assert torch.equal(codes, ref_codes)
 
+
+
+@pytest.mark.parametrize("bs,seq,cache_pos", [(1, 1, 0), (4, 2, 0), (32, 1, 7), (3, 1, 15), (5, 2, 3)])
+def test_cp_attention_is_causal_attention_over_the_depth_cache(bs, seq, cache_pos):
+    from mstar.model.qwen3_omni.components.cp_kernels import cp_attention
+
+    torch.manual_seed(4)
+    hq, hkv, d, depth = 16, 8, 128, 16
+    cache = torch.randn(bs, 2, depth, hkv, d, device="cuda", dtype=torch.bfloat16)
+    q = torch.randn(bs, seq, hq, d, device="cuda", dtype=torch.bfloat16)
+    out = cp_attention(q, cache[:, 0], cache[:, 1], cache_pos)
+    for s in range(seq):
+        n = cache_pos + s + 1
+        k = cache[:, 0, :n].float().repeat_interleave(hq // hkv, dim=2)  # (bs, n, hq, d)
+        v = cache[:, 1, :n].float().repeat_interleave(hq // hkv, dim=2)
+        w = torch.softmax(torch.einsum("bhd,bnhd->bhn", q[:, s].float(), k) / d ** 0.5, -1)
+        ref = torch.einsum("bhn,bnhd->bhd", w, v)
+        torch.testing.assert_close(out[:, s].float(), ref, rtol=2e-2, atol=2e-2)
