@@ -68,6 +68,8 @@ class LingBotWorldModel(Model):
             raise NotImplementedError(f"LingBot-World variant {variant!r} is not implemented yet.")
         self.config = LINGBOT_CONFIGS[variant]()
         self.config.reference_numerics = bool(reference_numerics)
+        if not reference_numerics:
+            self.config.vae_decode_fp32 = False
         self.model_path_hf = model_path_hf or LINGBOT_HF_REPOS[variant]
         self.cache_dir = cache_dir
         self.skip_weight_loading = skip_weight_loading
