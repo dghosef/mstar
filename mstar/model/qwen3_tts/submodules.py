@@ -448,11 +448,12 @@ class TalkerSubmodule(ARNodeSubmodule):
             )
             # ``talker_input_embeds`` is the recurrent graph edge emitted by
             # the previous frame, not a token ID that needs another lookup.
+            # The text condition is added for the whole batch in
+            # ``preprocess`` (one kernel instead of one per row).
             input_embeds = inputs["talker_input_embeds"][0].to(
-                device=self.get_device(),
+                device=text_condition.device,
                 dtype=text_condition.dtype,
             ).reshape(1, -1)
-            input_embeds = input_embeds + text_condition
             state.add("generation_step", step + 1)
         else:
             raise ValueError(f"Unknown Qwen3-TTS Talker walk: {graph_walk!r}")
@@ -461,10 +462,13 @@ class TalkerSubmodule(ARNodeSubmodule):
             int(state.get("generated_frames", 0))
             < self.config.generation.min_new_tokens
         )
+        kwargs = {"suppress_eos": suppress_eos}
+        if graph_walk == "talker_decode":
+            kwargs["text_condition"] = text_condition
         return ARNodeInputs(
             input_embeds=input_embeds,
             input_seq_len=input_embeds.shape[0],
-            kwargs={"suppress_eos": suppress_eos},
+            kwargs=kwargs,
         )
 
     def preprocess(
@@ -489,13 +493,12 @@ class TalkerSubmodule(ARNodeSubmodule):
         if graph_walk == "talker_decode":
             if any(seq_len != 1 for seq_len in seq_lens):
                 raise ValueError("Qwen3-TTS decode expects one token per request")
-            # one token per request, so the indices are a fixed arange and a
-            # single-request batch is already packed
-            packed_embeds = (
-                input_embeds[0]
-                if len(input_embeds) == 1
-                else torch.cat(input_embeds, dim=0)
-            )
+            # one token per request, so the indices are a fixed arange
+            conditions = [item.kwargs["text_condition"] for item in inputs]
+            if len(input_embeds) == 1:
+                packed_embeds = input_embeds[0] + conditions[0]
+            else:
+                packed_embeds = torch.cat(input_embeds, dim=0) + torch.stack(conditions)
             last_token_indices = self._get_decode_last_token_indices(len(inputs))
         else:
             packed_embeds = torch.cat(input_embeds, dim=0)
@@ -853,8 +856,13 @@ class TalkerSubmodule(ARNodeSubmodule):
                 ),
                 input_seq_len=1,
                 # Padding slots clone this template, so every replay input must
-                # declare the same dynamic key as a real prepared request.
-                kwargs={"suppress_eos": True},
+                # declare the same dynamic keys as a real prepared request.
+                kwargs={
+                    "suppress_eos": True,
+                    "text_condition": torch.zeros(
+                        self.talker_config.hidden_size, dtype=dtype, device=device,
+                    ),
+                },
             ),
             capture_batch_sizes=self.DECODE_CAPTURE_BATCH_SIZES,
             compile=True,
