@@ -952,12 +952,13 @@ def test_qwen3_tts_clone_prefill_streams_reference_frames_first():
     # (all a window can use as context) ahead of the first generated frame.
     reference = torch.arange(12).view(3, 4)
     submodule.request_state("clone").add("reference_frames", reference)
-    frame = torch.tensor([9, 9, 9, 9])
+    frame = torch.tensor([[9, 9, 9, 9]])   # a [1, groups] row of the step's output
     items = submodule._codec_stream_items("talker_prefill_clone", "clone", frame)
-    assert [item.tolist() for item in items] == [[4, 5, 6, 7], [8, 9, 10, 11], [9, 9, 9, 9]]
+    # every item has the decode rows' [1, groups] shape, so a stream's items stack
+    assert [item.tolist() for item in items] == [[[4, 5, 6, 7]], [[8, 9, 10, 11]], [[9, 9, 9, 9]]]
     submodule.request_state("short").add("reference_frames", reference[:1])
     assert [item.tolist() for item in submodule._codec_stream_items("talker_prefill_clone", "short", frame)] == [
-        [0, 1, 2, 3], [9, 9, 9, 9],
+        [[0, 1, 2, 3]], [[9, 9, 9, 9]],
     ]
     # Only the clone prefill leads with the reference; decode never does.
     assert submodule._codec_stream_items("talker_decode", "clone", frame) == [frame]
