@@ -205,14 +205,16 @@ class Wav2Vec2CTC(nn.Module):
         self,
         waveforms: torch.Tensor,
         seq_lens: list[int] | None = None,
+        features=None,
     ) -> tuple[torch.Tensor, list[int]]:
         """``(N, S)`` waveforms (and each row's sample count, for a padded batch) ->
         ``(N, T, vocab)`` logits and each row's valid frame count.
 
         The lengths are host ints, so a padded batch is masked without reading
-        anything back from the device."""
+        anything back from the device. ``features`` stands in for the feature
+        extractor (e.g. a compiled copy of it)."""
         front = self.encoder_frontend
-        x = front.feature_extractor(waveforms)
+        x = (front.feature_extractor if features is None else features)(waveforms)
         n, t = x.shape[:2]
         frame_lens = [t] * n if seq_lens is None else self.frame_lengths(seq_lens)
         frame_mask = None
