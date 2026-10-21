@@ -148,7 +148,7 @@ def _omnivoice_inputs(cfg, k, target_len=6, clone=False):
     inputs = {
         "prefix_ids": [torch.arange(c * 5).view(c, 5)],
         "prefix_audio_mask": [torch.zeros(5, dtype=torch.bool)],
-        "target_len": [torch.tensor([target_len])],
+        "initial_canvas": [torch.full((c, target_len), cfg.audio_mask_id)],
         "audio_tokens": [tokens],
         "step_index": [torch.tensor([k], dtype=torch.int64)],
     }
@@ -172,20 +172,23 @@ def test_omnivoice_step_prep_reads_no_tensor(clone):
     assert prepare(fwd(UNMASK_LOOP_NAME, steps), _omnivoice_inputs(cfg, steps)) is None
 
 
-def test_omnivoice_first_step_prep_unchanged():
-    # iteration 0 still reads target_len once to size the canvas
+def test_omnivoice_first_step_prep_reads_no_tensor():
+    # iteration 0 starts from the data worker's all-MASK canvas: its shape is
+    # the target length, so nothing is read on the host
     sub, cfg = _omnivoice()
     inputs = _omnivoice_inputs(cfg, 0)
     del inputs["audio_tokens"], inputs["step_index"]
-    ni = sub.prepare_inputs("speech_gen", _fwd("r", "speech_gen", _omnivoice_meta(4)), inputs)
+    with _HostReads() as reads:
+        ni = sub.prepare_inputs("speech_gen", _fwd("r", "speech_gen", _omnivoice_meta(4)), inputs)
+    assert reads.reads == [], reads.reads
     assert ni.tensor_inputs["audio_tokens"].shape == (cfg.num_audio_codebook, 6)
     assert (ni.tensor_inputs["audio_tokens"] == cfg.audio_mask_id).all()
     assert ni.input_seq_len == 5 + 2 * 6
 
 
 def test_omnivoice_postprocess_reads_no_tensor():
-    """The unmask step's postprocess takes the iteration from the loop counter:
-    same canvas as reading the step edge, and no host read."""
+    """The unmask step's postprocess takes the iteration prepare_inputs read off
+    the loop counter: same canvas as reading the step edge, and no host read."""
     from mstar.model.omnivoice.components.unmask import build_reveal_schedule
 
     sub, cfg = _omnivoice()
@@ -199,19 +202,18 @@ def test_omnivoice_postprocess_reads_no_tensor():
     for k in range(steps):
         inputs = _omnivoice_inputs(cfg, k, target_len)
         inputs["audio_tokens"] = [torch.full((cfg.num_audio_codebook, target_len), cfg.audio_mask_id)]
-        node_inputs = sub.prepare_inputs("speech_gen", _fwd("r", "speech_gen", _omnivoice_meta(steps)), inputs)
         logits = torch.randn(shape, generator=torch.Generator().manual_seed(100 + k))
         results = {}
         for name, info in (
             ("counter", _fwd("r", "speech_gen", _omnivoice_meta(steps), UNMASK_LOOP_NAME, k)),
             ("edge", _fwd("r", "speech_gen", _omnivoice_meta(steps))),
         ):
+            node_inputs = sub.prepare_inputs("speech_gen", info, inputs)
             outputs = {"c_logits": [logits.clone()], "u_logits": [logits.flip(-1)]}
             with _HostReads() as reads:
                 sub.postprocess("r", info, outputs, inputs=node_inputs)
             results[name] = (outputs, reads.reads)
-        assert results["counter"][1] == [], f"step {k}: host reads {results['counter'][1]}"
-        assert results["edge"][1], "the edge path should read the step on the host"
+            assert reads.reads == [], f"step {k} ({name}): host reads {reads.reads}"
         assert torch.equal(results["counter"][0]["audio_tokens"][0], results["edge"][0]["audio_tokens"][0])
         assert torch.equal(results["counter"][0]["step_index"][0], results["edge"][0]["step_index"][0])
 
