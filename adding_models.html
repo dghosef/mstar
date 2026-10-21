@@ -54,7 +54,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.2.1" />
-    <meta name="docbuild:last-update" content="Oct 17, 2026"/>
+    <meta name="docbuild:last-update" content="Oct 21, 2026"/>
   
     
     <script src="_static/searchtools.js"></script>
@@ -199,7 +199,9 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">User Guide</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="serving.html">Serving</a></li>
+<li class="toctree-l1"><a class="reference internal" href="metrics.html">Metrics reference</a></li>
 <li class="toctree-l1"><a class="reference internal" href="clients.html">Using a Server</a></li>
+<li class="toctree-l1"><a class="reference internal" href="evaluation.html">Evaluation and Benchmarks</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Reference</span></p>
 <ul class="nav bd-sidenav">
@@ -207,9 +209,11 @@
 <li class="toctree-l1"><a class="reference internal" href="models.html">Supported Models</a></li>
 <li class="toctree-l1 has-children"><a class="reference internal" href="api.html">API Reference</a><details open="open"><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
 <li class="toctree-l2 has-children"><a class="reference internal" href="_autosummary/mstar.api_server.html">mstar.api_server</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.api_server.auth.html">mstar.api_server.auth</a></li>
 <li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.api_server.media_io.html">mstar.api_server.media_io</a></li>
 <li class="toctree-l3 has-children"><a class="reference internal" href="_autosummary/mstar.api_server.openai.html">mstar.api_server.openai</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.api_server.openai.protocol.html">mstar.api_server.openai.protocol</a></li>
+<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.api_server.openai.realtime_vad.html">mstar.api_server.openai.realtime_vad</a></li>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.api_server.openai.serving_chat.html">mstar.api_server.openai.serving_chat</a></li>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.api_server.openai.serving_images.html">mstar.api_server.openai.serving_images</a></li>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.api_server.openai.serving_realtime.html">mstar.api_server.openai.serving_realtime</a></li>
@@ -232,7 +236,6 @@
 <li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.communication.tensor_uuid.html">mstar.communication.tensor_uuid</a></li>
 <li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.communication.tensors.html">mstar.communication.tensors</a></li>
 <li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.communication.wire.html">mstar.communication.wire</a></li>
-<li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.communication.wire_types.html">mstar.communication.wire_types</a></li>
 </ul>
 </details></li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="_autosummary/mstar.conductor.html">mstar.conductor</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
@@ -240,13 +243,12 @@
 </ul>
 </details></li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="_autosummary/mstar.engine.html">mstar.engine</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.engine.cuda_graph_config.html">mstar.engine.cuda_graph_config</a></li>
-<li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.engine.cuda_graph_runner.html">mstar.engine.cuda_graph_runner</a></li>
-<li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.engine.engine.html">mstar.engine.engine</a></li>
+<li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.engine.accelerator_graph_backend.html">mstar.engine.accelerator_graph_backend</a></li>
+<li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.engine.accelerator_graph_config.html">mstar.engine.accelerator_graph_config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.engine.accelerator_graph_runner.html">mstar.engine.accelerator_graph_runner</a></li>
 <li class="toctree-l3 has-children"><a class="reference internal" href="_autosummary/mstar.engine.resources.html">mstar.engine.resources</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.engine.resources.attn.html">mstar.engine.resources.attn</a></li>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.engine.resources.base.html">mstar.engine.resources.base</a></li>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.engine.resources.convenience.html">mstar.engine.resources.convenience</a></li>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.engine.resources.kv.html">mstar.engine.resources.kv</a></li>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.engine.resources.position.html">mstar.engine.resources.position</a></li>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.engine.resources.recurrent.html">mstar.engine.resources.recurrent</a></li>
@@ -268,23 +270,9 @@
 </ul>
 </details></li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="_autosummary/mstar.model.html">mstar.model</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.model.audio_watermark.html">mstar.model.audio_watermark</a></li>
 <li class="toctree-l3 has-children"><a class="reference internal" href="_autosummary/mstar.model.chatterbox.html">mstar.model.chatterbox</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.chatterbox.config.html">mstar.model.chatterbox.config</a></li>
-</ul>
-</details></li>
-<li class="toctree-l3 has-children"><a class="reference internal" href="_autosummary/mstar.model.components.html">mstar.model.components</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.components.attention.html">mstar.model.components.attention</a></li>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.components.audio_features.html">mstar.model.components.audio_features</a></li>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.components.aut_encoder.html">mstar.model.components.aut_encoder</a></li>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.components.decoder_layer.html">mstar.model.components.decoder_layer</a></li>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.components.diffusion.html">mstar.model.components.diffusion</a></li>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.components.distributed.html">mstar.model.components.distributed</a></li>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.components.linear.html">mstar.model.components.linear</a></li>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.components.linear_attn.html">mstar.model.components.linear_attn</a></li>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.components.mlp.html">mstar.model.components.mlp</a></li>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.components.moe.html">mstar.model.components.moe</a></li>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.components.norm.html">mstar.model.components.norm</a></li>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.components.qwen3_lm.html">mstar.model.components.qwen3_lm</a></li>
 </ul>
 </details></li>
 <li class="toctree-l3 has-children"><a class="reference internal" href="_autosummary/mstar.model.cosmos3.html">mstar.model.cosmos3</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
@@ -299,8 +287,6 @@
 </details></li>
 <li class="toctree-l3 has-children"><a class="reference internal" href="_autosummary/mstar.model.flux2_klein.html">mstar.model.flux2_klein</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.flux2_klein.components.html">mstar.model.flux2_klein.components</a></li>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.flux2_klein.config.html">mstar.model.flux2_klein.config</a></li>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.flux2_klein.submodules.html">mstar.model.flux2_klein.submodules</a></li>
 </ul>
 </details></li>
 <li class="toctree-l3 has-children"><a class="reference internal" href="_autosummary/mstar.model.higgs_audio.html">mstar.model.higgs_audio</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
@@ -309,19 +295,35 @@
 </ul>
 </details></li>
 <li class="toctree-l3 has-children"><a class="reference internal" href="_autosummary/mstar.model.kokoro.html">mstar.model.kokoro</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.kokoro.components.html">mstar.model.kokoro.components</a></li>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.kokoro.config.html">mstar.model.kokoro.config</a></li>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.kokoro.g2p.html">mstar.model.kokoro.g2p</a></li>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.kokoro.submodules.html">mstar.model.kokoro.submodules</a></li>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.kokoro.voices.html">mstar.model.kokoro.voices</a></li>
 </ul>
 </details></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="_autosummary/mstar.model.lingbot_world.html">mstar.model.lingbot_world</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.lingbot_world.components.html">mstar.model.lingbot_world.components</a></li>
+<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.lingbot_world.config.html">mstar.model.lingbot_world.config</a></li>
+</ul>
+</details></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="_autosummary/mstar.model.ltx2_5.html">mstar.model.ltx2_5</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.ltx2_5.components.html">mstar.model.ltx2_5.components</a></li>
+</ul>
+</details></li>
+<li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.model.media_limits.html">mstar.model.media_limits</a></li>
 <li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.model.multimodal.html">mstar.model.multimodal</a></li>
 <li class="toctree-l3 has-children"><a class="reference internal" href="_autosummary/mstar.model.nemotron_duplex.html">mstar.model.nemotron_duplex</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.nemotron_duplex.components.html">mstar.model.nemotron_duplex.components</a></li>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.nemotron_duplex.config.html">mstar.model.nemotron_duplex.config</a></li>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.nemotron_duplex.realtime_api.html">mstar.model.nemotron_duplex.realtime_api</a></li>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.nemotron_duplex.submodules.html">mstar.model.nemotron_duplex.submodules</a></li>
+</ul>
+</details></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="_autosummary/mstar.model.omnilingual_asr.html">mstar.model.omnilingual_asr</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.omnilingual_asr.audio.html">mstar.model.omnilingual_asr.audio</a></li>
+<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.omnilingual_asr.components.html">mstar.model.omnilingual_asr.components</a></li>
+<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.omnilingual_asr.config.html">mstar.model.omnilingual_asr.config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.omnilingual_asr.tokenizer.html">mstar.model.omnilingual_asr.tokenizer</a></li>
+<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.omnilingual_asr.weight_loader.html">mstar.model.omnilingual_asr.weight_loader</a></li>
 </ul>
 </details></li>
 <li class="toctree-l3 has-children"><a class="reference internal" href="_autosummary/mstar.model.omnivoice.html">mstar.model.omnivoice</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
@@ -350,13 +352,10 @@
 <li class="toctree-l3 has-children"><a class="reference internal" href="_autosummary/mstar.model.vjepa2.html">mstar.model.vjepa2</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.vjepa2.components.html">mstar.model.vjepa2.components</a></li>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.vjepa2.config.html">mstar.model.vjepa2.config</a></li>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.vjepa2.submodules.html">mstar.model.vjepa2.submodules</a></li>
 </ul>
 </details></li>
 <li class="toctree-l3 has-children"><a class="reference internal" href="_autosummary/mstar.model.wan22.html">mstar.model.wan22</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.wan22.components.html">mstar.model.wan22.components</a></li>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.wan22.config.html">mstar.model.wan22.config</a></li>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.wan22.submodules.html">mstar.model.wan22.submodules</a></li>
 </ul>
 </details></li>
 <li class="toctree-l3 has-children"><a class="reference internal" href="_autosummary/mstar.model.waypoint.html">mstar.model.waypoint</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
@@ -374,10 +373,14 @@
 </details></li>
 <li class="toctree-l3 has-children"><a class="reference internal" href="_autosummary/mstar.model.z_image.html">mstar.model.z_image</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
 <li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.z_image.components.html">mstar.model.z_image.components</a></li>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.z_image.config.html">mstar.model.z_image.config</a></li>
-<li class="toctree-l4"><a class="reference internal" href="_autosummary/mstar.model.z_image.submodules.html">mstar.model.z_image.submodules</a></li>
 </ul>
 </details></li>
+</ul>
+</details></li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="_autosummary/mstar.observability.html">mstar.observability</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
+<li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.observability.catalog.html">mstar.observability.catalog</a></li>
+<li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.observability.metrics.html">mstar.observability.metrics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.observability.recorders.html">mstar.observability.recorders</a></li>
 </ul>
 </details></li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="_autosummary/mstar.streaming.html">mstar.streaming</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
@@ -389,6 +392,7 @@
 <li class="toctree-l2 has-children"><a class="reference internal" href="_autosummary/mstar.utils.html">mstar.utils</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
 <li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.utils.adarms_norm.html">mstar.utils.adarms_norm</a></li>
 <li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.utils.containers.html">mstar.utils.containers</a></li>
+<li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.utils.device.html">mstar.utils.device</a></li>
 <li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.utils.exitcode.html">mstar.utils.exitcode</a></li>
 <li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.utils.fast_tokenize.html">mstar.utils.fast_tokenize</a></li>
 <li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.utils.gc_freeze.html">mstar.utils.gc_freeze</a></li>
@@ -400,12 +404,14 @@
 <li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.utils.logging_config.html">mstar.utils.logging_config</a></li>
 <li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.utils.orphan.html">mstar.utils.orphan</a></li>
 <li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.utils.profiler.html">mstar.utils.profiler</a></li>
+<li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.utils.socket_prefix.html">mstar.utils.socket_prefix</a></li>
 <li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.utils.streams.html">mstar.utils.streams</a></li>
 </ul>
 </details></li>
 <li class="toctree-l2 has-children"><a class="reference internal" href="_autosummary/mstar.worker.html">mstar.worker</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
 <li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.worker.batch_builder.html">mstar.worker.batch_builder</a></li>
 <li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.worker.rid_table.html">mstar.worker.rid_table</a></li>
+<li class="toctree-l3"><a class="reference internal" href="_autosummary/mstar.worker.worker_metrics.html">mstar.worker.worker_metrics</a></li>
 </ul>
 </details></li>
 </ul>
@@ -642,7 +648,10 @@
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#step-2a-declare-your-resources">Step 2a — Declare your resources</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#two-samplers-on-one-node">Two samplers on one node</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#cross-attention-encoder-decoder-models">Cross-attention (encoder-decoder models)</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#cacheless-attention-encoder-towers">Cacheless attention (encoder towers)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#cacheless-attention-encoder-towers">Cacheless attention (encoder towers)</a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#cross-attention-between-spans">Cross-attention between spans</a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#step-3-declare-the-computation-graph">Step 3 — Declare the computation graph</a></li>
@@ -865,6 +874,14 @@ lists <code class="docutils literal notranslate"><span class="pre">robot_state</
 <code class="docutils literal notranslate"><span class="pre">action_shape</span></code> metadata). A tensor left in <code class="docutils literal notranslate"><span class="pre">model_kwargs</span></code> fails at send
 with an error that names the kwarg.</p>
 </div>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>The metadata <code class="docutils literal notranslate"><span class="pre">process_prompt</span></code> returns is laid over the request’s own
+<code class="docutils literal notranslate"><span class="pre">model_kwargs</span></code>, so a key the model reads back there (a prompt layout, a
+stream lead) must be set in every mode and listed in <code class="docutils literal notranslate"><span class="pre">INTERNAL_KWARGS</span></code>: the
+data worker drops a client’s value for it before <code class="docutils literal notranslate"><span class="pre">process_prompt</span></code>. Qwen3-TTS
+lists its prompt layout, speaker, language, clip digest and codec stream lead.</p>
+</div>
 <p>The following methods have defaults and are optional to override:
 <code class="docutils literal notranslate"><span class="pre">get_request_resource_configs</span></code> (described below), <code class="docutils literal notranslate"><span class="pre">get_sampling_config</span></code>,
 <code class="docutils literal notranslate"><span class="pre">get_max_output_tokens</span></code>, <code class="docutils literal notranslate"><span class="pre">get_autocast_dtype</span></code>, <code class="docutils literal notranslate"><span class="pre">load_image</span></code>, <code class="docutils literal notranslate"><span class="pre">load_audio</span></code>,
@@ -1028,7 +1045,11 @@ that depends on nothing: it names no cache, because it has none.</p></li>
 <code class="docutils literal notranslate"><span class="pre">PagedKVConfig</span></code> adds <code class="docutils literal notranslate"><span class="pre">max_seq_len</span></code> and five fields that
 a deployment can tune: <code class="docutils literal notranslate"><span class="pre">max_num_pages</span></code>, <code class="docutils literal notranslate"><span class="pre">page_size</span></code>, <code class="docutils literal notranslate"><span class="pre">cpu_offload_pages</span></code>
 (the number of pinned host pages used for offload; 0 disables offload),
-<code class="docutils literal notranslate"><span class="pre">prefix_cache</span></code> and <code class="docutils literal notranslate"><span class="pre">prefix_cache_salt</span></code>.</p></td>
+<code class="docutils literal notranslate"><span class="pre">prefix_cache</span></code> and <code class="docutils literal notranslate"><span class="pre">prefix_cache_salt</span></code>. <code class="docutils literal notranslate"><span class="pre">layout=KVLayout.MLA</span></code> stores one
+Multi-head Latent Attention latent per token in place of K and V. It needs
+<code class="docutils literal notranslate"><span class="pre">kv_lora_rank</span></code> and <code class="docutils literal notranslate"><span class="pre">qk_rope_head_dim</span></code>, and sets <code class="docutils literal notranslate"><span class="pre">num_kv_heads</span></code> to 1 and
+<code class="docutils literal notranslate"><span class="pre">head_dim</span></code> to their sum. Every rank holds the whole latent; only
+<code class="docutils literal notranslate"><span class="pre">num_qo_heads</span></code> shards, and MLA attention needs it set to the model’s query heads.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">KVSpec(config=RingKVConfig(...))</span></code></p></td>
 <td><p>A fixed-capacity frame ring. It adds <code class="docutils literal notranslate"><span class="pre">tokens_per_frame</span></code>, one
@@ -1037,27 +1058,43 @@ Ring storage is currently paired with FlexAttention.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">AttentionSpec(config=AttentionConfig(kv_cache=...))</span></code></p></td>
 <td><p>Self-attention planned over the named cache. <code class="docutils literal notranslate"><span class="pre">backend</span></code> selects
-<code class="docutils literal notranslate"><span class="pre">AttnBackend.FLASHINFER</span></code> (the default), <code class="docutils literal notranslate"><span class="pre">AttnBackend.DENSE</span></code> or
-<code class="docutils literal notranslate"><span class="pre">AttnBackend.FLEX</span></code>. FlashInfer and dense attention require a
-<code class="docutils literal notranslate"><span class="pre">PagedKVConfig</span></code>; FlexAttention requires a <code class="docutils literal notranslate"><span class="pre">RingKVConfig</span></code>.
+<code class="docutils literal notranslate"><span class="pre">AttnBackend.AUTO</span></code> (the default, which lets the engine pick the platform’s
+paged backend, FlashInfer for now), <code class="docutils literal notranslate"><span class="pre">AttnBackend.FLASHINFER</span></code>,
+<code class="docutils literal notranslate"><span class="pre">AttnBackend.DENSE</span></code>, <code class="docutils literal notranslate"><span class="pre">AttnBackend.FLEX</span></code> or <code class="docutils literal notranslate"><span class="pre">AttnBackend.FLASHINFER_MLA</span></code>.
+Leave it at <code class="docutils literal notranslate"><span class="pre">AUTO</span></code> unless the model needs a specific kernel. FlashInfer, dense
+and MLA attention require a <code class="docutils literal notranslate"><span class="pre">PagedKVConfig</span></code>; FlexAttention requires a
+<code class="docutils literal notranslate"><span class="pre">RingKVConfig</span></code>.
 <code class="docutils literal notranslate"><span class="pre">flashinfer_backend</span></code> selects a kernel generation: <code class="docutils literal notranslate"><span class="pre">&quot;auto&quot;</span></code>, <code class="docutils literal notranslate"><span class="pre">&quot;fa2&quot;</span></code> or
-<code class="docutils literal notranslate"><span class="pre">&quot;fa3&quot;</span></code> when the FlashInfer backend is selected.</p></td>
+<code class="docutils literal notranslate"><span class="pre">&quot;fa3&quot;</span></code> when the FlashInfer backend is selected. <code class="docutils literal notranslate"><span class="pre">FLASHINFER_MLA</span></code> is
+Multi-head Latent Attention over a <code class="docutils literal notranslate"><span class="pre">KVLayout.MLA</span></code> cache. It needs <code class="docutils literal notranslate"><span class="pre">sm_scale</span></code>,
+the softmax scale of the model’s original qk head dim, which the other backends
+refuse. Its <code class="docutils literal notranslate"><span class="pre">run</span></code> takes the absorbed query (<code class="docutils literal notranslate"><span class="pre">[tokens,</span> <span class="pre">heads,</span> <span class="pre">kv_lora_rank]</span></code>)
+with the rope part as <code class="docutils literal notranslate"><span class="pre">q_pe</span></code>, and returns the output in the latent space, so
+the layer applies <code class="docutils literal notranslate"><span class="pre">W_UV</span></code>. FlashInfer’s kernel covers a 512-wide latent with a
+64-wide rope part, or none from FlashInfer 0.6.18; any other shape runs a torch
+fallback, which cannot be captured in a CUDA graph.</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">CrossAttentionSpec(config=CrossAttentionConfig(...))</span></code></p></td>
-<td><p>Attention over a paged context that is written once and never extended. Only
-the FlashInfer backend is implemented. See <a class="reference internal" href="#cross-attention-encoder-decoder-models">Cross-attention (encoder-decoder
-models)</a>.</p></td>
+<td><p>Attention over a paged context that is written once and never extended.
+<code class="docutils literal notranslate"><span class="pre">backend</span></code> defaults to <code class="docutils literal notranslate"><span class="pre">AttnBackend.AUTO</span></code>. Only FlashInfer is implemented.
+See <a class="reference internal" href="#cross-attention-encoder-decoder-models">Cross-attention (encoder-decoder models)</a>.</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">RaggedAttentionSpec(config=RaggedAttentionConfig(...))</span></code></p></td>
 <td><p>Cacheless (ragged) varlen self-attention over the segments packed into one
 forward. Nothing is paged, and nothing carries to the next step.
 <code class="docutils literal notranslate"><span class="pre">RaggedAttentionConfig</span></code> holds <code class="docutils literal notranslate"><span class="pre">num_qo_heads</span></code>, <code class="docutils literal notranslate"><span class="pre">num_kv_heads</span></code> and
 <code class="docutils literal notranslate"><span class="pre">head_dim</span></code> (all pre-sharding, as in <code class="docutils literal notranslate"><span class="pre">KVConfig</span></code>), an <code class="docutils literal notranslate"><span class="pre">sm_scale</span></code> that
-defaults to <code class="docutils literal notranslate"><span class="pre">head_dim</span> <span class="pre">**</span> <span class="pre">-0.5</span></code>, <code class="docutils literal notranslate"><span class="pre">flashinfer_backend</span></code>, and the two
-CUDA-graph ceilings <code class="docutils literal notranslate"><span class="pre">max_segments_per_request</span></code> and
+defaults to <code class="docutils literal notranslate"><span class="pre">head_dim</span> <span class="pre">**</span> <span class="pre">-0.5</span></code>, <code class="docutils literal notranslate"><span class="pre">backend</span></code> (<code class="docutils literal notranslate"><span class="pre">RaggedAttnBackend.AUTO</span></code>, the
+default, or <code class="docutils literal notranslate"><span class="pre">RaggedAttnBackend.FLASHINFER</span></code>), <code class="docutils literal notranslate"><span class="pre">flashinfer_backend</span></code>, and the
+two CUDA-graph ceilings <code class="docutils literal notranslate"><span class="pre">max_segments_per_request</span></code> and
 <code class="docutils literal notranslate"><span class="pre">max_tokens_per_request</span></code>. See <a class="reference internal" href="#cacheless-attention-encoder-towers">Cacheless attention (encoder towers)</a>.</p></td>
 </tr>
-<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">PositionSpec(config=PositionConfig(kv_cache=...))</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">RaggedCrossAttentionSpec(config=RaggedAttentionConfig(...))</span></code></p></td>
+<td><p>The cross-attention counterpart: one span of each request attends another
+(<code class="docutils literal notranslate"><span class="pre">RaggedCrossAttentionStep(pairs=...)</span></code>). Same config. See <a class="reference internal" href="#cross-attention-between-spans">Cross-attention
+between spans</a>.</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">PositionSpec(config=PositionConfig(kv_cache=...))</span></code></p></td>
 <td><p>Position tracking and RoPE. <code class="docutils literal notranslate"><span class="pre">scheme</span></code> is <code class="docutils literal notranslate"><span class="pre">PosScheme.SEQUENTIAL</span></code> or
 <code class="docutils literal notranslate"><span class="pre">PosScheme.BLOCK</span></code>. The RoPE parameters are set here: <code class="docutils literal notranslate"><span class="pre">rope_theta</span></code>,
 <code class="docutils literal notranslate"><span class="pre">rope_scale</span></code>, and the Llama-3.1 parameters <code class="docutils literal notranslate"><span class="pre">low_freq_factor</span></code>,
@@ -1065,7 +1102,7 @@ CUDA-graph ceilings <code class="docutils literal notranslate"><span class="pre"
 embeddings also declares this spec, because it needs the position counter. Such a
 model never applies RoPE.</p></td>
 </tr>
-<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">SamplerSpec(vocab_size=...,</span> <span class="pre">enable_repetion_penalty=...)</span></code></p></td>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">SamplerSpec(vocab_size=...,</span> <span class="pre">enable_repetion_penalty=...)</span></code></p></td>
 <td><p>A sampler with its own per-request parameter buffers, philox stream, and optional
 seen-token mask. <code class="docutils literal notranslate"><span class="pre">enable_repetion_penalty</span></code> declares a capability, not an
 intention. It selects which kernel variant is recorded into the captured graph.
@@ -1257,6 +1294,25 @@ previous step’s plan. Because the tower is normally captured as a piecewise re
 declaration lives in the region’s <code class="docutils literal notranslate"><span class="pre">declare_step</span></code>, and names no <code class="docutils literal notranslate"><span class="pre">KVStep</span></code>. See
 <code class="docutils literal notranslate"><span class="pre">mstar/model/bagel/submodules.py</span></code>, region <code class="docutils literal notranslate"><span class="pre">&quot;vit_block_loop&quot;</span></code>, and <a class="reference internal" href="#piecewise-cuda-graphs-capturing-an-inner-loop">Piecewise CUDA
 graphs (capturing an inner loop)</a>.</p>
+<section id="cross-attention-between-spans">
+<h4>Cross-attention between spans<a class="headerlink" href="#cross-attention-between-spans" title="Link to this heading">#</a></h4>
+<p>A diffusion transformer whose streams attend each other (video queries over text keys, or
+audio over video) has several spans per request and no cache either. Declare each span as
+its own label, and the cross-attentions as a <code class="docutils literal notranslate"><span class="pre">RaggedCrossAttentionSpec</span></code> beside the
+<code class="docutils literal notranslate"><span class="pre">RaggedAttentionSpec</span></code> for the self-attention: a resource is one kind of attention. Its
+step names the <code class="docutils literal notranslate"><span class="pre">(q_label,</span> <span class="pre">kv_label)</span></code> pairs:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">RaggedCrossAttentionStep</span><span class="p">(</span>
+    <span class="n">segments</span><span class="o">=</span><span class="n">segments</span><span class="p">,</span>              <span class="c1"># one Segment per (request, label) the pairs use</span>
+    <span class="n">pairs</span><span class="o">=</span><span class="p">((</span><span class="s2">"video"</span><span class="p">,</span> <span class="s2">"text"</span><span class="p">),</span> <span class="p">(</span><span class="s2">"audio"</span><span class="p">,</span> <span class="s2">"video"</span><span class="p">)),</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p>Each pair is planned as its own layout, pairing each request’s <code class="docutils literal notranslate"><span class="pre">q_label</span></code> span with that
+request’s <code class="docutils literal notranslate"><span class="pre">kv_label</span></code> span; cross-attention is never causal. A layer attends through
+<code class="docutils literal notranslate"><span class="pre">RaggedAttentionCallable(resource,</span> <span class="pre">cross_label(q_label,</span> <span class="pre">kv_label))</span></code>, passing the key
+span’s tokens as <code class="docutils literal notranslate"><span class="pre">k</span></code> and <code class="docutils literal notranslate"><span class="pre">v</span></code>. One resource has one head geometry, so a model whose
+attentions differ in head count or head dim declares one spec per (kind, geometry).
+LTX-2.5 is the reference (<code class="docutils literal notranslate"><span class="pre">mstar/model/ltx2_5/submodules.py</span></code>).</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>The eager varlen path is sometimes good to have. The BAGEL ViT has a head dimension of
@@ -1264,6 +1320,7 @@ graphs (capturing an inner loop)</a>.</p>
 us to zero-pad to 128. So that tower attends through the resource only when it is
 replaying a captured graph, and runs flash-attn varlen otherwise.</p>
 </div>
+</section>
 </section>
 </section>
 <section id="step-3-declare-the-computation-graph">
@@ -1413,7 +1470,10 @@ nothing. A request contributes one segment per label that is active for it.</p><
 <li><p>The <code class="docutils literal notranslate"><span class="pre">segments</span></code> argument of <code class="docutils literal notranslate"><span class="pre">SubmoduleStep</span></code> is a default value. Any <code class="docutils literal notranslate"><span class="pre">ResourceStep</span></code>
 that does not set its own <code class="docutils literal notranslate"><span class="pre">segments</span></code> uses this list.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">KVStep(commit=,</span> <span class="pre">combined_labels=,</span> <span class="pre">pre_forks=,</span> <span class="pre">post_forks=)</span></code>. See below.</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">AttentionStep(causal=)</span></code> describes the attention plan. A <code class="docutils literal notranslate"><span class="pre">RaggedAttentionSpec</span></code>
+<li><p><code class="docutils literal notranslate"><span class="pre">AttentionStep(causal=,</span> <span class="pre">context_only=)</span></code> describes the attention plan.
+<code class="docutils literal notranslate"><span class="pre">context_only=True</span></code> has the queries attend to the stored context alone, not to the
+tokens this step appends, and the step’s own <code class="docutils literal notranslate"><span class="pre">segments</span></code> then give the query counts.
+Only the MLA backend reads it; the others refuse it. A <code class="docutils literal notranslate"><span class="pre">RaggedAttentionSpec</span></code>
 steps through this same type. There, the segments are the whole layout rather than an
 extension of a cache. See <a class="reference internal" href="#cacheless-attention-encoder-towers">Cacheless attention (encoder towers)</a>.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">PositionStep(pos_ids=,</span> <span class="pre">advance=)</span></code>. With <code class="docutils literal notranslate"><span class="pre">pos_ids=None</span></code>, positions are derived from
@@ -1599,6 +1659,15 @@ When a batch runs, the engine calls this method instead of the single-request
 <code class="docutils literal notranslate"><span class="pre">forward</span></code>.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">max_batch_size(self,</span> <span class="pre">graph_walk)</span></code> sets an optional upper limit.</p></li>
 </ul>
+<p><strong>Combined walks.</strong> By default a step holds one walk. A model lets several walks of a node
+share a step by returning <code class="docutils literal notranslate"><span class="pre">{node:</span> <span class="pre">{combined_walk:</span> <span class="pre">{walks}}}</span></code> from
+<code class="docutils literal notranslate"><span class="pre">get_combined_graph_walks</span></code>, for example decode rows beside a prompt’s prefill. The
+combined walk is a name of its own, which <code class="docutils literal notranslate"><span class="pre">max_batch_size</span></code> and the CUDA-graph configs
+can key on. A step of one walk keeps that walk’s cap. A step that mixes walks takes the
+combined walk’s <code class="docutils literal notranslate"><span class="pre">max_batch_size</span></code> when it has one, else the smallest cap of the walks it
+holds, so a small prefill cap never limits a decode-only step.
+<code class="docutils literal notranslate"><span class="pre">max_rows_in_combined(self,</span> <span class="pre">graph_walk)</span></code> also bounds how many rows of one walk a mixed
+step may hold, for kernels sized to a few prompt rows (see <code class="docutils literal notranslate"><span class="pre">CombinedSplit</span></code>).</p>
 <p><code class="docutils literal notranslate"><span class="pre">ARNodeSubmodule</span></code> declares <code class="docutils literal notranslate"><span class="pre">preprocess</span></code> abstract because autoregressive nodes are
 expected to collate a batch. You can still disable batching for one node, or for specific
 walks, by returning <code class="docutils literal notranslate"><span class="pre">False</span></code> from <code class="docutils literal notranslate"><span class="pre">can_batch</span></code> in those cases.</p>
@@ -1657,6 +1726,11 @@ one place. This field replaces the removed <code class="docutils literal notrans
 engine’s eager batch size for the walk. The default is <code class="docutils literal notranslate"><span class="pre">True</span></code>, so the engine never
 batches beyond a captured size.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">compile</span></code> runs <code class="docutils literal notranslate"><span class="pre">torch.compile</span></code> before capture. The default is <code class="docutils literal notranslate"><span class="pre">True</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">compile_mode</span></code> is that <code class="docutils literal notranslate"><span class="pre">torch.compile</span></code>’s mode. The default, <code class="docutils literal notranslate"><span class="pre">None</span></code>, is
+<code class="docutils literal notranslate"><span class="pre">max-autotune-no-cudagraphs</span></code>. <code class="docutils literal notranslate"><span class="pre">default</span></code> keeps Inductor’s fusion but takes cuBLAS for
+every GEMM and skips autotuning. Building the config refuses an unknown mode, and one
+that turns on Inductor’s own CUDA graphs (<code class="docutils literal notranslate"><span class="pre">reduce-overhead</span></code>, <code class="docutils literal notranslate"><span class="pre">max-autotune</span></code>), which
+fail inside the runner’s capture.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">required</span></code> makes every bucket in the config mandatory. If capture fails locally or
 on another participating rank, warmup raises after rank-wide agreement instead of
 dropping the bucket and falling back to eager execution. The default is <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
@@ -1771,6 +1845,7 @@ them.</p></li>
 default.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">compile</span></code> runs <code class="docutils literal notranslate"><span class="pre">torch.compile</span></code> on <code class="docutils literal notranslate"><span class="pre">capture_fn</span></code> before capture. The default is
 <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">compile_mode</span></code> is that <code class="docutils literal notranslate"><span class="pre">torch.compile</span></code>’s mode, as on <code class="docutils literal notranslate"><span class="pre">AcceleratorGraphConfig</span></code>.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">required</span></code> makes every declared shape mandatory. If any participating rank cannot
 capture one, warmup raises instead of leaving that shape on the eager path. The default
 is <code class="docutils literal notranslate"><span class="pre">False</span></code>.</p></li>
@@ -1894,7 +1969,9 @@ embedding and the RoPE gathers left eager because they are data-dependent indexi
 <span id="config-yaml"></span><h2>Step 6 — Write a config YAML<a class="headerlink" href="#step-6-write-a-config-yaml" title="Link to this heading">#</a></h2>
 <p>A config maps nodes to GPU ranks. The value under <code class="docutils literal notranslate"><span class="pre">model:</span></code> is your registry key. Each
 <code class="docutils literal notranslate"><span class="pre">node_groups</span></code> entry assigns one or more <code class="docutils literal notranslate"><span class="pre">node_names</span></code> to <code class="docutils literal notranslate"><span class="pre">ranks</span></code>. An entry can also
-name specific <code class="docutils literal notranslate"><span class="pre">graph_walks</span></code>, which is how prefill-decode disaggregation is expressed.</p>
+name specific <code class="docutils literal notranslate"><span class="pre">graph_walks</span></code>, which is how prefill-decode disaggregation is expressed.
+Every node of a walk must be placed by exactly one entry that applies to that walk; the
+conductor refuses a config that places it twice or not at all.</p>
 <div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="s">"your_model"</span>
 <span class="nt">max_seq_len</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2048</span>
 <span class="nt">node_groups</span><span class="p">:</span>
@@ -1942,18 +2019,18 @@ that a misspelled setting is never silently ignored:</p>
 <td><p><code class="docutils literal notranslate"><span class="pre">num_sessions</span></code></p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">AttentionSpec</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">backend</span></code> (<code class="docutils literal notranslate"><span class="pre">flashinfer</span></code> / <code class="docutils literal notranslate"><span class="pre">dense</span></code> / <code class="docutils literal notranslate"><span class="pre">flex</span></code>),
+<td><p><code class="docutils literal notranslate"><span class="pre">backend</span></code> (<code class="docutils literal notranslate"><span class="pre">auto</span></code> / <code class="docutils literal notranslate"><span class="pre">flashinfer</span></code> / <code class="docutils literal notranslate"><span class="pre">dense</span></code> / <code class="docutils literal notranslate"><span class="pre">flex</span></code> / <code class="docutils literal notranslate"><span class="pre">xpu_paged</span></code>),
 <code class="docutils literal notranslate"><span class="pre">flashinfer_backend</span></code> (<code class="docutils literal notranslate"><span class="pre">auto</span></code> / <code class="docutils literal notranslate"><span class="pre">fa2</span></code> / <code class="docutils literal notranslate"><span class="pre">fa3</span></code>)</p></td>
 </tr>
 <tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">CrossAttentionSpec</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">backend</span></code> (only <code class="docutils literal notranslate"><span class="pre">flashinfer</span></code> is implemented), <code class="docutils literal notranslate"><span class="pre">flashinfer_backend</span></code>
+<td><p><code class="docutils literal notranslate"><span class="pre">backend</span></code> (<code class="docutils literal notranslate"><span class="pre">auto</span></code> / <code class="docutils literal notranslate"><span class="pre">flashinfer</span></code>), <code class="docutils literal notranslate"><span class="pre">flashinfer_backend</span></code>
 (<code class="docutils literal notranslate"><span class="pre">auto</span></code> / <code class="docutils literal notranslate"><span class="pre">fa2</span></code> / <code class="docutils literal notranslate"><span class="pre">fa3</span></code>)</p></td>
 </tr>
 <tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">RaggedAttentionSpec</span></code></p></td>
-<td><p><code class="docutils literal notranslate"><span class="pre">flashinfer_backend</span></code> (<code class="docutils literal notranslate"><span class="pre">auto</span></code> / <code class="docutils literal notranslate"><span class="pre">fa2</span></code> / <code class="docutils literal notranslate"><span class="pre">fa3</span></code>),
-<code class="docutils literal notranslate"><span class="pre">max_segments_per_request</span></code>, <code class="docutils literal notranslate"><span class="pre">max_tokens_per_request</span></code>. The two ceilings size
-CUDA-graph buckets, which is a memory-against-coverage trade the deployment makes,
-not the model.</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">backend</span></code> (<code class="docutils literal notranslate"><span class="pre">auto</span></code> / <code class="docutils literal notranslate"><span class="pre">flashinfer</span></code>), <code class="docutils literal notranslate"><span class="pre">flashinfer_backend</span></code>
+(<code class="docutils literal notranslate"><span class="pre">auto</span></code> / <code class="docutils literal notranslate"><span class="pre">fa2</span></code> / <code class="docutils literal notranslate"><span class="pre">fa3</span></code>), <code class="docutils literal notranslate"><span class="pre">max_segments_per_request</span></code>,
+<code class="docutils literal notranslate"><span class="pre">max_tokens_per_request</span></code>. The two ceilings size CUDA-graph buckets, which is a
+memory-against-coverage trade the deployment makes, not the model.</p></td>
 </tr>
 </tbody>
 </table>
@@ -2264,11 +2341,18 @@ embeddings, so the planned ids index an <code class="docutils literal notranslat
 The <code class="docutils literal notranslate"><span class="pre">SamplerSpec</span></code> sets <code class="docutils literal notranslate"><span class="pre">enable_repetion_penalty=False</span></code>, because ASR transcription
 decodes greedily.</p>
 <p>The page counts show how to size a cache for a specific model instead of using the
-default. A sequence is at most <code class="docutils literal notranslate"><span class="pre">max_target_positions</span></code> (448) tokens, which is 4 pages per
-request. 128 pages therefore support about 32 concurrent requests and use about 2.7 GB.
-The 2048-page default would use about 43 GB. The fixed 30-second context window is
-<code class="docutils literal notranslate"><span class="pre">max_source_positions</span></code> (1500) tokens, which is 12 pages per request, so 192 pages
-support about 16 concurrent requests.</p>
+default. Both caches use 128-token pages and hold <code class="docutils literal notranslate"><span class="pre">WhisperModel.MAX_CONCURRENT_REQUESTS</span></code>
+(64) requests at full length, plus the sink page that every <code class="docutils literal notranslate"><span class="pre">KVManager</span></code> keeps out of
+circulation. A sequence is at most <code class="docutils literal notranslate"><span class="pre">max_target_positions</span></code> (448) tokens, which is 4 pages
+per request, so the self-attention cache has 64 * 4 + 1 = 257 pages, about 5 GiB for
+large-v3 in bf16. The 2048-page default would use about 40 GiB. The fixed 30-second context
+window is <code class="docutils literal notranslate"><span class="pre">max_source_positions</span></code> (1500) tokens, which is 12 pages per request held from
+prefill to the last token, so the context cache has 64 * 12 + 1 = 769 pages, about 15 GiB.
+Sizing the caches is only half of it: <code class="docutils literal notranslate"><span class="pre">configs/whisper_large.yaml</span></code> also sets
+<code class="docutils literal notranslate"><span class="pre">max_concurrent_requests:</span> <span class="pre">64</span></code>, so the conductor queues further requests instead of the
+worker offloading decoding requests to admit them. <code class="docutils literal notranslate"><span class="pre">WhisperModel.validate_config_yaml</span></code>
+refuses at startup a cap that either cache cannot hold after the YAML’s <code class="docutils literal notranslate"><span class="pre">resources:</span></code>
+overrides.</p>
 <p>Whisper’s <code class="docutils literal notranslate"><span class="pre">declare_step</span></code> shows how a write-once context is expressed with spans. The
 context segments have a non-zero span in the prefill step that writes them, and a span of
 0 in every later step. The <code class="docutils literal notranslate"><span class="pre">commit</span></code> in the prefill step converts the reservation into
@@ -2345,13 +2429,22 @@ Override these methods:</p>
 objects between them, including a <code class="docutils literal notranslate"><span class="pre">chunk_policy_factory</span></code> such as
 <code class="docutils literal notranslate"><span class="pre">SlidingWindowChunkPolicy(window=...,</span> <span class="pre">stride=...)</span></code>.</p></li>
 <li><p><code class="docutils literal notranslate"><span class="pre">get_partitions()</span></code> declares each <code class="docutils literal notranslate"><span class="pre">PartitionDefinition</span></code>: its walks, its initial walk,
-and the partitions that produce data into it.</p></li>
+and the partitions that produce data into it. Every walk belongs to exactly one
+partition.</p></li>
 <li><p>Route cross-partition tensors with <code class="docutils literal notranslate"><span class="pre">StreamingGraphEdge(next_node=...,</span> <span class="pre">name=...,</span>
 <span class="pre">target_partition=...)</span></code> instead of a plain <code class="docutils literal notranslate"><span class="pre">GraphEdge</span></code>.</p></li>
 </ul>
 <p>The consuming partition’s <code class="docutils literal notranslate"><span class="pre">get_partition_forward_pass_args</span></code> reads
 <code class="docutils literal notranslate"><span class="pre">incoming_connections</span></code>, which provides token counts and a <code class="docutils literal notranslate"><span class="pre">producer_done</span></code> flag, and
 uses them to decide when to run.</p>
+<p>Keep a walk that consumes a stream to one node or one <code class="docutils literal notranslate"><span class="pre">Loop</span></code> on one node group, and move
+later work into a downstream partition fed by its own <code class="docutils literal notranslate"><span class="pre">StreamingGraphEdge</span></code>. A consumer
+whose every input is streamed runs again as soon as the next chunk arrives, and the
+runtime and conductor count passes per worker graph, so the conductor refuses at startup
+such a consumer sharing its worker graph with another top-level node or <code class="docutils literal notranslate"><span class="pre">Loop</span></code>, and a
+stream-consuming walk split over worker graphs, unless every consumer also waits on a
+non-streamed input and all the walk’s worker graphs run on the same workers. That input
+must arrive once per pass (from the conductor, say); startup cannot check this.</p>
 </section>
 <section id="checklist">
 <h2>Checklist<a class="headerlink" href="#checklist" title="Link to this heading">#</a></h2>
@@ -2486,7 +2579,10 @@ for a full omni-modal model.</p>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#step-2a-declare-your-resources">Step 2a — Declare your resources</a><ul class="pst-show_toc_level nav section-nav flex-column">
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#two-samplers-on-one-node">Two samplers on one node</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#cross-attention-encoder-decoder-models">Cross-attention (encoder-decoder models)</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#cacheless-attention-encoder-towers">Cacheless attention (encoder towers)</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#cacheless-attention-encoder-towers">Cacheless attention (encoder towers)</a><ul class="nav section-nav flex-column">
+<li class="toc-h4 nav-item toc-entry"><a class="reference internal nav-link" href="#cross-attention-between-spans">Cross-attention between spans</a></li>
+</ul>
+</li>
 </ul>
 </li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#step-3-declare-the-computation-graph">Step 3 — Declare the computation graph</a></li>
@@ -2546,7 +2642,7 @@ By M* Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Oct 17, 2026.
+  Last updated on Oct 21, 2026.
   <br/>
 </p>
   </div>

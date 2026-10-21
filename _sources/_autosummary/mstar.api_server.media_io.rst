@@ -15,27 +15,49 @@ mstar.api\_server.media\_io
    
       audio_formats
       check_audio_format
+      check_ref_audio
+      check_resample_rate
       decode_audio
+      decode_torchcodec_capped
       modality_from_mime
       mux_mp4_with_pcm16
       pcm16_to_container
       pcm16_to_wav_bytes
       png_to_data_url
+      read_soundfile_capped
+      resample_kernel_size
       resolve_media_ref
       save_base64
+      save_base64_audio
       save_data_url
       save_remote_url
       split_windows
+      torchcodec_samples_capped
       wav_stream_header
+      window_stop
       write_wav
    
    
 
    
    
+   .. rubric:: Classes
+
+   .. autosummary::
+   
+      StreamResampler
+   
    
 
    
+   
+   .. rubric:: Exceptions
+
+   .. autosummary::
+   
+      AudioRefusedError
+      AudioTooLongError
+      RefAudioTooLongError
    
    
 

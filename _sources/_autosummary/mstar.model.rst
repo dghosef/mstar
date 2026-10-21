@@ -27,16 +27,22 @@
    :toctree:
    :recursive:
 
+   audio_watermark
    base
    chatterbox
    components
    cosmos3
+   fish_s2_pro
    flux2_klein
    higgs_audio
    kokoro
+   lingbot_world
    loader
+   ltx2_5
+   media_limits
    multimodal
    nemotron_duplex
+   omnilingual_asr
    omnivoice
    orpheus
    pi05
