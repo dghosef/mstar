@@ -8,6 +8,9 @@ model: "wan22"
 # avoids rank 1 idling through rank 0's VAE decode.
 max_seq_len: 512
 
+model_kwargs:
+  vae_decode_fast_sizes: ["1280x704", "832x480"]
+
 node_groups:
   - node_names:
       - text_encoder
