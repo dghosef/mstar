@@ -1403,11 +1403,9 @@ def _run_warmup_requests(server: APIServer, specs: list, copies: int = 1) -> Non
     warmup that is malformed or fails is logged and skipped; it must not keep
     the server from coming up.
 
-    Each spec runs as ``copies`` x its ``concurrency`` concurrent requests:
-    ``copies`` warms every replica of a data-parallel deployment, since the
-    conductor sends concurrent requests to different replicas (the
-    least-loaded one each), and ``concurrency`` lets them batch, for a step
-    that compiles per batch size.
+    Each spec runs as ``copies`` concurrent requests: a data-parallel
+    deployment warms every replica, since the conductor sends concurrent
+    requests to different replicas (the least-loaded one each).
     """
     if not isinstance(specs, list):
         logger.warning("warmup_requests must be a list; ignoring %r", type(specs).__name__)
@@ -1417,8 +1415,7 @@ def _run_warmup_requests(server: APIServer, specs: list, copies: int = 1) -> Non
         await server.collect_results(request.submit(server, request_id))
 
     async def _all(request: WarmupRequest, index: int) -> None:
-        n = copies * request.concurrency
-        ids = [f"warmup-{index}"] + [f"warmup-{index}-{c}" for c in range(1, n)]
+        ids = [f"warmup-{index}"] + [f"warmup-{index}-{c}" for c in range(1, copies)]
         await asyncio.gather(*(_one(request, rid) for rid in ids))
 
     for index, spec in enumerate(specs):

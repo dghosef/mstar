@@ -163,14 +163,3 @@ def test_warmup_reaches_every_data_parallel_replica() -> None:
     fake = _FakeServer()
     entrypoint._run_warmup_requests(fake, [{"text": "a"}, {"text": "b"}], copies=2)
     assert [s["request_id"] for s in fake.submitted] == ["warmup-0", "warmup-0-1", "warmup-1", "warmup-1-1"]
-
-
-def test_concurrency_runs_copies_together_for_batched_shapes() -> None:
-    """``concurrency: N`` submits N copies at once (times the replica count), so
-    a step compiled per batch size sees that batch before the bind."""
-    fake = _FakeServer()
-    entrypoint._run_warmup_requests(fake, [{"text": "a", "concurrency": 3}], copies=2)
-    assert [s["request_id"] for s in fake.submitted] == [f"warmup-0{s}" for s in ("", "-1", "-2", "-3", "-4", "-5")]
-    fake = _FakeServer()
-    entrypoint._run_warmup_requests(fake, [{"text": "a", "concurrency": 0}, {"text": "b", "concurrency": True}])
-    assert fake.submitted == []
