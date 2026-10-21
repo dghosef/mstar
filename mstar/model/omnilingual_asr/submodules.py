@@ -49,8 +49,9 @@ def _full_fp32_matmuls(enabled: bool):
 
 
 class OmniASRCTCSubmodule(NodeSubmodule):
-    # Every request has its own length, so a compiled forward would recompile
-    # per shape; the encoder runs eagerly.
+    # Every request has its own length, so the engine's compile of the whole
+    # forward would recompile per shape; the encoder runs eagerly. The conv
+    # feature extractor alone is compiled (below), dynamic from the first call.
     disable_torch_compile = True
     # The model runs in its own dtype end to end, as the reference does (only
     # the conv stack's LayerNorms upcast to fp32), not under autocast.
@@ -62,6 +63,19 @@ class OmniASRCTCSubmodule(NodeSubmodule):
         self.dtype = next(model.parameters()).dtype
         self._max_batch_size = max_batch_size
         self._max_batch_samples = int(max_batch_seconds * SAMPLE_RATE)
+        # Eager, each conv layer's channel LayerNorm (in fp32, over a transposed
+        # copy) costs more than the conv: about half the GPU time of a batched
+        # step. Inductor fuses the transposes, the norm and the GELU.
+        self._compiled_features = torch.compile(model.encoder_frontend.feature_extractor, dynamic=True)
+
+    def warm_compile(self, device: str) -> None:
+        """Compile the feature extractor at load rather than on a live request:
+        one graph for a lone clip (size-1 dims specialize) and the dynamic one."""
+        if torch.device(device).type == "cpu":
+            return
+        with torch.no_grad():
+            for rows in (1, 2):
+                self._compiled_features(torch.zeros(rows, SAMPLE_RATE, dtype=self.dtype, device=device))
 
     def prepare_inputs(
         self,
@@ -116,7 +130,11 @@ class OmniASRCTCSubmodule(NodeSubmodule):
                 batch[i, : lengths[row]] = waveforms[row]
             padded = any(n < longest for n in group_lens)
             with _full_fp32_matmuls(self.dtype == torch.float32 and batch.is_cuda):
-                logits, frame_lens = self.model(batch, group_lens if padded else None)
+                logits, frame_lens = self.model(
+                    batch, group_lens if padded else None,
+                    # CPU (tests) stays eager
+                    features=self._compiled_features if batch.device.type != "cpu" else None,
+                )
             ids = logits.argmax(dim=-1)
             for i, (row, n) in enumerate(zip(group, frame_lens, strict=True)):
                 out[row] = ids[i, :n]

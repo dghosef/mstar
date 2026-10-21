@@ -246,4 +246,6 @@ class OmnilingualASRModel(Model):
             Path(path).name,
             device,
         )
-        return OmniASRCTCSubmodule(model, self.max_batch_size, self.max_batch_seconds)
+        submodule = OmniASRCTCSubmodule(model, self.max_batch_size, self.max_batch_seconds)
+        submodule.warm_compile(device)
+        return submodule
