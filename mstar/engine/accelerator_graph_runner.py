@@ -2123,6 +2123,11 @@ class PiecewiseAcceleratorGraphRunner:
         """Whether this region takes its slot ahead of the declaration."""
         return self._config.lease_before_step
 
+    @property
+    def one_row_per_step(self) -> bool:
+        """Whether a replay carries the whole step as one row."""
+        return self._config.one_row_per_step
+
     def lease_slot(
         self, batch_size: int, total_tokens: int | None = None,
     ) -> SlotLease | None:

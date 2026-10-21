@@ -1481,7 +1481,7 @@ class Engine:
         for label, runner in runners.items():
             if not runner.lease_before_step:
                 continue
-            lease = runner.lease_slot(bs, total_tokens)
+            lease = runner.lease_slot(1 if runner.one_row_per_step else bs, total_tokens)
             if lease is not None:
                 leases[label] = lease
         if leases:

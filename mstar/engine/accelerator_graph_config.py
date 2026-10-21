@@ -292,6 +292,10 @@ class PiecewiseAcceleratorGraphConfig(ABC):
     # own work; the lease only tells the outer declaration which resources are
     # already spoken for, so it can leave them out.
     lease_before_step: bool = False
+    # The region replays a whole step as ONE row, however many requests the
+    # step carries (a vision tower packing every request's images as segments
+    # of one ragged batch), so its slot is leased at batch size 1.
+    one_row_per_step: bool = False
     # static kwargs threaded into capture_fn (e.g. cond_tokens, is_causal)
     forward_kwargs: dict[str, Any] = field(default_factory=dict)
     # None => defer to the runner's default batch-size buckets
