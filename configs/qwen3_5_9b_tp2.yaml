@@ -1,5 +1,8 @@
 model: "qwen3_5_9b"
 max_seq_len: 32768
+# GIL switch interval of the API server process (see docs/serving.rst):
+# token streaming keeps three of its threads busy
+api_switch_interval_s: 0.001
 node_groups:
   # Text and images; video is refused (see `process_prompt`). Colocated: the
   # encoder runs once per request, then idles.
