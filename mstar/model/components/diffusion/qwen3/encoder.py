@@ -209,6 +209,7 @@ class Qwen3HiddenStateEncoder(nn.Module):
             raise ValueError("tap layers are 1-indexed decoder layers (0 would be the raw embeddings)")
         self.tap_layers = tuple(tap_layers)
         self.head_dim, self.rope_theta = head_dim, rope_theta
+        self._rotary_cache: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
         self.embed_tokens = nn.Embedding(vocab_size, hidden_size)
         self.layers = nn.ModuleList(
             DecoderLayer(
@@ -226,18 +227,32 @@ class Qwen3HiddenStateEncoder(nn.Module):
     def dtype(self) -> torch.dtype:
         return self.embed_tokens.weight.dtype
 
-    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor, padded: bool | None = None,
+    ) -> torch.Tensor:
         """``input_ids, attention_mask [B, S]`` (right padded) -> ``[B, S, len(taps) * hidden]``.
 
         Follows HF's two attention paths exactly: a batch without padding attends mask-free
         (``is_causal`` + native GQA), a padded one through a boolean causal-and-key-padding
         mask; the two pick different SDPA kernels, so the choice is part of parity.
+
+        ``padded`` is whether any row has padding, when the caller knows it on the host;
+        None reads it off ``attention_mask``, a host sync (and not graph-capturable).
         """
         seq = input_ids.shape[1]
-        rotary = qwen3_rotary_tables(torch.arange(seq, device=input_ids.device), self.head_dim, self.rope_theta)
+        # cached per (length, device): building them copies inv_freq from the host, which a
+        # captured forward cannot do (and the tables never change)
+        key = (seq, input_ids.device)
+        rotary = self._rotary_cache.get(key)
+        if rotary is None:
+            rotary = self._rotary_cache[key] = qwen3_rotary_tables(
+                torch.arange(seq, device=input_ids.device), self.head_dim, self.rope_theta,
+            )
         # No padding anywhere in the batch: HF's create_causal_mask returns None and attention
         # runs its is_causal path; mirror that rather than passing an all-True mask.
-        mask = None if bool(attention_mask.all()) else padded_causal_mask(attention_mask)
+        if padded is None:
+            padded = not bool(attention_mask.all())
+        mask = padded_causal_mask(attention_mask) if padded else None
         hidden = self.embed_tokens(input_ids)
         taps = []
         for layer_idx, layer in enumerate(self.layers, start=1):
