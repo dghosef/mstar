@@ -287,11 +287,6 @@ def notify_many(reqs) -> None:
             pass  # the loop is closed: the client is gone
 
 
-# /generate's NDJSON body: one write per drained batch of chunks (see
-# ``APIServer._stream_ndjson``). A module flag only so an A/B can turn it off.
-_NDJSON_BATCH_WRITES = True
-
-
 def _chunk_to_ndjson_payload(chunk: ResultChunk) -> str:
     """Serialize one result chunk as an NDJSON line."""
     return json.dumps({
@@ -1090,37 +1085,27 @@ class APIServer:
         per-chunk, and this keeps both bodies flat. It also binds the
         submission now, before Starlette starts iterating the body.
         """
+        chunks = self.iter_result_chunks(request_id)
         if binary:
-            return self._stream_binary(self.iter_result_chunks(request_id))
-        return self._stream_ndjson(self.iter_result_chunk_batches(request_id))
+            return self._stream_binary(chunks)
+        return self._stream_ndjson(chunks)
 
-    async def _stream_ndjson(self, batches):
-        """One body write per drained batch: the lines of every chunk that
-        arrived since the handler last ran, so a loop that falls behind under
-        load catches up with one write rather than one per token."""
-        try:
-            async for batch in batches:
-                if not self.enable_nvtx and _NDJSON_BATCH_WRITES:
-                    yield "".join([_chunk_to_ndjson_payload(chunk) for chunk in batch])
-                    continue
-                for chunk in batch:
-                    line = self._chunk_to_ndjson(chunk)
-                    if not self.enable_nvtx:
-                        yield line
-                        continue
-                    profiler.mark(f"apiserver.yield_line.bytes[{len(line)}]")
-                    # Spans the handoff to Starlette/uvicorn: chunked-transfer
-                    # framing and the socket writes for ~14.7 MB, plus any
-                    # transport backpressure. The generator resumes only once
-                    # that is done, so this range is the server's share of the
-                    # client's blocking read.
-                    profiler.range_push(f"apiserver.socket_write.bytes[{len(line)}]")
-                    try:
-                        yield line
-                    finally:
-                        profiler.range_pop()
-        finally:
-            await batches.aclose()
+    async def _stream_ndjson(self, chunks):
+        async for chunk in chunks:
+            line = self._chunk_to_ndjson(chunk)
+            if not self.enable_nvtx:
+                yield line
+                continue
+            profiler.mark(f"apiserver.yield_line.bytes[{len(line)}]")
+            # Spans the handoff to Starlette/uvicorn: chunked-transfer framing
+            # and the socket writes for ~14.7 MB, plus any transport
+            # backpressure. The generator resumes only once that is done, so
+            # this range is the server's share of the client's blocking read.
+            profiler.range_push(f"apiserver.socket_write.bytes[{len(line)}]")
+            try:
+                yield line
+            finally:
+                profiler.range_pop()
 
     async def _stream_binary(self, chunks):
         async for chunk in chunks:
@@ -1340,12 +1325,13 @@ class WarmupRequest:
     files: list[WarmupMedia] = field(default_factory=list)
     output_modalities: list[str] = field(default_factory=lambda: ["text"])
     model_kwargs: dict | None = None
+    concurrency: int = 1
 
     @classmethod
     def from_config(cls, spec: Any) -> "WarmupRequest":
         if not isinstance(spec, dict):
             raise ValueError("not a mapping")
-        unknown = set(spec) - {"text", "files", "output_modalities", "model_kwargs", "repeat"}
+        unknown = set(spec) - {"text", "files", "output_modalities", "model_kwargs", "repeat", "concurrency"}
         if unknown:
             raise ValueError(f"unknown key(s) {sorted(unknown)}")
         text = spec.get("text")
@@ -1356,6 +1342,9 @@ class WarmupRequest:
             raise ValueError(f"repeat must be a positive integer, got {repeat!r}")
         if repeat > 1 and not text:
             raise ValueError("repeat needs text")
+        concurrency = spec.get("concurrency", 1)
+        if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
+            raise ValueError(f"concurrency must be a positive integer, got {concurrency!r}")
         out_mods = spec.get("output_modalities") or ["text"]
         if isinstance(out_mods, str):
             out_mods = [m.strip() for m in out_mods.split(",") if m.strip()]
@@ -1370,6 +1359,7 @@ class WarmupRequest:
             files=[WarmupMedia.from_config(f) for f in files],
             output_modalities=list(out_mods),
             model_kwargs=model_kwargs,
+            concurrency=concurrency,
         )
 
     def submit(self, server: APIServer, request_id: str) -> str:
@@ -1413,9 +1403,11 @@ def _run_warmup_requests(server: APIServer, specs: list, copies: int = 1) -> Non
     warmup that is malformed or fails is logged and skipped; it must not keep
     the server from coming up.
 
-    Each spec runs as ``copies`` concurrent requests: a data-parallel
-    deployment warms every replica, since the conductor sends concurrent
-    requests to different replicas (the least-loaded one each).
+    Each spec runs as ``copies`` x its ``concurrency`` concurrent requests:
+    ``copies`` warms every replica of a data-parallel deployment, since the
+    conductor sends concurrent requests to different replicas (the
+    least-loaded one each), and ``concurrency`` lets them batch, for a step
+    that compiles per batch size.
     """
     if not isinstance(specs, list):
         logger.warning("warmup_requests must be a list; ignoring %r", type(specs).__name__)
@@ -1425,7 +1417,8 @@ def _run_warmup_requests(server: APIServer, specs: list, copies: int = 1) -> Non
         await server.collect_results(request.submit(server, request_id))
 
     async def _all(request: WarmupRequest, index: int) -> None:
-        ids = [f"warmup-{index}"] + [f"warmup-{index}-{c}" for c in range(1, copies)]
+        n = copies * request.concurrency
+        ids = [f"warmup-{index}"] + [f"warmup-{index}-{c}" for c in range(1, n)]
         await asyncio.gather(*(_one(request, rid) for rid in ids))
 
     for index, spec in enumerate(specs):

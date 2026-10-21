@@ -201,15 +201,17 @@ class HiggsAudioModel(Model):
             section=GraphNode(
                 name="LLM",
                 input_names=["text_inputs"],
+                # one signal to the client and back into the loop, so a step
+                # can keep it on the device and send the client's copy inline
                 outputs=[
-                    GraphEdge(
-                        next_node=EMIT_TO_CLIENT,
-                        name="new_token",
-                        output_modality="text",
-                    ),
                     GraphEdge(
                         next_node="LLM",
                         name="text_inputs",
+                    ),
+                    GraphEdge(
+                        next_node=EMIT_TO_CLIENT,
+                        name="text_inputs",
+                        output_modality="text",
                     ),
                 ],
             ),

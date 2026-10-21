@@ -75,6 +75,7 @@ from mstar.model.submodule_base import (
     NodeSubmodule,
     device_loopback_enabled,
 )
+from mstar.utils.device import DeviceCapability
 from mstar.utils.knobs import ingraph_decode_rope
 from mstar.utils.profiler import PHASE_PERIOD, phase_record
 
@@ -448,8 +449,16 @@ class LLMSubmodule(ARNodeSubmodule):
                     for i, inp in enumerate(inputs)
                 ])
             elif routed:
+                # Through pinned memory, non-blocking: a pageable
+                # ``torch.tensor(..., device=cuda)`` is a synchronous copy
+                # that waits for the queued step, and every request's first
+                # decode step after its prefill takes this path.
+                index = torch.tensor(
+                    routed, dtype=torch.long,
+                    pin_memory=DeviceCapability.of(ids.device).pin_memory,
+                ).to(ids.device, non_blocking=True)
                 ids.index_copy_(
-                    0, torch.tensor(routed, device=ids.device),
+                    0, index,
                     torch.cat([inputs[i].input_ids for i in routed]).to(ids.dtype),
                 )
             out["input_ids"] = ids

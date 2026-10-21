@@ -1412,17 +1412,13 @@ class KVManager(AttentionResource):
         ]
         # one critical section so the read-of-stored_len then alloc is atomic
         # against a concurrent reset/remove/commit on another thread
-        # hoisted: these run per row, several times, on every step
-        streams = self._streams
-        capture = ctx.capture
-        is_padding_row = ctx.is_padding_row
-        report = self._index is not None
         with self._lock:
             # before the fork loop and the segment loop, both of which size
             # off `stored_len`: a pre-fork target has to cover the whole prefix
             for segment in step.segments:
-                labels = streams.get(segment.request_id)
-                stream = labels.get(segment.label) if labels else None
+                stream = self._streams.get(
+                    segment.request_id, {},
+                ).get(segment.label)
                 if stream is None:
                     continue
                 if (
@@ -1446,8 +1442,7 @@ class KVManager(AttentionResource):
                     if stream.lease is not None:
                         self._image_ends.append(stream)
                     stream.converted = True
-                if report and stream.chain is not None and not stream.chain.reported:
-                    self._report_admission(segment, stream)
+                self._report_admission(segment, stream)
             if ctx.is_preplan:
                 # a preplan that was promoted or abandoned already cleared
                 # these; reset anyway so a refused admit can't leave stale
@@ -1477,13 +1472,9 @@ class KVManager(AttentionResource):
                 # A replay's padding rows reserve nothing: they run against
                 # SINK_PAGE (see `_sequence_views`). Pages for them would fail
                 # to allocate on a near-full arena and hold the batch.
-                rid = segment.request_id
-                if segment.span == 0 or capture or is_padding_row(rid):
+                if segment.span == 0 or self._on_sink(ctx, segment.request_id):
                     continue
-                labels = streams[rid]
-                stream = labels.get(segment.label)
-                if stream is None:
-                    stream = self._ensure_label(rid, segment.label)
+                stream = self._ensure_label(segment.request_id, segment.label)
                 seq_len = segment.span + stream.stored_len
                 # the common decode row: its pages already cover the token it
                 # appends, so there is nothing to acquire and nothing to record
@@ -1508,18 +1499,19 @@ class KVManager(AttentionResource):
             # reservation above succeeded, so a refusal here sets none.
             # `.get` because a zero-span segment on a label nothing created
             # reserves no stream (see the loop above)
-            preplan = ctx.is_preplan
-            for segment in () if capture else step.segments:
-                rid = segment.request_id
-                if is_padding_row(rid):
+            for segment in step.segments:
+                if self._on_sink(ctx, segment.request_id):
                     continue
-                labels = streams.get(rid)
-                stream = labels.get(segment.label) if labels else None
+                stream = self._streams.get(
+                    segment.request_id, {}
+                ).get(segment.label)
                 if stream is None:
                     continue
                 stream.step_in_flight = True
-                if preplan:
-                    self._preplan_marked.append((rid, segment.label))
+                if ctx.is_preplan:
+                    self._preplan_marked.append(
+                        (segment.request_id, segment.label)
+                    )
             if _DEBUG_ASSERTS:
                 self.assert_pages_conserved()
         # retention is applied at commit (see `_apply_retention`)
