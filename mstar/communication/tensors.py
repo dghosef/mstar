@@ -1532,6 +1532,11 @@ class TensorCommunicationManager(ABC):
 
     # ---- shared: TensorStore delegation ----
 
+    def release_host_copies(self, uuids: list[int]) -> None:
+        """End of the step that stored ``uuids``: their host copies (views of
+        the worker's reused pinned buffers) may not be sent from after this."""
+        self.tensor_store.drop_cpu_tensors(uuids)
+
     def get_tensor(self, uuid: int) -> torch.Tensor:
         tensor = self.tensor_store.get_tensor(uuid)
         shard_dim = self.uuid_to_shard_dim.get(uuid)
