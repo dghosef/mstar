@@ -402,6 +402,18 @@ class Qwen3_5DenseModel(Model):
             raise ValueError("could not decode image: the file is corrupt or truncated") from exc
         return TensorAndMetadata(img.to(device))
 
+    def pixel_normalizer(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-column mean and std that turn `process_prompt`'s byte patches
+        into the processor's normalized pixels: its fused rescale-and-normalize,
+        ``(x - mean / rescale) / (std / rescale)``, element for element."""
+        processor = self.image_processor
+        scale = 1.0 / processor.rescale_factor
+        mean = torch.tensor(processor.image_mean) * scale
+        std = torch.tensor(processor.image_std) * scale
+        # a patch's columns are channel-major (C x T x P x P)
+        per_channel = processor.temporal_patch_size * processor.patch_size ** 2
+        return mean.repeat_interleave(per_channel), std.repeat_interleave(per_channel)
+
     def process_prompt(
         self,
         prompt: str | None,
@@ -476,8 +488,13 @@ class Qwen3_5DenseModel(Model):
         # `pixel_values`), so do not ship them to the workers.
         result["image_inputs"] = []
         for image in raw_images:
+            # Resized and patchified here, still bytes: the vision encoder
+            # rescales and normalizes on the device (`pixel_normalizer`). That
+            # is a quarter of the bytes to ship, and the float work was most
+            # of this call (43 of 52 ms for a 2560 px image).
             out = self.image_processor(
                 images=[_as_hwc_uint8(image)], return_tensors="pt",
+                do_rescale=False, do_normalize=False,
             )
             result["pixel_values"].append(out["pixel_values"])
             result["image_grid_thw"] += out["image_grid_thw"]
@@ -764,7 +781,9 @@ class Qwen3_5DenseModel(Model):
             load_qwen3_5_vision_weights(tower, weights_dir, device=device)
             tower.requires_grad_(False).eval()
             logger.info("Loaded Qwen3.5 vision tower onto %s", device)
-            return VisionEncoderSubmodule(tower, self.vision_config)
+            return VisionEncoderSubmodule(
+                tower, self.vision_config, self.pixel_normalizer(),
+            )
 
         from mstar.model.qwen3_5.weight_loader import load_qwen3_5_weights
 
