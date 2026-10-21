@@ -147,3 +147,19 @@ def test_hf_file_references_resolve_from_the_cache(monkeypatch) -> None:
     # a malformed reference is a failed warmup, not a crash
     entrypoint._run_warmup_requests(fake, [{"files": ["hf://nvidia.jpg"], "output_modalities": ["video"]}])
     assert len(fake.submitted) == 1
+
+
+def test_warmup_reaches_every_data_parallel_replica() -> None:
+    """One concurrent copy of each warmup per replica, so the conductor's
+    least-loaded placement warms every replica, not a random one."""
+    config = {"node_groups": [
+        {"node_names": ["dit", "vae_decoder"], "ranks": [0, 1]},
+        {"node_names": ["text_encoder"], "ranks": [0]},
+    ]}
+    assert entrypoint._data_parallel_replicas(config) == 2
+    # a lockstep instance is one replica
+    assert entrypoint._data_parallel_replicas({"node_groups": [{"ranks": [0, 1], "sp_size": 2}]}) == 1
+    assert entrypoint._data_parallel_replicas({"node_groups": [{"ranks": [0, 1, 2, 3], "tp_size": 2}]}) == 2
+    fake = _FakeServer()
+    entrypoint._run_warmup_requests(fake, [{"text": "a"}, {"text": "b"}], copies=2)
+    assert [s["request_id"] for s in fake.submitted] == ["warmup-0", "warmup-0-1", "warmup-1", "warmup-1-1"]
