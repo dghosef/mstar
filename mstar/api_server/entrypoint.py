@@ -1395,13 +1395,27 @@ class WarmupRequest:
         )
 
 
-def _run_warmup_requests(server: APIServer, specs: list) -> None:
+def _data_parallel_replicas(config: dict) -> int:
+    """The most replicas any node group serves (its ranks over its tp x sp
+    instance size): how many copies of a request it takes to reach them all."""
+    replicas = 1
+    for group in config.get("node_groups") or []:
+        instance = int(group.get("tp_size", 1)) * int(group.get("sp_size", 1))
+        replicas = max(replicas, len(group.get("ranks") or []) // max(instance, 1))
+    return replicas
+
+
+def _run_warmup_requests(server: APIServer, specs: list, copies: int = 1) -> None:
     """Run the deployment's ``warmup_requests`` once the workers are ready and
     before the server binds, so the first client does not pay what a first
     request of a shape costs (torch.compile of a denoise step, a cold
     inductor cache). Each spec is parsed into a :class:`WarmupRequest`. A
     warmup that is malformed or fails is logged and skipped; it must not keep
     the server from coming up.
+
+    Each spec runs as ``copies`` concurrent requests: a data-parallel
+    deployment warms every replica, since the conductor sends concurrent
+    requests to different replicas (the least-loaded one each).
     """
     if not isinstance(specs, list):
         logger.warning("warmup_requests must be a list; ignoring %r", type(specs).__name__)
@@ -1409,6 +1423,10 @@ def _run_warmup_requests(server: APIServer, specs: list) -> None:
 
     async def _one(request: WarmupRequest, request_id: str) -> None:
         await server.collect_results(request.submit(server, request_id))
+
+    async def _all(request: WarmupRequest, index: int) -> None:
+        ids = [f"warmup-{index}"] + [f"warmup-{index}-{c}" for c in range(1, copies)]
+        await asyncio.gather(*(_one(request, rid) for rid in ids))
 
     for index, spec in enumerate(specs):
         try:
@@ -1418,7 +1436,7 @@ def _run_warmup_requests(server: APIServer, specs: list) -> None:
             continue
         t0 = time.perf_counter()
         try:
-            asyncio.run(_one(request, f"warmup-{index}"))
+            asyncio.run(_all(request, index))
         except Exception as exc:  # noqa: BLE001 — a cold server is better than none
             logger.warning(
                 "warmup request %d/%d failed after %.1f s: %s",
@@ -2081,8 +2099,12 @@ def main(argv: list[str] | None = None):
         # client never sees the first request of a shape.
         warmups = config.get("warmup_requests") or []
         if warmups:
-            logger.info("Running %d warmup request(s) before binding", len(warmups))
-            _run_warmup_requests(api_server, warmups)
+            copies = _data_parallel_replicas(config)
+            logger.info(
+                "Running %d warmup request(s) before binding, %d at a time (one per replica)",
+                len(warmups), copies,
+            )
+            _run_warmup_requests(api_server, warmups, copies)
         if args.enable_metrics:
             api_server.enable_metrics()
         if args.rust_frontend:
