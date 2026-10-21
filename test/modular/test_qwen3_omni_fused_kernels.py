@@ -103,3 +103,16 @@ def test_cp_embed_accumulate_matches_the_unfused_ops(bs):
     assert torch.equal(emb, ref_emb)
     assert torch.equal(emb_sum, ref_sum)
     assert torch.equal(codes, ref_codes)
+
+
+@pytest.mark.parametrize("m", [1, 2, 3, 8, 16, 32, 64])
+@pytest.mark.parametrize("n,k", [(4096, 1024), (1024, 2048), (2048, 1024), (512, 256)])
+def test_cp_linear_matches_f_linear(m, n, k):
+    from mstar.model.qwen3_omni.components.cp_kernels import cp_linear
+
+    torch.manual_seed(3)
+    x = torch.randn(m, 1, k, device="cuda", dtype=torch.bfloat16)
+    w = torch.randn(n, k, device="cuda", dtype=torch.bfloat16) * 0.02
+    y = cp_linear(x, w)
+    assert y.shape == (m, 1, n)
+    torch.testing.assert_close(y.float(), torch.nn.functional.linear(x, w).float(), rtol=2e-2, atol=2e-2)
