@@ -148,7 +148,7 @@ def _omnivoice_inputs(cfg, k, target_len=6, clone=False):
     inputs = {
         "prefix_ids": [torch.arange(c * 5).view(c, 5)],
         "prefix_audio_mask": [torch.zeros(5, dtype=torch.bool)],
-        "target_len": [torch.tensor([target_len])],
+        "initial_canvas": [torch.full((c, target_len), cfg.audio_mask_id)],
         "audio_tokens": [tokens],
         "step_index": [torch.tensor([k], dtype=torch.int64)],
     }
@@ -172,12 +172,15 @@ def test_omnivoice_step_prep_reads_no_tensor(clone):
     assert prepare(fwd(UNMASK_LOOP_NAME, steps), _omnivoice_inputs(cfg, steps)) is None
 
 
-def test_omnivoice_first_step_prep_unchanged():
-    # iteration 0 still reads target_len once to size the canvas
+def test_omnivoice_first_step_prep_reads_no_tensor():
+    # iteration 0 starts from the data worker's all-MASK canvas: its shape is
+    # the target length, so nothing is read on the host
     sub, cfg = _omnivoice()
     inputs = _omnivoice_inputs(cfg, 0)
     del inputs["audio_tokens"], inputs["step_index"]
-    ni = sub.prepare_inputs("speech_gen", _fwd("r", "speech_gen", _omnivoice_meta(4)), inputs)
+    with _HostReads() as reads:
+        ni = sub.prepare_inputs("speech_gen", _fwd("r", "speech_gen", _omnivoice_meta(4)), inputs)
+    assert reads.reads == [], reads.reads
     assert ni.tensor_inputs["audio_tokens"].shape == (cfg.num_audio_codebook, 6)
     assert (ni.tensor_inputs["audio_tokens"] == cfg.audio_mask_id).all()
     assert ni.input_seq_len == 5 + 2 * 6

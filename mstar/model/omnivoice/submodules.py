@@ -226,20 +226,13 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
             )
 
         if "audio_tokens" not in inputs or len(inputs["audio_tokens"]) == 0:
-            # Iteration 0: the loop-back edges arrive empty. Seed a fully
-            # masked canvas; there is no noise and no seed to honour, because
-            # the stochastic part of this model is the reveal order, not the
-            # starting state. target_len rides an edge rather than
-            # step_metadata: computing it needs the tokenizer and the duration
-            # estimator, both data-worker assets. Later iterations read it off
-            # the canvas shape instead, which costs no host read.
-            target_len = int(inputs["target_len"][0].reshape(-1)[0].item())
-            tokens = torch.full(
-                (self.config.num_audio_codebook, target_len),
-                self.config.audio_mask_id,
-                dtype=torch.long,
-                device=device,
-            )
+            # Iteration 0: the loop-back edges arrive empty, and the loop starts
+            # from the all-MASK canvas the data worker built (it knows the
+            # target length from the tokenizer and the duration estimator).
+            # There is no noise and no seed to honour: the stochastic part of
+            # this model is the reveal order, not the starting state.
+            tokens = inputs["initial_canvas"][0].to(device)
+            target_len = tokens.shape[-1]
             # 1-D, not 0-dim: the worker's output fanout reads dims[0] of
             # every routed edge.
             step_index = torch.zeros(1, dtype=torch.int64, device=device)

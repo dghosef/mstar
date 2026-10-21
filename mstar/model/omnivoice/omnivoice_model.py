@@ -165,7 +165,7 @@ class OmniVoiceModel(Model):
         backbone_inputs = [
             "prefix_ids",
             "prefix_audio_mask",
-            "target_len",
+            "initial_canvas",
             "audio_tokens",
             "step_index",
         ]
@@ -406,7 +406,12 @@ class OmniVoiceModel(Model):
         out: NameToTensorList = {
             "prefix_ids": [prefix_ids],
             "prefix_audio_mask": [prefix_audio_mask],
-            "target_len": [torch.tensor([target_len], dtype=torch.long)],
+            # the all-MASK canvas the unmask loop starts from: its shape carries
+            # the target length, so the backbone sizes the request without a
+            # host read of a device value
+            "initial_canvas": [
+                torch.full((self.config.num_audio_codebook, target_len), self.config.audio_mask_id, dtype=torch.long)
+            ],
         }
         if ref_audio:
             out["ref_audio_inputs"] = [ref_waveform]
@@ -517,8 +522,8 @@ class OmniVoiceModel(Model):
             "walk_schedule": schedule,
             "walk_step": 0,
             # target_len is NOT here: it is computed on the data worker (it
-            # needs the tokenizer and the duration estimator) and rides an edge
-            # to the backbone, rather than being re-derived at the conductor.
+            # needs the tokenizer and the duration estimator) and rides to the
+            # backbone as the initial canvas's shape.
             "num_step": num_step,
             "guidance_scale": float(
                 model_kwargs.get("guidance_scale", defaults.guidance_scale)
@@ -590,7 +595,7 @@ class OmniVoiceModel(Model):
         step counter at iteration 0.
         """
         inputs: list[GraphEdge] = []
-        for name in ("prefix_ids", "prefix_audio_mask", "target_len"):
+        for name in ("prefix_ids", "prefix_audio_mask", "initial_canvas"):
             edge = GraphEdge(next_node="backbone", name=name)
             edge.tensor_info = persist_signals.get(name, [])
             inputs.append(edge)
