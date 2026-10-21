@@ -539,6 +539,8 @@ def test_preprocess_packs_the_tensors_the_per_row_device_copies_did():
     prefill_config, graph_config = ar.get_accelerator_graph_configs(torch.device("cpu"))
     # Plain prefills replay packed captures; their padding rows suppress EOS.
     assert prefill_config.capture_graph_walk == "ar_prefill"
+    # a voice clone's prefill is the same forward: it replays these captures too
+    assert prefill_config.replay_graph_walks == ["ar_prefill", "ar_prefill_clone"]
     assert prefill_config.make_node_input(5).kwargs == {"suppress_eos": True}
     assert graph_config.capture_graph_walk == "ar_decode"
     template = graph_config.single_request_inputs
