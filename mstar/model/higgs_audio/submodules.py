@@ -23,6 +23,9 @@ from mstar.engine.accelerator_graph_config import (
     AcceleratorGraphConfig,
     BatchedAcceleratorGraphConfig,
     PackedAcceleratorGraphConfig,
+    PiecewiseAcceleratorGraphConfig,
+    PiecewiseBatchedConfig,
+    PiecewiseCallInputs,
 )
 from mstar.engine.engine import ExecutingBatch
 from mstar.engine.resources import AttentionStep, KVStep, PositionStep, SamplerStep, Segment, SlotLease, SubmoduleStep
@@ -55,19 +58,36 @@ class HiggsAudioEncoderSubmodule(NodeSubmodule):
 
     Mirrors the reference pipeline: batch-encode padded chunks, run the
     projector on the padded batch, then slice each chunk to its valid
-    (downsampled) length and concatenate in order.
+    (downsampled) length and concatenate in order. Chunks attend only
+    within themselves, so requests whose chunks share a width are encoded
+    as one batch.
+
+    The chunk count and, for a clip under one chunk, the mel width change
+    per request; compiled, every new shape recompiled on the serving path
+    (tens of seconds with the worker blocked). So the tower runs eagerly,
+    and full-width chunks replay a CUDA graph by chunk count.
     """
+
+    disable_torch_compile = True
+    # requests per encoder step, and full-width chunks per captured replay
+    MAX_BATCH_SIZE = 16
+    CAPTURE_CHUNK_COUNTS = [1, 2, 4, 8, 16, 32, 64]
+    TOWER = "tower"
 
     def __init__(
         self,
         audio_tower: nn.Module,
         projector: nn.Module,
         config: HiggsAudioModelConfig,
+        graphs: bool = True,
     ):
         super().__init__()
         self.audio_tower = audio_tower
         self.projector = projector
         self.config = config
+        self.graphs = graphs
+        # mel frames of a full chunk: the feature extractor's 10 ms hop
+        self.chunk_frames = int(config.chunk_size_seconds * 100)
 
     def prepare_inputs(
         self,
@@ -76,37 +96,107 @@ class HiggsAudioEncoderSubmodule(NodeSubmodule):
         inputs: NameToTensorList,
         **kwargs,
     ) -> NodeInputs:
+        features = inputs["audio_features"][0]
+        if features.dim() == 2:
+            features = features.unsqueeze(0)  # (1, num_mel_bins, T)
+        # one host read per request: the valid embeddings of each chunk
+        valid = [
+            self.config.encoder_output_length(int(n))
+            for n in inputs["audio_feature_lens"][0].reshape(-1).tolist()
+        ]
         return NodeInputs(
-            tensor_inputs={
-                "audio_features": inputs["audio_features"][0],
-                "audio_feature_lens": inputs["audio_feature_lens"][0],
-            }
+            tensor_inputs={"audio_features": features},
+            kwargs={"valid_lengths": valid},
+            input_seq_len=features.shape[0],
         )
+
+    def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
+        # chunks are padded to their own request's longest, so only requests
+        # of one mel width share a batch
+        widths = {inp.tensor_inputs["audio_features"].shape[-1] for inp in model_inputs}
+        chunks = sum(inp.input_seq_len for inp in model_inputs)
+        return len(widths) == 1 and chunks <= self.CAPTURE_CHUNK_COUNTS[-1]
+
+    def max_batch_size(self, graph_walk: str) -> int:
+        return self.MAX_BATCH_SIZE
+
+    def preprocess(
+        self,
+        graph_walk: str,
+        engine_inputs: ModelInputsFromEngine,
+        inputs: list[NodeInputs],
+    ) -> dict[str, Any]:
+        dtype = next(self.audio_tower.parameters()).dtype
+        return {
+            "audio_features": torch.cat(
+                [inp.tensor_inputs["audio_features"] for inp in inputs], dim=0,
+            ).to(device=self.get_device(), dtype=dtype),
+            "valid_lengths": [inp.kwargs["valid_lengths"] for inp in inputs],
+        }
+
+    def _encode(self, features: torch.Tensor) -> torch.Tensor:
+        return self.projector(self.audio_tower(features))
+
+    def _capture_tower(self, inp: PiecewiseCallInputs) -> dict[str, torch.Tensor]:
+        return {"projected": self._encode(inp.static_inputs["audio_features"])}
+
+    def get_piecewise_accelerator_graph_configs(
+        self, device: torch.device, autocast_dtype: torch.dtype, tp_world_size: int = 1, **kwargs: Any,
+    ) -> dict[str, PiecewiseAcceleratorGraphConfig]:
+        """Tower + projector over full-width chunks, by chunk count."""
+        del autocast_dtype, tp_world_size, kwargs
+        if not self.graphs:
+            return {}
+        dtype = next(self.audio_tower.parameters()).dtype
+        mels, frames = self.config.audio_num_mel_bins, self.chunk_frames
+        return {
+            self.TOWER: PiecewiseBatchedConfig(
+                capture_fn=self._capture_tower,
+                make_static_inputs=lambda shape: {
+                    "audio_features": torch.zeros(shape.bs, mels, frames, dtype=dtype, device=device),
+                },
+                seq_len=frames,
+                capture_batch_sizes=list(self.CAPTURE_CHUNK_COUNTS),
+            )
+        }
+
+    def forward_batched(
+        self,
+        graph_walk: str,
+        engine_inputs: ModelInputsFromEngine,
+        audio_features: torch.Tensor,
+        valid_lengths: list[list[int]],
+        **kwargs,
+    ) -> dict[str, NameToTensorList]:
+        num_chunks = audio_features.shape[0]
+        runner = engine_inputs.piecewise_runners.get(self.TOWER)
+        if (
+            runner is not None
+            and audio_features.shape[-1] == self.chunk_frames
+            and runner.can_run(num_chunks)
+        ):
+            projected = runner.run(
+                static_inputs={"audio_features": audio_features}, real_bs=num_chunks,
+            ).get_view("projected")
+        else:
+            projected = self._encode(audio_features)
+
+        outputs: dict[str, NameToTensorList] = {}
+        chunk = 0
+        for rid, valid in zip(engine_inputs.request_ids, valid_lengths, strict=True):
+            embeds = torch.cat([projected[chunk + i, :n] for i, n in enumerate(valid)], dim=0)
+            chunk += len(valid)
+            outputs[rid] = {"audio_embeds": [embeds]}
+        return outputs
 
     def forward(
         self,
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
-        audio_features: torch.Tensor,
-        audio_feature_lens: torch.Tensor,
         **kwargs,
     ) -> NameToTensorList:
-        device = self.get_device()
-        dtype = next(self.audio_tower.parameters()).dtype
-        feats = audio_features.to(device=device, dtype=dtype)
-        if feats.dim() == 2:
-            feats = feats.unsqueeze(0)  # (1, num_mel_bins, T)
-
-        encoded = self.audio_tower(feats)         # (num_chunks, T_out, 1280)
-        projected = self.projector(encoded)       # (num_chunks, T', hidden)
-
-        chunks = []
-        for i, mel_len in enumerate(audio_feature_lens.tolist()):
-            valid = self.config.encoder_output_length(int(mel_len))
-            chunks.append(projected[i, :valid])
-        audio_embeds = torch.cat(chunks, dim=0)   # (total_audio_tokens, hidden)
-
-        return {"audio_embeds": [audio_embeds]}
+        rid = engine_inputs.request_ids[0]
+        return self.forward_batched(graph_walk, engine_inputs, **kwargs)[rid]
 
 
 # ===================================================================

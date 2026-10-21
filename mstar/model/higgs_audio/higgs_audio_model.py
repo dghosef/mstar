@@ -86,6 +86,8 @@ class HiggsAudioModel(Model):
     ):
         self.cache_dir = cache_dir
         self.model_path_hf = model_path_hf
+        # ``model_kwargs: {encoder_graphs: false}`` runs the audio tower eagerly
+        self.encoder_graphs = bool(kwargs.get("encoder_graphs", True))
 
         self.local_dir = _resolve_local_hf_snapshot(model_path_hf, cache_dir=cache_dir)
         self.config = HiggsAudioModelConfig.from_pretrained(self.local_dir)
@@ -501,6 +503,7 @@ class HiggsAudioModel(Model):
         from mstar.model.higgs_audio.submodules import HiggsAudioEncoderSubmodule
         return HiggsAudioEncoderSubmodule(
             audio_tower=audio_tower, projector=projector, config=self.config,
+            graphs=self.encoder_graphs,
         )
 
     @staticmethod
