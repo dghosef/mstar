@@ -74,7 +74,11 @@ class LingBotWorldConfig:
     # The reference decodes in fp32. bf16 is faster on cuDNN >= 9.16 but is not
     # the reference's numerics.
     vae_decode_fp32: bool = True
-    vae_decode_channels_last: bool = False
+    # Channels-last fp32 decode with cuDNN autotuning: 547 -> 340 ms per
+    # 16-frame chunk at 480x832 on an H200, frames within 73 dB of the
+    # contiguous decode (conv accumulation order only).
+    vae_decode_channels_last: bool = True
+    vae_decode_cudnn_benchmark: bool = True
 
     @property
     def head_dim(self) -> int:
