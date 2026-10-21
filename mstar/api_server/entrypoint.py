@@ -287,6 +287,11 @@ def notify_many(reqs) -> None:
             pass  # the loop is closed: the client is gone
 
 
+# /generate's NDJSON body: one write per drained batch of chunks (see
+# ``APIServer._stream_ndjson``). A module flag only so an A/B can turn it off.
+_NDJSON_BATCH_WRITES = True
+
+
 def _chunk_to_ndjson_payload(chunk: ResultChunk) -> str:
     """Serialize one result chunk as an NDJSON line."""
     return json.dumps({
@@ -1085,27 +1090,37 @@ class APIServer:
         per-chunk, and this keeps both bodies flat. It also binds the
         submission now, before Starlette starts iterating the body.
         """
-        chunks = self.iter_result_chunks(request_id)
         if binary:
-            return self._stream_binary(chunks)
-        return self._stream_ndjson(chunks)
+            return self._stream_binary(self.iter_result_chunks(request_id))
+        return self._stream_ndjson(self.iter_result_chunk_batches(request_id))
 
-    async def _stream_ndjson(self, chunks):
-        async for chunk in chunks:
-            line = self._chunk_to_ndjson(chunk)
-            if not self.enable_nvtx:
-                yield line
-                continue
-            profiler.mark(f"apiserver.yield_line.bytes[{len(line)}]")
-            # Spans the handoff to Starlette/uvicorn: chunked-transfer framing
-            # and the socket writes for ~14.7 MB, plus any transport
-            # backpressure. The generator resumes only once that is done, so
-            # this range is the server's share of the client's blocking read.
-            profiler.range_push(f"apiserver.socket_write.bytes[{len(line)}]")
-            try:
-                yield line
-            finally:
-                profiler.range_pop()
+    async def _stream_ndjson(self, batches):
+        """One body write per drained batch: the lines of every chunk that
+        arrived since the handler last ran, so a loop that falls behind under
+        load catches up with one write rather than one per token."""
+        try:
+            async for batch in batches:
+                if not self.enable_nvtx and _NDJSON_BATCH_WRITES:
+                    yield "".join([_chunk_to_ndjson_payload(chunk) for chunk in batch])
+                    continue
+                for chunk in batch:
+                    line = self._chunk_to_ndjson(chunk)
+                    if not self.enable_nvtx:
+                        yield line
+                        continue
+                    profiler.mark(f"apiserver.yield_line.bytes[{len(line)}]")
+                    # Spans the handoff to Starlette/uvicorn: chunked-transfer
+                    # framing and the socket writes for ~14.7 MB, plus any
+                    # transport backpressure. The generator resumes only once
+                    # that is done, so this range is the server's share of the
+                    # client's blocking read.
+                    profiler.range_push(f"apiserver.socket_write.bytes[{len(line)}]")
+                    try:
+                        yield line
+                    finally:
+                        profiler.range_pop()
+        finally:
+            await batches.aclose()
 
     async def _stream_binary(self, chunks):
         async for chunk in chunks:
