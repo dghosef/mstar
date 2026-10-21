@@ -20,13 +20,17 @@ the v1 engine supplies neither the autocast nor the no-grad wrapper.
 import logging
 import os
 from contextlib import contextmanager
+from typing import NamedTuple
 
 import torch
 from torch import nn
 
 from mstar.communication.tensors import NameToTensorList
 from mstar.conductor.request_info import CurrentForwardPassInfo
+from mstar.engine.resources import AttentionStep, Segment, SlotLease, SubmoduleStep
+from mstar.engine.resources.convenience import RaggedAttentionCallable
 from mstar.model.submodule_base import ModelInputsFromEngine, NodeInputs, NodeSubmodule
+from mstar.model.wan22.components.dit import Wan22AttentionFns
 from mstar.model.wan22.components.unipc import (
     SOLVER_ORDER,
     UniPCState,
@@ -324,6 +328,14 @@ class Wan22VaeEncoderSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmod
 # dit
 # ---------------------------------------------------------------------------
 
+class Wan22AttnLayout(NamedTuple):
+    """One step's self-attention spans for a request: each of the ``branches``
+    guidance branches this rank computes attends within its video tokens."""
+
+    video_tokens: int
+    branches: int
+
+
 class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
     """Dense 5B video DiT with the UniPC step run inline.
 
@@ -355,6 +367,10 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
     # circular import.
     _I2V_WALK = "video_gen_i2v"
 
+    # The ragged self-attention resource (Wan22Model.get_node_resources) and its span.
+    SELF_ATTN = "dit_self_attn"
+    VIDEO_SPAN = "video"
+
     # The WHOLE forward cannot be one compiled region: Inductor would fuse the UniPC
     # step's `sample - sigma * output` and pass the 0-dim CPU-resident sigma as a
     # device pointer, which fails on the first call. Moving sigma to CUDA would fix
@@ -368,6 +384,7 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
         super().__init__()
         self.transformer = transformer
         self.config = config
+        self._attn_fns: Wan22AttentionFns | None = None
         self._record_fp32_islands()
         # Compile the inner DiT region only (tensors in, tensor out; nothing
         # CPU-resident crosses it), IN PLACE so ``self.transformer`` keeps its
@@ -435,7 +452,52 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
             tensor_inputs["time_index"] = time_index
             tensor_inputs["unipc_model_outputs"] = inputs["unipc_model_outputs"][0]
             tensor_inputs["unipc_last_sample"] = inputs["unipc_last_sample"][0]
-        return NodeInputs(tensor_inputs=tensor_inputs)
+        _, _, t_lat, h_lat, w_lat = tensor_inputs["latents"].shape
+        p_t, p_h, p_w = self.config.patch_size
+        guidance_scale = float(fwd_info.step_metadata.get("guidance_scale", self.config.guidance_scale))
+        layout = Wan22AttnLayout(
+            video_tokens=(t_lat // p_t) * (h_lat // p_h) * (w_lat // p_w),
+            branches=self._branches(guidance_scale),
+        )
+        return NodeInputs(
+            tensor_inputs=tensor_inputs, resource_step_info=layout, input_seq_len=layout.video_tokens,
+        )
+
+    @staticmethod
+    def _branches(guidance_scale: float) -> int:
+        """Guidance branches the forward computes (one batch row each)."""
+        return 2 if guidance_scale > 1.0 else 1
+
+    # attention ------------------------------------------------------------
+    def bind_node_resources(self, resources) -> None:
+        super().bind_node_resources(resources)
+        self._attn_fns = None  # the memoized callables hold the old resources
+
+    def _attention_fns(self) -> Wan22AttentionFns | None:
+        """The ragged callables, built once per resource binding (the compiled
+        transformer guards on their identity), or None to run SDPA."""
+        if self._attn_fns is None:
+            self_attn = self.node_resources.get(self.SELF_ATTN)
+            if self_attn is None:
+                return None
+            self._attn_fns = Wan22AttentionFns(
+                self_attn=RaggedAttentionCallable(self_attn, self.VIDEO_SPAN, opaque=True), cross_attn=None,
+            )
+            logger.info("Wan2.2 DiT: self-attention through the engine's ragged attention resource")
+        return self._attn_fns
+
+    def declare_step(
+        self, graph_walk: str, request_ids: list[str], inputs: list[NodeInputs],
+        slot_lease: SlotLease | None = None, piecewise_leases=None, **kwargs,
+    ) -> SubmoduleStep | None:
+        if self.config.attention_backend != "flashinfer":
+            return None
+        video = [
+            Segment(request_id=rid, label=self.VIDEO_SPAN, span=inp.resource_step_info.video_tokens)
+            for rid, inp in zip(request_ids, inputs, strict=True)
+            for _ in range(inp.resource_step_info.branches)
+        ]
+        return SubmoduleStep(steps={self.SELF_ATTN: AttentionStep(segments=tuple(video), causal=False)})
 
     def forward(
         self,
@@ -521,7 +583,7 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
         reference's two sequential forwards. The combine runs in the
         transformer's output dtype (bf16), like the reference."""
         do_cfg = guidance_scale > 1.0
-        batch = 2 if do_cfg else 1
+        batch = self._branches(guidance_scale)
         hidden_states = model_input.repeat(batch, 1, 1, 1, 1)
         timestep = temp_ts.unsqueeze(0).expand(batch, -1)
         # dynamic=False keys the compiled trace on the full input shape (batch
@@ -544,6 +606,7 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
             hidden_states=hidden_states,
             timestep=timestep,
             encoder_hidden_states=encoder_hidden_states,
+            attn_fns=self._attention_fns(),
         )
         if not do_cfg:
             return out
