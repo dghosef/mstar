@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 
 import torch
@@ -55,7 +54,7 @@ from mstar.graph.base import (
 )
 from mstar.graph.special_destinations import EMIT_TO_CLIENT
 from mstar.model.base import ForwardPassArgs, Model, TensorAndMetadata, video_metadata_dict
-from mstar.model.media_limits import VideoBudget
+from mstar.model.media_limits import VIDEO_DECODE_THREADS, VideoBudget
 from mstar.model.submodule_base import NodeSubmodule
 from mstar.model.vjepa2.components.ac_predictor import VisionTransformerPredictorAC
 from mstar.model.vjepa2.components.predictor import VJEPA2Predictor
@@ -81,11 +80,6 @@ logger = logging.getLogger(__name__)
 
 
 # ImageNet normalization constants (match HF ``IMAGENET_DEFAULT_MEAN``/``STD``).
-# FFmpeg decode threads per request. The decode is single-threaded by default
-# and dominates a request's latency on long clips; frame threading is
-# bit-identical. Capped so concurrent requests don't oversubscribe the host.
-_DECODE_THREADS = min(8, os.cpu_count() or 1)
-
 _IMAGENET_MEAN = (0.485, 0.456, 0.406)
 _IMAGENET_STD = (0.229, 0.224, 0.225)
 
@@ -585,7 +579,7 @@ class VJepa2Model(Model):
 
         target_frames = self.config.frames_per_clip
         logger.info("load_video: opening %s", filepath)
-        decoder = VideoDecoder(filepath, num_ffmpeg_threads=_DECODE_THREADS)
+        decoder = VideoDecoder(filepath, num_ffmpeg_threads=VIDEO_DECODE_THREADS)
         logger.info("load_video: decoder opened; reading metadata")
 
         metadata_obj = getattr(decoder, "metadata", None)
