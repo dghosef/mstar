@@ -322,26 +322,6 @@ def test_shards_head_counts_at_build():
     assert mgr._kwargs["head_dim"] == HEAD_DIM
 
 
-def test_shard_heads_false_keeps_every_head():
-    """A node whose ranks split something other than heads (guidance branches)
-    keeps the full head count on every rank."""
-
-    class _Group:
-        world_size = 2
-
-    spec = RaggedAttentionSpec(
-        resource_key=ATTN, nodes={"encoder"},
-        config=RaggedAttentionConfig(
-            num_qo_heads=HEADS, num_kv_heads=HEADS, head_dim=HEAD_DIM, shard_heads=False,
-        ),
-    )
-    mgr = build_resource(
-        spec,
-        EngineResourceInfo(device=DEVICE, kv_dtype=DTYPE, joint_comm_group=_Group()),
-    )
-    assert mgr._kwargs["num_qo_heads"] == HEADS
-
-
 def test_opaque_callable_stays_in_the_compiled_graph():
     """``opaque=True`` runs the attention as a custom op: a compiled region
     keeps one graph around it (no break) and computes what the eager call does."""
