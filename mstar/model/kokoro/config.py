@@ -155,8 +155,9 @@ class KokoroModelConfig:
     # Run each bidirectional LSTM's two directions as one block-diagonal LSTM
     # (see ``MaskedBiLSTM.fuse``): half the sequential steps.
     fuse_lstm_directions: bool = True
-    # Let cuDNN time its conv algorithms for the frame half's shapes (once per
-    # captured bucket, at startup) instead of taking its heuristic pick.
+    # Let cuDNN time its conv algorithms for the frame half's captured buckets
+    # (once each, at startup) instead of taking its heuristic pick; the eager
+    # fallback keeps the heuristic.
     decoder_cudnn_benchmark: bool = True
 
     # ---------------------------------------------------------------------

@@ -1891,7 +1891,8 @@ class Code2WavSubmodule(NodeSubmodule):
         # can hold it only as its last new frame (it arrived before the
         # producer's done signal); reading every window for that would sync
         # the GPU thread on each chunk, so ``forward_batched`` decodes the
-        # frame as padding and silences its samples instead.
+        # frame as padding and silences its samples instead: such a reply ends
+        # with one frame (80 ms) of zeros, the price of not syncing per chunk.
         if (chunk is None or chunk.is_final) and codec_tokens.dim() == 2 and codec_tokens.shape[0] > 0:
             eos_mask = codec_tokens[:, 0] == codec_eos
             if eos_mask.any():

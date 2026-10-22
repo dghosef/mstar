@@ -269,11 +269,12 @@ class KokoroSynthSubmodule(NodeSubmodule):
                     real_bs=len(rows),
                 )["audio"]
             else:
+                # cuDNN's heuristic pick: autotuning here would search again
+                # for every new frame count the eager fallback sees
                 num_frames = max(sizes[r] for r in rows)
-                with cudnn_benchmark(self.config.decoder_cudnn_benchmark):
-                    audio, _ = self.model.synthesize_frames(
-                        d[index], t_en[index], pred_dur[index], style[index], num_frames
-                    )
+                audio, _ = self.model.synthesize_frames(
+                    d[index], t_en[index], pred_dur[index], style[index], num_frames
+                )
             audio = (audio.clamp(-1, 1) * PCM16_SCALE).to(torch.int16)
             for i, row in enumerate(rows):
                 pcm[row] = audio[i, : sizes[row] * self.config.samples_per_frame]
