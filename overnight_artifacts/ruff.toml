@@ -1,0 +1,3 @@
+# Raw artifacts from the overnight run, not code: lint is off here.
+[lint]
+ignore = ["ALL"]

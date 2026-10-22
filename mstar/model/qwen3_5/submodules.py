@@ -64,7 +64,7 @@ from mstar.model.qwen3_5.config import (
     Qwen3_5Config,
     Qwen3_5VisionConfig,
 )
-from mstar.model.qwen3_5.qwen3_5_model import IMAGE_GRIDS_KEY, TEXT_PART
+from mstar.model.qwen3_5.qwen3_5_model import STEP_GRIDS_KEY, TEXT_PART, VIDEO_PART
 from mstar.model.submodule_base import (
     ARNodeInputs,
     ARNodeSubmodule,
@@ -85,10 +85,10 @@ logger = logging.getLogger(__name__)
 def _host_grids(
     fwd_info: CurrentForwardPassInfo, device_grids: list[torch.Tensor],
 ) -> list[tuple[int, int, int]]:
-    """Each image's (t, h, w), off the step metadata the conductor filled from
-    `process_prompt`; reading `image_grid_thw` back from the device instead
-    blocks the host on every kernel queued ahead of it."""
-    host = fwd_info.step_metadata.get(IMAGE_GRIDS_KEY)
+    """Each image's or video's (t, h, w), off the step metadata the conductor
+    filled from `process_prompt`; reading `image_grid_thw` back from the
+    device instead blocks the host on every kernel queued ahead of it."""
+    host = fwd_info.step_metadata.get(STEP_GRIDS_KEY)
     if host:
         return [(int(t), int(h), int(w)) for t, h, w in host]
     return [
@@ -249,8 +249,11 @@ class LLMSubmodule(ARNodeSubmodule):
     ) -> ARNodeInputs:
         """A whole multimodal prompt as one row, spliced in prompt order.
 
-        `prefill_order` tags each part text (0) or image (1); the nth tag of a
-        kind takes the nth tensor of that kind.
+        `prefill_order` tags each part text, image or video frame group; the
+        nth tag of a kind takes the nth tensor of that kind, except that a
+        video's tags, one per temporal group, share its one grid and walk
+        through it. A group is placed like a one-frame image; the timestamp
+        text between groups arrives as ordinary text parts.
 
         An image spans ``max(h', w')`` MRoPE positions but ``t * h' * w'``
         tokens, so the cursor advances by the real amount and `declare_step`
@@ -276,8 +279,10 @@ class LLMSubmodule(ARNodeSubmodule):
         embeds: list[torch.Tensor] = []
         pos_ids: list[torch.Tensor] = []
         tracked: list[torch.Tensor] = []
-        text_i = image_i = 0
-        # into `packed`, which holds every image's merged tokens end to end
+        text_i = grid_i = 0
+        # frame groups of the video at `grid_i` already placed
+        group = 0
+        # into `packed`, which holds every image's and video's merged tokens end to end
         cursor = 0
 
         for kind in fwd_info.step_metadata.get("prefill_order", ()):
@@ -290,9 +295,15 @@ class LLMSubmodule(ARNodeSubmodule):
                 tracked.append(ids)
                 pos += span
                 continue
-            t, h, w = grids[image_i]
-            grid = torch.tensor([t, h, w])
-            image_i += 1
+            t, h, w = grids[grid_i]
+            if kind == VIDEO_PART:
+                group += 1
+                if group == t:
+                    grid_i, group = grid_i + 1, 0
+                t = 1
+            else:
+                grid_i += 1
+            grid = torch.tensor((t, h, w))
             span = t * (h // merge) * (w // merge)
             advance = vision_position_advance(grid, merge)
             embeds += [start_embed, packed[cursor:cursor + span], end_embed]
@@ -752,8 +763,12 @@ class VisionEncoderSubmodule(NodeSubmodule):
 
     Eager, the tower is launch-bound (~500 kernels, ~4 ms of GPU work in a
     ~20 ms forward on 9B), so the block loop is captured, and a step's
-    requests replay together as one packed row: every image of every request
-    is its own attention segment.
+    requests replay together as one packed row: every image and video frame
+    group of every request is its own attention segment.
+
+    A replay's attention plan holds at most the vision attention resource's
+    ``max_segments_per_request`` segments. A step with more takes no lease
+    and runs the block loop eagerly, however few its patches.
     """
 
     # Patch-count buckets of one replay. 16384 patches merge to the LLM's
@@ -779,10 +794,9 @@ class VisionEncoderSubmodule(NodeSubmodule):
         super().__init__()
         self.model = model
         self.config = config
+        self._compiled: tuple | None = None
         # per-column (mean, std) for byte patches; see `Qwen3_5DenseModel.pixel_normalizer`
         self._pixel_normalizer = pixel_normalizer
-        self._embed = torch.compile(model.embed, dynamic=True)
-        self._merger = torch.compile(model.merger, dynamic=True)
 
     def prepare_inputs(
         self,
@@ -882,10 +896,27 @@ class VisionEncoderSubmodule(NodeSubmodule):
                 declare_step=declare_step,
                 lease_before_step=True,
                 one_row_per_step=True,
+                can_lease=self._fits_capture,
                 total_tokens=self.BLOCK_LOOP_PATCH_BUCKETS,
                 capture_batch_sizes=[1],
             )
         }
+
+    def _fits_capture(self, inputs: list[NodeInputs]) -> bool:
+        """Whether the batch's segments fit a replay's attention plan: the
+        resource's per-request ceiling, read from it so a YAML override holds.
+
+        TODO: capture more than 64 segments, so long low-res videos replay
+        too. The ceiling is sized for images (16384 patches / 256-patch
+        floor), and raising it pads every replay's plan to it. Sizing each
+        bucket's plan by its own token count over the smallest segment (one
+        2x2 merge block) would hold any prompt that fits, at small buckets'
+        cost unchanged; that is a ragged-resource change.
+        """
+        per_request = self.node_resources[VISION_ATTN].max_segments_per_request
+        segments = sum(len(inp.tensor_inputs["seq_lengths"]) for inp in inputs)
+        # the whole step replays as one row (`one_row_per_step`)
+        return segments <= per_request
 
     def _capture_block_loop(self, inp: PiecewiseCallInputs) -> dict[str, torch.Tensor]:
         """The captured region: reads the runner's buffers, never rebinds."""
@@ -902,11 +933,16 @@ class VisionEncoderSubmodule(NodeSubmodule):
     ) -> torch.Tensor | None:
         """The block loop replayed once per prompt, or None if not leased.
 
-        Decided as the engine leased, on batch size and total patch count.
+        A leased step declares nothing of its own (`declare_step`), so
+        ``engine_inputs.step`` is None; a bucket that fits is not enough, as
+        ``can_lease`` may have refused the batch. The bucket check keeps a
+        forward driven outside the engine (no declaration either) eager.
         """
         runner = engine_inputs.piecewise_runners.get(VISION_BLOCK_LOOP)
         # the whole step is one row (`one_row_per_step`)
-        if runner is None or not runner.can_run(1, int(hidden.shape[0])):
+        if runner is None or engine_inputs.step is not None or not runner.can_run(
+            1, int(hidden.shape[0]),
+        ):
             return None
         # one replay for every image, not one each: a second plan overwrites the schedule a queued replay still reads
         return runner.run(
@@ -922,8 +958,8 @@ class VisionEncoderSubmodule(NodeSubmodule):
         engine_inputs: ModelInputsFromEngine,
         inputs: list[NodeInputs],
     ) -> dict[str, Any]:
-        """Every request's images packed end to end, in `declare_step`'s
-        segment order."""
+        """Every request's images and videos packed end to end, in
+        `declare_step`'s segment order."""
         device = self.get_device()
 
         def packed(name: str) -> torch.Tensor:
@@ -946,9 +982,9 @@ class VisionEncoderSubmodule(NodeSubmodule):
         }
 
     def _normalize(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        """Byte patches to the processor's float pixels. Eager, not in the
+        """Byte patches to the processors' float pixels. Eager, not in the
         compiled embed, so the arithmetic (a subtract, a true divide) is the
-        processor's exactly."""
+        processors' exactly."""
         if pixel_values.dtype != torch.uint8:
             return pixel_values
         mean, std = self._pixel_normalizer
@@ -980,11 +1016,17 @@ class VisionEncoderSubmodule(NodeSubmodule):
     ) -> dict[str, NameToTensorList]:
         # One call for every image; the ragged kernel's per-frame segments
         # keep them apart.
-        hidden, cos, sin = self._embed(pixel_values, indices, weights, position_ids)
+        if self._compiled is None:
+            self._compiled = (
+                torch.compile(self.model.embed, dynamic=True),
+                torch.compile(self.model.merger, dynamic=True),
+            )
+        embed, merger = self._compiled
+        hidden, cos, sin = embed(pixel_values, indices, weights, position_ids)
         encoded = self._replay_block_loop(engine_inputs, hidden, cos, sin, seq_lengths)
         if encoded is None:
             encoded = self.model.encode(hidden, cos, sin)
-        embeds = self._merger(encoded)
+        embeds = merger(encoded)
         return self._split_rows(engine_inputs.request_ids, embeds, row_tokens)
 
     @staticmethod

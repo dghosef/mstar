@@ -8,7 +8,7 @@ api_switch_interval_s: 0.001
 # plan run serially between the ranks' forwards.
 tp_async_sched: true
 node_groups:
-  # Text and images; video is refused (see `process_prompt`). Colocated: the
+  # Text, images and video. Colocated: the
   # encoder runs once per request, then idles.
   - node_names: [vision_encoder]
     ranks: [0]

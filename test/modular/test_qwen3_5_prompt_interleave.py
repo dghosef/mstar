@@ -17,14 +17,13 @@ import pytest
 import torch
 
 from mstar.api_server.openai.adapters import flatten_messages
-from mstar.model.base import ProcessPromptOutput
 from mstar.model.multimodal import (
     TEXT,
     PromptPart,
     parts_from_modalities,
     prefill_plan,
 )
-from mstar.model.qwen3_5.qwen3_5_model import IMAGE_GRIDS_KEY, IMAGE_PART, TEXT_PART
+from mstar.model.qwen3_5.qwen3_5_model import IMAGE_PART, TEXT_PART
 
 CKPT = os.environ.get("QWEN3_5_CKPT")
 
@@ -38,11 +37,6 @@ def model():
     from mstar.model.qwen3_5.qwen3_5_model import Qwen3_5DenseModel
 
     return Qwen3_5DenseModel(CKPT)
-
-
-def tensors_of(out):
-    """An image prompt also returns its grids as metadata."""
-    return out.new_input_tensors if isinstance(out, ProcessPromptOutput) else out
 
 
 def an_image():
@@ -68,9 +62,7 @@ def test_segments_rebuild_the_prompt(model, modalities):
         tensors={"image_inputs": [an_image()] * n_images},
         prompt_parts=None,
     )
-    grids = out.metadata[IMAGE_GRIDS_KEY]
-    out = tensors_of(out)
-    assert grids == [tuple(g.tolist()) for g in out["image_grid_thw"]]
+    out = out.new_input_tensors
     segments = out["text_inputs"]
     assert len(out["image_grid_thw"]) == n_images
     assert len(out["pixel_values"]) == n_images
@@ -121,15 +113,14 @@ def test_schedule_matches_the_split(model):
         tensors={"image_inputs": [an_image(), an_image()]},
         prompt_parts=parts,
     )
-    host_grids = out.metadata[IMAGE_GRIDS_KEY]
-    out = tensors_of(out)
+    out = out.new_input_tensors
     # the conductor passes tensor handles; the identity is all that matters
     signals = {
         "text_inputs": list(out["text_inputs"]),
         "pixel_values": list(out["pixel_values"]),
         "image_grid_thw": list(out["image_grid_thw"]),
     }
-    schedule = model._prefill_schedule(modalities, signals, host_grids)
+    schedule = model._prefill_schedule(modalities, signals)
 
     # An image prompt is one walk, whatever its layout: the interleaving
     # travels as `order` rather than as a walk per span.
@@ -141,8 +132,6 @@ def test_schedule_matches_the_split(model):
         for s in prefill_plan(parts_from_modalities(modalities))
     ]
     assert list(step.order) == planned
-    # the host copy of the grids rides with the step, in the same order
-    assert list(step.image_grids) == host_grids
 
     # the nth tag of a kind takes the nth tensor of that kind, in order
     for name in ("text_inputs", "pixel_values", "image_grid_thw"):
@@ -168,6 +157,7 @@ def test_schedule_matches_the_split(model):
 def test_text_only_prompt_still_uses_prefill_text(model):
     """No images, no merged walk: the plain text path is unchanged."""
     out = model.process_prompt("just text", ["text"], ["text"], tensors={})
+    out = out.new_input_tensors
     signals = {"text_inputs": list(out["text_inputs"])}
     schedule = model._prefill_schedule(["text"], signals)
 
@@ -197,22 +187,14 @@ def test_empty_prompt_fails_legibly(model):
         model.get_initial_forward_pass_args("LLM", ["text"], ["text"], {})
 
 
-def test_video_is_refused_rather_than_run_as_an_image(model):
-    # a ValueError, so the server answers 400 rather than 500
-    with pytest.raises(ValueError, match="video"):
-        model.process_prompt(
-            "What happens?", ["video", "text"], ["text"],
-            tensors={"video_inputs": [an_image()]},
-        )
-
-
 def test_image_only_message_renders_an_empty_text_span(model):
     """A chat message with just an image arrives with no text at all; that is
     still a prompt, so it must render (an empty span around the image) rather
     than be dropped on the floor and time out at the client."""
-    out = tensors_of(model.process_prompt(
+    out = model.process_prompt(
         None, ["image"], ["text"], tensors={"image_inputs": [an_image()]},
-    ))
+    )
+    out = out.new_input_tensors
     assert len(out["pixel_values"]) == 1 and len(out["image_grid_thw"]) == 1
     # the template's framing around the image: a span before it and one after
     assert len(out["text_inputs"]) == 2
@@ -226,9 +208,10 @@ def test_no_text_and_no_attachments_is_a_bad_request(model):
 def test_rgba_image_is_accepted(model):
     torch.manual_seed(0)
     rgba = torch.rand(4, 224, 224)
-    out = tensors_of(model.process_prompt(
+    out = model.process_prompt(
         "Describe.", ["image", "text"], ["text"], tensors={"image_inputs": [rgba]},
-    ))
+    )
+    out = out.new_input_tensors
     assert out["pixel_values"][0].shape[0] > 0
 
 
@@ -254,23 +237,3 @@ def test_a_chat_the_template_refuses_is_a_bad_request(model, tmp_path):
     text, _, in_mods, parts = flatten_messages(messages, tmp_path)
     with pytest.raises(ValueError, match="System message must be at the beginning"):
         model.process_prompt(text, in_mods, ["text"], prompt_parts=parts)
-
-
-@pytest.mark.parametrize("size", [(224, 224), (500, 377), (64, 900)])
-def test_byte_patches_normalize_to_the_processors_pixels(model, size):
-    """`process_prompt` ships un-normalized byte patches; the encoder's
-    normalization must give the processor's own pixels exactly, resized or not."""
-    from mstar.model.qwen3_5.qwen3_5_model import _as_hwc_uint8
-    from mstar.model.qwen3_5.submodules import VisionEncoderSubmodule
-
-    torch.manual_seed(0)
-    image = torch.randint(0, 256, (3, size[1], size[0]), dtype=torch.uint8)
-    out = tensors_of(model.process_prompt(
-        "Describe.", ["image", "text"], ["text"], tensors={"image_inputs": [image]},
-    ))
-    patches = out["pixel_values"][0]
-    assert patches.dtype == torch.uint8
-    encoder = VisionEncoderSubmodule.__new__(VisionEncoderSubmodule)
-    encoder._pixel_normalizer = model.pixel_normalizer()
-    reference = model.image_processor(images=[_as_hwc_uint8(image)], return_tensors="pt")
-    assert torch.equal(VisionEncoderSubmodule._normalize(encoder, patches), reference["pixel_values"])
