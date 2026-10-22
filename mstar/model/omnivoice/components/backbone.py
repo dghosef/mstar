@@ -20,8 +20,10 @@ requests*, at different diffusion steps, with different per-request knobs.  Its
 own server has no batching at all (k2-fsa/OmniVoice#251).
 
 The coupling to ``omnivoice.models.omnivoice_flashinfer`` is deliberate but
-narrow — four module-private names, checked at load by ``assert_flashinfer_api``
-so an upstream rename fails at boot rather than at the first request.
+narrow — four module-private names and the four fused-weight attributes its
+``apply_flashinfer`` sets on each layer, checked at load by
+``assert_flashinfer_api`` and ``assert_flashinfer_patched`` so an upstream
+rename fails at boot rather than at the first request.
 """
 
 import logging
@@ -34,8 +36,15 @@ from torch import nn
 
 logger = logging.getLogger(__name__)
 
-# The private surface this integration rides on. Checked once at load.
+# The private surface this integration rides on. Checked once at load: the
+# module's names before ``apply_flashinfer`` runs, and the fused weights it
+# leaves on every layer's attention and MLP (read by ``OmniVoiceBackbone.encode``)
+# after.
 _REQUIRED_FI_NAMES = ("_CTX", "PackedAttnRunner", "_forward_logits", "apply_flashinfer")
+_REQUIRED_FI_LAYER_ATTRS = {
+    "self_attn": ("_fi_w_qkv", "_fi_qkv_split", "_fi_rope_theta"),
+    "mlp": ("_fi_w_gate_up",),
+}
 
 
 def assert_flashinfer_api():
@@ -65,6 +74,24 @@ def assert_flashinfer_api():
             "omnivoice version, or port the validator into mstar."
         )
     return fi
+
+
+def assert_flashinfer_patched(model: nn.Module) -> None:
+    """Fail at boot if ``apply_flashinfer`` no longer leaves the fused weights
+    ``OmniVoiceBackbone.encode`` reads, rather than at capture."""
+    missing = sorted({
+        f"{part}.{name}"
+        for layer in model.llm.layers
+        for part, names in _REQUIRED_FI_LAYER_ATTRS.items()
+        for name in names
+        if not hasattr(getattr(layer, part), name)
+    })
+    if missing:
+        raise RuntimeError(
+            f"omnivoice's apply_flashinfer no longer sets {missing} on the layers; "
+            "mstar's OmniVoice layer loop reads them. Pin the omnivoice version, "
+            "or port the fused weights into mstar."
+        )
 
 
 @dataclass
@@ -271,7 +298,10 @@ class OmniVoiceBackbone(nn.Module):
                 residual = hidden
                 x = flashinfer.norm.rmsnorm(hidden, norm.weight, eps=norm.variance_epsilon)
             else:
-                # residual += hidden; hidden = norm(residual), in place
+                # residual += hidden; hidden = norm(residual), in place. The kernel
+                # normalizes the sum before rounding it to half precision, where
+                # the reference rounds first: logits match it to that rounding,
+                # not bit for bit.
                 flashinfer.norm.fused_add_rmsnorm(hidden, residual, norm.weight, eps=norm.variance_epsilon)
                 x = hidden
             n, d = x.shape[0], sa.head_dim

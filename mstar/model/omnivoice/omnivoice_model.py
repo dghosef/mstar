@@ -44,6 +44,7 @@ from mstar.model.base import ForwardPassArgs, Model
 from mstar.model.omnivoice.components.backbone import (
     OmniVoiceBackbone,
     assert_flashinfer_api,
+    assert_flashinfer_patched,
 )
 from mstar.model.omnivoice.components.codec import load_codec
 from mstar.model.omnivoice.components.text import (
@@ -758,6 +759,7 @@ class OmniVoiceModel(Model):
             # After .to(device): apply_flashinfer sizes its attention workspace
             # against model.device, and patching on CPU would allocate it there.
             fi.apply_flashinfer(reference, enable_cuda_graph=False)
+            assert_flashinfer_patched(reference)
             backbone = OmniVoiceBackbone(reference, plan_dtype=dtype).eval()
             return OmniVoiceBackboneSubmodule(backbone, self.config)
 
