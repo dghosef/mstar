@@ -1,0 +1,209 @@
+{
+ "summary": {
+  "n": 32,
+  "errors": 0,
+  "wall_s": 4.139882467978168,
+  "req_per_s": 7.729688040063642,
+  "ttft_p50": 0.4858894615317695,
+  "ttft_mean": 0.4842796244120109,
+  "e2e_p50": 1.0285805350285955,
+  "ttft_p50_by_kind": {
+   "big": 0.4858894615317695
+  }
+ },
+ "rows": [
+  {
+   "id": "big_0",
+   "text": "The image shows **three pieces of fried food**, likely **fried chicken tenders** or **breaded chicken nuggets**, served in a white bowl.\n\n###",
+   "ttft": 0.1467398829990998,
+   "e2e": 1.0303637759643607
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays several **beignets** \u2014 a classic French pastry, famously associated with New Orleans\u2019 Caf\u00e9 du Monde. These are square-shaped, deep-fried",
+   "ttft": 0.2413143509766087,
+   "e2e": 1.0289168489980511
+  },
+  {
+   "id": "big_2",
+   "text": "The dish shown in the photo is **beignets**, a classic French pastry that has become iconic in New Orleans, Louisiana.\n\n### Key Identifying Features:",
+   "ttft": 0.3456147880060598,
+   "e2e": 1.060092005005572
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of three golden-brown beignets, generously dusted with powdered sugar, sits on a dark wooden table alongside a spoon, a glass of water,",
+   "ttft": 0.761814650031738,
+   "e2e": 1.0596586749888957
+  },
+  {
+   "id": "big_0",
+   "text": "The image shows **three pieces of fried food**, likely **fried chicken tenders** or **breaded chicken nuggets**, served in a white bowl.\n\n###",
+   "ttft": 0.6594978329958394,
+   "e2e": 1.0592541359947063
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up view of several **beignets** \u2014 a classic French pastry, famously associated with New Orleans\u2019 Caf\u00e9 du Monde. These are square",
+   "ttft": 0.5574003059882671,
+   "e2e": 1.0588016780093312
+  },
+  {
+   "id": "big_2",
+   "text": "The dish shown in the photo is **beignets**, a classic French pastry that has become iconic in New Orleans, Louisiana.\n\n### Key Identifying Features:",
+   "ttft": 0.8622696280363016,
+   "e2e": 1.058399117027875
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of three golden-brown beignets, generously dusted with powdered sugar, sits on a dark wooden table alongside a spoon, a glass of water,",
+   "ttft": 0.4548084550187923,
+   "e2e": 1.0570955440052785
+  },
+  {
+   "id": "big_0",
+   "text": "The image shows **three pieces of fried food**, likely **fried chicken tenders** or **breaded chicken nuggets**, served in a white bowl.\n\n###",
+   "ttft": 0.1454974139924161,
+   "e2e": 1.0180946050095372
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up view of several **beignets** \u2014 a classic French pastry, famously associated with New Orleans\u2019 Caf\u00e9 du Monde. These are square",
+   "ttft": 0.23746250598924235,
+   "e2e": 1.0591701219673268
+  },
+  {
+   "id": "big_2",
+   "text": "The dish shown in the photo is **beignets**, a classic French pastry that has become iconic in New Orleans, Louisiana.\n\n### Key Identifying Features:",
+   "ttft": 0.721214660035912,
+   "e2e": 1.03189222200308
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of three golden-brown beignets, generously dusted with powdered sugar, sits on a dark wooden table alongside a spoon, a glass of water,",
+   "ttft": 0.41631834901636466,
+   "e2e": 1.029098320985213
+  },
+  {
+   "id": "big_0",
+   "text": "The image shows **three pieces of fried food**, likely **fried chicken tenders** or **breaded chicken nuggets**, served in a white bowl.\n\n###",
+   "ttft": 0.31625723402248695,
+   "e2e": 1.0286245120223612
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up view of several **beignets** \u2014 a classic French pastry, famously associated with New Orleans\u2019 Caf\u00e9 du Monde. These are square",
+   "ttft": 0.6179034130182117,
+   "e2e": 1.0282424269826151
+  },
+  {
+   "id": "big_2",
+   "text": "The dish shown in the photo is **beignets**, a classic French pastry that has become iconic in New Orleans, Louisiana.\n\n### Key Identifying Features:",
+   "ttft": 0.5169704680447467,
+   "e2e": 1.027823361044284
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of three golden-brown beignets, generously dusted with powdered sugar, sits on a dark wooden table alongside a spoon, a glass of water,",
+   "ttft": 0.8313879829947837,
+   "e2e": 1.0301541000371799
+  },
+  {
+   "id": "big_0",
+   "text": "The image shows **three pieces of fried food**, likely **fried chicken tenders** or **breaded chicken nuggets**, served in a white bowl.\n\n###",
+   "ttft": 0.1640527460258454,
+   "e2e": 1.0378748350194655
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up view of several **beignets** \u2014 a classic French pastry, famously associated with New Orleans\u2019 Caf\u00e9 du Monde. These are square",
+   "ttft": 0.2131188450148329,
+   "e2e": 1.0281971270451322
+  },
+  {
+   "id": "big_2",
+   "text": "The dish shown in the photo is **beignets**, a classic French pastry that has become iconic in New Orleans, Louisiana.\n\n### Key Identifying Features:",
+   "ttft": 0.6256522900075652,
+   "e2e": 1.028116220026277
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of three golden-brown beignets, generously dusted with powdered sugar, sits on a dark wooden table alongside a spoon, a glass of water,",
+   "ttft": 0.4226999530219473,
+   "e2e": 1.0289462490472943
+  },
+  {
+   "id": "big_0",
+   "text": "The image shows **three pieces of fried food**, likely **fried chicken tenders** or **breaded chicken nuggets**, served in a white bowl.\n\n###",
+   "ttft": 0.31941916595678777,
+   "e2e": 1.027063385990914
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up view of several **beignets** \u2014 a classic French pastry, famously associated with New Orleans\u2019 Caf\u00e9 du Monde. These are square",
+   "ttft": 0.725772506033536,
+   "e2e": 1.0285365580348298
+  },
+  {
+   "id": "big_2",
+   "text": "The dish shown in the photo is **beignets**, a classic French pastry that has become iconic in New Orleans, Louisiana.\n\n### Key Identifying Features:",
+   "ttft": 0.5228987609734759,
+   "e2e": 1.0260099680162966
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of three golden-brown beignets, generously dusted with powdered sugar, sits on a dark wooden table alongside a spoon, a glass of water,",
+   "ttft": 0.8383101989747956,
+   "e2e": 1.0275559769943357
+  },
+  {
+   "id": "big_0",
+   "text": "The image shows **three pieces of fried food**, likely **fried chicken tenders** or **breaded chicken nuggets**, served in a white bowl.\n\n###",
+   "ttft": 0.1591151250177063,
+   "e2e": 1.0305064829881303
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up view of several **beignets** \u2014 a classic French pastry, famously associated with New Orleans\u2019 Caf\u00e9 du Monde. These are square",
+   "ttft": 0.21019094303483143,
+   "e2e": 1.0118492000037804
+  },
+  {
+   "id": "big_2",
+   "text": "The dish shown in the photo is **beignets**, a classic French pastry that has become iconic in New Orleans, Louisiana.\n\n### Key Identifying Features:",
+   "ttft": 0.8335688019869849,
+   "e2e": 1.0199191179708578
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of three golden-brown beignets, generously dusted with powdered sugar, sits on a dark wooden table alongside a spoon, a glass of water,",
+   "ttft": 0.42626191303133965,
+   "e2e": 1.0108239779947326
+  },
+  {
+   "id": "big_0",
+   "text": "The image shows **three pieces of fried food**, likely **fried chicken tenders** or **breaded chicken nuggets**, served in a white bowl.\n\n###",
+   "ttft": 0.32313474401598796,
+   "e2e": 1.0100014969939366
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up view of several **beignets** \u2014 a classic French pastry, famously associated with New Orleans\u2019 Caf\u00e9 du Monde. These are square",
+   "ttft": 0.6266266839811578,
+   "e2e": 1.010042930021882
+  },
+  {
+   "id": "big_2",
+   "text": "The dish shown in the photo is **beignets**, a classic French pastry that has become iconic in New Orleans, Louisiana.\n\n### Key Identifying Features:",
+   "ttft": 0.7287131329649128,
+   "e2e": 1.0095338629907928
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of three golden-brown beignets, generously dusted with powdered sugar, sits on a dark wooden table alongside a spoon, a glass of water,",
+   "ttft": 0.5249402499757707,
+   "e2e": 1.0092395760002546
+  }
+ ],
+ "errors": []
+}

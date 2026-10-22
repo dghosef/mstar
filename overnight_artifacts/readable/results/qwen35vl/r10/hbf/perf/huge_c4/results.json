@@ -1,0 +1,89 @@
+{
+ "summary": {
+  "n": 12,
+  "errors": 0,
+  "wall_s": 1.2078005059738643,
+  "req_per_s": 9.935415609322215,
+  "ttft_p50": 0.21832141748745926,
+  "ttft_mean": 0.2357032753304035,
+  "e2e_p50": 0.394524557486875,
+  "ttft_p50_by_kind": {
+   "huge": 0.21832141748745926
+  }
+ },
+ "rows": [
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in this image is **pastries**, specifically **sugar cookies** or **pastel cookies** (often called *past\u00e9is de nata*",
+   "ttft": 0.1909868080401793,
+   "e2e": 0.4033444850356318
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a close-up of three **donuts**, likely **papas al pastor** or **papas al horno**, generously dusted with **powder",
+   "ttft": 0.24716439394978806,
+   "e2e": 0.4636121079674922
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in this image is **pastries**, specifically **sugar cookies** or **pastel cookies** (often called *past\u00e9is de nata*",
+   "ttft": 0.3585800239816308,
+   "e2e": 0.4635813920176588
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a close-up of three **donuts**, likely **papas al pastor** or **papas al horno**, generously dusted with **powder",
+   "ttft": 0.2879401000100188,
+   "e2e": 0.46282863401575014
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in this image is **pastries**, specifically **sugar cookies** or **pastel cookies** (often called *past\u00e9is de nata*",
+   "ttft": 0.19074081000871956,
+   "e2e": 0.3965709930052981
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a close-up of three **donuts**, likely **papas al pastor** or **papas al horno**, generously dusted with **powder",
+   "ttft": 0.2932466500205919,
+   "e2e": 0.3949421899742447
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in this image is **pastries**, specifically **sugar cookies** or **pastel cookies** (often called *past\u00e9is de nata*",
+   "ttft": 0.2187601819750853,
+   "e2e": 0.3939188190270215
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a close-up of three **donuts**, likely **papas al pastor** or **papas al horno**, generously dusted with **powder",
+   "ttft": 0.1895721729961224,
+   "e2e": 0.3922124030068517
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in this image is **pastries**, specifically **sugar cookies** or **pastel cookies** (often called *past\u00e9is de nata*",
+   "ttft": 0.1737038730061613,
+   "e2e": 0.3941069249995053
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a close-up of three **donuts**, likely **papas al pastor** or **papas al horno**, generously dusted with **powder",
+   "ttft": 0.16823454201221466,
+   "e2e": 0.3416157069732435
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in this image is **pastries**, specifically **sugar cookies** or **pastel cookies** (often called *past\u00e9is de nata*",
+   "ttft": 0.2916270949644968,
+   "e2e": 0.34683657600544393
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a close-up of three **donuts**, likely **papas al pastor** or **papas al horno**, generously dusted with **powder",
+   "ttft": 0.21788265299983323,
+   "e2e": 0.3436998830293305
+  }
+ ],
+ "errors": []
+}

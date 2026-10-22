@@ -1,0 +1,118 @@
+{
+ "label": "w_new_480",
+ "tree": "/root/work/mstar",
+ "config": "",
+ "env": [
+  "HF_HOME=/root/work/hf"
+ ],
+ "size": "832x480",
+ "frames": 81,
+ "steps": 20,
+ "guidance": 5.0,
+ "concurrency": 1,
+ "num": 3,
+ "startup_s": 21.014538049697876,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  98.61908751599913
+ ],
+ "e2e_s": [
+  9.21318345399959,
+  9.101840269000604,
+  9.214221177999207
+ ],
+ "e2e_mean_s": 9.1764149669998,
+ "e2e_median_s": 9.21318345399959,
+ "wall_s": 27.53364314600003,
+ "videos_per_min": 6.537456705076445,
+ "peak_gpu_mem": "0, 0 MiB | 1, 30967 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 9.21318345399959,
+   "bytes": 482426,
+   "t_end": 1792568199.158153
+  },
+  {
+   "idx": 1,
+   "ok": true,
+   "e2e_s": 9.101840269000604,
+   "bytes": 213197,
+   "t_end": 1792568208.2609186
+  },
+  {
+   "idx": 2,
+   "ok": true,
+   "e2e_s": 9.214221177999207,
+   "bytes": 428759,
+   "t_end": 1792568217.4765868
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-38f23a960c9d427e945f571c7bc810b0",
+   "total_ms": 9206.6,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 6805.9,
+     "fwd_ms": 6739.0
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 46.9,
+     "fwd_ms": 46.2
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 1773.5,
+     "fwd_ms": 1769.2
+    }
+   }
+  },
+  {
+   "rid": "vid-8595c367d37846b888c21b2954f92f3a",
+   "total_ms": 9097.0,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 6866.0,
+     "fwd_ms": 6800.0
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 45.2,
+     "fwd_ms": 44.6
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 1778.7,
+     "fwd_ms": 1774.5
+    }
+   }
+  },
+  {
+   "rid": "vid-6519b5494ab143edb146d69a3bf5249d",
+   "total_ms": 9207.0,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 6893.6,
+     "fwd_ms": 6827.9
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 45.3,
+     "fwd_ms": 44.6
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 1790.0,
+     "fwd_ms": 1777.3
+    }
+   }
+  }
+ ]
+}

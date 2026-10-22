@@ -1,0 +1,89 @@
+{
+ "summary": {
+  "n": 12,
+  "errors": 0,
+  "wall_s": 4.171457102987915,
+  "req_per_s": 2.8766926528873293,
+  "ttft_p50": 1.0017689564847387,
+  "ttft_mean": 0.9609078787470935,
+  "e2e_p50": 1.3820343569968827,
+  "ttft_p50_by_kind": {
+   "phone": 1.0017689564847387
+  }
+ },
+ "rows": [
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, slightly high-angle photograph of a pile of freshly baked pastries, heavily dusted with powdered sugar. The golden-brown, flaky",
+   "ttft": 0.7560844809631817,
+   "e2e": 1.3829972670064308
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, slightly high-angle photograph of a dessert, likely a layered cake or cake layer, heavily dusted with powdered sugar.\n\n**Key Elements",
+   "ttft": 1.3380469990079291,
+   "e2e": 1.6383288490469567
+  },
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, slightly high-angle photograph of a pile of freshly baked pastries, heavily dusted with powdered sugar. The golden-brown, flaky",
+   "ttft": 1.0070523410104215,
+   "e2e": 1.3878968710196204
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, slightly high-angle photograph of a dessert, likely a layered cake or cake layer, heavily dusted with powdered sugar.\n\n**Key Elements",
+   "ttft": 1.0762477240059525,
+   "e2e": 1.6339363770093769
+  },
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, slightly high-angle photograph of a pile of freshly baked pastries, heavily dusted with powdered sugar. The golden-brown, flaky",
+   "ttft": 0.760424308013171,
+   "e2e": 1.3893000049865805
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, slightly high-angle photograph of a dessert, likely a layered cake or cake layer, heavily dusted with powdered sugar.\n\n**Key Elements",
+   "ttft": 1.0093502659583464,
+   "e2e": 1.3891503309714608
+  },
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, slightly high-angle photograph of a pile of freshly baked pastries, heavily dusted with powdered sugar. The golden-brown, flaky",
+   "ttft": 1.088703751040157,
+   "e2e": 1.3808893869863823
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, slightly high-angle photograph of a dessert, likely a layered cake or cake layer, heavily dusted with powdered sugar.\n\n**Key Elements",
+   "ttft": 0.8315341700217687,
+   "e2e": 1.3772705850424245
+  },
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, slightly high-angle photograph of a pile of freshly baked pastries, heavily dusted with powdered sugar. The golden-brown, flaky",
+   "ttft": 0.7496194510022178,
+   "e2e": 1.380240430997219
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, slightly high-angle photograph of a dessert, likely a layered cake or cake layer, heavily dusted with powdered sugar.\n\n**Key Elements",
+   "ttft": 0.996485571959056,
+   "e2e": 1.3810714469873346
+  },
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, slightly high-angle photograph of a pile of freshly baked pastries, heavily dusted with powdered sugar. The golden-brown, flaky",
+   "ttft": 1.087646888976451,
+   "e2e": 1.1521905529662035
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, slightly high-angle photograph of a dessert, likely a layered cake or cake layer, heavily dusted with powdered sugar.\n\n**Key Elements",
+   "ttft": 0.8296985930064693,
+   "e2e": 1.1474525230005383
+  }
+ ],
+ "errors": []
+}

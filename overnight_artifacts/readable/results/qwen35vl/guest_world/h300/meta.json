@@ -1,0 +1,25 @@
+{
+ "arm": "h300",
+ "tree": "/root/guest-qwen35vl/head",
+ "cmd": [
+  "/root/work/mstar/.venv/bin/python",
+  "-m",
+  "mstar.cli.main",
+  "serve",
+  "omnilingual_asr_ctc_300m",
+  "--gpus",
+  "1",
+  "--port",
+  "9110",
+  "--config",
+  "configs/omnilingual_asr_ctc_300m.yaml"
+ ],
+ "env_extra": {},
+ "start": "2026-10-21 19:17:10",
+ "loadavg_start": "83.82 48.71 29.24 99/4048 399778",
+ "git": "",
+ "mstar_file": "/root/guest-qwen35vl/head/mstar/__init__.py",
+ "startup_s": 18.0,
+ "end": "2026-10-21 19:18:59",
+ "loadavg_end": "186.53 93.99 47.55 4/3292 401534"
+}

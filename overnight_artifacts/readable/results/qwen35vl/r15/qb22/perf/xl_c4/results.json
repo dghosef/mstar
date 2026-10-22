@@ -1,0 +1,89 @@
+{
+ "summary": {
+  "n": 12,
+  "errors": 0,
+  "wall_s": 2.146440594980959,
+  "req_per_s": 5.590650879441857,
+  "ttft_p50": 0.38909032801166177,
+  "ttft_mean": 0.4261561695942267,
+  "e2e_p50": 0.6898178305127658,
+  "ttft_p50_by_kind": {
+   "xl": 0.38909032801166177
+  }
+ },
+ "rows": [
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle shot of a casual dining table set with breakfast or brunch items. The table surface appears to be a speckled white",
+   "ttft": 0.2958463130053133,
+   "e2e": 0.5912038669921458
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly high-angle photograph of a meal served on a rectangular, light-colored serving board or tray, likely in a casual dining setting. The",
+   "ttft": 0.44297439500223845,
+   "e2e": 0.7423036270192824
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle shot of a casual dining table set with breakfast or brunch items. The table surface appears to be a speckled white",
+   "ttft": 0.5881805089884438,
+   "e2e": 0.9065100750303827
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly high-angle photograph of a meal served on a rectangular, light-colored serving board or tray, likely in a casual dining setting. The",
+   "ttft": 0.7390862760366872,
+   "e2e": 1.0521018209983595
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle shot of a casual dining table set with breakfast or brunch items. The table surface appears to be a speckled white",
+   "ttft": 0.3067124530207366,
+   "e2e": 0.6515310559771024
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly high-angle photograph of a meal served on a rectangular, light-colored serving board or tray, likely in a casual dining setting. The",
+   "ttft": 0.31053158902795985,
+   "e2e": 0.500646508007776
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle shot of a casual dining table set with breakfast or brunch items. The table surface appears to be a speckled white",
+   "ttft": 0.3352062610210851,
+   "e2e": 0.33645327301928774
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly high-angle photograph of a meal served on a rectangular, light-colored serving board or tray, likely in a casual dining setting. The",
+   "ttft": 0.4974828769918531,
+   "e2e": 0.7731224419549108
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle shot of a casual dining table set with breakfast or brunch items. The table surface appears to be a speckled white",
+   "ttft": 0.30976043100235984,
+   "e2e": 0.5945322220213711
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly high-angle photograph of a meal served on a rectangular, light-colored serving board or tray, likely in a casual dining setting. The",
+   "ttft": 0.45496453205123544,
+   "e2e": 0.7281046050484292
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle shot of a casual dining table set with breakfast or brunch items. The table surface appears to be a speckled white",
+   "ttft": 0.5681540789664723,
+   "e2e": 0.7283764539752156
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly high-angle photograph of a meal served on a rectangular, light-colored serving board or tray, likely in a casual dining setting. The",
+   "ttft": 0.2649743200163357,
+   "e2e": 0.3164474840159528
+  }
+ ],
+ "errors": []
+}

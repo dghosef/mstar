@@ -1,0 +1,96 @@
+{
+ "label": "ta_n_sp2_on",
+ "tree": "/root/work/mstar",
+ "config": "configs/cosmos3_nano_sp2.yaml",
+ "env": [
+  "HF_HOME=/root/work/hf",
+  "MSTAR_TP_ASYNC_SCHED=1"
+ ],
+ "size": "832x480",
+ "frames": 189,
+ "steps": 35,
+ "guidance": 6.0,
+ "concurrency": 1,
+ "num": 2,
+ "startup_s": 42.014490842819214,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  35.557771485997364
+ ],
+ "e2e_s": [
+  31.105890808998083,
+  31.30040122000355
+ ],
+ "e2e_mean_s": 31.203146014500817,
+ "e2e_median_s": 31.203146014500817,
+ "wall_s": 62.43144728599873,
+ "videos_per_min": 1.922108251796238,
+ "peak_gpu_mem": "0, 51533 MiB | 1, 43185 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 31.105890808998083,
+   "bytes": 4679914,
+   "t_end": 1792612390.432413
+  },
+  {
+   "idx": 1,
+   "ok": true,
+   "e2e_s": 31.30040122000355,
+   "bytes": 4018714,
+   "t_end": 1792612421.7443986
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-fb0c001311d24eb19c7a21a20eed8b25",
+   "total_ms": 31069.1,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.1,
+    "preprocess done -> conductor ingest": 0.8,
+    "conductor ingest -> conductor done": 30814.0,
+    "conductor done -> first chunk": 247.6,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 5.5
+   },
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 28414.3,
+     "fwd_ms": 28360.9
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2405.4,
+     "fwd_ms": 2393.8
+    }
+   }
+  },
+  {
+   "rid": "vid-f29bf519473e4a018bc5b4b3400b0689",
+   "total_ms": 31264.3,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.4,
+    "preprocess done -> conductor ingest": 0.4,
+    "conductor ingest -> conductor done": 31012.8,
+    "conductor done -> first chunk": 244.1,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 5.7
+   },
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 28613.7,
+     "fwd_ms": 28559.6
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2418.2,
+     "fwd_ms": 2405.0
+    }
+   }
+  }
+ ]
+}

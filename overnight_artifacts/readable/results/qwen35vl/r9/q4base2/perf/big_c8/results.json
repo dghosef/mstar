@@ -1,0 +1,209 @@
+{
+ "summary": {
+  "n": 32,
+  "errors": 0,
+  "wall_s": 2.889584345044568,
+  "req_per_s": 11.07425711759469,
+  "ttft_p50": 0.3383054434962105,
+  "ttft_mean": 0.3391512913440238,
+  "e2e_p50": 0.7148795319662895,
+  "ttft_p50_by_kind": {
+   "big": 0.3383054434962105
+  }
+ },
+ "rows": [
+  {
+   "id": "big_0",
+   "text": "The image shows **two pieces of fried dough**, likely **donuts** or **fried dough balls**, served in a white bowl.\n\n### Key observations:\n",
+   "ttft": 0.12835536600323394,
+   "e2e": 0.7130737900151871
+  },
+  {
+   "id": "big_1",
+   "text": "This image showcases a close-up, appetizing view of **three powdered sugar-dusted pastries**, likely **beignets** or **churros**, arranged",
+   "ttft": 0.24994695000350475,
+   "e2e": 0.7449620460392907
+  },
+  {
+   "id": "big_2",
+   "text": "The dish shown in the photo is **beignets** \u2014 a type of fried dough pastry dusted with powdered sugar.\n\n### Cuisine:\nBeignets",
+   "ttft": 0.17707094800425693,
+   "e2e": 0.7110432870103978
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered donuts, dusted with sugar, sits on a dark wooden table. A spoon rests beside the donuts, ready for serving. In the",
+   "ttft": 0.31996152899228036,
+   "e2e": 0.7438251699786633
+  },
+  {
+   "id": "big_0",
+   "text": "The image shows **two pieces of fried dough**, likely **donuts** or **fried dough balls**, served in a white bowl.\n\n### Key observations:\n",
+   "ttft": 0.4557682180311531,
+   "e2e": 0.7434069200535305
+  },
+  {
+   "id": "big_1",
+   "text": "This image showcases a close-up, appetizing view of **three powdered sugar-dusted pastries**, likely **beignets** or **churros**, arranged",
+   "ttft": 0.38815703603904694,
+   "e2e": 0.7419467690051533
+  },
+  {
+   "id": "big_2",
+   "text": "The dish shown in the photo is **beignets** \u2014 a type of fried dough pastry dusted with powdered sugar.\n\n### Cuisine:\nBeignets",
+   "ttft": 0.5236747880117036,
+   "e2e": 0.7425099260290153
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered donuts, dusted with sugar, sits on a dark wooden table. A spoon rests beside the donuts, ready for serving. In the",
+   "ttft": 0.5911148120067082,
+   "e2e": 0.742169331992045
+  },
+  {
+   "id": "big_0",
+   "text": "The image shows **two pieces of fried dough**, likely **donuts** or **fried dough balls**, served in a white bowl.\n\n### Key observations:\n",
+   "ttft": 0.2110217569861561,
+   "e2e": 0.7535414780140854
+  },
+  {
+   "id": "big_1",
+   "text": "This image showcases a close-up, appetizing view of **three powdered sugar-dusted pastries**, likely **beignets** or **churros**, arranged",
+   "ttft": 0.12174603599123657,
+   "e2e": 0.711824080965016
+  },
+  {
+   "id": "big_2",
+   "text": "The dish shown in the photo is **beignets** \u2014 a type of fried dough pastry dusted with powdered sugar.\n\n### Cuisine:\nBeignets",
+   "ttft": 0.42656896001426503,
+   "e2e": 0.7237955090240575
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered donuts, dusted with sugar, sits on a dark wooden table. A spoon rests beside the donuts, ready for serving. In the",
+   "ttft": 0.35664935800014064,
+   "e2e": 0.7210486399708316
+  },
+  {
+   "id": "big_0",
+   "text": "The image shows **two pieces of fried dough**, likely **donuts** or **fried dough balls**, served in a white bowl.\n\n### Key observations:\n",
+   "ttft": 0.5009871569927782,
+   "e2e": 0.7220368150155991
+  },
+  {
+   "id": "big_1",
+   "text": "This image showcases a close-up, appetizing view of **three powdered sugar-dusted pastries**, likely **beignets** or **churros**, arranged",
+   "ttft": 0.5684349480434321,
+   "e2e": 0.722114569041878
+  },
+  {
+   "id": "big_2",
+   "text": "The dish shown in the photo is **beignets** \u2014 a type of fried dough pastry dusted with powdered sugar.\n\n### Cuisine:\nBeignets",
+   "ttft": 0.2880793079966679,
+   "e2e": 0.7197679249802604
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered donuts, dusted with sugar, sits on a dark wooden table. A spoon rests beside the donuts, ready for serving. In the",
+   "ttft": 0.21773231698898599,
+   "e2e": 0.7193606090149842
+  },
+  {
+   "id": "big_0",
+   "text": "The image shows **two pieces of fried dough**, likely **donuts** or **fried dough balls**, served in a white bowl.\n\n### Key observations:\n",
+   "ttft": 0.12356804200680926,
+   "e2e": 0.7248992789536715
+  },
+  {
+   "id": "big_1",
+   "text": "This image showcases a close-up, appetizing view of **three powdered sugar-dusted pastries**, likely **beignets** or **churros**, arranged",
+   "ttft": 0.16899079800350592,
+   "e2e": 0.7151168559794314
+  },
+  {
+   "id": "big_2",
+   "text": "The dish shown in the photo is **beignets** \u2014 a type of fried dough pastry dusted with powdered sugar.\n\n### Cuisine:\nBeignets",
+   "ttft": 0.29016960598528385,
+   "e2e": 0.7144456909736618
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered donuts, dusted with sugar, sits on a dark wooden table. A spoon rests beside the donuts, ready for serving. In the",
+   "ttft": 0.42674711399013177,
+   "e2e": 0.7140134369838051
+  },
+  {
+   "id": "big_0",
+   "text": "The image shows **two pieces of fried dough**, likely **donuts** or **fried dough balls**, served in a white bowl.\n\n### Key observations:\n",
+   "ttft": 0.21933747502043843,
+   "e2e": 0.7126563449855894
+  },
+  {
+   "id": "big_1",
+   "text": "This image showcases a close-up, appetizing view of **three powdered sugar-dusted pastries**, likely **beignets** or **churros**, arranged",
+   "ttft": 0.3572857169783674,
+   "e2e": 0.713044109987095
+  },
+  {
+   "id": "big_2",
+   "text": "The dish shown in the photo is **beignets** \u2014 a type of fried dough pastry dusted with powdered sugar.\n\n### Cuisine:\nBeignets",
+   "ttft": 0.5020372399594635,
+   "e2e": 0.7125869509764016
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered donuts, dusted with sugar, sits on a dark wooden table. A spoon rests beside the donuts, ready for serving. In the",
+   "ttft": 0.5694580010022037,
+   "e2e": 0.7146422079531476
+  },
+  {
+   "id": "big_0",
+   "text": "The image shows **two pieces of fried dough**, likely **donuts** or **fried dough balls**, served in a white bowl.\n\n### Key observations:\n",
+   "ttft": 0.11927256401395425,
+   "e2e": 0.7157781510031782
+  },
+  {
+   "id": "big_1",
+   "text": "This image showcases a close-up, appetizing view of **three powdered sugar-dusted pastries**, likely **beignets** or **churros**, arranged",
+   "ttft": 0.36029724299442023,
+   "e2e": 0.6947616210090928
+  },
+  {
+   "id": "big_2",
+   "text": "The dish shown in the photo is **beignets** \u2014 a type of fried dough pastry dusted with powdered sugar.\n\n### Cuisine:\nBeignets",
+   "ttft": 0.22150396998040378,
+   "e2e": 0.6934608540032059
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered donuts, dusted with sugar, sits on a dark wooden table. A spoon rests beside the donuts, ready for serving. In the",
+   "ttft": 0.18127134395763278,
+   "e2e": 0.6931454499717802
+  },
+  {
+   "id": "big_0",
+   "text": "The image shows **two pieces of fried dough**, likely **donuts** or **fried dough balls**, served in a white bowl.\n\n### Key observations:\n",
+   "ttft": 0.42748778802342713,
+   "e2e": 0.7005580150289461
+  },
+  {
+   "id": "big_1",
+   "text": "This image showcases a close-up, appetizing view of **three powdered sugar-dusted pastries**, likely **beignets** or **churros**, arranged",
+   "ttft": 0.29015098698437214,
+   "e2e": 0.6923267099773511
+  },
+  {
+   "id": "big_2",
+   "text": "The dish shown in the photo is **beignets** \u2014 a type of fried dough pastry dusted with powdered sugar.\n\n### Cuisine:\nBeignets",
+   "ttft": 0.5691893309704028,
+   "e2e": 0.7052719949861057
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered donuts, dusted with sugar, sits on a dark wooden table. A spoon rests beside the donuts, ready for serving. In the",
+   "ttft": 0.5008046150323935,
+   "e2e": 0.6989944970118813
+  }
+ ],
+ "errors": []
+}

@@ -1,0 +1,330 @@
+{
+ "label": "w_1g_mps_c2",
+ "tree": "/root/work/mstar",
+ "config": "",
+ "env": [
+  "HF_HOME=/root/work/hf",
+  "CUDA_MPS_PIPE_DIRECTORY=/tmp/mps_root_gpu0/pipe",
+  "CUDA_MPS_LOG_DIRECTORY=/tmp/mps_root_gpu0/log"
+ ],
+ "size": "1280x704",
+ "frames": 81,
+ "steps": 20,
+ "guidance": 5.0,
+ "concurrency": 2,
+ "num": 8,
+ "startup_s": 21.012959718704224,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  42.92146908799987,
+  63.82719091499894
+ ],
+ "e2e_s": [
+  22.691220041000634,
+  44.05502960600279,
+  43.48280586799956,
+  43.962037547000364,
+  43.77901398800168,
+  43.58550206500149,
+  43.66599041399968,
+  44.05312979299924
+ ],
+ "e2e_mean_s": 41.15934116525068,
+ "e2e_median_s": 43.72250220100068,
+ "wall_s": 175.679839927001,
+ "videos_per_min": 2.7322429266753145,
+ "peak_gpu_mem": "0, 40476 MiB | 1, 0 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 22.691220041000634,
+   "bytes": 632427,
+   "t_end": 1792578891.6315844
+  },
+  {
+   "idx": 1,
+   "ok": true,
+   "e2e_s": 44.05502960600279,
+   "bytes": 257133,
+   "t_end": 1792578912.9946067
+  },
+  {
+   "idx": 2,
+   "ok": true,
+   "e2e_s": 43.48280586799956,
+   "bytes": 583644,
+   "t_end": 1792578935.1164017
+  },
+  {
+   "idx": 3,
+   "ok": true,
+   "e2e_s": 43.962037547000364,
+   "bytes": 566511,
+   "t_end": 1792578956.9584453
+  },
+  {
+   "idx": 4,
+   "ok": true,
+   "e2e_s": 43.77901398800168,
+   "bytes": 535958,
+   "t_end": 1792578978.8969615
+  },
+  {
+   "idx": 5,
+   "ok": true,
+   "e2e_s": 43.58550206500149,
+   "bytes": 319331,
+   "t_end": 1792579000.544945
+  },
+  {
+   "idx": 6,
+   "ok": true,
+   "e2e_s": 43.66599041399968,
+   "bytes": 620803,
+   "t_end": 1792579022.5647976
+  },
+  {
+   "idx": 7,
+   "ok": true,
+   "e2e_s": 44.05312979299924,
+   "bytes": 6049272,
+   "t_end": 1792579044.6173282
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-7d16584186474d79a7ed7422cb0dae65",
+   "total_ms": 22677.0,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.6,
+    "preprocess done -> conductor ingest": 1.6,
+    "conductor ingest -> conductor done": 21827.4,
+    "conductor done -> first chunk": 841.2,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 5.1
+   },
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 19430.8,
+     "fwd_ms": 19346.6
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 47.4,
+     "fwd_ms": 46.7
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2366.3,
+     "fwd_ms": 2327.9
+    }
+   }
+  },
+  {
+   "rid": "vid-8aeea9ebf42a4a68a79b0bddd07c5898",
+   "total_ms": 44040.2,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.9,
+    "preprocess done -> conductor ingest": 0.5,
+    "conductor ingest -> conductor done": 43647.6,
+    "conductor done -> first chunk": 388.1,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 2.1
+   },
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 19515.7,
+     "fwd_ms": 19444.2
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 47.2,
+     "fwd_ms": 46.8
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2365.6,
+     "fwd_ms": 2329.6
+    }
+   }
+  },
+  {
+   "rid": "vid-a53190756fe64a33bb6c076dfa00c2e2",
+   "total_ms": 43468.2,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.9,
+    "preprocess done -> conductor ingest": 0.2,
+    "conductor ingest -> conductor done": 42805.9,
+    "conductor done -> first chunk": 654.8,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 5.5
+   },
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 19538.3,
+     "fwd_ms": 19468.9
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 50.1,
+     "fwd_ms": 49.4
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2371.5,
+     "fwd_ms": 2334.5
+    }
+   }
+  },
+  {
+   "rid": "vid-4174d4f3021e49bfa350f591c1445aa8",
+   "total_ms": 43946.4,
+   "timeline_ms": {
+    "recv -> preprocess done": 2.2,
+    "preprocess done -> conductor ingest": 0.4,
+    "conductor ingest -> conductor done": 43267.4,
+    "conductor done -> first chunk": 671.1,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 5.3
+   },
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 19536.4,
+     "fwd_ms": 19468.1
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 50.1,
+     "fwd_ms": 49.5
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2347.7,
+     "fwd_ms": 2335.3
+    }
+   }
+  },
+  {
+   "rid": "vid-407e5521a820489da428e0dad1224c13",
+   "total_ms": 43764.9,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.9,
+    "preprocess done -> conductor ingest": 0.2,
+    "conductor ingest -> conductor done": 43020.2,
+    "conductor done -> first chunk": 737.0,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 5.5
+   },
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 19539.7,
+     "fwd_ms": 19462.6
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 50.0,
+     "fwd_ms": 49.4
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2374.3,
+     "fwd_ms": 2340.2
+    }
+   }
+  },
+  {
+   "rid": "vid-6f0acea38b114c7ba19f22d79cdac281",
+   "total_ms": 43573.4,
+   "timeline_ms": {
+    "recv -> preprocess done": 2.3,
+    "preprocess done -> conductor ingest": 1.1,
+    "conductor ingest -> conductor done": 43079.7,
+    "conductor done -> first chunk": 485.0,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 5.2
+   },
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 19583.5,
+     "fwd_ms": 19512.5
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 50.8,
+     "fwd_ms": 50.0
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2377.9,
+     "fwd_ms": 2338.3
+    }
+   }
+  },
+  {
+   "rid": "vid-bceacb09a7fd4a39986953839a812a76",
+   "total_ms": 43653.7,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.5,
+    "preprocess done -> conductor ingest": 1.1,
+    "conductor ingest -> conductor done": 43042.7,
+    "conductor done -> first chunk": 603.4,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 5.0
+   },
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 19587.6,
+     "fwd_ms": 19516.9
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 51.6,
+     "fwd_ms": 50.9
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2375.9,
+     "fwd_ms": 2338.6
+    }
+   }
+  },
+  {
+   "rid": "vid-5edfc4dc7770444da37dfeae47c080ac",
+   "total_ms": 44000.5,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.4,
+    "preprocess done -> conductor ingest": 0.4,
+    "conductor ingest -> conductor done": 43182.7,
+    "conductor done -> first chunk": 814.7,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 1.3
+   },
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 19542.8,
+     "fwd_ms": 19473.2
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 51.4,
+     "fwd_ms": 50.8
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2350.3,
+     "fwd_ms": 2341.0
+    }
+   }
+  }
+ ]
+}

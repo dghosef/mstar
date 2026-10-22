@@ -1,0 +1,19 @@
+{
+ "tag": "cfgpar_prune_r1",
+ "tree": "/root/work/img6",
+ "mstar_file": "/root/work/img6/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve bagel --config /workspace/results/img/bagel/cfgpar_prune_r1/config.yaml --gpus 0,1 --port 8100",
+ "sets": [],
+ "env": [],
+ "git": "",
+ "start": "08:44:47",
+ "gpu_mem_before": [
+  52399,
+  0
+ ],
+ "startup_s": 435.0421040058136,
+ "gpu_mem_after": [
+  0,
+  0
+ ]
+}

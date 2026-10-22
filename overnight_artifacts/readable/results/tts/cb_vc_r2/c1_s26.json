@@ -1,0 +1,325 @@
+{
+  "engine": "mstar",
+  "label": "cb_vc_r2",
+  "url": "http://127.0.0.1:8100",
+  "model": "chatterbox",
+  "engine_version": null,
+  "sentences_file": "/root/work/tharness/s26.txt",
+  "num_sentences": 27,
+  "concurrency": 1,
+  "repeats": 1,
+  "warmup": 4,
+  "request_fields": {
+    "model": "chatterbox",
+    "stream": true,
+    "response_format": "wav"
+  },
+  "sample_rate": 24000,
+  "gpu": {
+    "gpus": [
+      "NVIDIA H200, 580.178.04, 1980 MHz, 1980 MHz, 143771 MiB",
+      "NVIDIA H200, 580.178.04, 345 MHz, 1980 MHz, 143771 MiB"
+    ]
+  },
+  "started_at": "2026-10-21T05:37:10+0000",
+  "median_over_repeats": {
+    "ttfa_p50_ms": 161.53328200016404,
+    "ttfa_p95_ms": 167.62530699998024,
+    "e2e_p50_s": 0.7096272439994209,
+    "e2e_p95_s": 1.8053249200002028,
+    "rtf_mean": 0.08909041639905943,
+    "rtf_p95": 0.11002843441362113,
+    "audio_s_per_wall_s": 11.427724880309343,
+    "wall_s": 27.20051482299823
+  },
+  "errors_total": 0,
+  "repeats_detail": [
+    {
+      "repeat": 0,
+      "requests": 27,
+      "errors": 0,
+      "wall_s": 27.20051482299823,
+      "ttfa_p50_ms": 161.53328200016404,
+      "ttfa_p95_ms": 167.62530699998024,
+      "e2e_p50_s": 0.7096272439994209,
+      "e2e_p95_s": 1.8053249200002028,
+      "rtf_mean": 0.08909041639905943,
+      "rtf_p95": 0.11002843441362113,
+      "audio_s_total": 310.84,
+      "audio_s_per_wall_s": 11.427724880309343,
+      "results": [
+        {
+          "sentence_id": 1,
+          "words": 9,
+          "ttfa_s": 0.1587111509998067,
+          "e2e_s": 0.2708206749994133,
+          "audio_s": 2.48,
+          "pcm_bytes": 119040,
+          "error": null,
+          "rtf": 0.1092018850804086
+        },
+        {
+          "sentence_id": 2,
+          "words": 14,
+          "ttfa_s": 0.15925553200031572,
+          "e2e_s": 0.3467750240015448,
+          "audio_s": 4.4,
+          "pcm_bytes": 211200,
+          "error": null,
+          "rtf": 0.07881250545489654
+        },
+        {
+          "sentence_id": 3,
+          "words": 16,
+          "ttfa_s": 0.1657700779996958,
+          "e2e_s": 0.3932800349994068,
+          "audio_s": 4.04,
+          "pcm_bytes": 193920,
+          "error": null,
+          "rtf": 0.09734654331668485
+        },
+        {
+          "sentence_id": 4,
+          "words": 26,
+          "ttfa_s": 0.1620164260002639,
+          "e2e_s": 0.5442850800009182,
+          "audio_s": 6.92,
+          "pcm_bytes": 332160,
+          "error": null,
+          "rtf": 0.07865391329493038
+        },
+        {
+          "sentence_id": 5,
+          "words": 31,
+          "ttfa_s": 0.15943229399999836,
+          "e2e_s": 0.6978799070002424,
+          "audio_s": 8.36,
+          "pcm_bytes": 401280,
+          "error": null,
+          "rtf": 0.08347845777514862
+        },
+        {
+          "sentence_id": 6,
+          "words": 42,
+          "ttfa_s": 0.16228350100027455,
+          "e2e_s": 4.449344116999782,
+          "audio_s": 12.52,
+          "pcm_bytes": 600960,
+          "error": null,
+          "rtf": 0.3553789230830497
+        },
+        {
+          "sentence_id": 7,
+          "words": 36,
+          "ttfa_s": 0.1625501609996718,
+          "e2e_s": 0.7096272439994209,
+          "audio_s": 9.6,
+          "pcm_bytes": 460800,
+          "error": null,
+          "rtf": 0.07391950458327301
+        },
+        {
+          "sentence_id": 8,
+          "words": 31,
+          "ttfa_s": 0.16106128100000205,
+          "e2e_s": 0.6827414319996024,
+          "audio_s": 9.16,
+          "pcm_bytes": 439680,
+          "error": null,
+          "rtf": 0.07453509082965092
+        },
+        {
+          "sentence_id": 9,
+          "words": 54,
+          "ttfa_s": 0.158758621000743,
+          "e2e_s": 1.22117067399995,
+          "audio_s": 17.24,
+          "pcm_bytes": 827520,
+          "error": null,
+          "rtf": 0.07083356577725929
+        },
+        {
+          "sentence_id": 10,
+          "words": 36,
+          "ttfa_s": 0.1574798470010137,
+          "e2e_s": 0.7018686100000195,
+          "audio_s": 9.68,
+          "pcm_bytes": 464640,
+          "error": null,
+          "rtf": 0.07250708780991938
+        },
+        {
+          "sentence_id": 11,
+          "words": 34,
+          "ttfa_s": 0.16092596599992248,
+          "e2e_s": 0.6540959680005471,
+          "audio_s": 8.56,
+          "pcm_bytes": 410880,
+          "error": null,
+          "rtf": 0.07641308037389569
+        },
+        {
+          "sentence_id": 12,
+          "words": 62,
+          "ttfa_s": 0.1650515159999486,
+          "e2e_s": 1.1914765229994373,
+          "audio_s": 17.68,
+          "pcm_bytes": 848640,
+          "error": null,
+          "rtf": 0.06739120605200437
+        },
+        {
+          "sentence_id": 13,
+          "words": 44,
+          "ttfa_s": 0.1617414699994697,
+          "e2e_s": 0.6548015299995313,
+          "audio_s": 8.6,
+          "pcm_bytes": 412800,
+          "error": null,
+          "rtf": 0.07613971279064319
+        },
+        {
+          "sentence_id": 14,
+          "words": 56,
+          "ttfa_s": 0.16058442600115086,
+          "e2e_s": 1.113334173000112,
+          "audio_s": 15.4,
+          "pcm_bytes": 739200,
+          "error": null,
+          "rtf": 0.0722944268181891
+        },
+        {
+          "sentence_id": 15,
+          "words": 43,
+          "ttfa_s": 0.1620748140012438,
+          "e2e_s": 0.8710868540001684,
+          "audio_s": 12.24,
+          "pcm_bytes": 587520,
+          "error": null,
+          "rtf": 0.07116722663400069
+        },
+        {
+          "sentence_id": 16,
+          "words": 65,
+          "ttfa_s": 0.1677320899998449,
+          "e2e_s": 1.5657110520005517,
+          "audio_s": 14.84,
+          "pcm_bytes": 712320,
+          "error": null,
+          "rtf": 0.105506135579552
+        },
+        {
+          "sentence_id": 17,
+          "words": 32,
+          "ttfa_s": 0.16153328200016404,
+          "e2e_s": 0.6461515769988182,
+          "audio_s": 8.52,
+          "pcm_bytes": 408960,
+          "error": null,
+          "rtf": 0.07583938697169228
+        },
+        {
+          "sentence_id": 18,
+          "words": 47,
+          "ttfa_s": 0.1590106219991867,
+          "e2e_s": 1.42596851000053,
+          "audio_s": 12.96,
+          "pcm_bytes": 622080,
+          "error": null,
+          "rtf": 0.11002843441362113
+        },
+        {
+          "sentence_id": 19,
+          "words": 35,
+          "ttfa_s": 0.16063125599976047,
+          "e2e_s": 0.8137185750001663,
+          "audio_s": 11.36,
+          "pcm_bytes": 545280,
+          "error": null,
+          "rtf": 0.07163015625001465
+        },
+        {
+          "sentence_id": 20,
+          "words": 44,
+          "ttfa_s": 0.15799075900031312,
+          "e2e_s": 0.8163138609997986,
+          "audio_s": 11.44,
+          "pcm_bytes": 549120,
+          "error": null,
+          "rtf": 0.07135610673075163
+        },
+        {
+          "sentence_id": 21,
+          "words": 67,
+          "ttfa_s": 0.16338165299930552,
+          "e2e_s": 1.2234907309994014,
+          "audio_s": 17.64,
+          "pcm_bytes": 846720,
+          "error": null,
+          "rtf": 0.06935888497729033
+        },
+        {
+          "sentence_id": 22,
+          "words": 61,
+          "ttfa_s": 0.16762530699998024,
+          "e2e_s": 1.2780504519996612,
+          "audio_s": 18.44,
+          "pcm_bytes": 885120,
+          "error": null,
+          "rtf": 0.06930859284163021
+        },
+        {
+          "sentence_id": 23,
+          "words": 35,
+          "ttfa_s": 0.15610207999998238,
+          "e2e_s": 0.5340686819999974,
+          "audio_s": 6.88,
+          "pcm_bytes": 330240,
+          "error": null,
+          "rtf": 0.07762626191860426
+        },
+        {
+          "sentence_id": 24,
+          "words": 70,
+          "ttfa_s": 0.16230720699968515,
+          "e2e_s": 1.5365372030009894,
+          "audio_s": 22.48,
+          "pcm_bytes": 1079040,
+          "error": null,
+          "rtf": 0.0683512990658803
+        },
+        {
+          "sentence_id": 25,
+          "words": 28,
+          "ttfa_s": 0.1623904380012391,
+          "e2e_s": 0.6584258930015494,
+          "audio_s": 8.68,
+          "pcm_bytes": 416640,
+          "error": null,
+          "rtf": 0.07585551762690662
+        },
+        {
+          "sentence_id": 26,
+          "words": 20,
+          "ttfa_s": 0.15760225699887087,
+          "e2e_s": 0.37212334199830366,
+          "audio_s": 4.44,
+          "pcm_bytes": 213120,
+          "error": null,
+          "rtf": 0.08381156351313145
+        },
+        {
+          "sentence_id": 27,
+          "words": 83,
+          "ttfa_s": 0.1644599390001531,
+          "e2e_s": 1.8053249200002028,
+          "audio_s": 26.28,
+          "pcm_bytes": 1261440,
+          "error": null,
+          "rtf": 0.06869577321157545
+        }
+      ]
+    }
+  ],
+  "markdown_row": "| cb_vc_r2 | c=1 | TTFA p50 162 ms / p95 168 ms | RTF 0.089 | 11.4 audio-s/s | e2e p50 0.71 s | errors 0 |"
+}

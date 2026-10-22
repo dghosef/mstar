@@ -1,0 +1,48 @@
+{
+ "single_A_vs_A": 0.0,
+ "wave0": {
+  "same_rows_vs_row0": [
+   0.0,
+   0.0,
+   0.0,
+   0.038824178291022284
+  ],
+  "same_row0_vs_single": 0.038824178466615025,
+  "mixed_A_rows_vs_same_row0": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "mixed_B_vs_single_B": 0.0344836847395981
+ },
+ "wave1": {
+  "same_rows_vs_row0": [
+   0.0,
+   0.0,
+   0.0,
+   0.0
+  ],
+  "same_row0_vs_single": 0.038824178466615025,
+  "mixed_A_rows_vs_same_row0": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "mixed_B_vs_single_B": 0.0344836847395981
+ },
+ "wave2": {
+  "same_rows_vs_row0": [
+   0.0,
+   0.0,
+   0.0,
+   0.0
+  ],
+  "same_row0_vs_single": 0.038824178466615025,
+  "mixed_A_rows_vs_same_row0": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "mixed_B_vs_single_B": 0.0344836847395981
+ }
+}

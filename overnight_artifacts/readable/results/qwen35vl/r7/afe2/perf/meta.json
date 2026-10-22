@@ -1,0 +1,26 @@
+{
+ "arm": "afe2",
+ "tree": "/root/work/mstar",
+ "cmd": [
+  "/root/work/mstar/.venv/bin/python",
+  "-m",
+  "mstar.cli.main",
+  "serve",
+  "omnilingual_asr_ctc_300m",
+  "--gpus",
+  "0",
+  "--port",
+  "8100",
+  "--config",
+  "configs/omnilingual_asr_ctc_300m.yaml"
+ ],
+ "env_extra": {
+  "MSTAR_OVN_ASR_FWD_COST": "1000000000000"
+ },
+ "start": "2026-10-21 06:02:52",
+ "loadavg_start": "34.47 27.11 26.58 3/3410 81965",
+ "git": "",
+ "mstar_file": "/root/work/mstar/mstar/__init__.py",
+ "startup_s": 15.0,
+ "end": "2026-10-21 06:03:42"
+}

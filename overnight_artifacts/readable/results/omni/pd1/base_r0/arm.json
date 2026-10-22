@@ -1,0 +1,29 @@
+{
+ "tree": "/root/work/base",
+ "mstar_file": "/root/work/base/mstar/__init__.py",
+ "config": "configs/qwen3omni_pd_2gpu.yaml",
+ "env": {
+  "MSTAR_PHASE_TIMING": "100"
+ },
+ "load_start": "16.21 8.35 8.29 2/2780 300326",
+ "t_start": 1792609477.2269008,
+ "startup_s": 190.0173466205597,
+ "workloads": {
+  "t2s_c8": {
+   "rc": 0,
+   "wall_s": 48.099846839904785,
+   "load": "12.80 8.07 7.99 1/3754 301898"
+  },
+  "t2t_c16": {
+   "rc": 0,
+   "wall_s": 20.939828395843506,
+   "load": "8.91 7.53 7.81 1/3725 302222"
+  },
+  "t2s_c1": {
+   "rc": 0,
+   "wall_s": 29.918133974075317,
+   "load": "11.25 8.47 8.13 1/3723 302549"
+  }
+ },
+ "t_end": 1792609766.2029958
+}

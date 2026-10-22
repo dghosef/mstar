@@ -1,0 +1,209 @@
+{
+ "summary": {
+  "n": 32,
+  "errors": 0,
+  "wall_s": 1.8078288930119015,
+  "req_per_s": 17.700790226162923,
+  "ttft_p50": 0.3315511839755345,
+  "ttft_mean": 0.27311872031350504,
+  "e2e_p50": 0.42646793252788484,
+  "ttft_p50_by_kind": {
+   "big": 0.3315511839755345
+  }
+ },
+ "rows": [
+  {
+   "id": "big_0",
+   "text": "The food dish shown in this image is **churros** \u2014 specifically, **sugar-coated churros**.\n\nThese are fried dough sticks that are",
+   "ttft": 0.07143506605643779,
+   "e2e": 0.5156596060260199
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays three golden-brown, fried pastries \u2014 likely **beignets** or **biscuits** \u2014 generously dusted with fine white powdered sugar",
+   "ttft": 0.1570185080054216,
+   "e2e": 0.5206707849865779
+  },
+  {
+   "id": "big_2",
+   "text": "The dish visible in this photo is **beignets**, a type of fried pastry popular in **French cuisine**, particularly in **New Orleans, Louisiana, USA**.",
+   "ttft": 0.15635556099005044,
+   "e2e": 0.519486146979034
+  },
+  {
+   "id": "big_3",
+   "text": " A plate of freshly powdered beignets, served on a dark wooden table with a glass of water, a metal pitcher, and a stack of white plates nearby.",
+   "ttft": 0.4381559760076925,
+   "e2e": 0.5288542010239325
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in this image is **churros** \u2014 specifically, **sugar-coated churros**.\n\nThese are fried dough sticks that are",
+   "ttft": 0.437839835009072,
+   "e2e": 0.5290414850460365
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays three golden-brown, fried pastries \u2014 likely **beignets** or **biscuits** \u2014 generously dusted with fine white powdered sugar",
+   "ttft": 0.4374310490093194,
+   "e2e": 0.5286375810392201
+  },
+  {
+   "id": "big_2",
+   "text": "The dish visible in this photo is **beignets**, a type of fried pastry popular in **French cuisine**, particularly in **New Orleans, Louisiana, USA**.",
+   "ttft": 0.4571302719996311,
+   "e2e": 0.5282330749905668
+  },
+  {
+   "id": "big_3",
+   "text": " A plate of freshly powdered beignets, served on a dark wooden table with a glass of water, a metal pitcher, and a stack of white plates nearby.",
+   "ttft": 0.4365609069936909,
+   "e2e": 0.527768928965088
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in this image is **churros** \u2014 specifically, **sugar-coated churros**.\n\nThese are fried dough sticks that are",
+   "ttft": 0.06919491599546745,
+   "e2e": 0.425991695956327
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays three golden-brown, fried pastries \u2014 likely **beignets** or **biscuits** \u2014 generously dusted with fine white powdered sugar",
+   "ttft": 0.14866740599973127,
+   "e2e": 0.42541112896287814
+  },
+  {
+   "id": "big_2",
+   "text": "The dish visible in this photo is **beignets**, a type of fried pastry popular in **French cuisine**, particularly in **New Orleans, Louisiana, USA**.",
+   "ttft": 0.1479076860123314,
+   "e2e": 0.4260552800260484
+  },
+  {
+   "id": "big_3",
+   "text": " A plate of freshly powdered beignets, served on a dark wooden table with a glass of water, a metal pitcher, and a stack of white plates nearby.",
+   "ttft": 0.35535757400793955,
+   "e2e": 0.4287896850146353
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in this image is **churros** \u2014 specifically, **sugar-coated churros**.\n\nThese are fried dough sticks that are",
+   "ttft": 0.33356279897270724,
+   "e2e": 0.42687735095387325
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays three golden-brown, fried pastries \u2014 likely **beignets** or **biscuits** \u2014 generously dusted with fine white powdered sugar",
+   "ttft": 0.3331125029944815,
+   "e2e": 0.42644810903584585
+  },
+  {
+   "id": "big_2",
+   "text": "The dish visible in this photo is **beignets**, a type of fried pastry popular in **French cuisine**, particularly in **New Orleans, Louisiana, USA**.",
+   "ttft": 0.33260414499090984,
+   "e2e": 0.4254703199840151
+  },
+  {
+   "id": "big_3",
+   "text": " A plate of freshly powdered beignets, served on a dark wooden table with a glass of water, a metal pitcher, and a stack of white plates nearby.",
+   "ttft": 0.3322480199858546,
+   "e2e": 0.4255974959814921
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in this image is **churros** \u2014 specifically, **sugar-coated churros**.\n\nThese are fried dough sticks that are",
+   "ttft": 0.06688754400238395,
+   "e2e": 0.4274448479991406
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays three golden-brown, fried pastries \u2014 likely **beignets** or **biscuits** \u2014 generously dusted with fine white powdered sugar",
+   "ttft": 0.14986252901144326,
+   "e2e": 0.4282650409732014
+  },
+  {
+   "id": "big_2",
+   "text": "The dish visible in this photo is **beignets**, a type of fried pastry popular in **French cuisine**, particularly in **New Orleans, Louisiana, USA**.",
+   "ttft": 0.1484676880063489,
+   "e2e": 0.4274099890026264
+  },
+  {
+   "id": "big_3",
+   "text": " A plate of freshly powdered beignets, served on a dark wooden table with a glass of water, a metal pitcher, and a stack of white plates nearby.",
+   "ttft": 0.3328128479770385,
+   "e2e": 0.42748605797532946
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in this image is **churros** \u2014 specifically, **sugar-coated churros**.\n\nThese are fried dough sticks that are",
+   "ttft": 0.353492210037075,
+   "e2e": 0.4281745020416565
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays three golden-brown, fried pastries \u2014 likely **beignets** or **biscuits** \u2014 generously dusted with fine white powdered sugar",
+   "ttft": 0.3317979769781232,
+   "e2e": 0.42648775601992384
+  },
+  {
+   "id": "big_2",
+   "text": "The dish visible in this photo is **beignets**, a type of fried pastry popular in **French cuisine**, particularly in **New Orleans, Louisiana, USA**.",
+   "ttft": 0.33130439097294584,
+   "e2e": 0.4260077519575134
+  },
+  {
+   "id": "big_3",
+   "text": " A plate of freshly powdered beignets, served on a dark wooden table with a glass of water, a metal pitcher, and a stack of white plates nearby.",
+   "ttft": 0.3308136810082942,
+   "e2e": 0.4250754020176828
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in this image is **churros** \u2014 specifically, **sugar-coated churros**.\n\nThese are fried dough sticks that are",
+   "ttft": 0.07370394200552255,
+   "e2e": 0.42479069699766114
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays three golden-brown, fried pastries \u2014 likely **beignets** or **biscuits** \u2014 generously dusted with fine white powdered sugar",
+   "ttft": 0.14827682898612693,
+   "e2e": 0.42429033695952967
+  },
+  {
+   "id": "big_2",
+   "text": "The dish visible in this photo is **beignets**, a type of fried pastry popular in **French cuisine**, particularly in **New Orleans, Louisiana, USA**.",
+   "ttft": 0.14781925600254908,
+   "e2e": 0.42398576298728585
+  },
+  {
+   "id": "big_3",
+   "text": " A plate of freshly powdered beignets, served on a dark wooden table with a glass of water, a metal pitcher, and a stack of white plates nearby.",
+   "ttft": 0.332603640970774,
+   "e2e": 0.4193324539810419
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in this image is **churros** \u2014 specifically, **sugar-coated churros**.\n\nThese are fried dough sticks that are",
+   "ttft": 0.3321171950083226,
+   "e2e": 0.41895842098165303
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays three golden-brown, fried pastries \u2014 likely **beignets** or **biscuits** \u2014 generously dusted with fine white powdered sugar",
+   "ttft": 0.35306185099761933,
+   "e2e": 0.42160622897790745
+  },
+  {
+   "id": "big_2",
+   "text": "The dish visible in this photo is **beignets**, a type of fried pastry popular in **French cuisine**, particularly in **New Orleans, Louisiana, USA**.",
+   "ttft": 0.33128598000621423,
+   "e2e": 0.41784816700965166
+  },
+  {
+   "id": "big_3",
+   "text": " A plate of freshly powdered beignets, served on a dark wooden table with a glass of water, a metal pitcher, and a stack of white plates nearby.",
+   "ttft": 0.3309092650306411,
+   "e2e": 0.4178390420274809
+  }
+ ],
+ "errors": []
+}

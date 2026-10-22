@@ -1,0 +1,19 @@
+{
+ "tag": "t2t_cub_s1",
+ "tree": "/root/work/img9",
+ "mstar_file": "/root/work/img9/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve bagel --config /workspace/results/img/bagel/t2t_cub_s1/config.yaml --gpus 1 --port 8300",
+ "sets": [
+  "decode_compile_mode=default"
+ ],
+ "env": [],
+ "git": "",
+ "start": "09:24:53",
+ "gpu_mem_before": [
+  0
+ ],
+ "startup_s": 70.01271772384644,
+ "gpu_mem_after": [
+  0
+ ]
+}

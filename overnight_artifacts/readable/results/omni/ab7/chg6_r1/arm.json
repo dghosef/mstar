@@ -1,0 +1,24 @@
+{
+ "tree": "/root/work/chg6",
+ "mstar_file": "/root/work/chg6/mstar/__init__.py",
+ "config": "configs/qwen3omni_2gpu.yaml",
+ "env": {
+  "MSTAR_PHASE_TIMING": "100"
+ },
+ "load_start": "79.87 49.73 35.41 100/3890 214357",
+ "t_start": 1792575232.9537623,
+ "startup_s": 135.0147156715393,
+ "workloads": {
+  "t2s_c32": {
+   "rc": 0,
+   "wall_s": 64.03225588798523,
+   "load": "81.20 57.45 40.63 103/5160 216037"
+  },
+  "t2s_c8": {
+   "rc": 0,
+   "wall_s": 47.69074726104736,
+   "load": "93.04 64.95 44.09 6/5017 216393"
+  }
+ },
+ "t_end": 1792575479.6921625
+}

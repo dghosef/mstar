@@ -1,0 +1,50 @@
+{
+  "mode": "throughput",
+  "by_concurrency": {
+    "4": {
+      "concurrency": 4,
+      "images": 8,
+      "repeats": 1,
+      "images_per_s": 0.06295937225771937,
+      "images_per_s_min": 0.06295937225771937,
+      "images_per_s_max": 0.06295937225771937,
+      "wall_s": 127.06606996099981,
+      "request_latency": {
+        "n": 8,
+        "median_s": 63.193927772999814,
+        "mean_s": 62.81505812000023,
+        "p95_s": 63.83291135699983,
+        "min_s": 59.60614781200093,
+        "max_s": 63.83291135699983
+      },
+      "runs": [
+        {
+          "wall_s": 127.06606996099981,
+          "images_per_s": 0.06295937225771937,
+          "request_latency": {
+            "n": 8,
+            "median_s": 63.193927772999814,
+            "mean_s": 62.81505812000023,
+            "p95_s": 63.83291135699983,
+            "min_s": 59.60614781200093,
+            "max_s": 63.83291135699983
+          }
+        }
+      ],
+      "peak_vram_mib": 52187
+    }
+  },
+  "observed_output_format": "png",
+  "tag": "run",
+  "url": "http://localhost:8100/v1/images/generations",
+  "model": "bagel",
+  "size": "1024x1024",
+  "steps": 4,
+  "guidance": null,
+  "seed": 0,
+  "prompts_file": "/root/work/hx/prompts.txt",
+  "num_prompts": 16,
+  "output_format": null,
+  "extra_json": null,
+  "timestamp": "2026-10-21T04:20:51"
+}

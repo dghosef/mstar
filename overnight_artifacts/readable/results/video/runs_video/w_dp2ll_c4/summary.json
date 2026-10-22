@@ -1,0 +1,266 @@
+{
+ "label": "w_dp2ll_c4",
+ "tree": "/root/work/mstar",
+ "config": "configs/wan22_dp2.yaml",
+ "env": [
+  "HF_HOME=/root/work/hf"
+ ],
+ "size": "1280x704",
+ "frames": 81,
+ "steps": 20,
+ "guidance": 5.0,
+ "concurrency": 4,
+ "num": 8,
+ "startup_s": 24.014302253723145,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  44.5943933540002,
+  43.525645899000665,
+  65.29215591499997,
+  66.27131590799945
+ ],
+ "e2e_s": [
+  23.510847231998923,
+  24.259408871999767,
+  46.365269237001485,
+  45.37949613899946,
+  43.97742920000019,
+  44.822146749998865,
+  44.062787179000225,
+  45.73900143100036
+ ],
+ "e2e_mean_s": 39.76454825499991,
+ "e2e_median_s": 44.442466964499545,
+ "wall_s": 92.12760288400023,
+ "videos_per_min": 5.210164868876247,
+ "peak_gpu_mem": "0, 40955 MiB | 1, 40429 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 23.510847231998923,
+   "bytes": 631915,
+   "t_end": 1792565690.0670238
+  },
+  {
+   "idx": 1,
+   "ok": true,
+   "e2e_s": 24.259408871999767,
+   "bytes": 255970,
+   "t_end": 1792565690.8149343
+  },
+  {
+   "idx": 2,
+   "ok": true,
+   "e2e_s": 46.365269237001485,
+   "bytes": 581571,
+   "t_end": 1792565712.9220402
+  },
+  {
+   "idx": 3,
+   "ok": true,
+   "e2e_s": 45.37949613899946,
+   "bytes": 562284,
+   "t_end": 1792565711.9370472
+  },
+  {
+   "idx": 4,
+   "ok": true,
+   "e2e_s": 43.97742920000019,
+   "bytes": 530965,
+   "t_end": 1792565734.0464818
+  },
+  {
+   "idx": 5,
+   "ok": true,
+   "e2e_s": 44.822146749998865,
+   "bytes": 322593,
+   "t_end": 1792565735.638428
+  },
+  {
+   "idx": 6,
+   "ok": true,
+   "e2e_s": 44.062787179000225,
+   "bytes": 616568,
+   "t_end": 1792565756.0016944
+  },
+  {
+   "idx": 7,
+   "ok": true,
+   "e2e_s": 45.73900143100036,
+   "bytes": 6123064,
+   "t_end": 1792565758.6807702
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-c6fe898276b2421e9242242ca3d8d7d1",
+   "total_ms": 23498.6,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 19777.8,
+     "fwd_ms": 19690.8
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 46.1,
+     "fwd_ms": 45.5
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2323.2,
+     "fwd_ms": 2290.0
+    }
+   }
+  },
+  {
+   "rid": "vid-8d11a683299c4da4a049cd67c8759dd2",
+   "total_ms": 24245.7,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 20290.0,
+     "fwd_ms": 20218.8
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 45.8,
+     "fwd_ms": 45.2
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2385.9,
+     "fwd_ms": 2354.8
+    }
+   }
+  },
+  {
+   "rid": "vid-b9da20f6b71e4ce7896192c2337e4495",
+   "total_ms": 45364.7,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 19925.7,
+     "fwd_ms": 19836.0
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 45.8,
+     "fwd_ms": 45.4
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2341.7,
+     "fwd_ms": 2303.7
+    }
+   }
+  },
+  {
+   "rid": "vid-3b37945f1b3241de8d30dca57408539e",
+   "total_ms": 46343.6,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 20440.6,
+     "fwd_ms": 20365.3
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 44.4,
+     "fwd_ms": 43.9
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2376.1,
+     "fwd_ms": 2364.6
+    }
+   }
+  },
+  {
+   "rid": "vid-0af9c743cf8a4ecba80ae4436ae59bfd",
+   "total_ms": 43961.7,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 19897.2,
+     "fwd_ms": 19816.2
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 50.2,
+     "fwd_ms": 49.4
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2335.7,
+     "fwd_ms": 2302.2
+    }
+   }
+  },
+  {
+   "rid": "vid-812a668a130a433eb400c31c119b6c6c",
+   "total_ms": 44815.8,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 20497.1,
+     "fwd_ms": 20421.9
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 50.1,
+     "fwd_ms": 49.5
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2386.5,
+     "fwd_ms": 2365.8
+    }
+   }
+  },
+  {
+   "rid": "vid-997e65dc89194441988092f28b6f9178",
+   "total_ms": 44049.3,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 19907.1,
+     "fwd_ms": 19832.7
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 53.1,
+     "fwd_ms": 52.3
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2336.2,
+     "fwd_ms": 2299.5
+    }
+   }
+  },
+  {
+   "rid": "vid-7406c12992ed433b8fcc67e7c5c4c458",
+   "total_ms": 45686.2,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 20419.7,
+     "fwd_ms": 20348.6
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 50.7,
+     "fwd_ms": 49.8
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2380.2,
+     "fwd_ms": 2359.3
+    }
+   }
+  }
+ ]
+}

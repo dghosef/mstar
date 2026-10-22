@@ -1,0 +1,93 @@
+{
+ "n": 12,
+ "corpus_wer": 0.01256281407035176,
+ "median_wer": 0.0,
+ "n_wer_gt_0.2": 0,
+ "audio_s": 141.64249999999998,
+ "rows": [
+  {
+   "wav": "req_0.wav",
+   "dur": 5.496875,
+   "wer": 0.043478260869565216,
+   "ref": "He was in a fevered state of mind, owing to the blight his wife's action threatened to cast upon his entire future.",
+   "hyp": " He was in a fevered state of mind, owned to the blight his wife's action threatened to cast upon his entire future."
+  },
+  {
+   "wav": "req_1.wav",
+   "dur": 5.576875,
+   "wer": 0.0,
+   "ref": "He would have to pay her the money which she would now regularly demand, or there would be trouble. It did not matter what he did.",
+   "hyp": " He would have to pay her the money which she would now regularly demand, or there would be trouble. It did not matter what he did."
+  },
+  {
+   "wav": "req_10.wav",
+   "dur": 4.696875,
+   "wer": 0.05263157894736842,
+   "ref": "So little did he consider druah that it never once occurred to him to worry about his finding out.",
+   "hyp": " So little did he consider Drua that it never once occurred to him to worry about his finding out."
+  },
+  {
+   "wav": "req_11.wav",
+   "dur": 4.456875,
+   "wer": 0.0,
+   "ref": "He grew restless as he ruminated, and then decided that perhaps it was nothing.",
+   "hyp": " He grew restless as he ruminated, and then decided that perhaps it was nothing."
+  },
+  {
+   "wav": "req_2.wav",
+   "dur": 4.296875,
+   "wer": 0.08333333333333333,
+   "ref": "Hurstwood walked the floor, mentally arranging the chief points of his situation.",
+   "hyp": " Harstwood walked the floor, mentally arranging the chief points of his situation."
+  },
+  {
+   "wav": "req_3.wav",
+   "dur": 2.136875,
+   "wer": 0.0,
+   "ref": "He also thought of his managerial position.",
+   "hyp": " He also thought of his managerial position."
+  },
+  {
+   "wav": "req_4.wav",
+   "dur": 82.616875,
+   "wer": 0.01,
+   "ref": "The way newspapers would report on an event depends heavily on the nature of the event, the newspaper's editorial stance, and the target audience. Here are a few general approaches:\n\n1. **Neutral and Factual Reporting**: Most mainstream newspapers aim to present the facts objectively. They would include quotes from relevant parties, provide background information, and avoid editorializing. For example, a news article might state: \"The city council voted 7-3 to approve the new zoning ordinance, which will allow for increased residential development in the downtown area.\"\n\n2. **Editorial and Opinion Pieces**: Editorials and op-ed columns often reflect the newspaper's perspective or that of guest contributors. These pieces might argue for or against the event, providing analysis and commentary. For instance, an editorial might say: \"The council's decision is a step forward in addressing our city's housing crisis, but it must be balanced with environmental concerns.\"\n\n3. **Sensationalism**: Some newspapers, particularly those with a focus on entertainment or tabloid journalism, might use dramatic language to attract readers. They might emphasize conflict or controversy. For example: \"Council Chaos: Downtown Developers Win Big, Residents Outraged!\"\n\n4. **Investigative Reporting**: If the event involves potential wrongdoing or complex issues,",
+   "hyp": " The way newspapers would report on an event depends heavily on the nature of the event, the newspaper's editorial stance, and the target audience. Here are a few general approaches. One, try neutral and factual reporting. Most mainstream newspapers aim to present the facts objectively. They would include quotes from relevant parties, provide background information, and avoid editorializing. For example, a news article might state, the city council voted 7-3 to approve the new zoning ordinance, which will allow for increased residential development in the downtown area. 2. Editorial and Opinion Pieces Editorials and op-ed columns often reflect the newspaper's perspective or that of guest contributors. These pieces might argue for or against the event, providing analysis and commentary. For instance, an editorial might say, the council's decision is a step forward in addressing our city's housing crisis, but it must be balanced with environmental concerns. Three, sensationalism. Some newspapers, particularly those with a focus on entertainment or tabloid journalism, might use dramatic language to attract readers. They might emphasize conflict or controversy. For example, Council Chaos, Downtown Developers Win Big, Residents Outraged, Investigative Reporting. If the event involves potential wrongdoing or complex issues,"
+  },
+  {
+   "wav": "req_5.wav",
+   "dur": 4.856875,
+   "wer": 0.0,
+   "ref": "Many little wrinkles gathered between his eyes as he contemplated this, and his brow moistened.",
+   "hyp": " Many little wrinkles gathered between his eyes as he contemplated this, and his brow moistened."
+  },
+  {
+   "wav": "req_6.wav",
+   "dur": 5.736875,
+   "wer": 0.0,
+   "ref": "He could arrange that satisfactorily. For Carrie would be glad to wait if necessary.",
+   "hyp": " He could arrange that satisfactorily, for Carrie would be glad to wait if necessary."
+  },
+  {
+   "wav": "req_7.wav",
+   "dur": 6.296875,
+   "wer": 0.0,
+   "ref": "He would see how things turned out tomorrow, and then he would talk to her. They were going to meet as usual.",
+   "hyp": " He would see how things turned out tomorrow, and then he would talk to her. They were going to meet as usual."
+  },
+  {
+   "wav": "req_8.wav",
+   "dur": 8.696875,
+   "wer": 0.0,
+   "ref": "For some reason, he felt as if something might come that way, and was relieved when all the envelopes had been scanned and nothing suspicious noticed.",
+   "hyp": " For some reason, he felt as if something might come that way and was relieved when all the envelopes had been scanned and nothing suspicious noticed."
+  },
+  {
+   "wav": "req_9.wav",
+   "dur": 6.776875,
+   "wer": 0.0,
+   "ref": "While the danger had not lessened, it had not as yet materialized, and with him, no news was good news.",
+   "hyp": " While the danger had not lessened, it had not as yet materialized, and with him, no news was good news."
+  }
+ ]
+}

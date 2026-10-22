@@ -1,0 +1,526 @@
+{
+ "cell": "zimage",
+ "gpu": 3,
+ "arms": {
+  "base": "/root/work/arms/base",
+  "cand": "/root/work/arms/cand-b"
+ },
+ "rounds": [
+  {
+   "round": 0,
+   "arm": "base",
+   "t": "06:15:22",
+   "load1": 31.73388671875,
+   "startup_s": 1335.1955510359994,
+   "metrics": {
+    "lat_mean_s": 0.8600786918335265,
+    "lat_p50_s": 0.8584967640008472,
+    "lat_min_s": 0.8495578169986402,
+    "failed": 0,
+    "c4_img_per_s": 1.130375448820235
+   },
+   "load1_end": 10.17138671875
+  },
+  {
+   "round": 0,
+   "arm": "cand",
+   "t": "06:37:57",
+   "load1": 10.17138671875,
+   "startup_s": 123.0227679890013,
+   "metrics": {
+    "lat_mean_s": 0.8686905013334277,
+    "lat_p50_s": 0.8640423895003551,
+    "lat_min_s": 0.8578781809992506,
+    "failed": 0,
+    "c4_img_per_s": 1.074329428028739
+   },
+   "load1_end": 18.0341796875
+  },
+  {
+   "round": 1,
+   "arm": "cand",
+   "t": "06:40:21",
+   "load1": 18.0341796875,
+   "startup_s": 120.02257288099827,
+   "metrics": {
+    "lat_mean_s": 0.8550119033340403,
+    "lat_p50_s": 0.854437365501326,
+    "lat_min_s": 0.8484084980009357,
+    "failed": 0,
+    "c4_img_per_s": 1.0903363352002888
+   },
+   "load1_end": 13.25634765625
+  },
+  {
+   "round": 1,
+   "arm": "base",
+   "t": "06:42:41",
+   "load1": 13.25634765625,
+   "startup_s": 117.01896752399989,
+   "metrics": {
+    "lat_mean_s": 0.8587787888336607,
+    "lat_p50_s": 0.8566535980007757,
+    "lat_min_s": 0.8505436969990114,
+    "failed": 0,
+    "c4_img_per_s": 1.0917331347017984
+   },
+   "load1_end": 24.404296875
+  }
+ ],
+ "profile": {
+  "base": {
+   "load": {
+    "wall_s": 2.560221621999517
+   },
+   "workers": {
+    "worker_0": {
+     "bs": 1.0,
+     "records": 5,
+     "phases": {
+      "await_gpu": {
+       "mean_ms": 2.406,
+       "p50_ms": 0.0,
+       "us_per_1k": 2406000.0
+      },
+      "engine.collect_outputs": {
+       "mean_ms": 0.03869565217391304,
+       "p50_ms": 0.04,
+       "us_per_1k": 35600.0
+      },
+      "engine.declare_step": {
+       "mean_ms": 0.0,
+       "p50_ms": 0.0,
+       "us_per_1k": 0.0
+      },
+      "engine.forward": {
+       "mean_ms": 3.1595652173913042,
+       "p50_ms": 0.72,
+       "us_per_1k": 2906800.0
+      },
+      "engine.postprocess": {
+       "mean_ms": 0.0,
+       "p50_ms": 0.0,
+       "us_per_1k": 0.0
+      },
+      "engine.preprocess": {
+       "mean_ms": 0.11217391304347826,
+       "p50_ms": 0.11,
+       "us_per_1k": 103200.0
+      },
+      "gpu_exec": {
+       "mean_ms": 74.786,
+       "p50_ms": 92.9,
+       "us_per_1k": 74786000.0
+      },
+      "iter_total": {
+       "mean_ms": 70.55799999999999,
+       "p50_ms": 92.42,
+       "us_per_1k": 70558000.0
+      },
+      "rust.send_outputs.call": {
+       "mean_ms": 0.020434782608695655,
+       "p50_ms": 0.01,
+       "us_per_1k": 18800.0
+      },
+      "rust.send_outputs.marshal": {
+       "mean_ms": 0.017391304347826087,
+       "p50_ms": 0.0,
+       "us_per_1k": 16000.0
+      },
+      "speculate": {
+       "mean_ms": 0.08842105263157896,
+       "p50_ms": 0.08,
+       "us_per_1k": 67200.00000000001
+      },
+      "submit_spec": {
+       "mean_ms": 0.5452380952380952,
+       "p50_ms": 0.55,
+       "us_per_1k": 457999.99999999994
+      },
+      "worker.await_admit_settled": {
+       "mean_ms": 1.5474999999999999,
+       "p50_ms": 1.9,
+       "us_per_1k": 247600.0
+      },
+      "worker.gpu_thread.await_plan": {
+       "mean_ms": 0.02238095238095238,
+       "p50_ms": 0.04,
+       "us_per_1k": 18799.999999999996
+      },
+      "worker.gpu_thread.exec": {
+       "mean_ms": 3.158,
+       "p50_ms": 1.03,
+       "us_per_1k": 3158000.0
+      },
+      "worker.gpu_thread.prepare_inputs": {
+       "mean_ms": 0.308,
+       "p50_ms": 0.15,
+       "us_per_1k": 308000.0
+      },
+      "worker.postprocess.check_stop": {
+       "mean_ms": 0.16434782608695653,
+       "p50_ms": 0.16,
+       "us_per_1k": 151200.0
+      },
+      "worker.postprocess.check_stop_tail": {
+       "mean_ms": 0.01652173913043478,
+       "p50_ms": 0.02,
+       "us_per_1k": 15200.0
+      },
+      "worker.postprocess.cleanup_inputs": {
+       "mean_ms": 0.01,
+       "p50_ms": 0.01,
+       "us_per_1k": 10000.0
+      },
+      "worker.postprocess.completion_event_sync": {
+       "mean_ms": 77.56260869565217,
+       "p50_ms": 91.51,
+       "us_per_1k": 71357599.99999999
+      },
+      "worker.postprocess.event_sync": {
+       "mean_ms": 71.35,
+       "p50_ms": 91.17,
+       "us_per_1k": 71350000.0
+      },
+      "worker.postprocess.pending_loop_stops": {
+       "mean_ms": 0.010000000000000002,
+       "p50_ms": 0.01,
+       "us_per_1k": 9200.000000000002
+      },
+      "worker.postprocess.prematerialize": {
+       "mean_ms": 0.15217391304347827,
+       "p50_ms": 0.15,
+       "us_per_1k": 140000.0
+      },
+      "worker.postprocess.register_outputs": {
+       "mean_ms": 0.034782608695652174,
+       "p50_ms": 0.0,
+       "us_per_1k": 32000.0
+      },
+      "worker.postprocess.route": {
+       "mean_ms": 0.04217391304347826,
+       "p50_ms": 0.04,
+       "us_per_1k": 38800.0
+      },
+      "worker.postprocess.route_outputs": {
+       "mean_ms": 0.12043478260869565,
+       "p50_ms": 0.11,
+       "us_per_1k": 110800.0
+      },
+      "worker.postprocess.send": {
+       "mean_ms": 0.044347826086956525,
+       "p50_ms": 0.02,
+       "us_per_1k": 40800.0
+      },
+      "worker.postprocess.send_outputs": {
+       "mean_ms": 0.05434782608695652,
+       "p50_ms": 0.03,
+       "us_per_1k": 50000.0
+      },
+      "worker.postprocess.send_prep": {
+       "mean_ms": 0.010000000000000002,
+       "p50_ms": 0.01,
+       "us_per_1k": 9200.000000000002
+      },
+      "worker.postprocess.stop_loops": {
+       "mean_ms": 0.0034782608695652175,
+       "p50_ms": 0.0,
+       "us_per_1k": 3200.0
+      },
+      "worker.postprocess.store_tensors": {
+       "mean_ms": 0.06608695652173914,
+       "p50_ms": 0.06,
+       "us_per_1k": 60800.00000000001
+      },
+      "worker.postprocess.update_lru": {
+       "mean_ms": 0.0,
+       "p50_ms": 0.0,
+       "us_per_1k": 0.0
+      },
+      "worker.postprocess_batch": {
+       "mean_ms": 71.744,
+       "p50_ms": 91.6,
+       "us_per_1k": 71744000.0
+      },
+      "worker.schedule": {
+       "mean_ms": 0.03,
+       "p50_ms": 0.01,
+       "us_per_1k": 27600.0
+      },
+      "worker.schedule_yield_away": {
+       "mean_ms": 0.034999999999999996,
+       "p50_ms": 0.01,
+       "us_per_1k": 8400.0
+      },
+      "worker.submit_spec.launch_wait": {
+       "mean_ms": 0.5171428571428571,
+       "p50_ms": 0.52,
+       "us_per_1k": 434399.99999999994
+      }
+     }
+    }
+   }
+  },
+  "cand": {
+   "load": {
+    "wall_s": 2.568793664000623
+   },
+   "workers": {
+    "worker_0": {
+     "bs": 1.0,
+     "records": 5,
+     "phases": {
+      "await_gpu": {
+       "mean_ms": 2.5540000000000003,
+       "p50_ms": 0.0,
+       "us_per_1k": 2554000.0000000005
+      },
+      "engine.collect_outputs": {
+       "mean_ms": 0.04086956521739131,
+       "p50_ms": 0.04,
+       "us_per_1k": 37600.0
+      },
+      "engine.declare_step": {
+       "mean_ms": 0.0,
+       "p50_ms": 0.0,
+       "us_per_1k": 0.0
+      },
+      "engine.forward": {
+       "mean_ms": 3.2904347826086955,
+       "p50_ms": 0.69,
+       "us_per_1k": 3027199.9999999995
+      },
+      "engine.postprocess": {
+       "mean_ms": 0.002,
+       "p50_ms": 0.0,
+       "us_per_1k": 2000.0
+      },
+      "engine.preprocess": {
+       "mean_ms": 0.12086956521739131,
+       "p50_ms": 0.11,
+       "us_per_1k": 111200.0
+      },
+      "gpu_exec": {
+       "mean_ms": 74.9636,
+       "p50_ms": 92.61,
+       "us_per_1k": 74963600.0
+      },
+      "iter_total": {
+       "mean_ms": 70.59400000000001,
+       "p50_ms": 92.62,
+       "us_per_1k": 70594000.00000001
+      },
+      "rust.send_outputs.call": {
+       "mean_ms": 0.020434782608695655,
+       "p50_ms": 0.01,
+       "us_per_1k": 18800.0
+      },
+      "rust.send_outputs.marshal": {
+       "mean_ms": 0.015652173913043476,
+       "p50_ms": 0.0,
+       "us_per_1k": 14400.0
+      },
+      "speculate": {
+       "mean_ms": 0.09157894736842105,
+       "p50_ms": 0.08,
+       "us_per_1k": 69600.0
+      },
+      "submit_spec": {
+       "mean_ms": 0.5723809523809523,
+       "p50_ms": 0.56,
+       "us_per_1k": 480800.0
+      },
+      "worker.await_admit_settled": {
+       "mean_ms": 1.1724999999999999,
+       "p50_ms": 1.85,
+       "us_per_1k": 187600.0
+      },
+      "worker.gpu_thread.await_plan": {
+       "mean_ms": 0.007619047619047619,
+       "p50_ms": 0.0,
+       "us_per_1k": 6400.0
+      },
+      "worker.gpu_thread.exec": {
+       "mean_ms": 3.302,
+       "p50_ms": 1.06,
+       "us_per_1k": 3302000.0
+      },
+      "worker.gpu_thread.prepare_inputs": {
+       "mean_ms": 0.2612,
+       "p50_ms": 0.16,
+       "us_per_1k": 261200.0
+      },
+      "worker.postprocess.check_stop": {
+       "mean_ms": 0.15260869565217391,
+       "p50_ms": 0.15,
+       "us_per_1k": 140400.0
+      },
+      "worker.postprocess.check_stop_tail": {
+       "mean_ms": 0.01652173913043478,
+       "p50_ms": 0.01,
+       "us_per_1k": 15200.0
+      },
+      "worker.postprocess.cleanup_inputs": {
+       "mean_ms": 0.01,
+       "p50_ms": 0.01,
+       "us_per_1k": 10000.0
+      },
+      "worker.postprocess.completion_event_sync": {
+       "mean_ms": 77.47,
+       "p50_ms": 91.55,
+       "us_per_1k": 71272400.0
+      },
+      "worker.postprocess.event_sync": {
+       "mean_ms": 71.26400000000001,
+       "p50_ms": 91.55,
+       "us_per_1k": 71264000.00000001
+      },
+      "worker.postprocess.pending_loop_stops": {
+       "mean_ms": 0.010000000000000002,
+       "p50_ms": 0.01,
+       "us_per_1k": 9200.000000000002
+      },
+      "worker.postprocess.prematerialize": {
+       "mean_ms": 0.14434782608695654,
+       "p50_ms": 0.14,
+       "us_per_1k": 132800.0
+      },
+      "worker.postprocess.register_outputs": {
+       "mean_ms": 0.026086956521739136,
+       "p50_ms": 0.0,
+       "us_per_1k": 24000.000000000004
+      },
+      "worker.postprocess.route": {
+       "mean_ms": 0.04000000000000001,
+       "p50_ms": 0.03,
+       "us_per_1k": 36800.00000000001
+      },
+      "worker.postprocess.route_outputs": {
+       "mean_ms": 0.3317391304347826,
+       "p50_ms": 0.1,
+       "us_per_1k": 305200.0
+      },
+      "worker.postprocess.send": {
+       "mean_ms": 0.04217391304347826,
+       "p50_ms": 0.02,
+       "us_per_1k": 38800.0
+      },
+      "worker.postprocess.send_outputs": {
+       "mean_ms": 0.05652173913043478,
+       "p50_ms": 0.03,
+       "us_per_1k": 52000.00000000001
+      },
+      "worker.postprocess.send_prep": {
+       "mean_ms": 0.010000000000000002,
+       "p50_ms": 0.01,
+       "us_per_1k": 9200.000000000002
+      },
+      "worker.postprocess.stop_loops": {
+       "mean_ms": 0.0034782608695652175,
+       "p50_ms": 0.0,
+       "us_per_1k": 3200.0
+      },
+      "worker.postprocess.store_tensors": {
+       "mean_ms": 0.2778260869565218,
+       "p50_ms": 0.06,
+       "us_per_1k": 255600.00000000006
+      },
+      "worker.postprocess.update_lru": {
+       "mean_ms": 0.0,
+       "p50_ms": 0.0,
+       "us_per_1k": 0.0
+      },
+      "worker.postprocess_batch": {
+       "mean_ms": 71.834,
+       "p50_ms": 91.83,
+       "us_per_1k": 71834000.0
+      },
+      "worker.schedule": {
+       "mean_ms": 0.03,
+       "p50_ms": 0.01,
+       "us_per_1k": 27600.0
+      },
+      "worker.schedule_yield_away": {
+       "mean_ms": 0.04,
+       "p50_ms": 0.01,
+       "us_per_1k": 9600.0
+      },
+      "worker.submit_spec.launch_wait": {
+       "mean_ms": 0.5390476190476191,
+       "p50_ms": 0.55,
+       "us_per_1k": 452800.00000000006
+      }
+     }
+    }
+   }
+  }
+ },
+ "errors": [],
+ "base_rev": "55b0215a3 perf/overnight-shared dirty=0",
+ "cand_rev": "b53845708 perf/ovn-integ-cand-b dirty=0",
+ "correctness": {
+  "psnr_base_vs_cand_r0_min": 30.34426668121752,
+  "psnr_base_vs_cand_r0_median": 35.50585759032445,
+  "psnr_base_r0_vs_r1_min": 28.309505069203937,
+  "psnr_base_r0_vs_r1_median": 33.333071615898554,
+  "psnr_cand_r0_vs_r1_min": 31.51272900530323,
+  "psnr_cand_r0_vs_r1_median": 36.207936950022344
+ },
+ "summary": {
+  "c4_img_per_s": {
+   "base": [
+    1.130375448820235,
+    1.0917331347017984
+   ],
+   "cand": [
+    1.074329428028739,
+    1.0903363352002888
+   ],
+   "delta_pct": -2.5850591064258124
+  },
+  "failed": {
+   "base": [
+    0,
+    0
+   ],
+   "cand": [
+    0,
+    0
+   ],
+   "delta_pct": null
+  },
+  "lat_mean_s": {
+   "base": [
+    0.8600786918335265,
+    0.8587787888336607
+   ],
+   "cand": [
+    0.8686905013334277,
+    0.8550119033340403
+   ],
+   "delta_pct": 0.2818688608435535
+  },
+  "lat_min_s": {
+   "base": [
+    0.8495578169986402,
+    0.8505436969990114
+   ],
+   "cand": [
+    0.8578781809992506,
+    0.8484084980009357
+   ],
+   "delta_pct": 0.3638115107603613
+  },
+  "lat_p50_s": {
+   "base": [
+    0.8584967640008472,
+    0.8566535980007757
+   ],
+   "cand": [
+    0.8640423895003551,
+    0.854437365501326
+   ],
+   "delta_pct": 0.1941166835176308
+  }
+ }
+}

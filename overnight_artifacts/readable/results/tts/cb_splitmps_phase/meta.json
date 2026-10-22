@@ -1,0 +1,41 @@
+{
+  "label": "cb_splitmps_phase",
+  "tree": "/root/work/mstar",
+  "serve": [
+    "/root/work/mstar/.venv/bin/python",
+    "-m",
+    "mstar.cli.main",
+    "serve",
+    "chatterbox",
+    "--gpus",
+    "0",
+    "--port",
+    "8100",
+    "--config",
+    "/root/work/cfg/chatterbox_split.yaml"
+  ],
+  "env": {
+    "TORCH_HOME": "/workspace/.cache/torch",
+    "MSTAR_SHM_ARENA": "1",
+    "TORCHINDUCTOR_CACHE_DIR": "/root/work/inductor_cache",
+    "MSTAR_PHASE_TIMING": "100"
+  },
+  "points": "32:s156:2",
+  "started": "2026-10-21 04:24:16",
+  "mstar_file": "/root/work/mstar/mstar/__init__.py",
+  "startup_s": 21.19577670097351,
+  "summaries": [
+    {
+      "point": "c32_s156",
+      "ttfa_p50_ms": 2065.5073150001044,
+      "ttfa_p95_ms": 3415.178531499805,
+      "e2e_p50_s": 5.750126669500787,
+      "e2e_p95_s": 10.086650406499757,
+      "rtf_mean": 0.5952571536661382,
+      "rtf_p95": 1.1147903237987151,
+      "audio_s_per_wall_s": 57.65208942531698,
+      "wall_s": 32.74314874599986,
+      "errors": 0
+    }
+  ]
+}

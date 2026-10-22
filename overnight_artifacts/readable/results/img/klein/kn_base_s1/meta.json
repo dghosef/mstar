@@ -1,0 +1,17 @@
+{
+ "tag": "kn_base_s1",
+ "tree": "/root/work/base",
+ "mstar_file": "/root/work/base/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve flux2_klein --config /workspace/results/img/klein/kn_base_s1/config.yaml --gpus 0 --port 8200",
+ "sets": [],
+ "env": [],
+ "git": "",
+ "start": "05:03:14",
+ "gpu_mem_before": [
+  0
+ ],
+ "startup_s": 630.0660967826843,
+ "gpu_mem_after": [
+  0
+ ]
+}

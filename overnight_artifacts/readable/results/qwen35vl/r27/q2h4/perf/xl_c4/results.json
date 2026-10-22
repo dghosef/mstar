@@ -1,0 +1,89 @@
+{
+ "summary": {
+  "n": 12,
+  "errors": 0,
+  "wall_s": 3.2517306379741058,
+  "req_per_s": 3.690342570157116,
+  "ttft_p50": 0.7601034505350981,
+  "ttft_mean": 0.7022026812580103,
+  "e2e_p50": 1.080171223526122,
+  "ttft_p50_by_kind": {
+   "xl": 0.7601034505350981
+  }
+ },
+ "rows": [
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a cozy breakfast or brunch scene on a speckled white countertop, likely in a caf\u00e9 or diner.",
+   "ttft": 0.28994743200019,
+   "e2e": 1.0764004249940626
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly low-angle photograph of a dessert platter, likely served at a restaurant or bar. The scene is dimly lit, with warm",
+   "ttft": 0.7607048420468345,
+   "e2e": 1.0811448120512068
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a cozy breakfast or brunch scene on a speckled white countertop, likely in a caf\u00e9 or diner.",
+   "ttft": 0.7595020590233617,
+   "e2e": 1.0791976350010373
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly low-angle photograph of a dessert platter, likely served at a restaurant or bar. The scene is dimly lit, with warm",
+   "ttft": 1.012355201994069,
+   "e2e": 1.1157865509740077
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a cozy breakfast or brunch scene on a speckled white countertop, likely in a caf\u00e9 or diner.",
+   "ttft": 0.291255451971665,
+   "e2e": 1.0880830339738168
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly low-angle photograph of a dessert platter, likely served at a restaurant or bar. The scene is dimly lit, with warm",
+   "ttft": 0.5416065470199101,
+   "e2e": 1.0875079940306023
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a cozy breakfast or brunch scene on a speckled white countertop, likely in a caf\u00e9 or diner.",
+   "ttft": 1.0219864380196668,
+   "e2e": 1.1249995030229911
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly low-angle photograph of a dessert platter, likely served at a restaurant or bar. The scene is dimly lit, with warm",
+   "ttft": 0.9857728310162202,
+   "e2e": 1.0879653760348447
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a cozy breakfast or brunch scene on a speckled white countertop, likely in a caf\u00e9 or diner.",
+   "ttft": 0.2891007420257665,
+   "e2e": 1.0763235859922133
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly low-angle photograph of a dessert platter, likely served at a restaurant or bar. The scene is dimly lit, with warm",
+   "ttft": 0.5266558949952014,
+   "e2e": 1.0767148210434243
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a cozy breakfast or brunch scene on a speckled white countertop, likely in a caf\u00e9 or diner.",
+   "ttft": 0.9741969439783134,
+   "e2e": 1.0437690709950402
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly low-angle photograph of a dessert platter, likely served at a restaurant or bar. The scene is dimly lit, with warm",
+   "ttft": 0.973347791004926,
+   "e2e": 1.042845222982578
+  }
+ ],
+ "errors": []
+}

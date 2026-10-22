@@ -1,0 +1,8 @@
+{
+ "tag": "fast_none",
+ "ms_per_chunk": 673.6610668334228,
+ "ms_per_forward": 134.73221336668453,
+ "bit_exact_vs_base": true,
+ "max_abs_vs_base": 0.0,
+ "cos_vs_base": 0.9999077916145325
+}

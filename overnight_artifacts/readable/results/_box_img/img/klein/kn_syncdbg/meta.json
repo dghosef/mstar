@@ -1,0 +1,22 @@
+{
+ "tag": "kn_syncdbg",
+ "tree": "/root/work/img3",
+ "mstar_file": "/root/work/img3/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve flux2_klein --config /workspace/results/img/klein/kn_syncdbg/config.yaml --gpus 0 --port 8200",
+ "sets": [],
+ "env": [
+  "SYNC_DEBUG=1",
+  "SYNC_DEBUG_DELAY=150",
+  "SYNC_DEBUG_LOG=/workspace/results/img/klein/kn_syncdbg/sync_debug.log",
+  "PYTHONPATH=/root/work/img3:/root/work/hx/syncdbg"
+ ],
+ "git": "",
+ "start": "06:48:58",
+ "gpu_mem_before": [
+  0
+ ],
+ "startup_s": 75.01998043060303,
+ "gpu_mem_after": [
+  0
+ ]
+}

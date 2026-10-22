@@ -1,0 +1,17 @@
+{
+ "tag": "zi_cap_s1",
+ "tree": "/root/work/img",
+ "mstar_file": "/root/work/img/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve z_image_turbo --config /workspace/results/img/zimg/zi_cap_s1/config.yaml --gpus 0 --port 8200",
+ "sets": [],
+ "env": [],
+ "git": "",
+ "start": "05:50:50",
+ "gpu_mem_before": [
+  0
+ ],
+ "startup_s": 120.01587700843811,
+ "gpu_mem_after": [
+  0
+ ]
+}

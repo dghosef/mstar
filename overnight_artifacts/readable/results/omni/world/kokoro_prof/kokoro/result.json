@@ -1,0 +1,483 @@
+{
+ "cell": "kokoro",
+ "gpu": "0",
+ "arms": {
+  "base": "/root/guest-world/arms/revert",
+  "cand": "/root/guest-world/arms/head"
+ },
+ "rounds": [
+  {
+   "round": 0,
+   "arm": "base",
+   "t": "20:28:04",
+   "load1": 3.701171875,
+   "startup_s": 144.0235331300064,
+   "load1_measure": 3.9287109375,
+   "metrics": {
+    "c32_audio_s_per_s": 786.0986764036611,
+    "c32_ttfa_p50_ms": 175.333787483396,
+    "c32_rtf_p50": 0.03735400657954788,
+    "c32_failed": 0,
+    "c32_audio_s_total": 756.425,
+    "c1_ttfa_p50_ms": 25.25394147960469,
+    "c1_rtf_p50": 0.005279931096183739,
+    "c1_failed": 0
+   },
+   "load1_end": 3.9345703125
+  },
+  {
+   "round": 0,
+   "arm": "cand",
+   "t": "20:30:32",
+   "load1": 3.9345703125,
+   "startup_s": 75.01580530300271,
+   "load1_measure": 5.25830078125,
+   "metrics": {
+    "c32_audio_s_per_s": 781.6974491663682,
+    "c32_ttfa_p50_ms": 180.46496447641402,
+    "c32_rtf_p50": 0.03775338802370243,
+    "c32_failed": 0,
+    "c32_audio_s_total": 756.4,
+    "c1_ttfa_p50_ms": 26.40995298861526,
+    "c1_rtf_p50": 0.005554506632947407,
+    "c1_failed": 0
+   },
+   "load1_end": 5.25830078125
+  }
+ ],
+ "profile": {
+  "cand": {
+   "load": {
+    "audio_s_per_s": 741.4522716166738,
+    "wall_s": 0.6121095279813744,
+    "failed": 0,
+    "fail_msgs": [],
+    "ttfa_p50_ms": 171.00423798547126,
+    "rtf_p50": 0.036801395478999466,
+    "audio_s_total": 453.85
+   },
+   "workers": {
+    "worker_0": {
+     "bs": 5.4,
+     "records": 1,
+     "phases": {
+      "await_gpu": {
+       "mean_ms": 13.9,
+       "p50_ms": 11.53,
+       "us_per_1k": 2316666.666666667
+      },
+      "engine.collect_outputs": {
+       "mean_ms": 0.12000000000000001,
+       "p50_ms": 0.05,
+       "us_per_1k": 20000.0
+      },
+      "engine.declare_step": {
+       "mean_ms": 0.0,
+       "p50_ms": 0.0,
+       "us_per_1k": 0.0
+      },
+      "engine.forward": {
+       "mean_ms": 20.61,
+       "p50_ms": 12.23,
+       "us_per_1k": 3435000.0
+      },
+      "engine.postprocess": {
+       "mean_ms": 0.01,
+       "p50_ms": 0.01,
+       "us_per_1k": 1666.6666666666665
+      },
+      "engine.preprocess": {
+       "mean_ms": 0.26,
+       "p50_ms": 0.19,
+       "us_per_1k": 43333.33333333333
+      },
+      "gpu_exec": {
+       "mean_ms": 33.33,
+       "p50_ms": 32.47,
+       "us_per_1k": 4937777.777777778
+      },
+      "iter_total": {
+       "mean_ms": 33.36,
+       "p50_ms": 38.05,
+       "us_per_1k": 6177777.777777778
+      },
+      "rust.send_outputs.call": {
+       "mean_ms": 0.09,
+       "p50_ms": 0.07,
+       "us_per_1k": 15000.0
+      },
+      "rust.send_outputs.marshal": {
+       "mean_ms": 0.1,
+       "p50_ms": 0.07,
+       "us_per_1k": 16666.666666666668
+      },
+      "worker.await_admit_settled": {
+       "mean_ms": 0.71,
+       "p50_ms": 0.53,
+       "us_per_1k": 118333.33333333333
+      },
+      "worker.gpu_thread.exec": {
+       "mean_ms": 21.1,
+       "p50_ms": 12.89,
+       "us_per_1k": 3516666.6666666665
+      },
+      "worker.gpu_thread.prepare_inputs": {
+       "mean_ms": 0.28,
+       "p50_ms": 0.19,
+       "us_per_1k": 46666.66666666668
+      },
+      "worker.postprocess.check_stop": {
+       "mean_ms": 0.58,
+       "p50_ms": 0.18,
+       "us_per_1k": 96666.66666666667
+      },
+      "worker.postprocess.check_stop_tail": {
+       "mean_ms": 0.02,
+       "p50_ms": 0.02,
+       "us_per_1k": 3333.333333333333
+      },
+      "worker.postprocess.cleanup_inputs": {
+       "mean_ms": 0.01,
+       "p50_ms": 0.01,
+       "us_per_1k": 1666.6666666666665
+      },
+      "worker.postprocess.completion_event_sync": {
+       "mean_ms": 13.73,
+       "p50_ms": 6.1,
+       "us_per_1k": 2288333.3333333335
+      },
+      "worker.postprocess.event_sync": {
+       "mean_ms": 13.72,
+       "p50_ms": 6.09,
+       "us_per_1k": 2286666.6666666665
+      },
+      "worker.postprocess.pending_loop_stops": {
+       "mean_ms": 0.01,
+       "p50_ms": 0.01,
+       "us_per_1k": 1666.6666666666665
+      },
+      "worker.postprocess.prematerialize": {
+       "mean_ms": 0.57,
+       "p50_ms": 0.17,
+       "us_per_1k": 95000.0
+      },
+      "worker.postprocess.register_outputs": {
+       "mean_ms": 0.65,
+       "p50_ms": 0.4,
+       "us_per_1k": 108333.33333333334
+      },
+      "worker.postprocess.route": {
+       "mean_ms": 0.060000000000000005,
+       "p50_ms": 0.05,
+       "us_per_1k": 10000.0
+      },
+      "worker.postprocess.route_outputs": {
+       "mean_ms": 0.17,
+       "p50_ms": 0.16,
+       "us_per_1k": 28333.333333333336
+      },
+      "worker.postprocess.send": {
+       "mean_ms": 0.19,
+       "p50_ms": 0.16,
+       "us_per_1k": 31666.666666666668
+      },
+      "worker.postprocess.send_outputs": {
+       "mean_ms": 0.22,
+       "p50_ms": 0.19,
+       "us_per_1k": 36666.666666666664
+      },
+      "worker.postprocess.send_prep": {
+       "mean_ms": 0.02,
+       "p50_ms": 0.01,
+       "us_per_1k": 3333.333333333333
+      },
+      "worker.postprocess.stop_loops": {
+       "mean_ms": 0.04,
+       "p50_ms": 0.03,
+       "us_per_1k": 6666.666666666666
+      },
+      "worker.postprocess.store_tensors": {
+       "mean_ms": 0.1,
+       "p50_ms": 0.09,
+       "us_per_1k": 16666.666666666668
+      },
+      "worker.postprocess.update_lru": {
+       "mean_ms": 0.0,
+       "p50_ms": 0.0,
+       "us_per_1k": 0.0
+      },
+      "worker.postprocess_batch": {
+       "mean_ms": 15.43,
+       "p50_ms": 6.71,
+       "us_per_1k": 2571666.666666667
+      },
+      "worker.schedule": {
+       "mean_ms": 0.01,
+       "p50_ms": 0.0,
+       "us_per_1k": 30925.925925925927
+      }
+     }
+    }
+   }
+  },
+  "base": {
+   "load": {
+    "audio_s_per_s": 715.3027480439705,
+    "wall_s": 0.6344865880091675,
+    "failed": 0,
+    "fail_msgs": [],
+    "ttfa_p50_ms": 178.77668101573363,
+    "rtf_p50": 0.03839752885018667,
+    "audio_s_total": 453.85
+   },
+   "workers": {
+    "worker_0": {
+     "bs": 7.2,
+     "records": 1,
+     "phases": {
+      "await_gpu": {
+       "mean_ms": 19.17,
+       "p50_ms": 10.62,
+       "us_per_1k": 2396250.0
+      },
+      "engine.collect_outputs": {
+       "mean_ms": 0.11,
+       "p50_ms": 0.04,
+       "us_per_1k": 13750.0
+      },
+      "engine.declare_step": {
+       "mean_ms": 0.0,
+       "p50_ms": 0.0,
+       "us_per_1k": 0.0
+      },
+      "engine.forward": {
+       "mean_ms": 25.98,
+       "p50_ms": 20.5,
+       "us_per_1k": 3247500.0
+      },
+      "engine.postprocess": {
+       "mean_ms": 0.01,
+       "p50_ms": 0.0,
+       "us_per_1k": 1250.0
+      },
+      "engine.preprocess": {
+       "mean_ms": 0.25,
+       "p50_ms": 0.18,
+       "us_per_1k": 31250.0
+      },
+      "gpu_exec": {
+       "mean_ms": 41.01,
+       "p50_ms": 36.4,
+       "us_per_1k": 4556666.666666667
+      },
+      "iter_total": {
+       "mean_ms": 28.85,
+       "p50_ms": 34.28,
+       "us_per_1k": 4006944.4444444445
+      },
+      "rust.send_outputs.call": {
+       "mean_ms": 0.09,
+       "p50_ms": 0.06,
+       "us_per_1k": 11250.0
+      },
+      "rust.send_outputs.marshal": {
+       "mean_ms": 0.1,
+       "p50_ms": 0.07,
+       "us_per_1k": 12500.0
+      },
+      "worker.await_admit_settled": {
+       "mean_ms": 0.7,
+       "p50_ms": 0.47,
+       "us_per_1k": 87500.0
+      },
+      "worker.gpu_thread.exec": {
+       "mean_ms": 26.46,
+       "p50_ms": 20.85,
+       "us_per_1k": 3307500.0
+      },
+      "worker.gpu_thread.prepare_inputs": {
+       "mean_ms": 0.28,
+       "p50_ms": 0.12,
+       "us_per_1k": 35000.0
+      },
+      "worker.postprocess.check_stop": {
+       "mean_ms": 0.75,
+       "p50_ms": 0.15,
+       "us_per_1k": 93750.0
+      },
+      "worker.postprocess.check_stop_tail": {
+       "mean_ms": 0.02,
+       "p50_ms": 0.01,
+       "us_per_1k": 2500.0
+      },
+      "worker.postprocess.cleanup_inputs": {
+       "mean_ms": 0.01,
+       "p50_ms": 0.01,
+       "us_per_1k": 1250.0
+      },
+      "worker.postprocess.completion_event_sync": {
+       "mean_ms": 13.58,
+       "p50_ms": 6.26,
+       "us_per_1k": 1697500.0
+      },
+      "worker.postprocess.event_sync": {
+       "mean_ms": 13.57,
+       "p50_ms": 6.25,
+       "us_per_1k": 1696250.0
+      },
+      "worker.postprocess.pending_loop_stops": {
+       "mean_ms": 0.01,
+       "p50_ms": 0.01,
+       "us_per_1k": 1250.0
+      },
+      "worker.postprocess.prematerialize": {
+       "mean_ms": 0.74,
+       "p50_ms": 0.14,
+       "us_per_1k": 92500.0
+      },
+      "worker.postprocess.register_outputs": {
+       "mean_ms": 0.62,
+       "p50_ms": 0.28,
+       "us_per_1k": 77500.0
+      },
+      "worker.postprocess.route": {
+       "mean_ms": 0.060000000000000005,
+       "p50_ms": 0.05,
+       "us_per_1k": 7500.000000000001
+      },
+      "worker.postprocess.route_outputs": {
+       "mean_ms": 0.18,
+       "p50_ms": 0.13,
+       "us_per_1k": 22500.0
+      },
+      "worker.postprocess.send": {
+       "mean_ms": 0.2,
+       "p50_ms": 0.13,
+       "us_per_1k": 25000.0
+      },
+      "worker.postprocess.send_outputs": {
+       "mean_ms": 0.23000000000000004,
+       "p50_ms": 0.15,
+       "us_per_1k": 28750.000000000004
+      },
+      "worker.postprocess.send_prep": {
+       "mean_ms": 0.02,
+       "p50_ms": 0.01,
+       "us_per_1k": 2500.0
+      },
+      "worker.postprocess.stop_loops": {
+       "mean_ms": 0.04,
+       "p50_ms": 0.03,
+       "us_per_1k": 5000.0
+      },
+      "worker.postprocess.store_tensors": {
+       "mean_ms": 0.1,
+       "p50_ms": 0.07,
+       "us_per_1k": 12500.0
+      },
+      "worker.postprocess.update_lru": {
+       "mean_ms": 0.0,
+       "p50_ms": 0.0,
+       "us_per_1k": 0.0
+      },
+      "worker.postprocess_batch": {
+       "mean_ms": 15.440000000000001,
+       "p50_ms": 7.0,
+       "us_per_1k": 1930000.0000000002
+      },
+      "worker.schedule": {
+       "mean_ms": 0.01,
+       "p50_ms": 0.0,
+       "us_per_1k": 18333.333333333332
+      }
+     }
+    }
+   }
+  }
+ },
+ "errors": [],
+ "base_rev": "?",
+ "cand_rev": "?",
+ "correctness": {
+  "wer_base": 0.009411764705882352,
+  "wer_base_n": 32,
+  "wer_cand": 0.009411764705882352,
+  "wer_cand_n": 32,
+  "same_length_frac": 1.0,
+  "waveform_snr_db_median": 19.64649200439453
+ },
+ "summary": {
+  "c1_failed": {
+   "base": [
+    0
+   ],
+   "cand": [
+    0
+   ],
+   "delta_pct": null
+  },
+  "c1_rtf_p50": {
+   "base": [
+    0.005279931096183739
+   ],
+   "cand": [
+    0.005554506632947407
+   ],
+   "delta_pct": 5.200362121432374
+  },
+  "c1_ttfa_p50_ms": {
+   "base": [
+    25.25394147960469
+   ],
+   "cand": [
+    26.40995298861526
+   ],
+   "delta_pct": 4.577548854875479
+  },
+  "c32_audio_s_per_s": {
+   "base": [
+    786.0986764036611
+   ],
+   "cand": [
+    781.6974491663682
+   ],
+   "delta_pct": -0.5598822856983018
+  },
+  "c32_audio_s_total": {
+   "base": [
+    756.425
+   ],
+   "cand": [
+    756.4
+   ],
+   "delta_pct": -0.0033050203258719983
+  },
+  "c32_failed": {
+   "base": [
+    0
+   ],
+   "cand": [
+    0
+   ],
+   "delta_pct": null
+  },
+  "c32_rtf_p50": {
+   "base": [
+    0.03735400657954788
+   ],
+   "cand": [
+    0.03775338802370243
+   ],
+   "delta_pct": 1.0691796696668694
+  },
+  "c32_ttfa_p50_ms": {
+   "base": [
+    175.333787483396
+   ],
+   "cand": [
+    180.46496447641402
+   ],
+   "delta_pct": 2.92651922180369
+  }
+ }
+}

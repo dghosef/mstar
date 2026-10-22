@@ -1,0 +1,95 @@
+{
+ "label": "cs189_fi_gs6",
+ "tree": "/root/work/base",
+ "config": "configs/cosmos3_nano_fi_tmp.yaml",
+ "env": [
+  "HF_HOME=/root/work/hf"
+ ],
+ "size": "832x480",
+ "frames": 189,
+ "steps": 2,
+ "guidance": 6.0,
+ "concurrency": 1,
+ "num": 2,
+ "startup_s": 36.01614451408386,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  23.92712458299866
+ ],
+ "e2e_s": [
+  6.436879214001237,
+  6.4275701269980345
+ ],
+ "e2e_mean_s": 6.432224670499636,
+ "e2e_median_s": 6.432224670499636,
+ "wall_s": 12.899707314001716,
+ "videos_per_min": 9.302536645133687,
+ "peak_gpu_mem": "0, 59847 MiB | 1, 0 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 6.436879214001237,
+   "bytes": 7916732,
+   "t_end": 1792573611.5985355
+  },
+  {
+   "idx": 1,
+   "ok": true,
+   "e2e_s": 6.4275701269980345,
+   "bytes": 3383074,
+   "t_end": 1792573618.036123
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-3dadd88c42ee4808aa199b924e76b8e6",
+   "total_ms": 6349.6,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.2,
+    "preprocess done -> conductor ingest": 0.3,
+    "conductor ingest -> conductor done": 6082.1,
+    "conductor done -> first chunk": 263.4,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 2.6
+   },
+   "nodes": {
+    "dit": {
+     "n": 3,
+     "total_ms": 3225.1000000000004,
+     "fwd_ms": 3216.5299999999997
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2844.2,
+     "fwd_ms": 2835.3
+    }
+   }
+  },
+  {
+   "rid": "vid-4ce8028a202647aca1c2570ef48b0dce",
+   "total_ms": 6396.3,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.5,
+    "preprocess done -> conductor ingest": 1.1,
+    "conductor ingest -> conductor done": 6117.4,
+    "conductor done -> first chunk": 271.2,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 5.0
+   },
+   "nodes": {
+    "dit": {
+     "n": 3,
+     "total_ms": 3234.7999999999997,
+     "fwd_ms": 3225.4700000000003
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2871.4,
+     "fwd_ms": 2847.2
+    }
+   }
+  }
+ ]
+}

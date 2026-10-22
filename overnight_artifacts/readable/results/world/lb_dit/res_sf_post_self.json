@@ -1,0 +1,8 @@
+{
+ "tag": "sf_post_self",
+ "ms_per_chunk": 656.1596036663104,
+ "ms_per_forward": 131.2319207332621,
+ "bit_exact_vs_base": false,
+ "max_abs_vs_base": 0.03125,
+ "cos_vs_base": 0.9998942017555237
+}

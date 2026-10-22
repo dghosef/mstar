@@ -1,0 +1,60 @@
+{
+ "label": "w_new2",
+ "tree": "/root/guest-video/mstar",
+ "config": "",
+ "env": [
+  "HF_HOME=/root/work/hf"
+ ],
+ "size": "1280x704",
+ "frames": 81,
+ "steps": 20,
+ "guidance": 5.0,
+ "concurrency": 1,
+ "num": 1,
+ "startup_s": 21.016217470169067,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  35.89779915899999
+ ],
+ "e2e_s": [
+  24.729916330999913
+ ],
+ "e2e_mean_s": 24.729916330999913,
+ "e2e_median_s": 24.729916330999913,
+ "wall_s": 24.732500207999692,
+ "videos_per_min": 2.425957727500315,
+ "peak_gpu_mem": "0, 22759 MiB | 1, 40209 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 24.729916330999913,
+   "bytes": 617509,
+   "t_end": 1792559779.7178519
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-f69b8306b575449ca4979f8cfcf5a02a",
+   "total_ms": 24715.1,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 21192.2,
+     "fwd_ms": 21135.9
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 45.3,
+     "fwd_ms": 44.7
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2363.2,
+     "fwd_ms": 2313.8
+    }
+   }
+  }
+ ]
+}

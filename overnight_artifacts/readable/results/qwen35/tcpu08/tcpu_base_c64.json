@@ -1,0 +1,51 @@
+[
+ {
+  "pid": 143437,
+  "tid": 143437,
+  "name": "MainThread",
+  "cpu": 0.541,
+  "proc": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve qwen3_5_0.8b --gpus 0 --port 810"
+ },
+ {
+  "pid": 143437,
+  "tid": 143589,
+  "name": "Thread-1 (_preprocess_loop)",
+  "cpu": 0.398,
+  "proc": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve qwen3_5_0.8b --gpus 0 --port 810"
+ },
+ {
+  "pid": 143728,
+  "tid": 143728,
+  "name": "MainThread",
+  "cpu": 0.297,
+  "proc": "/root/work/mstar/.venv/bin/python -c from multiprocessing.spawn import spawn_main; spawn_m"
+ },
+ {
+  "pid": 143728,
+  "tid": 144488,
+  "name": "mstar-gpu-worker_0_0",
+  "cpu": 0.241,
+  "proc": "/root/work/mstar/.venv/bin/python -c from multiprocessing.spawn import spawn_main; spawn_m"
+ },
+ {
+  "pid": 143728,
+  "tid": 144489,
+  "name": "mstar-plan-worker_0_0",
+  "cpu": 0.233,
+  "proc": "/root/work/mstar/.venv/bin/python -c from multiprocessing.spawn import spawn_main; spawn_m"
+ },
+ {
+  "pid": 143437,
+  "tid": 144290,
+  "name": "Thread-2 (_process_messages)",
+  "cpu": 0.223,
+  "proc": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve qwen3_5_0.8b --gpus 0 --port 810"
+ },
+ {
+  "pid": 143593,
+  "tid": 143593,
+  "name": "MainThread",
+  "cpu": 0.039,
+  "proc": "/root/work/mstar/.venv/bin/python -c from multiprocessing.spawn import spawn_main; spawn_m"
+ }
+]

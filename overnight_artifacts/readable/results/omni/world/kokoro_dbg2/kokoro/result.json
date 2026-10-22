@@ -1,0 +1,33 @@
+{
+ "cell": "kokoro",
+ "gpu": "0",
+ "arms": {
+  "base": "/root/guest-world/arms/dbg",
+  "cand": "/root/guest-world/arms/dbg"
+ },
+ "rounds": [
+  {
+   "round": 0,
+   "arm": "base",
+   "t": "20:40:10",
+   "load1": 7.275390625,
+   "startup_s": 75.01265924499603,
+   "load1_measure": 4.27880859375,
+   "metrics": {
+    "c32_audio_s_per_s": 801.144511381301,
+    "c32_ttfa_p50_ms": 167.9044310003519,
+    "c32_rtf_p50": 0.035639420126186296,
+    "c32_failed": 0,
+    "c32_audio_s_total": 756.4,
+    "c1_ttfa_p50_ms": 28.894187504192814,
+    "c1_rtf_p50": 0.005948989290279548,
+    "c1_failed": 0
+   },
+   "load1_end": 4.17626953125
+  }
+ ],
+ "profile": {},
+ "errors": [],
+ "base_rev": "?",
+ "cand_rev": "?"
+}

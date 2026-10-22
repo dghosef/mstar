@@ -1,0 +1,13 @@
+{
+ "tree": "/root/guest-omni/base",
+ "mstar_file": "/root/guest-omni/base/mstar/__init__.py",
+ "config": "configs/qwen3omni_thinker_tp2_2gpu.yaml",
+ "env": {
+  "NCCL_DEBUG": "INFO",
+  "TORCH_DISTRIBUTED_DEBUG": "DETAIL",
+  "TORCHINDUCTOR_CACHE_DIR": "/root/guest-omni/ind_cold_main"
+ },
+ "load_start": "8.24 8.29 7.75 5/3923 715563",
+ "t_start": 1792615327.1262264,
+ "t_end": 1792615987.1748643
+}

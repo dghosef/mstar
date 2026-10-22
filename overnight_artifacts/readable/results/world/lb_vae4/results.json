@@ -1,0 +1,34 @@
+[
+ {
+  "variant": "fp32",
+  "ms_per_chunk_med": 546.3364569986879,
+  "ms_per_chunk_mean": 546.2133377994178,
+  "peak_gib": 9.033632755279541,
+  "psnr_vs_first": Infinity,
+  "bit_exact_vs_first": true
+ },
+ {
+  "variant": "fp32_cl",
+  "ms_per_chunk_med": 465.28994999971474,
+  "ms_per_chunk_mean": 465.41710720011906,
+  "peak_gib": 7.690370082855225,
+  "psnr_vs_first": 73.0660909910026,
+  "bit_exact_vs_first": false
+ },
+ {
+  "variant": "fp32_cl_compile_det",
+  "ms_per_chunk_med": 347.80267600035586,
+  "ms_per_chunk_mean": 347.77116400000523,
+  "peak_gib": 11.134960174560547,
+  "psnr_vs_first": 73.05721116271242,
+  "bit_exact_vs_first": false
+ },
+ {
+  "variant": "fp32_cl_compile",
+  "ms_per_chunk_med": 347.22430300098495,
+  "ms_per_chunk_mean": 347.6272878007876,
+  "peak_gib": 11.13442611694336,
+  "psnr_vs_first": 73.05785350377934,
+  "bit_exact_vs_first": false
+ }
+]

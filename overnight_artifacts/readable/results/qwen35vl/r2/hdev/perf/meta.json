@@ -1,0 +1,26 @@
+{
+ "arm": "hdev",
+ "tree": "/root/work/mstar",
+ "cmd": [
+  "/root/work/mstar/.venv/bin/python",
+  "-m",
+  "mstar.cli.main",
+  "serve",
+  "qwen3_5_0.8b",
+  "--gpus",
+  "0",
+  "--port",
+  "8100",
+  "--config",
+  "configs/qwen3_5_0.8b.yaml"
+ ],
+ "env_extra": {
+  "MSTAR_OVN_DEVICE_GRIDS": "1"
+ },
+ "start": "2026-10-21 05:12:30",
+ "loadavg_start": "47.83 31.43 22.71 6/4936 48672",
+ "git": "",
+ "mstar_file": "/root/work/mstar/mstar/__init__.py",
+ "startup_s": 102.0,
+ "end": "2026-10-21 05:15:31"
+}

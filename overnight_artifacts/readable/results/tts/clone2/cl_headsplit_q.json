@@ -1,0 +1,149 @@
+{
+  "base": {
+    "wer": 0.018518518518518517,
+    "files": 16,
+    "per": {
+      "0001": {
+        "wer": 0.0,
+        "hyp": "The quick brown fox jumps over the lazy dog."
+      },
+      "0002": {
+        "wer": 0.0,
+        "hyp": "Please call me back at your earliest convenience. I have some important news to share."
+      },
+      "0003": {
+        "wer": 0.0,
+        "hyp": "Turn left on Maple Avenue, continue for half a mile, then take the second right onto Cedar Lane."
+      },
+      "0004": {
+        "wer": 0.08333333333333333,
+        "hyp": "The meeting has been rescheduled to Thursday at 2.30 in the afternoon."
+      },
+      "0005": {
+        "wer": 0.0,
+        "hyp": "The quick brown fox jumps over the lazy dog."
+      },
+      "0006": {
+        "wer": 0.0,
+        "hyp": "Please call me back at your earliest convenience. I have some important news to share."
+      },
+      "0007": {
+        "wer": 0.0,
+        "hyp": "Turn left on Maple Avenue, continue for half a mile then take the second right onto Cedar Lane."
+      },
+      "0008": {
+        "wer": 0.08333333333333333,
+        "hyp": "The meeting has been rescheduled to Thursday at 2.30 in the afternoon."
+      },
+      "0009": {
+        "wer": 0.0,
+        "hyp": "The quick brown fox jumps over the lazy dog."
+      },
+      "0010": {
+        "wer": 0.0,
+        "hyp": "Please call me back at your earliest convenience. I have some important news to share."
+      },
+      "0011": {
+        "wer": 0.0,
+        "hyp": "Turn left on Maple Avenue, continue for half a mile, then take the second right onto Cedar Lane."
+      },
+      "0012": {
+        "wer": 0.08333333333333333,
+        "hyp": "The meeting has been rescheduled to Thursday at 2.30 in the afternoon."
+      },
+      "0013": {
+        "wer": 0.0,
+        "hyp": "The quick brown fox jumps over the lazy dog."
+      },
+      "0014": {
+        "wer": 0.0,
+        "hyp": "Please call me back at your earliest convenience. I have some important news to share."
+      },
+      "0015": {
+        "wer": 0.0,
+        "hyp": "Turn left on Maple Avenue. Continue for half a mile then take the second right onto Cedar Lane."
+      },
+      "0016": {
+        "wer": 0.08333333333333333,
+        "hyp": "The meeting has been rescheduled to Thursday at 2.30 in the afternoon."
+      }
+    }
+  },
+  "test": {
+    "wer": 0.018518518518518517,
+    "files": 16,
+    "per": {
+      "0001": {
+        "wer": 0.0,
+        "hyp": "The quick brown fox jumps over the lazy dog."
+      },
+      "0002": {
+        "wer": 0.0,
+        "hyp": "Please call me back at your earliest convenience. I have some important news to share."
+      },
+      "0003": {
+        "wer": 0.0,
+        "hyp": "Turn left on Maple Avenue, continue for half a mile then take the second right onto Cedar Lane."
+      },
+      "0004": {
+        "wer": 0.08333333333333333,
+        "hyp": "The meeting has been rescheduled to Thursday at 2.30 in the afternoon."
+      },
+      "0005": {
+        "wer": 0.0,
+        "hyp": "The quick brown fox jumps over the lazy dog."
+      },
+      "0006": {
+        "wer": 0.0,
+        "hyp": "Please call me back at your earliest convenience. I have some important news to share."
+      },
+      "0007": {
+        "wer": 0.0,
+        "hyp": "Turn left on Maple Avenue, continue for half a mile, then take the second right onto Cedar Lane."
+      },
+      "0008": {
+        "wer": 0.08333333333333333,
+        "hyp": "The meeting has been rescheduled to Thursday at 2.30 in the afternoon."
+      },
+      "0009": {
+        "wer": 0.0,
+        "hyp": "The quick brown fox jumps over the lazy dog."
+      },
+      "0010": {
+        "wer": 0.0,
+        "hyp": "Please call me back at your earliest convenience. I have some important news to share."
+      },
+      "0011": {
+        "wer": 0.0,
+        "hyp": "Turn left on Maple Avenue, continue for half a mile, then take the second right onto Cedar Lane."
+      },
+      "0012": {
+        "wer": 0.08333333333333333,
+        "hyp": "The meeting has been rescheduled to Thursday at 2.30 in the afternoon."
+      },
+      "0013": {
+        "wer": 0.0,
+        "hyp": "The quick brown fox jumps over the lazy dog."
+      },
+      "0014": {
+        "wer": 0.0,
+        "hyp": "Please call me back at your earliest convenience. I have some important news to share."
+      },
+      "0015": {
+        "wer": 0.0,
+        "hyp": "Turn left on Maple Avenue, continue for half a mile, then take the second right onto Cedar Lane."
+      },
+      "0016": {
+        "wer": 0.08333333333333333,
+        "hyp": "The meeting has been rescheduled to Thursday at 2.30 in the afternoon."
+      }
+    }
+  },
+  "wave": {
+    "pairs": 16,
+    "corr_median": -0.02002762397751212,
+    "corr_min": -0.05875568091869354,
+    "identical_frac": 0.0,
+    "dur_ratio_median": 0.9980732177263969
+  }
+}

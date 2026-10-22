@@ -1,0 +1,89 @@
+{
+ "summary": {
+  "n": 12,
+  "errors": 0,
+  "wall_s": 14.970002228044905,
+  "req_per_s": 0.8016030871070358,
+  "ttft_p50": 3.1506995930103585,
+  "ttft_mean": 3.1101246877466715,
+  "e2e_p50": 4.982186479493976,
+  "ttft_p50_by_kind": {
+   "phone": 3.1506995930103585
+  }
+ },
+ "rows": [
+  {
+   "id": "phone_0",
+   "text": "This photo showcases a close-up, appetizing pile of **beignets** \u2014 golden-brown, square-shaped fried dough pastries generously dusted with powdered sugar",
+   "ttft": 1.4529649839969352,
+   "e2e": 4.969706040981691
+  },
+  {
+   "id": "phone_1",
+   "text": "This photo shows a close-up, appetizing view of several golden-brown pastries \u2014 likely beignets or similar fried dough treats \u2014 generously dusted with powdered",
+   "ttft": 2.583228061965201,
+   "e2e": 4.969876808987465
+  },
+  {
+   "id": "phone_0",
+   "text": "This photo showcases a close-up, appetizing pile of **beignets** \u2014 golden-brown, square-shaped fried dough pastries generously dusted with powdered sugar",
+   "ttft": 4.801049011992291,
+   "e2e": 4.989396543998737
+  },
+  {
+   "id": "phone_1",
+   "text": "This photo shows a close-up, appetizing view of several golden-brown pastries \u2014 likely beignets or similar fried dough treats \u2014 generously dusted with powdered",
+   "ttft": 3.6882583950064145,
+   "e2e": 4.986764792003669
+  },
+  {
+   "id": "phone_0",
+   "text": "This photo showcases a close-up, appetizing pile of **beignets** \u2014 golden-brown, square-shaped fried dough pastries generously dusted with powdered sugar",
+   "ttft": 1.4805288150091656,
+   "e2e": 5.009645554993767
+  },
+  {
+   "id": "phone_1",
+   "text": "This photo shows a close-up, appetizing view of several golden-brown pastries \u2014 likely beignets or similar fried dough treats \u2014 generously dusted with powdered",
+   "ttft": 2.6131407910143025,
+   "e2e": 5.009704235999379
+  },
+  {
+   "id": "phone_0",
+   "text": "This photo showcases a close-up, appetizing pile of **beignets** \u2014 golden-brown, square-shaped fried dough pastries generously dusted with powdered sugar",
+   "ttft": 4.822973533009645,
+   "e2e": 5.356032793002669
+  },
+  {
+   "id": "phone_1",
+   "text": "This photo shows a close-up, appetizing view of several golden-brown pastries \u2014 likely beignets or similar fried dough treats \u2014 generously dusted with powdered",
+   "ttft": 3.7007838769932278,
+   "e2e": 5.009112144995015
+  },
+  {
+   "id": "phone_0",
+   "text": "This photo showcases a close-up, appetizing pile of **beignets** \u2014 golden-brown, square-shaped fried dough pastries generously dusted with powdered sugar",
+   "ttft": 1.4799310689559206,
+   "e2e": 4.968660082959104
+  },
+  {
+   "id": "phone_1",
+   "text": "This photo shows a close-up, appetizing view of several golden-brown pastries \u2014 likely beignets or similar fried dough treats \u2014 generously dusted with powdered",
+   "ttft": 3.690933366015088,
+   "e2e": 4.977608166984282
+  },
+  {
+   "id": "phone_0",
+   "text": "This photo showcases a close-up, appetizing pile of **beignets** \u2014 golden-brown, square-shaped fried dough pastries generously dusted with powdered sugar",
+   "ttft": 2.571552187029738,
+   "e2e": 4.947080280049704
+  },
+  {
+   "id": "phone_1",
+   "text": "This photo shows a close-up, appetizing view of several golden-brown pastries \u2014 likely beignets or similar fried dough treats \u2014 generously dusted with powdered",
+   "ttft": 4.436152161972132,
+   "e2e": 4.621947548992466
+  }
+ ],
+ "errors": []
+}

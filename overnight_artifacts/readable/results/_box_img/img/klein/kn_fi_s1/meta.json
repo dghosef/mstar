@@ -1,0 +1,19 @@
+{
+ "tag": "kn_fi_s1",
+ "tree": "/root/work/img4",
+ "mstar_file": "/root/work/img4/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve flux2_klein --config /workspace/results/img/klein/kn_fi_s1/config.yaml --gpus 0 --port 8200",
+ "sets": [
+  "attention_backend=flashinfer"
+ ],
+ "env": [],
+ "git": "",
+ "start": "08:02:15",
+ "gpu_mem_before": [
+  0
+ ],
+ "startup_s": 105.01010775566101,
+ "gpu_mem_after": [
+  0
+ ]
+}

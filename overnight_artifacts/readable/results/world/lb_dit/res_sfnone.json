@@ -1,0 +1,8 @@
+{
+ "tag": "sfnone",
+ "ms_per_chunk": 677.5054843334752,
+ "ms_per_forward": 135.50109686669506,
+ "bit_exact_vs_base": true,
+ "max_abs_vs_base": 0.0,
+ "cos_vs_base": 0.9999077916145325
+}

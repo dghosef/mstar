@@ -1,0 +1,17 @@
+{
+ "tag": "kn_pin_s3",
+ "tree": "/root/work/img3",
+ "mstar_file": "/root/work/img3/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve flux2_klein --config /workspace/results/img/klein/kn_pin_s3/config.yaml --gpus 1 --port 8300",
+ "sets": [],
+ "env": [],
+ "git": "",
+ "start": "07:40:02",
+ "gpu_mem_before": [
+  0
+ ],
+ "startup_s": 65.01281356811523,
+ "gpu_mem_after": [
+  0
+ ]
+}

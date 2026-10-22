@@ -1,0 +1,68 @@
+{
+ "label": "e_sp2_nsys",
+ "tree": "/root/work/mstar",
+ "config": "configs/cosmos3_edge_sp2_tmp.yaml",
+ "env": [
+  "HF_HOME=/root/work/hf"
+ ],
+ "size": "832x480",
+ "frames": 121,
+ "steps": 20,
+ "guidance": 6.0,
+ "concurrency": 1,
+ "num": 1,
+ "startup_s": 54.01856541633606,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  4.460435447999771
+ ],
+ "e2e_s": [
+  4.4763738440015
+ ],
+ "e2e_mean_s": 4.4763738440015,
+ "e2e_median_s": 4.4763738440015,
+ "wall_s": 4.498036135999428,
+ "videos_per_min": 13.3391547301717,
+ "peak_gpu_mem": "0, 30131 MiB | 1, 18637 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 4.4763738440015,
+   "bytes": 7142009,
+   "t_end": 1792576655.4130185
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-1e28b384805e44569f2b8133db841e07",
+   "total_ms": 4418.2,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.4,
+    "preprocess done -> conductor ingest": 0.4,
+    "conductor ingest -> conductor done": 4241.0,
+    "conductor done -> first chunk": 170.3,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 5.2
+   },
+   "nodes": {
+    "dit": {
+     "n": 21,
+     "total_ms": 2644.7000000000003,
+     "fwd_ms": 2609.3
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 1543.3,
+     "fwd_ms": 1534.4
+    },
+    "vae_decoder_ar": {
+     "n": 1,
+     "total_ms": 0.58,
+     "fwd_ms": 0.32
+    }
+   }
+  }
+ ]
+}

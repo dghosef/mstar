@@ -1,0 +1,189 @@
+{
+ "summary": {
+  "n": 28,
+  "errors": 0,
+  "wall_s": 7.676331132010091,
+  "req_per_s": 3.6475758430014524,
+  "ttft_p50": 0.03301160203409381,
+  "ttft_mean": 0.0828281159213345,
+  "e2e_p50": 0.22543021599994972,
+  "ttft_p50_by_kind": {
+   "small": 0.03301160203409381,
+   "big": 0.10826153049129061,
+   "huge": 0.2692001719842665,
+   "text": 0.014011349965585396,
+   "xl": 0.41544796898961067
+  }
+ },
+ "rows": [
+  {
+   "id": "small_0",
+   "text": "The food dish shown in the image is **beignets** \u2014 specifically, **New Orleans-style beignets**.\n\n### Key features visible:\n- **Golden-brown, fried dough pastries** dusted generously with **powdered sugar**.\n- Served on a white plate, often in a stack",
+   "ttft": 0.037701830035075545,
+   "e2e": 0.23109435505466536
+  },
+  {
+   "id": "small_1",
+   "text": "This image showcases a classic French dessert platter, likely from a caf\u00e9 or patisserie, featuring **choux pastry puffs (often called \u201cchoux\u201d or \u201cpains au chocolat\u201d without the chocolate)** served with three complementary sauces.\n\n### The Main Item: Choux Puffs\n- **Appearance**: Several",
+   "ttft": 0.03225018398370594,
+   "e2e": 0.22467959398636594
+  },
+  {
+   "id": "small_2",
+   "text": "The dish shown in the photo is **beignets** \u2014 a type of deep-fried dough pastry dusted generously with powdered sugar.\n\n### Cuisine:\n**American**, specifically associated with **New Orleans, Louisiana**.\n\n### Dish:\n**Beignets** (also spelled \u201cbeignets\u201d or sometimes",
+   "ttft": 0.03397551295347512,
+   "e2e": 0.22747953794896603
+  },
+  {
+   "id": "small_3",
+   "text": "A close-up of a classic beignet, generously dusted with powdered sugar, resting on a light-colored plate. The golden-brown fried dough peeking through the white sugar highlights its fluffy, airy texture \u2014 a beloved New Orleans treat perfect for dipping in chocolate or vanilla sauce.",
+   "ttft": 0.0331654220353812,
+   "e2e": 0.20190171099966392
+  },
+  {
+   "id": "small_4",
+   "text": "The food dish shown in the image is **beignets** \u2014 specifically, **New Orleans-style beignets**.\n\n### Key features visible:\n- **Golden-brown, fried dough pastries** with a slightly puffy texture.\n- Heavily dusted with **powdered sugar**, which is",
+   "ttft": 0.032857782032806426,
+   "e2e": 0.22516954800812528
+  },
+  {
+   "id": "small_5",
+   "text": "The food item pictured is a classic **beignet** \u2014 specifically, a large, square-shaped beignet dusted generously with powdered sugar. It\u2019s served on a white paper plate alongside two smaller, similarly powdered beignets, all resting on a green tray.\n\n### Detailed Description:\n\n- **Shape & Size**:",
+   "ttft": 0.03173476201482117,
+   "e2e": 0.22409868199611083
+  },
+  {
+   "id": "small_6",
+   "text": "The dish shown in the photo is **churros** \u2014 a popular fried dough pastry dusted with powdered sugar.\n\n### Cuisine:\n- **Origin**: Churros have roots in **Spain**, where they are known as *churros*. They were brought to the Americas by Spanish colonists and are now",
+   "ttft": 0.03341156896203756,
+   "e2e": 0.2257026569568552
+  },
+  {
+   "id": "small_7",
+   "text": "A close-up shot of two golden-brown beignets, generously dusted with powdered sugar, nestled in a paper-lined basket. The soft, fluffy texture of the dough is visible beneath the sweet coating, evoking the classic taste of New Orleans-style fried dough. A receipt peeks out from the side, hinting",
+   "ttft": 0.029188535001594573,
+   "e2e": 0.22145000903401524
+  },
+  {
+   "id": "small_8",
+   "text": "This image shows a casual meal at a restaurant, featuring several dishes:\n\n1. **Fried Dough Balls (likely \u201cDoughnuts\u201d or \u201cBread Pudding Balls\u201d)**  \n   - In the foreground, there\u2019s a white bowl filled with golden-brown, fried dough balls \u2014 possibly homemade or artisan",
+   "ttft": 0.03236043098149821,
+   "e2e": 0.22569088399177417
+  },
+  {
+   "id": "small_9",
+   "text": "The image showcases a classic **churro** \u2014 a deep-fried dough pastry dusted generously with powdered sugar. Here\u2019s a detailed description:\n\n### Appearance:\n- **Shape**: The churro is long, cylindrical, and slightly tapered at both ends, giving it a conical or \u201cpointed\u201d",
+   "ttft": 0.04126096802065149,
+   "e2e": 0.23515836504520848
+  },
+  {
+   "id": "small_10",
+   "text": "The dish shown in the photo is **beignets** \u2014 a popular French-American pastry, especially associated with New Orleans.\n\n### Key Features Visible:\n- **Golden-brown, round pastries** dusted generously with powdered sugar \u2014 classic appearance of beignets.\n- Served on a white plate with",
+   "ttft": 0.03383791696978733,
+   "e2e": 0.2264075159910135
+  },
+  {
+   "id": "small_11",
+   "text": "This image captures a rustic, cozy dining scene featuring three golden-brown, powdered sugar-dusted pastries \u2014 likely **beignets** or **churros** \u2014 arranged on a white ceramic plate with a subtle floral pattern. A small metal ramekin of dark red dipping sauce (possibly jam or chocolate) sits beside",
+   "ttft": 0.02860199799761176,
+   "e2e": 0.22253121301764622
+  },
+  {
+   "id": "big_0",
+   "text": "The image shows **two pieces of fried dough**, likely **donuts** or **fried dough balls**, served in a white bowl.\n\n### Key observations:\n- The dough is golden-brown and appears to be deep-fried.\n- It\u2019s coated with **granulated sugar**, giving it a sparkling, crystall",
+   "ttft": 0.10991655598627403,
+   "e2e": 0.3062494400073774
+  },
+  {
+   "id": "big_1",
+   "text": "This image showcases a close-up, appetizing view of **three powdered sugar-dusted pastries**, likely **beignets** or **churros**, arranged on a surface dusted with more powdered sugar.\n\n### Visual Details:\n\n- **Shape & Texture**: The pastries are golden-brown, crescent",
+   "ttft": 0.10231594898505136,
+   "e2e": 0.295762883964926
+  },
+  {
+   "id": "big_2",
+   "text": "The dish shown in the photo is **beignets** \u2014 a type of fried dough pastry dusted with powdered sugar.\n\n### Cuisine:\nBeignets are a classic **Cajun and Creole** dish, originating from New Orleans, Louisiana, USA. They are deeply rooted in French colonial influence and have",
+   "ttft": 0.1066065049963072,
+   "e2e": 0.3003478009486571
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered donuts, dusted with sugar, sits on a dark wooden table. A spoon rests beside the donuts, ready for serving. In the background, a glass of water and other tableware are visible, suggesting a cozy caf\u00e9 or restaurant setting.",
+   "ttft": 0.11025511694606394,
+   "e2e": 0.27397252997616306
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in the image is **beignets** \u2014 specifically, two classic New Orleans-style beignets dusted generously with powdered sugar.\n\n### Key features visible:\n- **Golden-brown, square-shaped pastries** \u2014 typical of beignets, which are deep-fried dough.\n-",
+   "ttft": 0.2668423459981568,
+   "e2e": 0.46181587199680507
+  },
+  {
+   "id": "huge_1",
+   "text": "The image showcases a classic **Beignet**, a beloved French-American pastry, served on a simple white plate. The beignet is generously dusted with fine, white powdered sugar that clings to its golden-brown, slightly puffy surface \u2014 giving it a snowy, indulgent appearance.\n\n### Key Visual Details:\n\n",
+   "ttft": 0.27155799797037616,
+   "e2e": 0.468367479974404
+  },
+  {
+   "id": "text_0",
+   "text": "In Python, both **lists** and **tuples** are built-in data structures used to store collections of items, but they differ fundamentally in **mutability** (whether their contents can be changed) and their typical use cases.\n\n### 1. Mutability (The Core Difference)\n\n*   **List**:",
+   "ttft": 0.017639485013205558,
+   "e2e": 0.21306599100353196
+  },
+  {
+   "id": "text_1",
+   "text": "The sun has bowed and faded from the sky,\nTo leave the world in silver, quiet light.\nThe waves no longer crash with thunderous cry,\nBut whisper soft against the moonlit night.\n\nA vast expanse of velvet, deep and blue,\nWhere ancient secrets sleep beneath the tide.\nThe",
+   "ttft": 0.015984859957825392,
+   "e2e": 0.2082229339866899
+  },
+  {
+   "id": "text_2",
+   "text": "Here are three effective tips for improving your sleep quality:\n\n1.  **Establish a Consistent Sleep Schedule**\n    Try to go to bed and wake up at the same time every day, even on weekends. This helps regulate your body's internal clock (circadian rhythm), making it easier to fall asleep and wake",
+   "ttft": 0.013904163031838834,
+   "e2e": 0.2071081640315242
+  },
+  {
+   "id": "text_3",
+   "text": "Romeo and Juliet, young lovers from feuding families in Verona, secretly marry and fall deeply in love despite their families' hatred. Their tragic story ends with a series of misunderstandings and misfortunes that lead both of them to take their own lives, ultimately forcing their parents to reconcile.",
+   "ttft": 0.014006705954670906,
+   "e2e": 0.1944560469710268
+  },
+  {
+   "id": "text_4",
+   "text": "A refrigerator keeps food cold through a process called **vapor-compression refrigeration**. This system works by moving heat from the inside of the fridge (where you want it cold) to the outside of the room (where the heat can dissipate).\n\nHere is the step-by-step logical flow of how this cycle works:",
+   "ttft": 0.014015993976499885,
+   "e2e": 0.20723798300605267
+  },
+  {
+   "id": "text_5",
+   "text": "Here is a recipe for a **Simple, Creamy Tomato Soup**. It's perfect for a quick weeknight dinner or a cozy weekend meal. The secret to making it creamy without heavy cream is using a little bit of butter and a splash of milk or cream at the end.\n\n### \ufffd\ufffd\ufffd Simple Creamy Tomato",
+   "ttft": 0.017124055011663586,
+   "e2e": 0.20929854502901435
+  },
+  {
+   "id": "text_6",
+   "text": "The capital of Australia is **Canberra**.\n\nIt was chosen as the capital through a unique and somewhat contentious process known as the **Capital City Commission** (1901\u20131913). When the Commonwealth of Australia was formed in 1901, the new nation needed to select a capital city",
+   "ttft": 0.013869846996385604,
+   "e2e": 0.20593235996784642
+  },
+  {
+   "id": "text_7",
+   "text": "**Photosynthesis** is the biological process by which green plants, algae, and certain bacteria transform light energy into chemical energy. This process is fundamental to life on Earth, as it produces the oxygen we breathe and serves as the primary source of energy for almost all food chains.\n\nThe overall chemical equation for photosynthesis is:",
+   "ttft": 0.013904816005378962,
+   "e2e": 0.20603375398786739
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a cozy caf\u00e9 or diner table set for breakfast or brunch. The scene is warm and inviting, with soft lighting that highlights the textures of the food and drink.\n\n**Foreground:**\n- In the bottom left corner, there\u2019s a white ceramic cup filled with a light",
+   "ttft": 0.40996694698696956,
+   "e2e": 0.6055176869849674
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly low-angle photograph of a dessert platter served on a long, rectangular white ceramic tray. The setting appears to be in a dimly lit restaurant or caf\u00e9, with a dark, reflective surface (possibly a black marble or polished wood table) visible in the background.\n\n**Main Components:**",
+   "ttft": 0.4209289909922518,
+   "e2e": 0.616276892949827
+  }
+ ],
+ "errors": []
+}

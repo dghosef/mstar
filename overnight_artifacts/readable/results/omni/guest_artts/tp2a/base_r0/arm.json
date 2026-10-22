@@ -1,0 +1,11 @@
+{
+ "tree": "/root/guest-omni/base",
+ "mstar_file": "/root/guest-omni/base/mstar/__init__.py",
+ "config": "configs/qwen3omni_thinker_tp2_2gpu.yaml",
+ "env": {
+  "MSTAR_PHASE_TIMING": "100"
+ },
+ "load_start": "3.67 7.05 10.97 2/2684 658128",
+ "t_start": 1792609090.5991771,
+ "t_end": 1792609655.6446877
+}

@@ -1,0 +1,96 @@
+{
+ "label": "s_tp2_ll128",
+ "tree": "/root/work/mstar",
+ "config": "",
+ "env": [
+  "HF_HOME=/root/work/hf",
+  "NCCL_PROTO=LL128"
+ ],
+ "size": "832x480",
+ "frames": 93,
+ "steps": 20,
+ "guidance": 6.0,
+ "concurrency": 1,
+ "num": 2,
+ "startup_s": 60.01703190803528,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  31.650446081002883
+ ],
+ "e2e_s": [
+  27.72994994200417,
+  27.94825589100219
+ ],
+ "e2e_mean_s": 27.83910291650318,
+ "e2e_median_s": 27.83910291650318,
+ "wall_s": 55.692790511006024,
+ "videos_per_min": 2.15467745284348,
+ "peak_gpu_mem": "0, 81665 MiB | 1, 73517 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 27.72994994200417,
+   "bytes": 2522560,
+   "t_end": 1792613249.276615
+  },
+  {
+   "idx": 1,
+   "ok": true,
+   "e2e_s": 27.94825589100219,
+   "bytes": 2566674,
+   "t_end": 1792613277.231996
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-6df76338226c444d84e568264b6c22f5",
+   "total_ms": 27696.8,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.4,
+    "preprocess done -> conductor ingest": 0.7,
+    "conductor ingest -> conductor done": 27559.4,
+    "conductor done -> first chunk": 129.8,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 5.6
+   },
+   "nodes": {
+    "dit": {
+     "n": 21,
+     "total_ms": 26337.399999999998,
+     "fwd_ms": 26311.7
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 1199.5,
+     "fwd_ms": 1195.2
+    }
+   }
+  },
+  {
+   "rid": "vid-3a59304b153e4d6d84f7871250525132",
+   "total_ms": 27923.0,
+   "timeline_ms": {
+    "recv -> preprocess done": 2.0,
+    "preprocess done -> conductor ingest": 0.4,
+    "conductor ingest -> conductor done": 27787.6,
+    "conductor done -> first chunk": 128.4,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 4.7
+   },
+   "nodes": {
+    "dit": {
+     "n": 21,
+     "total_ms": 26556.8,
+     "fwd_ms": 26531.100000000002
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 1211.0,
+     "fwd_ms": 1204.2
+    }
+   }
+  }
+ ]
+}

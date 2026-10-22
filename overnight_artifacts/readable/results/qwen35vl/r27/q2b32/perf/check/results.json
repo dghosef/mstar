@@ -1,0 +1,202 @@
+{
+ "summary": {
+  "n": 30,
+  "errors": 0,
+  "wall_s": 7.121047844004352,
+  "req_per_s": 4.212863142782961,
+  "ttft_p50": 0.026873470487771556,
+  "ttft_mean": 0.134729563863948,
+  "e2e_p50": 0.13346591949812137,
+  "ttft_p50_by_kind": {
+   "small": 0.02680517648695968,
+   "big": 0.08378857950447127,
+   "huge": 0.25032465998083353,
+   "text": 0.010923827008809894,
+   "xl": 0.3606565375230275,
+   "phone": 1.029175834992202
+  }
+ },
+ "rows": [
+  {
+   "id": "small_0",
+   "text": "The food dish shown in this image is **beignets** \u2014 specifically, **beignets dusted with powdered sugar**.\n\nThese are deep-fried dough pastries, typically served in French bakeries (like *boulangeries*) and popular in New Orleans and other parts of the United States. They are",
+   "ttft": 0.0369071020395495,
+   "e2e": 0.14336415799334645
+  },
+  {
+   "id": "small_1",
+   "text": "This image displays a classic French pastry service, likely from a bistro or caf\u00e9 setting. The main item is a **baguette-style baguette**, baked to a golden-brown crust and generously dusted with powdered sugar (candied sugar), giving it a delicate, snowy appearance. It\u2019s nestled in a",
+   "ttft": 0.028130099002737552,
+   "e2e": 0.13332532602362335
+  },
+  {
+   "id": "small_2",
+   "text": "The dish visible in this photo is **Beignets**, a traditional French pastry.\n\n### Key Features:\n- **Shape**: They are irregularly shaped, often triangular or square, resembling fried dough pockets.\n- **Texture**: Golden-brown, fried dough that appears crispy on the outside and soft on the inside",
+   "ttft": 0.026923756988253444,
+   "e2e": 0.13932334596756846
+  },
+  {
+   "id": "small_3",
+   "text": " A close-up, mouth-watering shot of a beignet generously dusted with powdered sugar, sitting on a speckled countertop. The golden-brown fried pastry is heavily coated in fine white sugar, creating a soft, snowy texture that contrasts with the crisp edges. This classic French dessert is perfect for a sweet treat",
+   "ttft": 0.026823183987289667,
+   "e2e": 0.1330834130058065
+  },
+  {
+   "id": "small_4",
+   "text": "The food dish shown in this image is **beignets** \u2014 specifically, **French beignets** (also known as *beignets* in French).\n\n### Key features visible:\n- **Shape**: They are crescent-shaped or triangular pastries, typical of beignets.\n- **Texture",
+   "ttft": 0.026787168986629695,
+   "e2e": 0.14249202102655545
+  },
+  {
+   "id": "small_5",
+   "text": "The food item pictured is a **beignet**, specifically a **French beignet** \u2014 a deep-fried pastry that has become iconic to New Orleans and the American South.\n\n### Appearance:\n- The beignet is golden-brown on the outside, indicating it was fried to a crisp texture.\n- It is",
+   "ttft": 0.02796582196606323,
+   "e2e": 0.1400801219861023
+  },
+  {
+   "id": "small_6",
+   "text": "The dish visible in the photo is **panettone**, a traditional Italian Christmas cake.\n\n### Key features supporting this identification:\n- **Shape & Texture**: The round, slightly domed shape with a golden-brown, fried exterior is characteristic of panettone.\n- **Powdered Sugar**: The generous",
+   "ttft": 0.027950908988714218,
+   "e2e": 0.13360651297261938
+  },
+  {
+   "id": "small_7",
+   "text": " Two golden-brown beignets, generously dusted with powdered sugar, nestled in a paper-lined basket on a blue table.",
+   "ttft": 0.024908069986850023,
+   "e2e": 0.07395514601375908
+  },
+  {
+   "id": "small_8",
+   "text": "The food dish shown in this image is **donut holes** (also known as **donut balls** or **donut bites**).\n\nThey are small, round, fried dough balls \u2014 typically coated in sugar, cinnamon, or chocolate \u2014 served in a small bowl with a side of **ketchup** (or",
+   "ttft": 0.02571261301636696,
+   "e2e": 0.1324511200073175
+  },
+  {
+   "id": "small_9",
+   "text": "The food item pictured is a plate of **pastel de pan** \u2014 a traditional Spanish pastry, also known as *pan dulce* in some regions.\n\n### Description:\n\n- **Shape & Form**: The pastels are triangular or wedge-shaped, resembling small triangles or slivers. They have a golden-brown,",
+   "ttft": 0.025791727006435394,
+   "e2e": 0.13143560203025118
+  },
+  {
+   "id": "small_10",
+   "text": "The dish visible in the photo is **donuts** \u2014 specifically, powdered sugar-coated donuts served with dipping sauces.\n\n### Cuisine:\nThis is a **Western-style dessert**, commonly found in **American** cuisine. Donuts are a staple of American breakfasts, brunches, and sweet treats.\n\n###",
+   "ttft": 0.024834546959027648,
+   "e2e": 0.127079491969198
+  },
+  {
+   "id": "small_11",
+   "text": " Three golden-brown, powdered sugar-dusted donuts sit on a rustic white plate, accompanied by a small metal ramekin of red jam. The scene is set on a warm-toned wooden table, with a glass of water and cutlery nearby \u2014 evoking a cozy, homemade caf\u00e9 or bakery atmosphere.",
+   "ttft": 0.024685688025783747,
+   "e2e": 0.12388554099015892
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in this image is **churros** \u2014 specifically, **sugar-coated churros**.\n\nThese are fried dough sticks that are typically rolled in sugar, cinnamon, or both. The golden-brown, crispy exterior and the visible granules of sugar on the surface confirm they are sweet,",
+   "ttft": 0.08568784798262641,
+   "e2e": 0.19264156703138724
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays three golden-brown, fried pastries \u2014 likely **beignets** or **biscuits** \u2014 generously dusted with fine white powdered sugar. They are arranged closely together on a surface that appears to be covered in more powdered sugar, suggesting they were freshly baked and decorated.\n\n### Visual Details:",
+   "ttft": 0.08293895301176235,
+   "e2e": 0.18832735600881279
+  },
+  {
+   "id": "big_2",
+   "text": "The dish visible in this photo is **beignets**, a type of fried pastry popular in **French cuisine**, particularly in **New Orleans, Louisiana, USA**.\n\n### Key Details:\n- **Appearance**: Golden-brown, deep-fried pastries dusted with powdered sugar.\n- **Shape**: Often triangular",
+   "ttft": 0.0846382059971802,
+   "e2e": 0.1892496650107205
+  },
+  {
+   "id": "big_3",
+   "text": " A plate of freshly made beignets, generously dusted with powdered sugar, sits invitingly on a dark wooden table. The golden-brown pastries, filled with sweet cream and fried to perfection, are arranged artfully on a white ceramic plate with a subtle patterned rim. A silver spoon rests beside them, ready",
+   "ttft": 0.08288867503870279,
+   "e2e": 0.1883183640311472
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in this image is **beignets** \u2014 specifically, **French beignets** (also known as *beignets* in French).\n\n### Key identifying features:\n- **Shape**: They are square or rectangular pastries, which is typical for beignets.\n- **Texture",
+   "ttft": 0.2452796860015951,
+   "e2e": 0.36021510005230084
+  },
+  {
+   "id": "huge_1",
+   "text": "The food item pictured is a plate of **beignets** \u2014 classic French-style fried dough pastries.\n\nHere\u2019s a detailed description:\n\n- **Appearance**: The beignets are golden-brown, puffy, and irregularly shaped, resembling small, soft breads or dumplings. They have a slightly",
+   "ttft": 0.25536963396007195,
+   "e2e": 0.362959919963032
+  },
+  {
+   "id": "text_0",
+   "text": "In Python, both **lists** and **tuples** are ordered, mutable collections of items, but they differ in how they are created, stored, and used. Here\u2019s a clear breakdown:\n\n---\n\n### \ufffd\ufffd **List**\n- **Mutable**: You can change elements after creation.\n- **Ordered",
+   "ttft": 0.019716690992936492,
+   "e2e": 0.12101395695935935
+  },
+  {
+   "id": "text_1",
+   "text": "The moon hangs heavy, silver and deep,\nAs the tide retreats to the shore.\nThe waves sleep in rhythmic, soft waves,\nWhile the stars begin to rise.\n\nA silver ribbon, the moon's glow,\nWinds through the dark, silent sea.\nNo sound but the sigh of",
+   "ttft": 0.010945573973003775,
+   "e2e": 0.11095837800530717
+  },
+  {
+   "id": "text_2",
+   "text": "Improving sleep quality is a combination of consistent habits, environmental adjustments, and mental preparation. Here are three effective tips:\n\n1.  **Establish a Consistent Sleep Schedule**\n    Try to go to bed and wake up at the same time every day, even on weekends. This helps regulate your body's internal clock",
+   "ttft": 0.010902080044616014,
+   "e2e": 0.11091977503383532
+  },
+  {
+   "id": "text_3",
+   "text": "Romeo and Juliet fall in love across the divide of feuding families, leading them to marry secretly before their deaths. Their tragic romance ends when a series of misunderstandings and a violent brawl between their families destroys their lives.",
+   "ttft": 0.011893797956872731,
+   "e2e": 0.08490317198447883
+  },
+  {
+   "id": "text_4",
+   "text": "A refrigerator keeps food cold primarily by creating a **controlled environment** that is significantly colder than the surrounding room, while simultaneously removing heat generated by the food itself. This process relies on a combination of mechanical cooling and insulation.\n\nHere is how it works step-by-step:\n\n### 1. The Cooling Mechanism: The",
+   "ttft": 0.010778133000712842,
+   "e2e": 0.10992027900647372
+  },
+  {
+   "id": "text_5",
+   "text": "Here is a recipe for a **Creamy Tomato Soup**. It's designed to be simple, flavorful, and perfect for a quick weeknight meal or a comforting Sunday dinner.\n\n### \ufffd\ufffd\ufffd Creamy Tomato Soup\n\n**Prep time:** 10 mins | **Cook time:** 20 mins | **",
+   "ttft": 0.012173332972452044,
+   "e2e": 0.11232421197928488
+  },
+  {
+   "id": "text_6",
+   "text": "The capital of Australia is **Canberra**.\n\nIt was chosen not because it was the most populous city or the location of the original colonial capital, Sydney, but due to a deliberate compromise between two major political factions: the **Liberal Party** (led by Premier Billy Hughes) and the **National Party** (led",
+   "ttft": 0.01085349899949506,
+   "e2e": 0.11092629400081933
+  },
+  {
+   "id": "text_7",
+   "text": "**Photosynthesis** is the biological process by which green plants, algae, and certain bacteria convert light energy into chemical energy. This process is essential for life on Earth because it produces the oxygen we breathe and creates the food (glucose) that fuels most ecosystems.\n\nThe process occurs in two main stages: the **light",
+   "ttft": 0.010735374002251774,
+   "e2e": 0.11083094798959792
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a cozy breakfast or brunch scene on a speckled white countertop, likely in a caf\u00e9 or diner. The composition features several items arranged casually:\n\n**Left Side:**\n- A white ceramic coffee cup filled with dark black coffee sits on a matching saucer.",
+   "ttft": 0.35931437503313646,
+   "e2e": 0.4657616100157611
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly low-angle photograph of a dessert platter, likely served at a restaurant or bar. The scene is dimly lit, with warm ambient lighting highlighting the food against a dark background.\n\n**Main Platter:**\n- A rectangular white ceramic platter holds the main components.\n- In",
+   "ttft": 0.36199870001291856,
+   "e2e": 0.4675798040116206
+  },
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, appetizing photo of a generous pile of **beignets** \u2014 classic French fried pastries.\n\nThe beignets are golden-yellow in color, indicating they\u2019ve been deep-fried to a crisp texture. They\u2019re generously dusted with **powdered sugar**, which gives them a",
+   "ttft": 1.1103714749915525,
+   "e2e": 1.2184456210234202
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, top-down photograph of a dessert \u2014 likely a **donut** or **fried pastry** \u2014 heavily dusted with **powdered sugar** (also known as confectioners\u2019 sugar).\n\n### Key Visual Details:\n\n- **Texture & Appearance**: The powdered sugar is thickly applied",
+   "ttft": 0.9479801949928515,
+   "e2e": 1.056282279023435
+  }
+ ],
+ "errors": []
+}

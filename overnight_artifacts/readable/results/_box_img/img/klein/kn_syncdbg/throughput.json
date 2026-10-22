@@ -1,0 +1,74 @@
+{
+  "mode": "throughput",
+  "by_concurrency": {
+    "16": {
+      "concurrency": 16,
+      "images": 64,
+      "repeats": 3,
+      "images_per_s": 3.325731556112792,
+      "images_per_s_min": 3.3004379933393335,
+      "images_per_s_max": 3.394586197158704,
+      "wall_s": 19.2438863210009,
+      "request_latency": {
+        "n": 64,
+        "median_s": 4.365987005001443,
+        "mean_s": 4.369949086077952,
+        "p95_s": 5.725570569997217,
+        "min_s": 1.9523454619993572,
+        "max_s": 6.480842597997253
+      },
+      "runs": [
+        {
+          "wall_s": 19.2438863210009,
+          "images_per_s": 3.325731556112792,
+          "request_latency": {
+            "n": 64,
+            "median_s": 4.626202837000164,
+            "mean_s": 4.535842095140424,
+            "p95_s": 5.285799195997242,
+            "min_s": 1.993271946997993,
+            "max_s": 5.413568416999624
+          }
+        },
+        {
+          "wall_s": 18.853549824001675,
+          "images_per_s": 3.394586197158704,
+          "request_latency": {
+            "n": 64,
+            "median_s": 4.365987005001443,
+            "mean_s": 4.369949086077952,
+            "p95_s": 5.725570569997217,
+            "min_s": 1.9523454619993572,
+            "max_s": 6.480842597997253
+          }
+        },
+        {
+          "wall_s": 19.391365669998777,
+          "images_per_s": 3.3004379933393335,
+          "request_latency": {
+            "n": 64,
+            "median_s": 4.748034940501384,
+            "mean_s": 4.626147011437183,
+            "p95_s": 5.372709438997845,
+            "min_s": 2.029318767999939,
+            "max_s": 6.733819434997713
+          }
+        }
+      ],
+      "peak_vram_mib": 42959
+    }
+  },
+  "observed_output_format": "png",
+  "tag": "run",
+  "url": "http://localhost:8200/v1/images/generations",
+  "model": "flux2_klein",
+  "size": "1024x1024",
+  "steps": 4,
+  "guidance": null,
+  "seed": 0,
+  "prompts_file": "/root/work/hx/prompts.txt",
+  "num_prompts": 16,
+  "output_format": null,
+  "extra_json": null,
+  "timestamp": "2026-10-21T06:53:48"
+}

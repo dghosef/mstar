@@ -1,0 +1,79 @@
+{
+ "label": "c_base_sp2_c1",
+ "tree": "/root/work/base",
+ "config": "configs/cosmos3_nano_sp2.yaml",
+ "env": [
+  "HF_HOME=/root/work/hf"
+ ],
+ "size": "832x480",
+ "frames": 189,
+ "steps": 35,
+ "guidance": 6.0,
+ "concurrency": 1,
+ "num": 2,
+ "startup_s": 57.01952052116394,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  58.86092372099847
+ ],
+ "e2e_s": [
+  31.34918881700105,
+  31.65629826100121
+ ],
+ "e2e_mean_s": 31.50274353900113,
+ "e2e_median_s": 31.50274353900113,
+ "wall_s": 63.03067805700084,
+ "videos_per_min": 1.9038348261378342,
+ "peak_gpu_mem": "0, 52777 MiB | 1, 43187 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 31.34918881700105,
+   "bytes": 4679697,
+   "t_end": 1792567071.0731184
+  },
+  {
+   "idx": 1,
+   "ok": true,
+   "e2e_s": 31.65629826100121,
+   "bytes": 4019687,
+   "t_end": 1792567102.7408974
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-186e6c0a3d634534948028174a35415a",
+   "total_ms": 31306.2,
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 28081.300000000003,
+     "fwd_ms": 28019.4
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2890.8,
+     "fwd_ms": 2878.1
+    }
+   }
+  },
+  {
+   "rid": "vid-82990aac41114ff8bf71ad2db9b511cc",
+   "total_ms": 31618.1,
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 28355.5,
+     "fwd_ms": 28291.3
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2925.3,
+     "fwd_ms": 2907.1
+    }
+   }
+  }
+ ]
+}

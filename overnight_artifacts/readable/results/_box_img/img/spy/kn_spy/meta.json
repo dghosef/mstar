@@ -1,0 +1,17 @@
+{
+ "tag": "kn_spy",
+ "tree": "/root/work/img8",
+ "mstar_file": "/root/work/img8/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve flux2_klein --config /workspace/results/img/spy/kn_spy/config.yaml --gpus 0 --port 8200",
+ "sets": [],
+ "env": [],
+ "git": "",
+ "start": "09:50:38",
+ "gpu_mem_before": [
+  0
+ ],
+ "startup_s": 60.00899338722229,
+ "gpu_mem_after": [
+  27491
+ ]
+}

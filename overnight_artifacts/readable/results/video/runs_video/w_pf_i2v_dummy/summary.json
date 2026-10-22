@@ -1,0 +1,66 @@
+{
+ "label": "w_pf_i2v_dummy",
+ "tree": "/root/work/mstar",
+ "config": "",
+ "env": [
+  "HF_HOME=/root/work/hf"
+ ],
+ "size": "1280x704",
+ "frames": 81,
+ "steps": 4,
+ "guidance": 5.0,
+ "concurrency": 1,
+ "num": 1,
+ "startup_s": 21.012653589248657,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [],
+ "e2e_s": [
+  27.947723571000097
+ ],
+ "e2e_mean_s": 27.947723571000097,
+ "e2e_median_s": 27.947723571000097,
+ "wall_s": 27.951045314999647,
+ "videos_per_min": 2.146610236712743,
+ "peak_gpu_mem": "0, 40389 MiB | 1, 0 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 27.947723571000097,
+   "bytes": 611942,
+   "t_end": 1792572299.1092744
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-05eaa56e7bc5485bb0566220aff668e2",
+   "total_ms": 27929.2,
+   "timeline_ms": {
+    "recv -> preprocess done": 3438.6,
+    "preprocess done -> conductor ingest": 1.2,
+    "conductor ingest -> conductor done": 23299.6,
+    "conductor done -> first chunk": 1184.8,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 4.9
+   },
+   "nodes": {
+    "dit": {
+     "n": 4,
+     "total_ms": 17011.9,
+     "fwd_ms": 16148.1
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 346.5,
+     "fwd_ms": 343.7
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 5966.0,
+     "fwd_ms": 5937.4
+    }
+   }
+  }
+ ]
+}

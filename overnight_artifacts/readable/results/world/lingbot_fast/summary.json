@@ -1,0 +1,134 @@
+[
+ {
+  "round": 0,
+  "arm": "cur",
+  "rep": 0,
+  "startup_s": 24.010989904403687,
+  "chunks": 6,
+  "frames": 93,
+  "first_chunk_s": 1.2090715960002854,
+  "total_s": 7.41848994800057,
+  "gap_mean_s": 1.2418836704000569,
+  "gap_p50_s": 1.2815436889995908,
+  "fps": 12.536243986562972,
+  "env": {
+   "MSTAR_PHASE_TIMING": "2"
+  }
+ },
+ {
+  "round": 0,
+  "arm": "cur",
+  "rep": 1,
+  "startup_s": 24.010989904403687,
+  "chunks": 6,
+  "frames": 93,
+  "first_chunk_s": 1.2039653120009461,
+  "total_s": 7.413906715999474,
+  "gap_mean_s": 1.2419882807997056,
+  "gap_p50_s": 1.2868257049995009,
+  "fps": 12.543993816283486,
+  "env": {
+   "MSTAR_PHASE_TIMING": "2"
+  }
+ },
+ {
+  "round": 0,
+  "arm": "fast",
+  "rep": 0,
+  "startup_s": 24.007664918899536,
+  "chunks": 6,
+  "frames": 93,
+  "first_chunk_s": 1.0691195250001329,
+  "total_s": 5.9214544580008805,
+  "gap_mean_s": 0.9704669866001495,
+  "gap_p50_s": 0.9993849670008785,
+  "fps": 15.70560082149097,
+  "env": {
+   "MSTAR_PHASE_TIMING": "2",
+   "LINGBOT_FAST": "fa4,compile"
+  }
+ },
+ {
+  "round": 0,
+  "arm": "fast",
+  "rep": 1,
+  "startup_s": 24.007664918899536,
+  "chunks": 6,
+  "frames": 93,
+  "first_chunk_s": 1.0664913689997775,
+  "total_s": 5.911688039001092,
+  "gap_mean_s": 0.9690393340002629,
+  "gap_p50_s": 0.9917444120001164,
+  "fps": 15.731547298580791,
+  "env": {
+   "MSTAR_PHASE_TIMING": "2",
+   "LINGBOT_FAST": "fa4,compile"
+  }
+ },
+ {
+  "round": 1,
+  "arm": "fast",
+  "rep": 0,
+  "startup_s": 21.007584810256958,
+  "chunks": 6,
+  "frames": 93,
+  "first_chunk_s": 1.0574336879999464,
+  "total_s": 5.919778908999433,
+  "gap_mean_s": 0.9724690441998973,
+  "gap_p50_s": 1.0004545419997157,
+  "fps": 15.710046173957357,
+  "env": {
+   "MSTAR_PHASE_TIMING": "2",
+   "LINGBOT_FAST": "fa4,compile"
+  }
+ },
+ {
+  "round": 1,
+  "arm": "fast",
+  "rep": 1,
+  "startup_s": 21.007584810256958,
+  "chunks": 6,
+  "frames": 93,
+  "first_chunk_s": 1.0847373479991802,
+  "total_s": 5.955627907000235,
+  "gap_mean_s": 0.9741781118002109,
+  "gap_p50_s": 0.9878361549999681,
+  "fps": 15.615481936117595,
+  "env": {
+   "MSTAR_PHASE_TIMING": "2",
+   "LINGBOT_FAST": "fa4,compile"
+  }
+ },
+ {
+  "round": 1,
+  "arm": "cur",
+  "rep": 0,
+  "startup_s": 24.007692098617554,
+  "chunks": 6,
+  "frames": 93,
+  "first_chunk_s": 1.2100123549989803,
+  "total_s": 7.45356627000001,
+  "gap_mean_s": 1.248710783000206,
+  "gap_p50_s": 1.2662139829990338,
+  "fps": 12.477248692926677,
+  "env": {
+   "MSTAR_PHASE_TIMING": "2"
+  }
+ },
+ {
+  "round": 1,
+  "arm": "cur",
+  "rep": 1,
+  "startup_s": 24.007692098617554,
+  "chunks": 6,
+  "frames": 93,
+  "first_chunk_s": 1.2254289530010283,
+  "total_s": 7.448862758999894,
+  "gap_mean_s": 1.2446867611997732,
+  "gap_p50_s": 1.297725772999911,
+  "fps": 12.485127328683184,
+  "env": {
+   "MSTAR_PHASE_TIMING": "2"
+  }
+ }
+]

@@ -1,0 +1,134 @@
+{
+ "cell": "kokoro",
+ "gpu": "0",
+ "arms": {
+  "base": "/root/guest-world/arms/dbg",
+  "cand": "/root/guest-world/arms/head"
+ },
+ "rounds": [
+  {
+   "round": 0,
+   "arm": "base",
+   "t": "20:35:32",
+   "load1": 9.26904296875,
+   "startup_s": 75.0122084459872,
+   "load1_measure": 6.86474609375,
+   "metrics": {
+    "c32_audio_s_per_s": 832.4585456867235,
+    "c32_ttfa_p50_ms": 167.23256101249717,
+    "c32_rtf_p50": 0.03472828780130156,
+    "c32_failed": 0,
+    "c32_audio_s_total": 756.4,
+    "c1_ttfa_p50_ms": 26.460402499651536,
+    "c1_rtf_p50": 0.005409622677295327,
+    "c1_failed": 0
+   },
+   "load1_end": 6.55517578125
+  },
+  {
+   "round": 0,
+   "arm": "cand",
+   "t": "20:36:51",
+   "load1": 6.55517578125,
+   "startup_s": 75.01280675403541,
+   "load1_measure": 4.47314453125,
+   "metrics": {
+    "c32_audio_s_per_s": 816.3201610085653,
+    "c32_ttfa_p50_ms": 167.49659800552763,
+    "c32_rtf_p50": 0.03484295991758553,
+    "c32_failed": 0,
+    "c32_audio_s_total": 756.4,
+    "c1_ttfa_p50_ms": 27.16804700321518,
+    "c1_rtf_p50": 0.00567698496784305,
+    "c1_failed": 0
+   },
+   "load1_end": 4.27490234375
+  }
+ ],
+ "profile": {},
+ "errors": [],
+ "base_rev": "?",
+ "cand_rev": "?",
+ "correctness": {
+  "wer_base": 0.009411764705882352,
+  "wer_base_n": 32,
+  "wer_cand": 0.009411764705882352,
+  "wer_cand_n": 32,
+  "same_length_frac": 1.0,
+  "waveform_snr_db_median": 19.669422149658203
+ },
+ "summary": {
+  "c1_failed": {
+   "base": [
+    0
+   ],
+   "cand": [
+    0
+   ],
+   "delta_pct": null
+  },
+  "c1_rtf_p50": {
+   "base": [
+    0.005409622677295327
+   ],
+   "cand": [
+    0.00567698496784305
+   ],
+   "delta_pct": 4.942346379718252
+  },
+  "c1_ttfa_p50_ms": {
+   "base": [
+    26.460402499651536
+   ],
+   "cand": [
+    27.16804700321518
+   ],
+   "delta_pct": 2.6743527562476106
+  },
+  "c32_audio_s_per_s": {
+   "base": [
+    832.4585456867235
+   ],
+   "cand": [
+    816.3201610085653
+   ],
+   "delta_pct": -1.938641240669241
+  },
+  "c32_audio_s_total": {
+   "base": [
+    756.4
+   ],
+   "cand": [
+    756.4
+   ],
+   "delta_pct": 0.0
+  },
+  "c32_failed": {
+   "base": [
+    0
+   ],
+   "cand": [
+    0
+   ],
+   "delta_pct": null
+  },
+  "c32_rtf_p50": {
+   "base": [
+    0.03472828780130156
+   ],
+   "cand": [
+    0.03484295991758553
+   ],
+   "delta_pct": 0.3301980130436118
+  },
+  "c32_ttfa_p50_ms": {
+   "base": [
+    167.23256101249717
+   ],
+   "cand": [
+    167.49659800552763
+   ],
+   "delta_pct": 0.1578861146608449
+  }
+ }
+}

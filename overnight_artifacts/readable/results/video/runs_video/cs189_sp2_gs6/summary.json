@@ -1,0 +1,95 @@
+{
+ "label": "cs189_sp2_gs6",
+ "tree": "/root/work/base",
+ "config": "configs/cosmos3_nano_sp2.yaml",
+ "env": [
+  "HF_HOME=/root/work/hf"
+ ],
+ "size": "832x480",
+ "frames": 189,
+ "steps": 2,
+ "guidance": 6.0,
+ "concurrency": 1,
+ "num": 2,
+ "startup_s": 45.01758122444153,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  22.896507438999834
+ ],
+ "e2e_s": [
+  4.865730182998959,
+  4.81387087800249
+ ],
+ "e2e_mean_s": 4.839800530500725,
+ "e2e_median_s": 4.839800530500725,
+ "wall_s": 9.715530215999024,
+ "videos_per_min": 12.351358838078678,
+ "peak_gpu_mem": "0, 52681 MiB | 1, 42929 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 4.865730182998959,
+   "bytes": 7916099,
+   "t_end": 1792573698.3905318
+  },
+  {
+   "idx": 1,
+   "ok": true,
+   "e2e_s": 4.81387087800249,
+   "bytes": 3354717,
+   "t_end": 1792573703.2146142
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-463038ffc4304c1085a799f02fd31fab",
+   "total_ms": 4776.1,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.8,
+    "preprocess done -> conductor ingest": 0.5,
+    "conductor ingest -> conductor done": 4505.4,
+    "conductor done -> first chunk": 265.8,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 2.6
+   },
+   "nodes": {
+    "dit": {
+     "n": 3,
+     "total_ms": 1595.0,
+     "fwd_ms": 1588.5
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2861.3,
+     "fwd_ms": 2847.9
+    }
+   }
+  },
+  {
+   "rid": "vid-3f74d425c43f4ad7b376a961e60f7b68",
+   "total_ms": 4769.6,
+   "timeline_ms": {
+    "recv -> preprocess done": 2.8,
+    "preprocess done -> conductor ingest": 0.8,
+    "conductor ingest -> conductor done": 4494.6,
+    "conductor done -> first chunk": 266.3,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 5.1
+   },
+   "nodes": {
+    "dit": {
+     "n": 3,
+     "total_ms": 1595.0,
+     "fwd_ms": 1589.0
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2860.5,
+     "fwd_ms": 2846.9
+    }
+   }
+  }
+ ]
+}

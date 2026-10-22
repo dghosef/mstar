@@ -1,0 +1,209 @@
+{
+ "summary": {
+  "n": 32,
+  "errors": 0,
+  "wall_s": 2.1716506899974775,
+  "req_per_s": 14.735334806555455,
+  "ttft_p50": 0.4415537020031479,
+  "ttft_mean": 0.43265243250084495,
+  "e2e_p50": 0.5058995650033467,
+  "ttft_p50_by_kind": {
+   "t8s_360p": 0.4415537020031479
+  }
+ },
+ "rows": [
+  {
+   "id": "t8s_360p_0",
+   "text": "The video begins with a colorful, abstract background featuring vertical bands of red, green, yellow, blue, and pink. A diagonal line of colored pixels moves across the",
+   "ttft": 0.09451787799480371,
+   "e2e": 0.1742549969931133
+  },
+  {
+   "id": "t8s_360p_1",
+   "text": "The video shows a test pattern with a vertical bar of red, green, yellow, blue, pink, and cyan. The red bar is on the left, followed",
+   "ttft": 0.3068035050018807,
+   "e2e": 0.3731304309985717
+  },
+  {
+   "id": "t8s_360p_0",
+   "text": "The video begins with a colorful, abstract background featuring vertical bands of red, green, yellow, blue, and pink. A diagonal line of colored pixels moves across the",
+   "ttft": 0.4343965500011109,
+   "e2e": 0.4988065449942951
+  },
+  {
+   "id": "t8s_360p_1",
+   "text": "The video shows a test pattern with a vertical bar of red, green, yellow, blue, pink, and cyan. The pattern is animated with moving lines and squares",
+   "ttft": 0.23710952900000848,
+   "e2e": 0.3044166440013214
+  },
+  {
+   "id": "t8s_360p_0",
+   "text": "The video begins with a colorful, abstract background featuring vertical bands of red, green, yellow, blue, and pink. A diagonal line of colored pixels moves across the",
+   "ttft": 0.3698109680044581,
+   "e2e": 0.4322285259986529
+  },
+  {
+   "id": "t8s_360p_1",
+   "text": "The video shows a test pattern with a vertical bar of red, green, yellow, blue, pink, and cyan. The pattern is animated with moving lines and squares",
+   "ttft": 0.4957119680038886,
+   "e2e": 0.5605327130033402
+  },
+  {
+   "id": "t8s_360p_0",
+   "text": "The video begins with a colorful, abstract background featuring vertical bands of red, green, yellow, blue, and pink. A diagonal line of colored pixels moves across the",
+   "ttft": 0.5586395079953945,
+   "e2e": 0.6218879949956317
+  },
+  {
+   "id": "t8s_360p_1",
+   "text": "The video shows a test pattern with a vertical bar of red, green, yellow, blue, pink, and cyan. The pattern is animated with moving lines and squares",
+   "ttft": 0.6202855709998403,
+   "e2e": 0.6847457089970703
+  },
+  {
+   "id": "t8s_360p_0",
+   "text": "The video begins with a colorful, abstract background featuring vertical bands of red, green, yellow, blue, and pink. A diagonal line of colored pixels moves across the",
+   "ttft": 0.5145326959973318,
+   "e2e": 0.5773220749979373
+  },
+  {
+   "id": "t8s_360p_1",
+   "text": "The video shows a test pattern with a vertical bar of red, green, yellow, blue, pink, and cyan. The pattern is animated with moving lines and squares",
+   "ttft": 0.4438593189988751,
+   "e2e": 0.5071775589967729
+  },
+  {
+   "id": "t8s_360p_0",
+   "text": "The video begins with a colorful, abstract background featuring vertical bands of red, green, yellow, blue, and pink. A diagonal line of colored pixels moves across the",
+   "ttft": 0.4390461820003111,
+   "e2e": 0.5036748300044565
+  },
+  {
+   "id": "t8s_360p_1",
+   "text": "The video shows a test pattern with a vertical bar of red, green, yellow, blue, pink, and cyan. The red bar is on the left, followed",
+   "ttft": 0.4412653320032405,
+   "e2e": 0.5052635800020653
+  },
+  {
+   "id": "t8s_360p_0",
+   "text": "The video begins with a colorful, abstract background featuring vertical bands of red, green, yellow, blue, and pink. A diagonal line of colored pixels moves across the",
+   "ttft": 0.4389402969973162,
+   "e2e": 0.5066651219967753
+  },
+  {
+   "id": "t8s_360p_1",
+   "text": "The video shows a test pattern with a vertical bar of red, green, yellow, blue, pink, and cyan. The red bar is on the left, followed",
+   "ttft": 0.44184207200305536,
+   "e2e": 0.5052273179971962
+  },
+  {
+   "id": "t8s_360p_0",
+   "text": "The video begins with a colorful, abstract background featuring vertical bands of red, green, yellow, blue, and pink. A diagonal line of colored pixels moves across the",
+   "ttft": 0.442244069003209,
+   "e2e": 0.506535550004628
+  },
+  {
+   "id": "t8s_360p_1",
+   "text": "The video shows a test pattern with a vertical bar of red, green, yellow, blue, pink, and cyan. The pattern is animated with moving lines and squares",
+   "ttft": 0.4420212890036055,
+   "e2e": 0.5190652200035402
+  },
+  {
+   "id": "t8s_360p_0",
+   "text": "The video begins with a colorful, abstract background featuring vertical bands of red, green, yellow, blue, and pink. A diagonal line of colored pixels moves across the",
+   "ttft": 0.4561829209997086,
+   "e2e": 0.5321522849990288
+  },
+  {
+   "id": "t8s_360p_1",
+   "text": "The video shows a test pattern with a vertical bar of red, green, yellow, blue, pink, and cyan. The red bar is on the left, followed",
+   "ttft": 0.46870583800046006,
+   "e2e": 0.5330077350008651
+  },
+  {
+   "id": "t8s_360p_0",
+   "text": "The video begins with a colorful, abstract background featuring vertical bands of red, green, yellow, blue, and pink. A diagonal line of colored pixels moves across the",
+   "ttft": 0.4683838540004217,
+   "e2e": 0.5317756360018393
+  },
+  {
+   "id": "t8s_360p_1",
+   "text": "The video shows a test pattern with a vertical bar of red, green, yellow, blue, pink, and cyan. The pattern is animated with moving lines and squares",
+   "ttft": 0.4679370840021875,
+   "e2e": 0.5303577679951559
+  },
+  {
+   "id": "t8s_360p_0",
+   "text": "The video begins with a colorful, abstract background featuring vertical bands of red, green, yellow, blue, and pink. A diagonal line of colored pixels moves across the",
+   "ttft": 0.46450333800021326,
+   "e2e": 0.5260789300009492
+  },
+  {
+   "id": "t8s_360p_1",
+   "text": "The video shows a test pattern with a vertical bar of red, green, yellow, blue, pink, and cyan. The pattern is animated with moving lines and squares",
+   "ttft": 0.46254134500486543,
+   "e2e": 0.5266208820030442
+  },
+  {
+   "id": "t8s_360p_0",
+   "text": "The video begins with a colorful, abstract background featuring vertical bands of red, green, yellow, blue, and pink. A diagonal line of colored pixels moves across the",
+   "ttft": 0.46217684800649295,
+   "e2e": 0.5252241460038931
+  },
+  {
+   "id": "t8s_360p_1",
+   "text": "The video shows a test pattern with a vertical bar of red, green, yellow, blue, pink, and cyan. The pattern is animated with moving lines and squares",
+   "ttft": 0.4481298960017739,
+   "e2e": 0.5105301869989489
+  },
+  {
+   "id": "t8s_360p_0",
+   "text": "The video begins with a colorful, abstract background featuring vertical bands of red, green, yellow, blue, and pink. A diagonal line of colored pixels moves across the",
+   "ttft": 0.4363235769997118,
+   "e2e": 0.4979506109957583
+  },
+  {
+   "id": "t8s_360p_1",
+   "text": "The video shows a test pattern with a vertical bar of red, green, yellow, blue, pink, and cyan. The pattern is animated with moving lines and squares",
+   "ttft": 0.43360201999894343,
+   "e2e": 0.49576858199725393
+  },
+  {
+   "id": "t8s_360p_0",
+   "text": "The video begins with a colorful, abstract background featuring vertical bands of red, green, yellow, blue, and pink. A diagonal line of colored pixels moves across the",
+   "ttft": 0.4323429860014585,
+   "e2e": 0.4940308169971104
+  },
+  {
+   "id": "t8s_360p_1",
+   "text": "The video shows a test pattern with a vertical bar of red, green, yellow, blue, magenta, and cyan. The pattern is animated with moving lines and",
+   "ttft": 0.4315938450017711,
+   "e2e": 0.4960156270026346
+  },
+  {
+   "id": "t8s_360p_0",
+   "text": "The video begins with a colorful, abstract background featuring vertical bands of red, green, yellow, blue, and pink. A diagonal line of colored pixels moves across the",
+   "ttft": 0.43263595399912447,
+   "e2e": 0.49522938200243516
+  },
+  {
+   "id": "t8s_360p_1",
+   "text": "The video shows a test pattern with a vertical bar of red, green, yellow, blue, magenta, and cyan. The pattern is animated with moving lines and",
+   "ttft": 0.431129429001885,
+   "e2e": 0.49536162200092804
+  },
+  {
+   "id": "t8s_360p_0",
+   "text": "The video begins with a colorful, abstract background featuring vertical bands of red, green, yellow, blue, and pink. A diagonal line of colored pixels moves across the",
+   "ttft": 0.4321638260007603,
+   "e2e": 0.47349362300155917
+  },
+  {
+   "id": "t8s_360p_1",
+   "text": "The video shows a test pattern with a vertical bar of red, green, yellow, blue, pink, and cyan. The pattern is animated with moving lines and squares",
+   "ttft": 0.39549834599893074,
+   "e2e": 0.4506820710012107
+  }
+ ],
+ "errors": []
+}

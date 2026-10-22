@@ -1,0 +1,17 @@
+{
+ "tag": "kn_cap_s1",
+ "tree": "/root/work/img",
+ "mstar_file": "/root/work/img/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve flux2_klein --config /workspace/results/img/klein/kn_cap_s1/config.yaml --gpus 0 --port 8200",
+ "sets": [],
+ "env": [],
+ "git": "",
+ "start": "05:15:25",
+ "gpu_mem_before": [
+  0
+ ],
+ "startup_s": 65.0125846862793,
+ "gpu_mem_after": [
+  0
+ ]
+}

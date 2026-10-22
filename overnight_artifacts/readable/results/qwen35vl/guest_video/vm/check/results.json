@@ -1,0 +1,106 @@
+{
+ "summary": {
+  "n": 14,
+  "errors": 0,
+  "wall_s": 2.9179760300030466,
+  "req_per_s": 4.797846128977757,
+  "ttft_p50": 0.06749537049836363,
+  "ttft_mean": 0.1179107955706838,
+  "e2e_p50": 0.16007709199766396,
+  "ttft_p50_by_kind": {
+   "image": 0.02102323549843277,
+   "t4s_360p": 0.06749537049836363,
+   "t8s_360p": 0.11636056150018703,
+   "t16s_360p": 0.20858265049901092,
+   "t8s_720p": 0.36214550999648054,
+   "text": 0.011840643001050921
+  }
+ },
+ "rows": [
+  {
+   "id": "img0",
+   "text": "This image displays a **diagonal sequence of overlapping ovals** arranged diagonally from the top-left to the bottom-right, set against a solid blue background.\n\n### Visual Breakdown:\n\n- **Shape**: Each oval is a filled, solid-colored ovoid (oval) with no outline or stroke.\n- **",
+   "ttft": 0.020455919999221805,
+   "e2e": 0.11421576399879996
+  },
+  {
+   "id": "img1",
+   "text": "This image displays a **diagonal sequence of overlapping circles** arranged in a **downward-left diagonal line**, set against a solid blue background. The circles are arranged from top-left to bottom-right, and they are **layered**, with each circle partially covering the one beneath it.\n\n### Key Observations:\n\n1",
+   "ttft": 0.02159055099764373,
+   "e2e": 0.1205981180028175
+  },
+  {
+   "id": "img2",
+   "text": "This image displays a **diagonal sequence of colored circles** arranged in a line, moving from the top-left to the bottom-right of the frame. The sequence is **color-coded**, progressing from red to yellow, with each circle slightly smaller than the previous one, suggesting a gradient or progression.\n\n### Key Observations:",
+   "ttft": 0.019290882999484893,
+   "e2e": 0.11074863000249024
+  },
+  {
+   "id": "img3",
+   "text": "This image displays a sequence of overlapping, gradient-colored ovals arranged diagonally from the top-left to the bottom-right on a solid blue background.\n\n**Visual Description:**\n\n- **Shape and Orientation**: Each oval is a horizontally oriented ellipse (oval), not a circle. They are arranged in a staggered, diagonal line",
+   "ttft": 0.05656431300303666,
+   "e2e": 0.14920646700193174
+  },
+  {
+   "id": "t4s_360p_0",
+   "text": "The video begins with a colorful, abstract background featuring vertical bands of red, green, yellow, blue, and pink. A diagonal line of colored pixels moves across the screen, creating a dynamic and visually striking effect. The background then shifts to a more complex pattern with multiple overlapping shapes and lines, including a gray square and a",
+   "ttft": 0.0688482080004178,
+   "e2e": 0.16142452199710533
+  },
+  {
+   "id": "t4s_360p_1",
+   "text": "The video shows a colorful, abstract animation on a test pattern background. The background consists of vertical bars of red, green, yellow, blue, pink, and cyan. The animation involves the movement of colored lines and shapes across the background. The lines and shapes move from left to right, and some of them are also moving",
+   "ttft": 0.06614253299630946,
+   "e2e": 0.15872966199822258
+  },
+  {
+   "id": "t8s_360p_0",
+   "text": "The video begins with a colorful, abstract background featuring vertical bands of red, green, yellow, blue, and pink. A diagonal line of colored pixels moves across the screen, creating a dynamic and visually striking effect. The background then shifts to a more complex pattern with multiple colored bands and a grid-like structure. As the video",
+   "ttft": 0.1167081289968337,
+   "e2e": 0.2095348250004463
+  },
+  {
+   "id": "t8s_360p_1",
+   "text": "The video shows a test pattern with a vertical bar of red, green, yellow, blue, pink, and cyan. The pattern is animated with moving lines and squares. The lines and squares move across the screen, changing their positions and colors. The video ends with the pattern still moving.",
+   "ttft": 0.11601299400354037,
+   "e2e": 0.20005918000242673
+  },
+  {
+   "id": "t16s_360p_0",
+   "text": "The video begins with a colorful, abstract pattern that transitions into a series of vertical bars in various colors, including red, green, yellow, blue, and pink. As the video progresses, a gray square appears in the center of the screen, and a diagonal line moves across the screen, intersecting with the vertical bars.",
+   "ttft": 0.20988297499570763,
+   "e2e": 0.3026587339991238
+  },
+  {
+   "id": "t16s_360p_1",
+   "text": "The video shows a test pattern with a moving line and a square. The line moves from left to right, and the square moves from bottom to top. The line and square are both moving at the same speed.",
+   "ttft": 0.20728232600231422,
+   "e2e": 0.2712803550020908
+  },
+  {
+   "id": "t8s_720p_0",
+   "text": "The video begins with a colorful, abstract background featuring vertical bands of red, green, yellow, blue, and pink. A series of lines and shapes move across the screen, creating a dynamic and visually engaging effect. The lines and shapes appear to be composed of small, pixelated elements that move in various directions, adding a",
+   "ttft": 0.36672448399622226,
+   "e2e": 0.45963154600030975
+  },
+  {
+   "id": "t8s_720p_1",
+   "text": "The video shows a series of colorful lines and shapes moving across a screen. The lines and shapes are moving from left to right, and the colors are changing from red to green to yellow to blue to pink to cyan. The lines and shapes are moving at different speeds, and the colors are changing at different speeds. The lines",
+   "ttft": 0.3575665359967388,
+   "e2e": 0.4494010819980758
+  },
+  {
+   "id": "text0",
+   "text": "In Python, both **lists** and **tuples** are sequences of items, but they differ fundamentally in how they store and access those items.\n\n### 1. Storage Mechanism\n*   **List**: Stores items in a **list of lists** (nested structure). Each element is a list of its own",
+   "ttft": 0.013845551999111194,
+   "e2e": 0.1055611069969018
+  },
+  {
+   "id": "text1",
+   "text": "The deep blue fades into the dark,\nWhere the stars are just a distant spark.\nThe waves are silent, waiting for a song,\nOr a gentle, soft, and long goodbye.\n\nThe moon hangs low, a silver coin,\nReflecting the endless, endless night.\nIt watches over the endless",
+   "ttft": 0.009835734002990648,
+   "e2e": 0.10039741400396451
+  }
+ ],
+ "errors": []
+}

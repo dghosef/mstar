@@ -1,0 +1,24 @@
+{
+ "arm": "arag",
+ "tree": "/root/work/asrr",
+ "cmd": [
+  "/root/work/mstar/.venv/bin/python",
+  "-m",
+  "mstar.cli.main",
+  "serve",
+  "omnilingual_asr_ctc_300m",
+  "--gpus",
+  "0",
+  "--port",
+  "8100",
+  "--config",
+  "configs/omnilingual_asr_ctc_300m.yaml"
+ ],
+ "env_extra": {},
+ "start": "2026-10-21 06:58:09",
+ "loadavg_start": "16.97 12.82 14.96 3/4428 131736",
+ "git": "",
+ "mstar_file": "/root/work/asrr/mstar/__init__.py",
+ "startup_s": 15.0,
+ "end": "2026-10-21 06:59:02"
+}

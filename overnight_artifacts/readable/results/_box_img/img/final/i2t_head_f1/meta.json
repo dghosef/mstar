@@ -1,0 +1,17 @@
+{
+ "tag": "i2t_head_f1",
+ "tree": "/root/work/img8",
+ "mstar_file": "/root/work/img8/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve bagel --config /workspace/results/img/final/i2t_head_f1/config.yaml --gpus 1 --port 8300",
+ "sets": [],
+ "env": [],
+ "git": "",
+ "start": "09:13:07",
+ "gpu_mem_before": [
+  0
+ ],
+ "startup_s": 65.0069329738617,
+ "gpu_mem_after": [
+  0
+ ]
+}

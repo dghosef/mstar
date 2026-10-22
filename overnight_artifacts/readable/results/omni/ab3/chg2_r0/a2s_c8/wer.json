@@ -1,0 +1,233 @@
+{
+ "n": 32,
+ "corpus_wer": 0.0464,
+ "median_wer": 0.0,
+ "n_wer_gt_0.2": 0,
+ "audio_s": 218.29999999999995,
+ "rows": [
+  {
+   "wav": "req_0.wav",
+   "dur": 5.496875,
+   "wer": 0.0,
+   "ref": "He was in a fevered state of mind, owing to the blight his wife's action threatened to cast upon his entire future.",
+   "hyp": " He was in a fevered state of mind, owing to the blight his wife's action threatened to cast upon his entire future."
+  },
+  {
+   "wav": "req_1.wav",
+   "dur": 5.656875,
+   "wer": 0.038461538461538464,
+   "ref": "He would have to pay her the money which she would now regularly demand, or there would be trouble. It did not matter what he did.",
+   "hyp": " It would have to pay her the money which she would now regularly demand, or there would be trouble. It did not matter what he did."
+  },
+  {
+   "wav": "req_10.wav",
+   "dur": 4.456875,
+   "wer": 0.05263157894736842,
+   "ref": "So little did he consider druah that it never once occurred to him to worry about his finding out.",
+   "hyp": " So little did he consider Zhuo that it never once occurred to him to worry about his finding out."
+  },
+  {
+   "wav": "req_11.wav",
+   "dur": 4.296875,
+   "wer": 0.0,
+   "ref": "He grew restless as he ruminated, and then decided that perhaps it was nothing.",
+   "hyp": " He grew restless as he ruminated and then decided that perhaps it was nothing."
+  },
+  {
+   "wav": "req_12.wav",
+   "dur": 3.096875,
+   "wer": 0.0,
+   "ref": "She had not been able to get away this morning.",
+   "hyp": " She had not been able to get away this morning."
+  },
+  {
+   "wav": "req_13.wav",
+   "dur": 5.576875,
+   "wer": 0.0,
+   "ref": "He would get one today. It would probably be on his desk when he got back. He would look for it at once.",
+   "hyp": " He would get one today. It would probably be on his desk when he got back. He would look for it at once."
+  },
+  {
+   "wav": "req_14.wav",
+   "dur": 4.216875,
+   "wer": 0.0,
+   "ref": "After a time, he gave up waiting and drearily headed for the Madison car.",
+   "hyp": " After a time, he gave up waiting and drearily headed for the Madison car."
+  },
+  {
+   "wav": "req_15.wav",
+   "dur": 4.936875,
+   "wer": 0.0,
+   "ref": "He went in and examined his letters, but there was nothing from Carrie.",
+   "hyp": " He went in and examined his letters, but there was nothing from Carrie."
+  },
+  {
+   "wav": "req_16.wav",
+   "dur": 3.016875,
+   "wer": 0.0,
+   "ref": "Fortunately, there was nothing from his wife either.",
+   "hyp": " Fortunately, there was nothing from his wife either."
+  },
+  {
+   "wav": "req_17.wav",
+   "dur": 5.656875,
+   "wer": 0.05263157894736842,
+   "ref": "At one thirty, he went to Rector's for lunch, and when he returned, a messenger was waiting for him.",
+   "hyp": " At 1.30, he went to Rector's for lunch, and when he returned, a messenger was waiting for him."
+  },
+  {
+   "wav": "req_18.wav",
+   "dur": 4.376875,
+   "wer": 0.0,
+   "ref": "His first impulse was to write, but four words in reply: \"Go to the devil.\"",
+   "hyp": " His first impulse was to write, but four words in reply, go to the devil."
+  },
+  {
+   "wav": "req_19.wav",
+   "dur": 3.416875,
+   "wer": 0.0,
+   "ref": "But he compromised by telling the boy that there would be no reply.",
+   "hyp": " But he compromised by telling the boy that there would be no reply."
+  },
+  {
+   "wav": "req_2.wav",
+   "dur": 4.296875,
+   "wer": 0.08333333333333333,
+   "ref": "Hurstwood walked the floor, mentally arranging the chief points of his situation.",
+   "hyp": " Earthswood walked the floor, mentally arranging the chief points of his situation."
+  },
+  {
+   "wav": "req_20.wav",
+   "dur": 4.376875,
+   "wer": 0.0,
+   "ref": "Then he sat down in his chair and gazed without seeing, contemplating the result of his work.",
+   "hyp": " Then he sat down in his chair and gazed without seeing, contemplating the result of his work."
+  },
+  {
+   "wav": "req_21.wav",
+   "dur": 2.776875,
+   "wer": 0.0,
+   "ref": "What would she do about that, the confounded wretch?",
+   "hyp": " What would she do about that? The confounded wretch."
+  },
+  {
+   "wav": "req_22.wav",
+   "dur": 3.096875,
+   "wer": 0.0,
+   "ref": "Later, however, his old discretion asserted itself.",
+   "hyp": " Later, however, his old discretion asserted itself."
+  },
+  {
+   "wav": "req_23.wav",
+   "dur": 4.296875,
+   "wer": 0.0,
+   "ref": "Something had to be done. A climax was near, and she would not sit idle.",
+   "hyp": " Something had to be done, a climax was near, and she would not sit idle."
+  },
+  {
+   "wav": "req_24.wav",
+   "dur": 5.176875,
+   "wer": 0.0,
+   "ref": "He knew her well enough to know that when she had decided upon a plan, she would follow it up.",
+   "hyp": " He knew her well enough to know that when she had decided upon a plan, she would follow it up."
+  },
+  {
+   "wav": "req_25.wav",
+   "dur": 2.936875,
+   "wer": 0.07692307692307693,
+   "ref": "He arose from his chair and went and looked out into the street.",
+   "hyp": " He rose from his chair and went and looked out into the street."
+  },
+  {
+   "wav": "req_26.wav",
+   "dur": 4.616875,
+   "wer": 0.0,
+   "ref": "The long drizzle had begun. Pedestrians had turned up collars and trousers at the bottom.",
+   "hyp": " The long drizzle had begun. Pedestrians had turned up collars and trousers at the bottom."
+  },
+  {
+   "wav": "req_27.wav",
+   "dur": 5.016875,
+   "wer": 0.0,
+   "ref": "Hurstwood almost exclaimed out loud at the insistency of this thing.",
+   "hyp": " Hurstwood almost exclaimed out loud at the insistency of this thing."
+  },
+  {
+   "wav": "req_28.wav",
+   "dur": 2.376875,
+   "wer": 0.0,
+   "ref": "He put on his hat and looked around for his umbrella.",
+   "hyp": " He put on his hat and looked around for his umbrella."
+  },
+  {
+   "wav": "req_29.wav",
+   "dur": 1.576875,
+   "wer": 0.125,
+   "ref": "He would have some arrangement of this thing.",
+   "hyp": " You would have some arrangement of this thing."
+  },
+  {
+   "wav": "req_3.wav",
+   "dur": 1.816875,
+   "wer": 0.0,
+   "ref": "He also thought of his managerial position.",
+   "hyp": " He also thought of his managerial position."
+  },
+  {
+   "wav": "req_30.wav",
+   "dur": 6.536875,
+   "wer": 0.0,
+   "ref": "He began to wish that he had compromised in some way or other, that he had sent the money. Perhaps he could do it up here.",
+   "hyp": " He began to wish that he had compromised in some way or other, that he had sent the money. Perhaps he could do it up here."
+  },
+  {
+   "wav": "req_31.wav",
+   "dur": 2.936875,
+   "wer": 0.08333333333333333,
+   "ref": "He would go in and see anyhow. He would have no row.",
+   "hyp": " He would go in and see anyhow, he would have no Rao."
+  },
+  {
+   "wav": "req_4.wav",
+   "dur": 84.296875,
+   "wer": 0.14864864864864866,
+   "ref": "The way newspapers would report on an event depends heavily on the nature of the event itself, the political and cultural context, the newspaper's editorial stance, and the target audience. Here are some general ways different types of papers might cover a story:\n\n1. **Mainstream Newspapers (e.g., The New York Times, The Guardian):**\n   - **Objective and Balanced:** They typically aim for factual reporting with multiple perspectives.\n   - **In-Depth Analysis:** May include background information, expert opinions, and historical context.\n   - **Investigative Reporting:** If the story involves wrongdoing, they might publish investigative pieces.\n   - **Editorials and Opinions:** Separate from news reporting, these sections may offer commentary from columnists.\n\n2. **Tabloid Newspapers (e.g., The Sun, Daily Mail):**\n   - **Sensationalism:** Often use dramatic headlines and focus on emotional or controversial aspects.\n   - **Simplified Language:** Aim for quick, easy-to-read content.\n   - **Focus on Human Interest:** May emphasize personal stories or scandals.\n\n3. **Specialized or Niche Publications (e.g., Financial Times, The Economist):**\n   - **Expertise and Depth:** Provide detailed analysis in their specific areas (e.g.,",
+   "hyp": " The way newspapers would report on an event depends heavily on the nature of the event itself, the political and cultural context, the newspaper's editorial stance, and the target audience. Here are some general ways different types of papers might cover a story. 1. Mainstream newspapers, e.g. The New York Times, The Guardian. Objective and balanced. They typically aim for factual reporting with multiple perspectives. In-depth analysis. May include background information, expert opinions, and historical context. Investigative reporting. If the story involves wrongdoing, they might publish investigative pieces. Editorials and opinions. Separ separate from news reporting, these sections may offer commentary from columnists. 2. Tabloid newspapers, e.g., The Sun, Daily Mail. Sensationalism. Often use dramatic headlines and focus on emotional or controversial aspects. Simplified language, aim for quick, easy-to-read content, focus on human interest, may emphasize personal stories or scandals. Specialized or niche publications, e.g., Financial Times, The Economist, Expertise and Depth, provide detailed analysis in their specific areas, e.g.,"
+  },
+  {
+   "wav": "req_5.wav",
+   "dur": 4.696875,
+   "wer": 0.0,
+   "ref": "Many little wrinkles gathered between his eyes as he contemplated this, and his brow moistened.",
+   "hyp": " Many little wrinkles gathered between his eyes as he contemplated this and his brow moistened."
+  },
+  {
+   "wav": "req_6.wav",
+   "dur": 4.616875,
+   "wer": 0.0,
+   "ref": "He could arrange that satisfactorily. For Carrie would be glad to wait if necessary.",
+   "hyp": " He could arrange that satisfactorily, for Carrie would be glad to wait if necessary."
+  },
+  {
+   "wav": "req_7.wav",
+   "dur": 5.656875,
+   "wer": 0.0,
+   "ref": "He would see how things turned out tomorrow, and then he would talk to her. They were going to meet as usual.",
+   "hyp": " He would see how things turned out tomorrow, and then he would talk to her. They were going to meet as usual."
+  },
+  {
+   "wav": "req_8.wav",
+   "dur": 6.936875,
+   "wer": 0.0,
+   "ref": "For some reason, he felt as if something might come that way, and was relieved when all the envelopes had been scanned and nothing suspicious noticed.",
+   "hyp": " For some reason, he felt as if something might come that way and was relieved when all the envelopes had been scanned and nothing suspicious noticed."
+  },
+  {
+   "wav": "req_9.wav",
+   "dur": 6.056875,
+   "wer": 0.0,
+   "ref": "While the danger had not lessened, it had not as yet materialized, and with him, no news was good news.",
+   "hyp": " While the danger had not lessened, it had not as yet materialized, and with him, no news was good news."
+  }
+ ]
+}

@@ -1,0 +1,41 @@
+{
+  "label": "survey_higgs",
+  "tree": "/root/work/mstar",
+  "serve": [
+    "/root/work/mstar/.venv/bin/python",
+    "-m",
+    "mstar.cli.main",
+    "serve",
+    "higgs_audio",
+    "--gpus",
+    "1",
+    "--port",
+    "8200"
+  ],
+  "env": {
+    "TORCH_HOME": "/workspace/.cache/torch",
+    "MSTAR_SHM_ARENA": "1",
+    "TORCHINDUCTOR_CACHE_DIR": "/root/work/inductor_cache",
+    "MSTAR_PHASE_TIMING": "100"
+  },
+  "points": "1:50:_,32:200:_",
+  "started": "2026-10-21 04:11:53",
+  "mstar_file": "/root/work/mstar/mstar/__init__.py",
+  "startup_s": 749.0469312667847,
+  "summaries": [
+    {
+      "point": "c1_50",
+      "wall_s": 80.22550925799987,
+      "wer": 0.01639344262295082,
+      "req_s": 0.6232431612145127,
+      "errors": 0
+    },
+    {
+      "point": "c32_200",
+      "wall_s": 10.448489258000336,
+      "wer": 0.014971378247468076,
+      "req_s": 19.14152324431605,
+      "errors": 0
+    }
+  ]
+}

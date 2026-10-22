@@ -1,0 +1,89 @@
+{
+ "summary": {
+  "n": 12,
+  "errors": 0,
+  "wall_s": 3.8656863379874267,
+  "req_per_s": 3.104235302817533,
+  "ttft_p50": 0.6939778625092003,
+  "ttft_mean": 0.6933086238326117,
+  "e2e_p50": 1.2837811000063084,
+  "ttft_p50_by_kind": {
+   "huge": 0.6939778625092003
+  }
+ },
+ "rows": [
+  {
+   "id": "huge_0",
+   "text": "Based on the visual evidence in the image, the food dish shown is **Beignets**.\n\nHere's a breakdown of why:\n\n*   **Appearance:**",
+   "ttft": 0.31922719202702865,
+   "e2e": 1.2946029499871656
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a classic serving of **beignets**, a popular French-inspired pastry, most famously associated with New Orleans\u2019 Caf\u00e9 du Monde.\n\n### Visual Description",
+   "ttft": 0.8700331189902499,
+   "e2e": 1.35953509202227
+  },
+  {
+   "id": "huge_0",
+   "text": "Based on the visual evidence in the image, the food dish shown is **Beignets**.\n\nHere's a breakdown of why:\n\n*   **Appearance:**",
+   "ttft": 0.6159937080228701,
+   "e2e": 1.2918784319772385
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a classic serving of **beignets**, a popular French-inspired pastry, most famously associated with New Orleans\u2019 Caf\u00e9 du Monde.\n\n### Visual Description",
+   "ttft": 1.1321669149911031,
+   "e2e": 1.3586678550345823
+  },
+  {
+   "id": "huge_0",
+   "text": "Based on the visual evidence in the image, the food dish shown is **Beignets**.\n\nHere's a breakdown of why:\n\n*   **Appearance:**",
+   "ttft": 0.32236057496629655,
+   "e2e": 1.267114871996455
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a classic serving of **beignets**, a popular French-inspired pastry, most famously associated with New Orleans\u2019 Caf\u00e9 du Monde.\n\n### Visual Description",
+   "ttft": 0.5797086899983697,
+   "e2e": 1.3501736560137942
+  },
+  {
+   "id": "huge_0",
+   "text": "Based on the visual evidence in the image, the food dish shown is **Beignets**.\n\nHere's a breakdown of why:\n\n*   **Appearance:**",
+   "ttft": 1.04038387601031,
+   "e2e": 1.2846310349996202
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a classic serving of **beignets**, a popular French-inspired pastry, most famously associated with New Orleans\u2019 Caf\u00e9 du Monde.\n\n### Visual Description",
+   "ttft": 0.7759713130071759,
+   "e2e": 1.2828110450063832
+  },
+  {
+   "id": "huge_0",
+   "text": "Based on the visual evidence in the image, the food dish shown is **Beignets**.\n\nHere's a breakdown of why:\n\n*   **Appearance:**",
+   "ttft": 0.3435903909849003,
+   "e2e": 1.2829311650129966
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a classic serving of **beignets**, a popular French-inspired pastry, most famously associated with New Orleans\u2019 Caf\u00e9 du Monde.\n\n### Visual Description",
+   "ttft": 0.510303771996405,
+   "e2e": 1.2106393100111745
+  },
+  {
+   "id": "huge_0",
+   "text": "Based on the visual evidence in the image, the food dish shown is **Beignets**.\n\nHere's a breakdown of why:\n\n*   **Appearance:**",
+   "ttft": 0.7719620169955306,
+   "e2e": 1.2097879810025916
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a classic serving of **beignets**, a popular French-inspired pastry, most famously associated with New Orleans\u2019 Caf\u00e9 du Monde.\n\n### Visual Description",
+   "ttft": 1.0380019180011004,
+   "e2e": 1.2185809099464677
+  }
+ ],
+ "errors": []
+}

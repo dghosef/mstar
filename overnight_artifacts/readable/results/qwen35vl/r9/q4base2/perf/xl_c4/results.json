@@ -1,0 +1,89 @@
+{
+ "summary": {
+  "n": 12,
+  "errors": 0,
+  "wall_s": 4.3094877260155044,
+  "req_per_s": 2.7845537017215367,
+  "ttft_p50": 0.8409970394859556,
+  "ttft_mean": 0.845980712590972,
+  "e2e_p50": 1.3850378660135902,
+  "ttft_p50_by_kind": {
+   "xl": 0.8409970394859556
+  }
+ },
+ "rows": [
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a cozy caf\u00e9 or diner table set for breakfast or brunch. The scene is warm and inviting, with soft lighting",
+   "ttft": 0.5299997429829091,
+   "e2e": 1.523910411982797
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly low-angle photograph of a dessert platter set on a dark, reflective table \u2014 likely in a restaurant or caf\u00e9. The lighting is",
+   "ttft": 0.8403259220067412,
+   "e2e": 1.6696228029904887
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a cozy caf\u00e9 or diner table set for breakfast or brunch. The scene is warm and inviting, with soft lighting",
+   "ttft": 1.1051999850315042,
+   "e2e": 1.6673929580138065
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly low-angle photograph of a dessert platter served on a long, rectangular white ceramic tray. The setting appears to be in a dim",
+   "ttft": 1.411812013015151,
+   "e2e": 1.6676485880161636
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a cozy caf\u00e9 or diner table set for breakfast or brunch. The scene is warm and inviting, with soft lighting",
+   "ttft": 0.4507673199987039,
+   "e2e": 1.3833580440259539
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly low-angle photograph of a dessert platter set on a dark, reflective table \u2014 likely in a restaurant or caf\u00e9. The lighting is",
+   "ttft": 0.5788817270076834,
+   "e2e": 1.248383775993716
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a cozy caf\u00e9 or diner table set for breakfast or brunch. The scene is warm and inviting, with soft lighting",
+   "ttft": 0.8416681569651701,
+   "e2e": 1.2465045030112378
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly low-angle photograph of a dessert platter served on a long, rectangular white ceramic tray. The setting appears to be in a dim",
+   "ttft": 1.118687913985923,
+   "e2e": 1.3784422560129315
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a cozy caf\u00e9 or diner table set for breakfast or brunch. The scene is warm and inviting, with soft lighting",
+   "ttft": 0.4566249140189029,
+   "e2e": 1.3853461319813505
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly low-angle photograph of a dessert platter set on a dark, reflective table \u2014 likely in a restaurant or caf\u00e9. The lighting is",
+   "ttft": 0.7142547630355693,
+   "e2e": 1.38472960004583
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a cozy caf\u00e9 or diner table set for breakfast or brunch. The scene is warm and inviting, with soft lighting",
+   "ttft": 1.257193166995421,
+   "e2e": 1.3899678309680894
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly low-angle photograph of a dessert platter set on a dark, reflective table \u2014 likely in a restaurant or caf\u00e9. The lighting is",
+   "ttft": 0.8463529260479845,
+   "e2e": 1.2516780869918875
+  }
+ ],
+ "errors": []
+}
