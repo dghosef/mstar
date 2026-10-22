@@ -1,13 +1,14 @@
 """``TopKRouter``'s fused softmax -> top-k -> renormalize (``mstar::moe_softmax_topk``)
-against the op sequence it replaces (GPU only)."""
+against the op sequence it replaces, and where the swept MoE tiles apply."""
 from __future__ import annotations
 
 import pytest
 import torch
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
 
 
+@needs_cuda
 @pytest.mark.parametrize("tokens", [1, 7, 32, 300, 4096])
 @pytest.mark.parametrize("experts,top_k,norm", [(128, 8, True), (128, 6, True), (60, 4, False)])
 def test_softmax_topk_matches_the_torch_router(tokens, experts, top_k, norm):
@@ -35,10 +36,11 @@ def test_softmax_topk_matches_the_torch_router(tokens, experts, top_k, norm):
     assert torch.equal(ids[distinct], ref_ids[distinct])
 
 
+@needs_cuda
 def test_router_compiles_with_the_fused_topk():
     from mstar.model.components.moe import TopKRouter
 
-    router = TopKRouter(64, 128, 8).cuda().to(torch.bfloat16).requires_grad_(False)
+    router = TopKRouter(64, 128, 8, fused_softmax_topk=True).cuda().to(torch.bfloat16).requires_grad_(False)
     torch.nn.init.normal_(router.weight)
     x = torch.randn(4, 64, device="cuda", dtype=torch.bfloat16)
     with torch.inference_mode():
@@ -46,3 +48,41 @@ def test_router_compiles_with_the_fused_topk():
         compiled = torch.compile(router, fullgraph=True)(x)
     assert torch.equal(eager[1], compiled[1])
     torch.testing.assert_close(eager[0], compiled[0], rtol=0, atol=0)
+
+
+@needs_cuda
+def test_router_defaults_to_the_torch_ops():
+    from mstar.model.components.moe import TopKRouter
+
+    torch.manual_seed(2)
+    router = TopKRouter(64, 128, 8).cuda().to(torch.bfloat16).requires_grad_(False)
+    torch.nn.init.normal_(router.weight)
+    x = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16)
+    with torch.inference_mode():
+        w, ids, _ = router(x)
+        probs = torch.softmax(torch.nn.functional.linear(x, router.weight), dim=-1, dtype=torch.float)
+        ref_w, ref_ids = torch.topk(probs, 8, dim=-1)
+    assert torch.equal(ids, ref_ids)
+    torch.testing.assert_close(w, ref_w / ref_w.sum(dim=-1, keepdim=True), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("platform,applies", [
+    ("cuda_h", True), ("cuda_b", False), ("rocm", False),
+])
+def test_tuned_moe_tiles_apply_only_on_hopper(monkeypatch, platform, applies):
+    pytest.importorskip("triton")
+    from mstar import platforms
+    from mstar.platforms.interface import CudaPlatform, RocmPlatform
+    from mstar.utils.fused_moe import kernels
+
+    fake = {
+        "cuda_h": type("H", (CudaPlatform,), {"cuda_capability": lambda self, device=None: (9, 0)})(),
+        "cuda_b": type("B", (CudaPlatform,), {"cuda_capability": lambda self, device=None: (10, 0)})(),
+        "rocm": RocmPlatform(),
+    }[platform]
+    monkeypatch.setattr(platforms, "resolve_platform", lambda: fake)
+    kernels._tuned_tiles_apply.cache_clear()
+    try:
+        assert (kernels.get_tuned_configs(1, 128, 1536, 2048) is not None) is applies
+    finally:
+        kernels._tuned_tiles_apply.cache_clear()

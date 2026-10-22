@@ -98,6 +98,7 @@ class Qwen3OmniTalkerLayer(nn.Module):
                 comm_group=comm_group,
             ),
             comm_group=comm_group,
+            fused_softmax_topk=True,
         )
 
     def forward(

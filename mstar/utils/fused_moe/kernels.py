@@ -25,6 +25,7 @@ Triton-specific boilerplate out of the runner.
 
 from __future__ import annotations
 
+import functools
 from typing import Any, Dict
 
 import torch
@@ -644,10 +645,22 @@ _TUNED: Dict[tuple, tuple] = {
 }
 
 
+@functools.cache
+def _tuned_tiles_apply() -> bool:
+    """Only on the NVIDIA Hopper parts the table was swept on; every other GPU,
+    ROCm included, keeps the generic heuristics."""
+    from mstar.platforms import current_platform
+
+    return current_platform.is_cuda() and current_platform.cuda_capability() == (9, 0)
+
+
 def get_tuned_configs(M: int, E: int, N: int, K: int) -> tuple[Dict[str, int], Dict[str, int]] | None:
     """Swept ``(gate/up, down)`` tiles for a known shape and batch size, else None.
     Both share ``BLOCK_SIZE_M``: the token alignment is computed once for the two."""
-    for max_m, gate_up, down in _TUNED.get((E, N, K), ()):
+    rows = _TUNED.get((E, N, K))
+    if not rows or not _tuned_tiles_apply():
+        return None
+    for max_m, gate_up, down in rows:
         if M <= max_m:
             return dict(gate_up), dict(down)
     return None

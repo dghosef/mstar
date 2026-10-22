@@ -74,7 +74,7 @@ def test_softmax_topk_matches_the_torch_router(tokens, experts, top_k, norm):
 def test_router_compiles_with_the_fused_topk():
     from mstar.model.components.moe import TopKRouter
 
-    router = TopKRouter(64, 128, 8).cuda().to(torch.bfloat16).requires_grad_(False)
+    router = TopKRouter(64, 128, 8, fused_softmax_topk=True).cuda().to(torch.bfloat16).requires_grad_(False)
     torch.nn.init.normal_(router.weight)
     x = torch.randn(4, 64, device="cuda", dtype=torch.bfloat16)
     with torch.inference_mode():
