@@ -695,6 +695,48 @@ def test_node_batches_and_matches_single_requests(tiny_model):
     assert sub.max_batch_size(TRANSCRIBE_WALK) == 4
 
 
+def test_a_step_over_the_audio_budget_is_not_encoded_packed(tiny_model, monkeypatch):
+    """With the packed encoder bound, a step whose frames fit `max_batch_seconds`
+    encodes in one packed call (leased or planned whole); one over it plans and
+    leases nothing and encodes padded per sub-batch."""
+    from mstar.model.omnilingual_asr.config import ENCODER_ATTN
+    from mstar.model.omnilingual_asr.submodules import ENCODER_LOOP, OmniASRCTCSubmodule
+
+    sub = tiny_model.get_submodule(ENCODER_NODE, "cpu")
+    small = OmniASRCTCSubmodule(sub.model, max_batch_size=4, max_batch_seconds=0.5)  # 8000 samples
+    small.node_resources = {ENCODER_ATTN: object()}
+    packed_calls = []
+    monkeypatch.setattr(small, "_transcribe_packed", lambda waves, attn, ei: packed_calls.append(len(waves)) or [
+        torch.zeros(n, dtype=torch.long) for n in small.model.frame_lengths([w.shape[0] for w in waves])
+    ])
+    torch.manual_seed(6)
+    lease = small.get_piecewise_accelerator_graph_configs(torch.device("cpu"), torch.float32)[ENCODER_LOOP].can_lease
+
+    def step(lengths):
+        waves = [audio.preprocess(torch.randn(n)) for n in lengths]
+        rids = [f"r{i}" for i in range(len(waves))]
+        inputs = [
+            small.prepare_inputs(TRANSCRIBE_WALK, types.SimpleNamespace(request_id=r), {WAVEFORM: [w]})
+            for r, w in zip(rids, waves, strict=True)
+        ]
+        declared = small.declare_step(TRANSCRIBE_WALK, rids, inputs)
+        engine_inputs = types.SimpleNamespace(request_ids=rids, resources={ENCODER_ATTN: object()})
+        pre = small.preprocess(TRANSCRIBE_WALK, engine_inputs, inputs)
+        with torch.no_grad():
+            out = small.forward_batched(TRANSCRIBE_WALK, engine_inputs, **pre)
+        return waves, inputs, declared, out
+
+    _, inputs, declared, _ = step((1000, 2000, 3000))
+    assert lease(inputs) and declared is not None and len(declared.segments) == 3
+    assert packed_calls == [3]
+
+    waves, inputs, declared, out = step((6000, 1000, 5000, 2000))
+    assert not lease(inputs) and declared is None
+    assert packed_calls == [3]
+    for i, w in enumerate(waves):
+        assert torch.equal(out[f"r{i}"][TOKEN_IDS][0], _run_node(sub, [w])["r0"])
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 def test_node_step_never_waits_on_the_gpu(tiny_model):
     """A padded step cut into sub-batches launches without a host sync."""

@@ -84,6 +84,7 @@ class OmniASRCTCSubmodule(NodeSubmodule):
         self.dtype = next(model.parameters()).dtype
         self._max_batch_size = max_batch_size
         self._max_batch_samples = int(max_batch_seconds * SAMPLE_RATE)
+        self._max_batch_frames = model.frame_lengths([self._max_batch_samples])[0]
         # Eager, each conv layer's channel LayerNorm (in fp32, over a transposed
         # copy) costs more than the conv: about half the GPU time of a batched
         # step. Inductor fuses the transposes, the norm and the GELU, under the
@@ -126,7 +127,11 @@ class OmniASRCTCSubmodule(NodeSubmodule):
         """One attention segment per request, its valid frames, when the
         encoder attends packed (see `get_node_resources`). Leased, the captured
         encoder plans its own."""
-        if ENCODER_ATTN not in self.node_resources or (piecewise_leases or {}).get(ENCODER_LOOP):
+        if (
+            ENCODER_ATTN not in self.node_resources
+            or (piecewise_leases or {}).get(ENCODER_LOOP)
+            or not self._packs([inp.input_seq_len for inp in inputs])
+        ):
             return None
         return SubmoduleStep(
             segments=[
@@ -162,6 +167,7 @@ class OmniASRCTCSubmodule(NodeSubmodule):
                 make_static_inputs=make_static_inputs,
                 declare_step=declare_step,
                 lease_before_step=True,
+                can_lease=lambda inputs: self._packs([inp.input_seq_len for inp in inputs]),
                 one_row_per_step=True,
                 total_tokens=self.ENCODER_FRAME_BUCKETS,
                 capture_batch_sizes=[1],
@@ -211,6 +217,13 @@ class OmniASRCTCSubmodule(NodeSubmodule):
                 groups.append([row])
         return groups
 
+    def _packs(self, frames: list[int]) -> bool:
+        """Whether a step's rows encode packed, in one call: their frames fit
+        the audio budget. A step over it encodes padded per sub-batch instead,
+        as the fp32 path does; packing each sub-batch would need an attention
+        plan per call."""
+        return sum(frames) <= self._max_batch_frames
+
     def _features_fn(self, batch: torch.Tensor):
         # CPU (tests) stays eager
         return self._compiled_features if batch.device.type != "cpu" else None
@@ -256,9 +269,9 @@ class OmniASRCTCSubmodule(NodeSubmodule):
     ) -> list[torch.Tensor]:
         """Argmax ids per row, over the row's valid frames."""
         attn = getattr(engine_inputs, "resources", {}).get(ENCODER_ATTN)
-        if attn is not None:
-            return self._transcribe_packed(waveforms, attn, engine_inputs)
         lengths = [w.shape[0] for w in waveforms]
+        if attn is not None and self._packs(self.model.frame_lengths(lengths)):
+            return self._transcribe_packed(waveforms, attn, engine_inputs)
         out: list[torch.Tensor | None] = [None] * len(waveforms)
         for group in self.sub_batches(lengths):
             group_lens = [lengths[row] for row in group]

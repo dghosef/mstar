@@ -234,7 +234,10 @@ Omnilingual ASR notes
 - ``dtype`` defaults to ``bfloat16``, the reference's inference dtype; ``float32`` also
   turns off TF32 for the node's matmuls. ``max_batch_size`` (16) caps the requests in one
   step; the step sorts them by length and splits them so that each forward's padded audio
-  (rows times the longest clip) stays within ``max_batch_seconds`` (320). In bf16 a
+  (rows times the longest clip) stays within ``max_batch_seconds`` (320). In bf16 the
+  encoder packs a step's clips into one unpadded forward (a captured graph up to 16384
+  frames) when their total audio fits ``max_batch_seconds``; a step over it encodes padded,
+  per split. In bf16 a
   request batched with others can differ from the same request run alone where two
   characters nearly tie, as the reference's own batched ``transcribe`` does;
   ``max_batch_size: 1`` or ``dtype: float32`` give batch-invariant transcripts.
