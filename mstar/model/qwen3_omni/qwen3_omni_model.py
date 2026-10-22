@@ -1004,7 +1004,7 @@ class Qwen3OmniModel(Model):
         metadata.graph_walk = "code2wav_chunk"
         step_metadata = {"consumed_tokens": chunk_size}
 
-        # Don't predict the last chunk from token counts: LeftContextChunkPolicy
+        # Don't predict the last chunk from token counts: the left-context policy
         # emits an extra flush pass for the retained overlap, so a count-based
         # guess completes the request before that final chunk is emitted. The
         # `available <= 0` check above fires once consumption actually catches up.

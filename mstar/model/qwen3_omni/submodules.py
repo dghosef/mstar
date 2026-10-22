@@ -1965,12 +1965,11 @@ class Code2WavSubmodule(NodeSubmodule):
     ) -> dict[str, NameToTensorList]:
         """Decode a batch of padded windows to untrimmed int16 PCM.
 
-        The Talker→Code2Wav StreamBuffer uses ``LeftContextChunkPolicy``:
-        the first popped chunk for a request contains ``codec_chunk_frames``
-        fresh frames with no overlap; every subsequent chunk contains
-        ``codec_chunk_frames + codec_left_context_frames`` frames where the
-        leading ``codec_left_context_frames`` are overlap from the previous
-        chunk's tail. The overlap lets the vocoder warm up at chunk
+        The Talker→Code2Wav StreamBuffer uses ``ScheduledLeftContextChunkPolicy``:
+        the first popped chunk for a request contains ``codec_chunk_schedule[0]``
+        fresh frames with no overlap; every later chunk carries its new frames
+        behind up to ``codec_left_context_frames`` frames of overlap from the
+        frames already delivered. The overlap lets the vocoder warm up at chunk
         boundaries; ``postprocess`` cuts each request's new audio out of the
         window.
 

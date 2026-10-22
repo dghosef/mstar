@@ -298,8 +298,8 @@ class Code2WavConfig:
     # Streaming chunk size (in codec frames) for the Talker→Code2Wav edge.
     # 25 frames keeps TTFT low (~1s). ``codec_left_context_frames`` is the
     # number of overlap frames prepended to non-first chunks by
-    # ``LeftContextChunkPolicy`` (warms up the causal ConvNet vocoder) and
-    # trimmed from the emitted waveform in ``Code2WavSubmodule``.
+    # ``ScheduledLeftContextChunkPolicy`` (warms up the vocoder) and trimmed
+    # from the emitted waveform in ``Code2WavSubmodule``.
     #
     # Named with a ``codec_`` prefix to avoid collision with HF's
     # ``Qwen3OmniMoeCode2WavConfig`` (which has no such field today but could
@@ -309,9 +309,11 @@ class Code2WavConfig:
     codec_left_context_frames: int = 25
     # New frames in the first chunks, before ``codec_chunk_frames`` takes
     # over: a small first chunk is the first audio after that many Talker
-    # steps instead of 25. The vocoder is causal (the one-frame lookahead is
-    # trimmed and re-emitted by the next window), so this moves only
-    # time-to-first-audio, not the waveform.
+    # steps instead of 25 (half the time to first audio). The vocoder's
+    # 72-frame attention window outreaches the 25-frame context, so the
+    # stream is not the full decode, and moving the window boundaries changes
+    # the waveform; boundaries stay as close to the full decode as with 25
+    # (test_qwen3_omni_code2wav_real_weights.py). ``()`` restores 25.
     codec_chunk_schedule: Tuple[int, ...] = (8,)
     attention_bias: bool = False
     attention_dropout: float = 0.0
