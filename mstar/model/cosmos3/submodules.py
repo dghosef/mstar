@@ -2703,16 +2703,19 @@ class Cosmos3VAEDecoderSubmodule(NodeSubmodule):
         self._decode = vae.decode if vae is not None else None
         self._decode_compiled = False
         self._warmed_decode_shapes: set[tuple[int, ...]] = set()
+        fast = vae is not None and self._whole_clip_fast and config.vae_decode_fast
         if vae is not None and os.environ.get("COSMOS3_COMPILE_VAE", "1").lower() not in (
             "0", "false", "no", "off",
         ):
-            self._decode = _wan_vae().compile_decode(vae.decode)
             self._decode_compiled = True
+            # The fast path compiles its own DecoderStep; the stock decode is unused there.
+            if not fast:
+                self._decode = _wan_vae().compile_decode(vae.decode)
             logger.info("Cosmos3 VAE decode torch.compile enabled")
         # Resolve + log the decode dtype now (a cheap cuDNN-version read) so the
         # choice is fixed at startup, not on the first request.
         self._decode_dtype()
-        if vae is not None and self._whole_clip_fast and config.vae_decode_fast:
+        if fast:
             # Cast before the layout switch and the compile trace, so both see the
             # weights the decode runs with (this instance is the node's own).
             self.vae = vae = vae.to(self._decode_dtype())
