@@ -74,17 +74,19 @@ class LingBotWorldConfig:
     # The reference decodes in fp32. bf16 is faster on cuDNN >= 9.16 but is not
     # the reference's numerics.
     vae_decode_fp32: bool = True
-    # Channels-last, cuDNN-autotuned, compiled fp32 decode (Inductor's
-    # deterministic mode, so every process decodes the same frames): 547 ->
-    # 230 ms per 16-frame chunk at 480x832 on an H200, frames within 73 dB of
-    # the contiguous eager decode (accumulation order only).
+    # Channels-last, compiled fp32 decode in Inductor's deterministic mode:
+    # 547 -> 347 ms per 16-frame chunk at 480x832 on an H200, frames within
+    # 73 dB of the contiguous eager decode (accumulation order only), the same
+    # in every process. cuDNN autotuning takes it to 230 ms but picks conv
+    # algorithms per process, so the model turns it on only with
+    # reference_numerics False.
     vae_decode_channels_last: bool = True
-    vae_decode_cudnn_benchmark: bool = True
+    vae_decode_cudnn_benchmark: bool = False
     vae_decode_compile: bool = True
 
     # False trades bit-parity with the reference for speed: flash-attn-4
     # attention (needs flash-attn-4, see docs/installation.rst), compiled block
-    # pointwise ops, a cuDNN-autotuned condition encoder and a bf16 decode:
+    # pointwise ops, and a cuDNN-autotuned condition encoder and bf16 decode:
     # 12.6 -> 18.6 fps at 480x832 on an H200. A free-running rollout then drifts
     # from the reference's about as far as it does under any other attention
     # kernel (24.6 dB over 93 frames; FA4 instead of FA2 alone gives 26.5 dB).

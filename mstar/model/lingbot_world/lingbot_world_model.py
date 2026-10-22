@@ -70,6 +70,7 @@ class LingBotWorldModel(Model):
         self.config.reference_numerics = bool(reference_numerics)
         if not reference_numerics:
             self.config.vae_decode_fp32 = False
+            self.config.vae_decode_cudnn_benchmark = True
         self.model_path_hf = model_path_hf or LINGBOT_HF_REPOS[variant]
         self.cache_dir = cache_dir
         self.skip_weight_loading = skip_weight_loading
