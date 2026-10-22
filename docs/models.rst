@@ -242,6 +242,36 @@ Omnilingual ASR notes
   (``record_oracle.py`` runs the reference in its own venv, as it pins torch 2.8 and
   fairseq2).
 
+BAGEL notes
+~~~~~~~~~~~
+
+- Text-to-image runs only the CFG branches a denoising step reads
+  (``cfg_prune``, on by default): two with image guidance off, and the main
+  branch alone outside ``cfg_interval``, about -37% latency at 1024² on an
+  H200. Outside the interval the step now returns the main branch's velocity
+  where it used to recombine all three and renormalize, which is equal only up
+  to rounding, so images move slightly (median 41 dB PSNR against the previous
+  output). ``model_kwargs: {cfg_prune: false}`` in the serving config restores
+  the always-three-branch math.
+
+Qwen3-Omni notes
+~~~~~~~~~~~~~~~~
+
+- The Talker -> Code2Wav edge sends a first chunk of 8 codec frames, then 25
+  (``codec_chunk_schedule``), which halves time to first audio. The vocoder's
+  attention window is longer than the 25-frame left context, so streamed audio
+  was never the whole-utterance decode, and moving the chunk boundaries changes
+  the waveform (served WER measured unchanged). An empty
+  ``Code2WavConfig.codec_chunk_schedule`` restores fixed 25-frame chunks.
+- Numerics: the code predictor's residual adds fold into the next RMSNorm
+  (FlashInfer's fused add + norm) and its attention is a Triton kernel
+  (``cp_attention``), neither bit-exact with the unfused ops. Its 15 depth
+  steps feed each sampled code into the next, so small differences can change
+  later codes at near-ties.
+- The MoE layers route through the fused softmax-top-k kernel
+  (``TopKRouter(fused_softmax_topk=True)``), which gives equal probabilities to
+  the lower expert id where ``torch.topk`` may pick another.
+
 Qwen3.5 / Qwen3.8 (``qwen3_5_*``, ``qwen3_8_27b``)
 --------------------------------------------------
 
