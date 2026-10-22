@@ -40,6 +40,7 @@ from mstar.engine.resources.step import Segment, SlotLease, SubmoduleStep
 from mstar.model.omnilingual_asr.components.wav2vec2 import Wav2Vec2CTC
 from mstar.model.omnilingual_asr.config import ENCODER_ATTN, SAMPLE_RATE, TOKEN_IDS, WAVEFORM
 from mstar.model.submodule_base import ModelInputsFromEngine, NodeInputs, NodeSubmodule
+from mstar.platforms.compile import with_inductor_overrides
 
 
 @contextmanager
@@ -85,8 +86,11 @@ class OmniASRCTCSubmodule(NodeSubmodule):
         self._max_batch_samples = int(max_batch_seconds * SAMPLE_RATE)
         # Eager, each conv layer's channel LayerNorm (in fp32, over a transposed
         # copy) costs more than the conv: about half the GPU time of a batched
-        # step. Inductor fuses the transposes, the norm and the GELU.
-        self._compiled_features = torch.compile(model.encoder_frontend.feature_extractor, dynamic=True)
+        # step. Inductor fuses the transposes, the norm and the GELU, under the
+        # platform's inductor settings as the engine's compiles are.
+        self._compiled_features = with_inductor_overrides(
+            torch.compile(model.encoder_frontend.feature_extractor, dynamic=True)
+        )
         self._attn_fns: dict[int, RaggedAttentionCallable] = {}
 
     def warm_compile(self, device: str) -> None:

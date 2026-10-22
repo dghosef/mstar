@@ -75,6 +75,7 @@ from mstar.model.submodule_base import (
     NodeSubmodule,
     device_loopback_enabled,
 )
+from mstar.platforms.compile import with_inductor_overrides
 from mstar.utils.device import DeviceCapability
 from mstar.utils.profiler import PHASE_PERIOD, phase_record
 
@@ -1017,9 +1018,10 @@ class VisionEncoderSubmodule(NodeSubmodule):
         # One call for every image; the ragged kernel's per-frame segments
         # keep them apart.
         if self._compiled is None:
+            # under the platform's inductor settings, as the engine's compiles are
             self._compiled = (
-                torch.compile(self.model.embed, dynamic=True),
-                torch.compile(self.model.merger, dynamic=True),
+                with_inductor_overrides(torch.compile(self.model.embed, dynamic=True)),
+                with_inductor_overrides(torch.compile(self.model.merger, dynamic=True)),
             )
         embed, merger = self._compiled
         hidden, cos, sin = embed(pixel_values, indices, weights, position_ids)
