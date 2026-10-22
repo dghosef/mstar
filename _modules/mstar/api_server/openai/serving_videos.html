@@ -410,7 +410,7 @@ window.runMermaid = runMermaid;</script>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
   <meta name="docsearch:version" content="0.2.1" />
-    <meta name="docbuild:last-update" content="Oct 21, 2026"/>
+    <meta name="docbuild:last-update" content="Oct 22, 2026"/>
   
     
     <script src="../../../../_static/searchtools.js"></script>
@@ -700,6 +700,7 @@ window.runMermaid = runMermaid;</script>
 <li class="toctree-l3 has-children"><a class="reference internal" href="../../../../_autosummary/mstar.model.qwen3_5.html">mstar.model.qwen3_5</a><details><summary><span class="toctree-toggle" role="presentation"><i class="fa-solid fa-chevron-down"></i></span></summary><ul>
 <li class="toctree-l4"><a class="reference internal" href="../../../../_autosummary/mstar.model.qwen3_5.components.html">mstar.model.qwen3_5.components</a></li>
 <li class="toctree-l4"><a class="reference internal" href="../../../../_autosummary/mstar.model.qwen3_5.config.html">mstar.model.qwen3_5.config</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../../../_autosummary/mstar.model.qwen3_5.video.html">mstar.model.qwen3_5.video</a></li>
 </ul>
 </details></li>
 <li class="toctree-l3"><a class="reference internal" href="../../../../_autosummary/mstar.model.submodule_base.html">mstar.model.submodule_base</a></li>
@@ -950,20 +951,22 @@ window.runMermaid = runMermaid;</script>
     <span class="n">request_id</span> <span class="o">=</span> <span class="n">rid</span><span class="p">(</span><span class="s2">"vid"</span><span class="p">)</span>
 
     <span class="n">stream</span> <span class="o">=</span> <span class="nb">bool</span><span class="p">(</span><span class="n">args</span><span class="o">.</span><span class="n">model_kwargs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"stream_video"</span><span class="p">))</span>
-    <span class="n">api</span><span class="o">.</span><span class="n">submit_request</span><span class="p">(</span>
-        <span class="n">text</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">text</span><span class="p">,</span>
-        <span class="n">file_paths</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">file_paths</span><span class="p">,</span>
-        <span class="n">input_modalities</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">input_modalities</span><span class="p">,</span>
-        <span class="c1"># the adapter decides: video alone, or video with its generated audio</span>
-        <span class="n">output_modalities</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">output_modalities</span><span class="p">,</span>
-        <span class="n">model_kwargs</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">model_kwargs</span><span class="p">,</span>
-        <span class="n">streaming</span><span class="o">=</span><span class="n">stream</span><span class="p">,</span>
-        <span class="n">request_id</span><span class="o">=</span><span class="n">request_id</span><span class="p">,</span>
-    <span class="p">)</span>
-    <span class="k">if</span> <span class="n">stream</span><span class="p">:</span>
-        <span class="k">return</span> <span class="n">_stream_ndjson</span><span class="p">(</span><span class="n">api</span><span class="p">,</span> <span class="n">request_id</span><span class="p">)</span>
-
-    <span class="n">chunks</span> <span class="o">=</span> <span class="k">await</span> <span class="n">api</span><span class="o">.</span><span class="n">collect_results</span><span class="p">(</span><span class="n">request_id</span><span class="p">,</span> <span class="n">raw_request</span><span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">api</span><span class="o">.</span><span class="n">submit_request</span><span class="p">(</span>
+            <span class="n">text</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">text</span><span class="p">,</span>
+            <span class="n">file_paths</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">file_paths</span><span class="p">,</span>
+            <span class="n">input_modalities</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">input_modalities</span><span class="p">,</span>
+            <span class="c1"># the adapter decides: video alone, or video with its generated audio</span>
+            <span class="n">output_modalities</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">output_modalities</span><span class="p">,</span>
+            <span class="n">model_kwargs</span><span class="o">=</span><span class="n">args</span><span class="o">.</span><span class="n">model_kwargs</span><span class="p">,</span>
+            <span class="n">streaming</span><span class="o">=</span><span class="n">stream</span><span class="p">,</span>
+            <span class="n">request_id</span><span class="o">=</span><span class="n">request_id</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="k">if</span> <span class="n">stream</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">_stream_ndjson</span><span class="p">(</span><span class="n">api</span><span class="p">,</span> <span class="n">request_id</span><span class="p">)</span>
+        <span class="n">chunks</span> <span class="o">=</span> <span class="k">await</span> <span class="n">api</span><span class="o">.</span><span class="n">collect_results</span><span class="p">(</span><span class="n">request_id</span><span class="p">,</span> <span class="n">raw_request</span><span class="p">)</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="n">media_io</span><span class="o">.</span><span class="n">schedule_upload_cleanup</span><span class="p">(</span><span class="n">args</span><span class="o">.</span><span class="n">file_paths</span><span class="p">,</span> <span class="n">api</span><span class="o">.</span><span class="n">upload_dir</span><span class="p">)</span>
     <span class="c1"># Each video chunk is an mp4 (H.264); return it base64-encoded, mirroring the</span>
     <span class="c1"># image endpoint's b64_json shape. A sound request additionally emits a raw</span>
     <span class="c1"># 16-bit PCM audio chunk, which is muxed into the mp4 as an AAC track (one</span>
@@ -1073,7 +1076,7 @@ By M* Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Oct 21, 2026.
+  Last updated on Oct 22, 2026.
   <br/>
 </p>
   </div>
