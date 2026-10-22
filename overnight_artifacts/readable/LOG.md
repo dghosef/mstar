@@ -1,0 +1,50 @@
+Times are PDT, when the coordinator recorded the entry (an earlier version copied some agents' skewed clocks).
+
+- **21:00**: kickoff. 9 agents on 19 Eras H200s; base `main` 55b0215a3.
+- **21:50**: BAGEL CFG pruning −37% latency. Higgs encoder recompile fix +61% at c=32. OmniVoice CUDA graphs: c=1 TTFA 452→180 ms.
+- **22:40**: Qwen3-TTS decode cap + codec buckets, TTFA −30%. FLUX.2-klein text-encoder capture +6%.
+- **22:51**: Qwen3.5-0.8B in-graph RoPE +13% at c=32.
+- **23:12**: Qwen3-Omni TTFA halved; MoE router +7%; code predictor +14%.
+- **23:54 – 00:05**: first shared merges: Omni router, Qwen3.5 vision batching (+24% image→text), Wan2.2 opaque FA3 op (−6%), multi-threaded video decode.
+- **00:15**: Wan2.2 CFG split across 2 GPUs: c=1 −42%.
+- **00:22**: combined shared-branch regression: no regression on Qwen3.5 / Qwen3-TTS / Z-Image (Kokoro being re-checked).
+- **00:25**: Fish S2-Pro c=32 +90%; LingBot-World +31%; Qwen3.5 API-server switch interval +8% at c=64 (proposed).
+- **00:36**: Qwen3.5-0.8B: the existing `--rust-frontend` gives +32% at c=64, so the Python API server is the cap for small text models. Kokoro regression check clean (+5% after the shared merges).
+- **00:48**: LingBot-World opt-in fast config: +25% more fps (12.5→15.7) at relaxed numerics; default path stays exact.
+- **01:01**: shared merge: least-loaded DP replica choice in the conductor (Wan2.2 DP2 c=4 +45%, Qwen3.5 DP2 c=32 +22%). Omnilingual ASR packed encoder: c=1 +37%. LingBot opt-in fast path +48%. Bug found in the merged opaque ragged op under compile+capture. Chatterbox and Waypoint at plateau; agents rotating to pool items (Qwen3-TTS voice-clone, Omni audio-in, Cosmos3 DROID, BAGEL understanding).
+- **01:10**: fixed the opaque-ragged-op IndexError (lazy registration traced under torch.compile), with a regression test.
+- **01:11**: Kokoro +16% at c=64 (fused BiLSTM + scoped cudnn.benchmark); Qwen3-TTS batched check_stop +3-4%; BAGEL c=4 +60% img/s.
+- **01:22**: shared merges: the ragged-op fix and DiT scaffold no-sync schedule staging. The integrator rejected the API switch interval as a global default (Kokoro −3.7%), so it becomes a per-config opt-in. V-JEPA2-AC +145% at c=4; found a pre-existing batch-dependence bug in V-JEPA2-AC rollouts (main). Qwen3.5 big-image TTFT −50%.
+- **01:33**: Fish S2-Pro now ~2× at c=32, c=64 TTFA p95 2.0→0.36 s. Wan2.2 response mux −40%. Cosmos3 VAE decode −18%, DP2 config. Found a second pre-existing bug in main: Cosmos3 sp2 output diverges from 1-GPU. OmniVoice and Higgs at plateau (OmniVoice now GPU-bound: c=32 139→189, c=1 31→75 audio-s/s vs base).
+- **01:44**: V-JEPA2-AC batch drift root-caused to a worker bug in main: accumulated loop outputs were sent from reused pinned host buffers, so a rollout returned one iteration H times. Fix and test proposed; the integrator is reviewing it (async-worker, Rust parity, CPU overhead). Z-Image and FLUX.2-klein at plateau (GPU-bound).
+- **01:55**: shared merge: API switch interval as a Qwen3.5-only config opt-in (+10.9% at c=64). Qwen3.5-9B image→text +25% at c=32, TTFT −36%.
+- **02:06**: Qwen3-TTS voice clone +23% at c=32, TTFA c=1 49→29 ms. Omni one-kernel sampler and Omnilingual ASR shape padding were both measured and dropped (no served gain).
+- **02:09**: Cosmos3 sp2 divergence checked: not an SP bug. It matches a 1-GPU attention-kernel swap, amplified by guidance 6 over 35 steps.
+- **02:16**: BAGEL on 2 GPUs: 1024² 16.3 s (1-GPU base) → 6.4 s, c=4 2×. Omnilingual ASR 1B +89% at c=64. V-JEPA2-AC c=4 now 6.5→18.4 req/s (2.8×).
+- **02:27**: Higgs short clips captured: c=32 → ~80 req/s (2.5× main). Omnilingual ASR 3B/7B +76%/+84% at c=64. Fish S2-Pro c=64 2.4×. Cosmos3 edge 2-GPU sp2 −30% e2e, bit-identical. Kokoro bf16 preset +26% over fp32 head. OmniVoice `.item()` stall removed (+2.5–5%).
+- **02:38**: Qwen3.5-9B TP2: enabling TP async scheduling gives +38–55% (greedy identical); lockstep stress test (aborts, EOS, long prompts) running before it's kept. Omnilingual: opaque ragged op now works after the fix, but no gain there (dropped).
+- **02:48**: shared merge: the worker held-output fix (V-JEPA2 rollouts correct), after async-order, Rust-path and overhead checks. Qwen3.5-0.8B text and Omnilingual ASR at plateau (both API-server-bound at high concurrency); the remaining lever is making the Rust frontend the default (+45% at c=64).
+- **02:59**: img final A/B vs shared base: Z-Image c=4 +12%, klein +2–3%, BAGEL image understanding +20% at c=16. Qwen3-TTS fused code-predictor kernel: −23 to −32% in a microbench but slower in the server, dropped.
+- **03:09**: Qwen3-TTS VoiceDesign +23% at c=64, TTFA −33%. V-JEPA2-AC c=8 2.9×. Wan2.2 at plateau on 1 GPU (−9%, GPU 99% busy), 2.03× with the 2-GPU CFG split. Qwen3.5 image path at plateau (now GPU-bound).
+- **03:20**: shared merge: DP warmup hits every replica (first request on a cold replica was 10.5 s vs 6.3 s). Qwen3-Omni colocated 1-GPU config +26–33%, TTFA 0.33→0.11 s. Higgs final sweep 1.9× at c=32. Several leads measured and dropped (Higgs mixed walk, V-JEPA2-AC mixed-iteration batches, Cosmos3-Super async TP).
+- **11:11**: all agents stopped at ~03:35 when the org hit its monthly API spend limit; the GPUs sat idle until 11:00. Per-change table now lists what each optimization is and how regressions were prevented.
+- **11:29**: extended run, batch 1 (qwen35, omni, world, each also using idle boxes). Cosmos3 DROID batched actions +44–50%. Omni audio-in encoder batched, +8% audio→text.
+- **11:40**: Qwen3.5-2B/4B: shared wins carry over (2B c=64 +5%, 4B +2%; 4B is GPU-bound); removed a sync H2D in Qwen3.5 decode preprocess. Cosmos3 warmup per batch size: the first 8-in-flight session on a fresh server goes 3.1→5.3 chunks/s (proposal). Cosmos3 Edge DROID and LingBot strict mode at plateau.
+- **11:51**: released ovn-tts and ovn-img (back to 3 agents). World final A/Bs vs shared head: Cosmos3 edge DROID 8 in flight +53%, nano DROID +30–35%, LingBot strict +30%. Summary table gained an H200-ceiling column.
+- **11:55**: world finished (SUMMARY saved): LingBot +30% exact, V-JEPA2-AC c=4 3–6× on fixed trees, Cosmos3 DROID batched +42–53%, cold-start warmup proposal. qwen35vl resumed in its slot on ovn-world + ovn-video (Omnilingual 7B conv-kernel lead).
+- **12:15**: qwen35 finished: TP async scheduling validated on Qwen3.5-9B TP2 (stress + mass cancels, no hang, greedy identical) and gives +22–35% on 27B TP4 too. Biggest leads it left: make the Rust frontend the default (+31–45% for small text models), and try tp_async_sched on other TP/SP configs.
+- **12:17**: omni finished: final A/B vs main +23–26% speech out, TTFA −57%, audio-in→text 2.2–7.6× (main recompiled the audio encoder per clip length). Released ovn-regress (4 GPUs). Integrator resumed in omni's slot for the pending proposals and the final combined A/B.
+- **12:29**: Omnilingual ASR: the slow cuDNN grouped conv replaced by per-group unfold+bmm (bitwise same): c=1 2.2–2.6× on 1B/3B/7B, c=16 +36–40%, 7B c=64 −6% (being tuned). Open risk logged: the Omni thinker-TP2 layout hung at startup on the omni branch (main not checked).
+- **12:37**: qwen35vl finished: Qwen3.5 image→text +25–40% at c=32 across 0.8B–9B (text unchanged, greedy identical); Omnilingual ASR 1B–7B now 1.7–2.9× main at every concurrency, WER unchanged.
+- **13:08**: video finished: TP async scheduling is safe on the diffusion lockstep configs (bit-identical frames, stress with cancels passed) but gains nothing there (steps are 0.12–1.3 s of GPU work, so the serial protocol is <1%); not enabled. Cosmos3-Super TP2 at plateau.
+- **13:25**: integrator finished: 13 proposals merged; final combined A/B vs main: Qwen3.5-0.8B +12–16% at c=1/32/64 (greedy identical), Z-Image and Qwen3-TTS unchanged. **Kokoro −5.5% at c=32**, bisected to the worker held-output fix; world agent resumed to fix it without losing the correctness fix.
+- **13:28**: artts finished: final Fish S2-Pro vs shared head c=64 30.6→72.7 audio-s/s (2.4×), TTFA c=1 −48%; Qwen3-TTS 1.7B clone/VoiceDesign +20–25%. Next Fish lead found (an Inductor norm kernel autotuned to one block: ~12% of a decode step); its patch is untested.
+- **13:50**: Qwen3.5 video→text on new main: +66% at c=8, +36% at c=32, TTFT −20 to −35% (branch perf/ovn-qwen35vl-video, kept out of this PR because it's on a newer main). Correction: the vision batching's greedy output is not byte-identical (bf16 reordering); a task-accuracy check is owed.
+- **13:55**: Kokoro −5.5% follow-up: not reproduced (revert vs head +1.9%, 4 rounds ABBA), and the suspected D2H mechanism was ruled out by instrumentation (0 device fallbacks). Verdict: unresolved, likely noise; the worker correctness fix stays.
+- **13:56**: Omni thinker-TP2 hang root-caused: pre-existing on main with a cold Inductor cache. Rank 1 compiles the Talker for 10–15 min before its first TP barrier, past the 600 s timeout (invariant 11 'when'). Not caused by this branch.
+- **14:25**: Higgs reopened by tts: its decode loop now uses Qwen3.5's device loopback, row outputs and batched stop check, +12% at c=32 (c=1 transcripts identical). Chatterbox T3 batched embedding: within noise, dropped (S3Gen is the bound).
+- **14:51**: img finished: FLUX.2-klein-9B (newly unblocked) +1.5–2.3%, GPU-bound at 91%; BAGEL's per-request CPU gap was PIL's default PNG encoder, so the shared parallel writer gives −3% latency (pixels identical). BAGEL image-gen capture measured as ≤1% headroom, skipped. Status 14/18 done.
+- **14:56**: artts finished Orpheus (newly unblocked): audio-vocabulary-only LM head (tokens unchanged over 4,800 greedy steps) + batched stop check: c=64 +10–20%, c=1 RTF −6%, WER same. Status 15/18 done.
+- **15:23**: tts finished: Chatterbox Turbo/Multilingual +45/+54% at c=32 (split configs), OmniVoice layer loop +5–8%, Higgs ~2.1× main at c=32, Kokoro +12–20%. **All 18 in-scope models done.** All agents stopped; GPUs idle.
+- **15:51**: all boxes terminated (results copied off first). The 9 persistent volumes are kept, holding raw media and traces.
+- **15:52**: all 9 volumes deleted; nothing from this run is billing on Eras any more.

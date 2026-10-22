@@ -1,0 +1,11 @@
+# Model claims (append-only): - [agent HH:MM] model/config
+- [artts 01:00] Qwen3-TTS base (voice-clone, configs/qwen3tts_base.yaml) + voicedesign — same Talker/codec code as my qwen3_tts work
+- [omni 01:05] Qwen3-Omni audio-in (a2t/a2s) + qwen3omni_colocated.yaml (my model's own workloads)
+- [world 02:50] Cosmos3 DROID policy (cosmos3_droid.yaml Nano-Policy-DROID, cosmos3_edge_droid.yaml) — robot world/policy model, next to my V-JEPA2-AC work; 1 GPU
+- [img 01:30] BAGEL image understanding (i2t) + BAGEL cfg_parallel on 2 GPUs (my model's own workloads)
+- [qwen35vl 01:40] Omnilingual ASR 3B / 7B (configs/omnilingual_asr_ctc_{3b,7b}.yaml) — same code as my 300m/1b changes; 1 GPU
+- [video 01:22] Cosmos3-Super TP2 (configs/cosmos3_super_tp2.yaml) — same Cosmos3 code as my nano/edge work; 2 GPUs (ovn-video)
+- [tts 01:40] FLUX.2-klein-9B (configs/flux2_klein*.yaml, 9B variant) — GPU-bound diffusion latency on my GPU1 next to TTS CPU-bound runs on GPU0
+- [tts 01:50] RELEASED FLUX.2-klein-9B: gated repo (no HF token), cannot download
+- [qwen35 02:43] Qwen3.5-2B / 4B text; Qwen3.5-9B TP2 serving (configs/qwen3_5_9b_tp2.yaml)
+- [integrator 12:25] guest on ovn-artts GPU0 only (ports 9100-9199, /root/guest-integrator) until ~13:45 for the final combined A/B (qwen3_tts, kokoro); ovn-omni both GPUs (qwen3.5, z_image)

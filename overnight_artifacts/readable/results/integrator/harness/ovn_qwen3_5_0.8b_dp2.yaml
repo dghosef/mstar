@@ -1,0 +1,17 @@
+# integrator regression cell: configs/qwen3_5_0.8b.yaml with the node group replicated
+# on two ranks (data parallel, no tp_size), to exercise the conductor's replica choice.
+model: "qwen3_5_0.8b"
+max_seq_len: 32768
+node_groups:
+  - node_names: [LLM, vision_encoder]
+    ranks: [0, 1]
+resources:
+  gdn_state:
+    max_slots: 129
+warmup_requests:
+  - text: What is in this image?
+    files: [hf://nvidia/Cosmos3-Edge/assets/example_action_fd_umi_first_frame.png]
+    model_kwargs: {max_output_tokens: 4}
+  - text: What is in this image?
+    files: [hf://nvidia/Cosmos3-Edge/assets/edge_action_id_av_0_output.png]
+    model_kwargs: {max_output_tokens: 4}

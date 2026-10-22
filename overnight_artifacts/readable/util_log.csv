@@ -1,0 +1,89 @@
+03:09,qwen35vl,gpu0 67%/0G  
+03:09,omni,gpu1 0%/0G  gpu0 5%/71G  
+03:09,qwen35,gpu1 0%/0G  gpu0 28%/28G  
+03:09,video,gpu1 0%/12G  gpu0 0%/26G  
+03:09,world,gpu1 48%/29G  gpu0 0%/0G  
+03:09,artts,gpu1 4%/48G  gpu0 96%/44G  
+03:09,tts,gpu1 30%/2G  gpu0 2%/9G  
+03:09,img,gpu1 50%/47G  gpu0 0%/2G  
+03:09,regress,gpu3 16%/0G  gpu2 20%/0G  gpu1 0%/0G  gpu0 0%/10G  
+03:20,qwen35vl,gpu0 2%/14G  
+03:20,world,gpu1 0%/0G  gpu0 0%/0G  
+03:20,qwen35,gpu1 0%/0G  gpu0 0%/33G  
+03:20,omni,gpu1 0%/73G  gpu0 56%/14G  
+03:20,video,gpu1 0%/0G  gpu0 100%/44G  
+03:20,img,gpu1 7%/44G  gpu0 0%/2G  
+03:20,artts,gpu1 3%/48G  gpu0 0%/0G  
+03:20,tts,gpu1 0%/0G  gpu0 6%/11G  
+03:20,regress,gpu3 11%/1G  gpu2 1%/12G  gpu1 28%/34G  gpu0 0%/0G  
+03:30,qwen35vl,gpu0 2%/15G  
+03:30,omni,gpu1 7%/75G  gpu0 9%/14G  
+03:30,artts,gpu1 18%/47G  gpu0 97%/42G  
+03:30,qwen35,gpu1 0%/0G  gpu0 82%/33G  
+03:30,img,gpu1 10%/46G  gpu0 0%/46G  
+03:30,video,gpu1 0%/0G  gpu0 99%/44G  
+03:30,tts,gpu1 0%/0G  gpu0 73%/22G  
+03:30,world,gpu1 0%/0G  gpu0 0%/0G  
+03:30,regress,gpu3 21%/1G  gpu2 44%/29G  gpu1 0%/0G  gpu0 0%/0G  
+11:28,qwen35vl,gpu0 0%/14G  
+11:28,artts,gpu1 0%/0G  gpu0 0%/0G  
+11:28,img,gpu1 0%/0G  gpu0 0%/0G  
+11:28,qwen35,gpu1 93%/27G  gpu0 99%/31G  
+11:28,tts,gpu1 0%/0G  gpu0 0%/0G  
+11:28,omni,gpu1 22%/77G  gpu0 0%/21G  
+11:28,video,gpu1 0%/0G  gpu0 0%/0G  
+11:28,world,gpu1 0%/0G  gpu0 65%/28G  
+11:28,regress,gpu3 1%/29G  gpu2 7%/29G  gpu1 0%/29G  gpu0 0%/30G  
+11:39,regress,UNREACHABLE
+11:39,tts,UNREACHABLE
+11:39,img,UNREACHABLE
+11:39,artts,UNREACHABLE
+11:40,qwen35vl,gpu0 15%/17G  
+11:40,video,gpu1 0%/0G  gpu0 5%/54G  
+11:40,world,gpu1 0%/0G  gpu0 0%/0G  
+11:40,qwen35,gpu1 0%/0G  gpu0 0%/0G  
+11:40,omni,gpu1 0%/58G  gpu0 18%/14G  
+11:51,world,UNREACHABLE
+11:51,qwen35vl,UNREACHABLE
+11:51,video,UNREACHABLE
+11:51,omni,UNREACHABLE
+11:51,regress,UNREACHABLE
+11:51,artts,UNREACHABLE
+11:51,qwen35,gpu1 0%/0G  gpu0 4%/12G  
+12:00,qwen35,gpu1 0%/0G  gpu0 0%/0G  
+12:01,qwen35vl,gpu0 0%/0G  
+12:01,omni,gpu1 24%/74G  gpu0 0%/85G  
+12:01,artts,gpu1 1%/50G  gpu0 100%/40G  
+12:01,video,gpu1 0%/0G  gpu0 0%/0G  
+12:02,world,gpu1 0%/0G  gpu0 16%/5G  
+12:02,regress,gpu3 35%/34G  gpu2 34%/34G  gpu1 34%/34G  gpu0 33%/38G  
+12:12,qwen35,gpu1 0%/0G  gpu0 0%/0G  
+12:13,qwen35vl,gpu0 0%/0G  
+12:13,omni,gpu1 0%/0G  gpu0 0%/0G  
+12:14,artts,UNREACHABLE
+12:14,video,gpu1 0%/14G  gpu0 0%/14G  
+12:14,world,gpu1 0%/0G  gpu0 0%/0G  
+12:14,regress,gpu3 0%/0G  gpu2 0%/0G  gpu1 0%/0G  gpu0 0%/0G  
+12:28,qwen35,gpu1 0%/47G  gpu0 1%/47G  
+12:28,qwen35vl,gpu0 0%/0G  
+12:28,omni,gpu1 7%/26G  gpu0 0%/11G  
+12:29,artts,gpu1 0%/47G  gpu0 0%/81G  
+12:29,video,gpu1 0%/0G  gpu0 79%/19G  
+12:29,world,UNREACHABLE
+12:40,qwen35,gpu1 3%/48G  gpu0 0%/48G  
+12:40,qwen35vl,gpu0 3%/48G  
+12:40,omni,gpu1 7%/21G  gpu0 11%/12G  
+12:40,artts,gpu1 1%/47G  gpu0 10%/48G  
+12:41,video,gpu1 23%/18G  gpu0 29%/29G  
+12:41,world,gpu1 0%/0G  gpu0 0%/0G  
+12:52,qwen35,gpu1 0%/0G  gpu0 8%/48G  
+12:52,qwen35vl,gpu0 9%/47G  
+12:53,omni,gpu1 42%/0G  gpu0 12%/12G  
+12:53,artts,gpu1 0%/47G  gpu0 0%/0G  
+12:53,video,gpu1 98%/42G  gpu0 99%/50G  
+12:53,world,gpu1 0%/0G  gpu0 0%/0G  
+14:24,qwen35,gpu1 98%/38G  gpu0 97%/38G  
+14:24,qwen35vl,gpu0 0%/0G  
+14:24,omni,gpu1 0%/0G  gpu0 74%/20G  
+14:24,artts,gpu1 8%/47G  gpu0 84%/60G  
+14:25,video,gpu1 0%/0G  gpu0 85%/38G  

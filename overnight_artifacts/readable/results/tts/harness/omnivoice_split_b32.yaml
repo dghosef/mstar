@@ -1,0 +1,11 @@
+model: "omnivoice"
+max_seq_len: 8192
+node_groups:
+  - node_names: [ref_encoder, backbone]
+    ranks: [0]
+  - node_names: [code2wav]
+    ranks: [1]
+rank_devices: {1: 0}
+gpu_memory_fraction: 0.45
+model_kwargs:
+  max_batch_size: 32

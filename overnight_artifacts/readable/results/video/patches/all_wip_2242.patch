@@ -1,0 +1,793 @@
+diff --git a/mstar/conductor/conductor.py b/mstar/conductor/conductor.py
+index 83584c424..ba9d89380 100644
+--- a/mstar/conductor/conductor.py
++++ b/mstar/conductor/conductor.py
+@@ -816,6 +816,26 @@ class Conductor:
+         """
+         # _group_id -> chosen DP-replica index within that group's ranks
+         group_id_to_replica_idx: dict[int, int] = {}
++        # worker id -> requests it currently serves; built only when a group
++        # actually has more than one replica to choose from
++        load: dict[str, int] | None = None
++
++        def pick(replicas: list[list[int]]) -> int:
++            """The least-loaded replica (by live requests on its workers), ties at
++            random. A random pick alone puts two of two concurrent requests on one
++            replica half the time, leaving the other idle."""
++            nonlocal load
++            if len(replicas) == 1:
++                return 0
++            if load is None:
++                load = defaultdict(int)
++                for request_data in self.requests.values():
++                    for worker_id in self._request_workers(request_data):
++                        load[worker_id] += 1
++            loads = [sum(load[f"worker_{r}"] for r in ranks) for ranks in replicas]
++            least = min(loads)
++            return int(np.random.choice([i for i, n in enumerate(loads) if n == least]))
++
+         result = {}
+         for wg_id, wg in self.worker_graphs.items():
+             if wg._instance_ranks:
+@@ -823,16 +843,14 @@ class Conductor:
+                 # tp*sp instance runs the request together, so its TP all-reduce
+                 # and SP all-to-all collectives stay in sync. Picking a single TP
+                 # row here would desync the SP all-to-all across rows.
+-                replica_idx = group_id_to_replica_idx.setdefault(
+-                    wg._group_id, np.random.randint(len(wg._instance_ranks)),
+-                )
+-                ranks = wg._instance_ranks[replica_idx]
++                if wg._group_id not in group_id_to_replica_idx:
++                    group_id_to_replica_idx[wg._group_id] = pick(wg._instance_ranks)
++                ranks = wg._instance_ranks[group_id_to_replica_idx[wg._group_id]]
+                 result[wg_id] = [f"worker_{r}" for r in ranks]
+             else:
+-                replica_idx = group_id_to_replica_idx.setdefault(
+-                    wg._group_id, np.random.randint(len(wg.ranks)),
+-                )
+-                result[wg_id] = [f"worker_{wg.ranks[replica_idx]}"]
++                if wg._group_id not in group_id_to_replica_idx:
++                    group_id_to_replica_idx[wg._group_id] = pick([[r] for r in wg.ranks])
++                result[wg_id] = [f"worker_{wg.ranks[group_id_to_replica_idx[wg._group_id]]}"]
+         return result
+ 
+     def _build_request_sharding_config(
+diff --git a/mstar/engine/resources/attn/ragged/base.py b/mstar/engine/resources/attn/ragged/base.py
+index 02ebe9ce2..14bee191b 100644
+--- a/mstar/engine/resources/attn/ragged/base.py
++++ b/mstar/engine/resources/attn/ragged/base.py
+@@ -27,7 +27,7 @@ def resolve_ragged_attn_backend(
+ 
+ def _build_ragged(spec, info: EngineResourceInfo, manager_cls):
+     config = spec.config
+-    if info.joint_comm_group is not None:
++    if info.joint_comm_group is not None and config.shard_heads:
+         config.shard(info.joint_comm_group.world_size)
+     dtype = config.dtype if config.dtype is not None else info.kv_dtype
+     if dtype is None:
+diff --git a/mstar/engine/resources/attn/ragged/config.py b/mstar/engine/resources/attn/ragged/config.py
+index 027614b49..2c597fc4c 100644
+--- a/mstar/engine/resources/attn/ragged/config.py
++++ b/mstar/engine/resources/attn/ragged/config.py
+@@ -73,6 +73,13 @@ class RaggedAttentionConfig:
+     backend: RaggedAttnBackend = RaggedAttnBackend.AUTO
+     flashinfer_backend: str = "auto"
+ 
++    # Whether the node's lockstep instance splits the attention heads across its
++    # ranks (tensor parallelism, Ulysses sequence parallelism), so each rank's
++    # resource attends its slice. A node that parallelizes over something else --
++    # each rank attending whole requests or guidance branches -- sets False and
++    # keeps every head on every rank.
++    shard_heads: bool = True
++
+     # Activation dtype of the q / k / v the node hands the kernel (and of its
+     # output). A cacheless attention doesn't need to adhere to the dtype of its
+     # KV cache, so it is free to declare a separate dtype here; when None, the
+diff --git a/mstar/engine/resources/convenience.py b/mstar/engine/resources/convenience.py
+index 9413ed29d..c93f09b52 100644
+--- a/mstar/engine/resources/convenience.py
++++ b/mstar/engine/resources/convenience.py
+@@ -145,17 +145,50 @@ class RaggedAttentionCallable:
+     until Dynamo gives up.
+     """
+ 
+-    def __init__(self, attn: RaggedAttnManager | RaggedCrossAttnManager, label: str):
++    def __init__(self, attn: RaggedAttnManager | RaggedCrossAttnManager, label: str, opaque: bool = False):
+         self.attn = attn
+         self.label = label
++        # ``opaque``: call through the ``mstar::ragged_attention`` custom op, which
++        # a compiled region keeps in its graph as one node. Otherwise the call is a
++        # graph break per layer, which also stops Inductor fusing the pointwise
++        # work on either side of it: on Wan2.2's compiled, uncaptured DiT the
++        # breaks cost ~85 ms of a ~1 s step in extra elementwise kernels.
++        self._handle = _register_ragged(self) if opaque else None
+ 
+-    @torch.compiler.disable
+     def __call__(
+         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+     ) -> torch.Tensor:
++        if self._handle is not None:
++            return _ragged_attention_op(q, k, v, self._handle)
++        return self._run(q, k, v)
++
++    @torch.compiler.disable
++    def _run(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+         return self.attn.run(q, k, v, label=self.label)
+ 
+ 
++# Opaque callables by handle: a custom op takes tensors and scalars only, so it
++# names its callable by index. One entry per callable built, i.e. per resource
++# binding and label, which is a handful per process.
++_RAGGED_CALLABLES: list[RaggedAttentionCallable] = []
++
++
++def _register_ragged(fn: RaggedAttentionCallable) -> int:
++    _RAGGED_CALLABLES.append(fn)
++    return len(_RAGGED_CALLABLES) - 1
++
++
++@torch.library.custom_op("mstar::ragged_attention", mutates_args=())
++def _ragged_attention_op(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, handle: int) -> torch.Tensor:
++    # the wrapper returns a fresh tensor (or a clone of its graph buffer), never an alias
++    return _RAGGED_CALLABLES[handle]._run(q, k, v).to(q.dtype)
++
++
++@_ragged_attention_op.register_fake
++def _(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, handle: int) -> torch.Tensor:
++    return torch.empty_like(q)
++
++
+ class Mamba2Callable:
+     """``LinearAttnCallable`` for a Mamba-2 layer: the conv, then the SSD
+     recurrence, each handed this layer's block of the pool as a plain tensor.
+diff --git a/mstar/model/cosmos3/config.py b/mstar/model/cosmos3/config.py
+index 003396c1e..2bcce9197 100644
+--- a/mstar/model/cosmos3/config.py
++++ b/mstar/model/cosmos3/config.py
+@@ -375,6 +375,12 @@ class Cosmos3Config:
+     # sharing the whole-clip decoder's, which keeps the default layout: a fixed
+     # ~1.03 GiB of bf16 weights (Wan2.2 VAE) in a process hosting both nodes.
+     vae_decode_channels_last: bool = True
++    # Decode a whole clip (the non-windowed video and image walks) with the shared
++    # Wan VAE decoder: the same per-latent decoder calls as ``vae.decode`` from an
++    # empty cache, channels-last and compiled per call in Inductor's deterministic
++    # mode, on a decoder-only copy of the VAE (~1 GiB bf16). False decodes with the
++    # compiled stock ``vae.decode`` on the shared instance.
++    vae_decode_fast: bool = True
+     # Let cuDNN time its conv algorithms for each new streaming-decode shape
+     # (once, then cached) instead of its heuristic pick. Same math, but the
+     # timed pick can differ between server launches, and so can the frames
+@@ -526,7 +532,8 @@ class Cosmos3Config:
+         reinterpret silently: a non-boolean switch (a yaml ``"false"`` is
+         truthy), a negative warm-stream cap (read as no cap), or more latents
+         per call than the default window holds (read as one call per window)."""
+-        for name in ("windowed_decode_warm_cache", "vae_decode_channels_last", "vae_decode_cudnn_benchmark"):
++        for name in ("windowed_decode_warm_cache", "vae_decode_channels_last", "vae_decode_cudnn_benchmark",
++                     "vae_decode_fast"):
+             value = getattr(self, name)
+             if not isinstance(value, bool):
+                 raise ValueError(f"Cosmos3 {name} must be true or false, got {value!r}.")
+diff --git a/mstar/model/cosmos3/cosmos3_model.py b/mstar/model/cosmos3/cosmos3_model.py
+index f552a67b4..e95239927 100644
+--- a/mstar/model/cosmos3/cosmos3_model.py
++++ b/mstar/model/cosmos3/cosmos3_model.py
+@@ -1757,9 +1757,14 @@ class Cosmos3Model(Model):
+                 vae=self._build_encode_vae(device), config=self.config
+             )
+         if node_name == VAE_DECODER_NODE:
+-            return Cosmos3VAEDecoderSubmodule(
+-                vae=self._build_vae(device), config=self.config
++            # The fast decode converts its VAE to channels-last in place, so it
++            # takes a decoder-only copy rather than the shared instance.
++            vae = (
++                self._build_decoder_only_vae(device)
++                if self.config.vae_decode_fast
++                else self._build_vae(device)
+             )
++            return Cosmos3VAEDecoderSubmodule(vae=vae, config=self.config)
+         if node_name == VAE_DECODER_AR_NODE:
+             # Shares the decoder VAE weights unless it decodes channels-last,
+             # which converts the VAE in place; only the streaming chunk state
+diff --git a/mstar/model/cosmos3/submodules.py b/mstar/model/cosmos3/submodules.py
+index a062b1bd5..3602e944b 100644
+--- a/mstar/model/cosmos3/submodules.py
++++ b/mstar/model/cosmos3/submodules.py
+@@ -2678,6 +2678,9 @@ class Cosmos3VAEDecoderSubmodule(NodeSubmodule):
+     # One-shot decode per request; CUDA-graph capture (not torch.compile) is the
+     # speedup path.
+     disable_torch_compile = True
++    # Whole-clip decodes through the shared Wan VAE decoder (config.vae_decode_fast);
++    # the streaming subclass sets up its own decoder step.
++    _whole_clip_fast = True
+ 
+     def __init__(self, vae, config):
+         super().__init__()
+@@ -2685,6 +2688,7 @@ class Cosmos3VAEDecoderSubmodule(NodeSubmodule):
+         self.config = config
+         self._decode_dtype_cached = None
+         self._channels_last = False
++        self._fast_step = None
+         # The decode is 3D-conv bound, one-shot per request at request-specific
+         # shapes, and not graph-captured; torch.compile fuses its pointwise
+         # epilogues (~20-30% off the 189-frame video decode, neutral for
+@@ -2703,6 +2707,14 @@ class Cosmos3VAEDecoderSubmodule(NodeSubmodule):
+         # Resolve + log the decode dtype now (a cheap cuDNN-version read) so the
+         # choice is fixed at startup, not on the first request.
+         self._decode_dtype()
++        if vae is not None and self._whole_clip_fast and config.vae_decode_fast:
++            # Cast before the layout switch and the compile trace, so both see the
++            # weights the decode runs with (this instance is the node's own).
++            self.vae = vae = vae.to(self._decode_dtype())
++            _wan_vae().to_channels_last(vae)
++            self._channels_last = True
++            self._fast_step = _wan_vae().DecoderStep(vae, compile=self._decode_compiled, deterministic=True)
++            logger.info("Cosmos3 VAE decode: whole clips on the shared Wan VAE decoder (channels-last)")
+ 
+     def prepare_inputs(self, graph_walk, fwd_info, inputs, **kwargs) -> NodeInputs:
+         return NodeInputs(tensor_inputs={"latents": inputs["latents"][0]})
+@@ -2757,6 +2769,13 @@ class Cosmos3VAEDecoderSubmodule(NodeSubmodule):
+         """Latents -> uint8 pixel frames ``[1, 3, T, H, W]``."""
+         vae_dtype = self._decode_dtype()
+         z = self._vae_input(latents)
++        if self._fast_step is not None:
++            wan_vae = _wan_vae()
++            with torch.autocast(device_type="cuda", enabled=False):
++                decoded = wan_vae.decode_causal(
++                    self.vae, z, wan_vae.new_feat_cache(self.vae), self._fast_step, clip_start=True,
++                )
++            return self._to_uint8(decoded)
+         with torch.autocast(device_type="cuda", enabled=False):
+             if (
+                 self._decode_compiled
+@@ -2816,6 +2835,8 @@ class Cosmos3VAEDecoderARSubmodule(Cosmos3VAEDecoderSubmodule):
+     done, so it is not vetoed.
+     """
+ 
++    _whole_clip_fast = False
++
+     def __init__(self, vae, config):
+         super().__init__(vae, config)
+         # Per-session decode context (the latents behind a session's last
+diff --git a/mstar/model/wan22/components/dit.py b/mstar/model/wan22/components/dit.py
+index 8a8fb9751..e0038e641 100644
+--- a/mstar/model/wan22/components/dit.py
++++ b/mstar/model/wan22/components/dit.py
+@@ -29,11 +29,13 @@ two-linear MLPs ARE the shared ``components.mlp.MLP``.
+ """
+ 
+ import math
++from typing import NamedTuple
+ 
+ import torch
+ import torch.nn.functional as F
+ from torch import nn
+ 
++from mstar.model.components.diffusion.attention import RaggedAttentionFn, joint_attention
+ from mstar.model.components.mlp import MLP
+ from mstar.model.wan22.config import Wan22Config
+ 
+@@ -148,6 +150,14 @@ def _apply_rotary_emb(
+     return out.type_as(hidden_states)
+ 
+ 
++class Wan22AttentionFns(NamedTuple):
++    """The engine's ragged attention callables for one step, per attention; a
++    None (or no ``Wan22AttentionFns`` at all) runs SDPA, the reference kernel."""
++
++    self_attn: RaggedAttentionFn | None
++    cross_attn: RaggedAttentionFn | None
++
++
+ class Wan22DiTAttention(nn.Module):
+     """Multi-head attention with across-heads RMSNorm on q/k (the
+     checkpoint's ``rms_norm_across_heads``: one 3072-wide norm before the
+@@ -170,6 +180,7 @@ class Wan22DiTAttention(nn.Module):
+         hidden_states: torch.Tensor,
+         encoder_hidden_states: torch.Tensor | None = None,
+         rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
++        attn_fn: RaggedAttentionFn | None = None,
+     ) -> torch.Tensor:
+         kv_source = hidden_states if encoder_hidden_states is None else encoder_hidden_states
+         query = self.q_norm(self.q_proj(hidden_states))
+@@ -184,13 +195,9 @@ class Wan22DiTAttention(nn.Module):
+             query = _apply_rotary_emb(query, *rotary_emb)
+             key = _apply_rotary_emb(key, *rotary_emb)
+ 
+-        # [B, S, H, D] -> [B, H, S, D] SDPA -> back (the reference's
+-        # dispatch_attention_fn native path; bidirectional, no mask).
+-        out = F.scaled_dot_product_attention(
+-            query.permute(0, 2, 1, 3),
+-            key.permute(0, 2, 1, 3),
+-            value.permute(0, 2, 1, 3),
+-        ).permute(0, 2, 1, 3)
++        # Bidirectional, no mask: SDPA (the reference's dispatch_attention_fn
++        # native path) without a ragged callable, one segment per row with one.
++        out = joint_attention(query, key, value, ragged=attn_fn)
+         return self.o_proj(out.flatten(2, 3))
+ 
+ 
+@@ -251,6 +258,7 @@ class Wan22DiTBlock(nn.Module):
+         encoder_hidden_states: torch.Tensor,
+         timestep_proj: torch.Tensor,
+         rotary_emb: tuple[torch.Tensor, torch.Tensor],
++        attn_fns: Wan22AttentionFns | None = None,
+     ) -> torch.Tensor:
+         # [1, 1, 6, dim] + [B, seq, 6, dim] -> six [B, seq, dim] fp32 tensors.
+         shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = (
+@@ -260,11 +268,16 @@ class Wan22DiTBlock(nn.Module):
+         c_shift_msa, c_scale_msa, c_gate_msa = c_shift_msa.squeeze(2), c_scale_msa.squeeze(2), c_gate_msa.squeeze(2)
+ 
+         norm_hidden = (self.norm1(hidden_states.float()) * (1 + scale_msa) + shift_msa).type_as(hidden_states)
+-        attn_output = self.self_attn(norm_hidden, rotary_emb=rotary_emb)
++        attn_output = self.self_attn(
++            norm_hidden, rotary_emb=rotary_emb, attn_fn=attn_fns.self_attn if attn_fns else None,
++        )
+         hidden_states = (hidden_states.float() + attn_output * gate_msa).type_as(hidden_states)
+ 
+         norm_hidden = self.norm2(hidden_states.float()).type_as(hidden_states)
+-        attn_output = self.cross_attn(norm_hidden, encoder_hidden_states=encoder_hidden_states)
++        attn_output = self.cross_attn(
++            norm_hidden, encoder_hidden_states=encoder_hidden_states,
++            attn_fn=attn_fns.cross_attn if attn_fns else None,
++        )
+         hidden_states = hidden_states + attn_output
+ 
+         norm_hidden = (self.norm3(hidden_states.float()) * (1 + c_scale_msa) + c_shift_msa).type_as(hidden_states)
+@@ -328,11 +341,13 @@ class Wan22DiT(nn.Module):
+         hidden_states: torch.Tensor,
+         timestep: torch.Tensor,
+         encoder_hidden_states: torch.Tensor,
++        attn_fns: Wan22AttentionFns | None = None,
+     ) -> torch.Tensor:
+         """``hidden_states`` ``[B, C, F, H, W]`` (bf16 latents), ``timestep``
+         ``[B, post-patch seq]`` per-token grid (``expand_timesteps`` — the
+         only timestep form mstar's dit submodule produces), text embeds
+-        ``[B, 512, text_dim]`` bf16. Returns ``[B, C_out, F, H, W]`` bf16."""
++        ``[B, 512, text_dim]`` bf16. Returns ``[B, C_out, F, H, W]`` bf16.
++        ``attn_fns`` routes attention through the engine's ragged resources."""
+         batch_size, _, num_frames, height, width = hidden_states.shape
+         p_t, p_h, p_w = self.config.patch_size
+         grid = (num_frames // p_t, height // p_h, width // p_w)
+@@ -350,7 +365,7 @@ class Wan22DiT(nn.Module):
+         )
+ 
+         for block in self.blocks:
+-            hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb)
++            hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, attn_fns)
+ 
+         # Output head: 2-chunk adaLN in fp32 ([1, 1, 2, dim] island table +
+         # bf16 temb promotes), then project and unpatchify.
+diff --git a/mstar/model/wan22/config.py b/mstar/model/wan22/config.py
+index 86b639f0f..8e059ec2a 100644
+--- a/mstar/model/wan22/config.py
++++ b/mstar/model/wan22/config.py
+@@ -74,6 +74,11 @@ class Wan22Config:
+     # build with this False so the eager path stays the bit-exact reference.
+     compile_dit: bool = True
+ 
++    # The DiT's attention kernel: "flashinfer" runs both attentions through the
++    # engine's ragged resources (FlashInfer's ragged prefill, FA3 on Hopper);
++    # "sdpa" runs torch SDPA, the reference pipeline's kernel.
++    attention_backend: str = "flashinfer"
++
+     # VAE-decode tiling policy: "auto" decodes untiled when free VRAM comfortably
+     # exceeds the estimated untiled peak for the output size and tiles otherwise;
+     # "tiled"/"untiled" force a path. WAN22_VAE_DECODE_TILING overrides at runtime.
+@@ -94,6 +99,10 @@ class Wan22Config:
+         # rather than read as on.
+         if not isinstance(self.vae_decode_fast, bool):
+             raise ValueError(f"Wan2.2 vae_decode_fast must be true or false, got {self.vae_decode_fast!r}.")
++        if self.attention_backend not in ("flashinfer", "sdpa"):
++            raise ValueError(
++                f"Wan2.2 attention_backend must be 'flashinfer' or 'sdpa', got {self.attention_backend!r}."
++            )
+         self.fast_decode_sizes()
+ 
+     def fast_decode_sizes(self) -> frozenset[tuple[int, int]]:
+diff --git a/mstar/model/wan22/submodules.py b/mstar/model/wan22/submodules.py
+index 977d1791e..3b4c4d5cb 100644
+--- a/mstar/model/wan22/submodules.py
++++ b/mstar/model/wan22/submodules.py
+@@ -20,13 +20,17 @@ the v1 engine supplies neither the autocast nor the no-grad wrapper.
+ import logging
+ import os
+ from contextlib import contextmanager
++from typing import NamedTuple
+ 
+ import torch
+ from torch import nn
+ 
+ from mstar.communication.tensors import NameToTensorList
+ from mstar.conductor.request_info import CurrentForwardPassInfo
++from mstar.engine.resources import AttentionStep, Segment, SlotLease, SubmoduleStep
++from mstar.engine.resources.convenience import RaggedAttentionCallable
+ from mstar.model.submodule_base import ModelInputsFromEngine, NodeInputs, NodeSubmodule
++from mstar.model.wan22.components.dit import Wan22AttentionFns
+ from mstar.model.wan22.components.unipc import (
+     SOLVER_ORDER,
+     UniPCState,
+@@ -324,6 +328,14 @@ class Wan22VaeEncoderSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmod
+ # dit
+ # ---------------------------------------------------------------------------
+ 
++class Wan22AttnLayout(NamedTuple):
++    """One step's self-attention spans for a request: each of the ``branches``
++    guidance branches this rank computes attends within its video tokens."""
++
++    video_tokens: int
++    branches: int
++
++
+ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
+     """Dense 5B video DiT with the UniPC step run inline.
+ 
+@@ -355,6 +367,10 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
+     # circular import.
+     _I2V_WALK = "video_gen_i2v"
+ 
++    # The ragged self-attention resource (Wan22Model.get_node_resources) and its span.
++    SELF_ATTN = "dit_self_attn"
++    VIDEO_SPAN = "video"
++
+     # The WHOLE forward cannot be one compiled region: Inductor would fuse the UniPC
+     # step's `sample - sigma * output` and pass the 0-dim CPU-resident sigma as a
+     # device pointer, which fails on the first call. Moving sigma to CUDA would fix
+@@ -364,10 +380,22 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
+     # leaving the solver, CFG combine, and everything touching sigma eager.
+     disable_torch_compile = True
+ 
+-    def __init__(self, transformer: nn.Module, config: Wan22Config):
++    def __init__(self, transformer: nn.Module, config: Wan22Config, sp_group=None):
+         super().__init__()
+         self.transformer = transformer
+         self.config = config
++        # Two ranks split the CFG batch: each runs one branch at batch 1 and the
++        # predictions are all-gathered, so the step costs one branch's forward plus a
++        # latent-sized gather. Every rank then runs the same combine and UniPC step on
++        # replicated latents. Any other shape (guidance off, more ranks) computes the
++        # whole batch on every rank, which is correct but no faster.
++        self.sp_group = sp_group if sp_group is not None and sp_group.world_size > 1 else None
++        if self.sp_group is not None and self.sp_group.world_size != 2:
++            logger.warning(
++                "Wan2.2 dit: sp_size=%d; only 2 ranks split the CFG batch, so every rank "
++                "computes the whole step.", self.sp_group.world_size,
++            )
++        self._attn_fns: Wan22AttentionFns | None = None
+         self._record_fp32_islands()
+         # Compile the inner DiT region only (tensors in, tensor out; nothing
+         # CPU-resident crosses it), IN PLACE so ``self.transformer`` keeps its
+@@ -435,7 +463,58 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
+             tensor_inputs["time_index"] = time_index
+             tensor_inputs["unipc_model_outputs"] = inputs["unipc_model_outputs"][0]
+             tensor_inputs["unipc_last_sample"] = inputs["unipc_last_sample"][0]
+-        return NodeInputs(tensor_inputs=tensor_inputs)
++        _, _, t_lat, h_lat, w_lat = tensor_inputs["latents"].shape
++        p_t, p_h, p_w = self.config.patch_size
++        guidance_scale = float(fwd_info.step_metadata.get("guidance_scale", self.config.guidance_scale))
++        layout = Wan22AttnLayout(
++            video_tokens=(t_lat // p_t) * (h_lat // p_h) * (w_lat // p_w),
++            branches=self._branches(guidance_scale),
++        )
++        return NodeInputs(
++            tensor_inputs=tensor_inputs, resource_step_info=layout, input_seq_len=layout.video_tokens,
++        )
++
++    def _cfg_split(self, guidance_scale: float) -> bool:
++        """Whether this step's two guidance branches run one per rank.
++
++        ``guidance_scale`` is request metadata, identical on every rank of the
++        instance, so all ranks agree on whether the forward's gather runs."""
++        return guidance_scale > 1.0 and self.sp_group is not None and self.sp_group.world_size == 2
++
++    def _branches(self, guidance_scale: float) -> int:
++        """Guidance branches this rank's forward computes."""
++        return 2 if guidance_scale > 1.0 and not self._cfg_split(guidance_scale) else 1
++
++    # attention ------------------------------------------------------------
++    def bind_node_resources(self, resources) -> None:
++        super().bind_node_resources(resources)
++        self._attn_fns = None  # the memoized callables hold the old resources
++
++    def _attention_fns(self) -> Wan22AttentionFns | None:
++        """The ragged callables, built once per resource binding (the compiled
++        transformer guards on their identity), or None to run SDPA."""
++        if self._attn_fns is None:
++            self_attn = self.node_resources.get(self.SELF_ATTN)
++            if self_attn is None:
++                return None
++            self._attn_fns = Wan22AttentionFns(
++                self_attn=RaggedAttentionCallable(self_attn, self.VIDEO_SPAN, opaque=True), cross_attn=None,
++            )
++            logger.info("Wan2.2 DiT: self-attention through the engine's ragged attention resource")
++        return self._attn_fns
++
++    def declare_step(
++        self, graph_walk: str, request_ids: list[str], inputs: list[NodeInputs],
++        slot_lease: SlotLease | None = None, piecewise_leases=None, **kwargs,
++    ) -> SubmoduleStep | None:
++        if self.config.attention_backend != "flashinfer":
++            return None
++        video = [
++            Segment(request_id=rid, label=self.VIDEO_SPAN, span=inp.resource_step_info.video_tokens)
++            for rid, inp in zip(request_ids, inputs, strict=True)
++            for _ in range(inp.resource_step_info.branches)
++        ]
++        return SubmoduleStep(steps={self.SELF_ATTN: AttentionStep(segments=tuple(video), causal=False)})
+ 
+     def forward(
+         self,
+@@ -521,7 +600,8 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
+         reference's two sequential forwards. The combine runs in the
+         transformer's output dtype (bf16), like the reference."""
+         do_cfg = guidance_scale > 1.0
+-        batch = 2 if do_cfg else 1
++        cfg_split = self._cfg_split(guidance_scale)
++        batch = self._branches(guidance_scale)
+         hidden_states = model_input.repeat(batch, 1, 1, 1, 1)
+         timestep = temp_ts.unsqueeze(0).expand(batch, -1)
+         # dynamic=False keys the compiled trace on the full input shape (batch
+@@ -537,16 +617,23 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
+                     "this resolution now (one-time pause); later requests reuse it.",
+                     shape_key,
+                 )
+-        encoder_hidden_states = (
+-            torch.cat([text_embeds_pos, text_embeds_neg], dim=0) if do_cfg else text_embeds_pos
+-        ).to(self.transformer.dtype)
++        if cfg_split:
++            # rank 0 the conditional branch, rank 1 the unconditional one
++            encoder_hidden_states = text_embeds_pos if self.sp_group.rank == 0 else text_embeds_neg
++        elif do_cfg:
++            encoder_hidden_states = torch.cat([text_embeds_pos, text_embeds_neg], dim=0)
++        else:
++            encoder_hidden_states = text_embeds_pos
+         out = self.transformer(
+             hidden_states=hidden_states,
+             timestep=timestep,
+-            encoder_hidden_states=encoder_hidden_states,
++            encoder_hidden_states=encoder_hidden_states.to(self.transformer.dtype),
++            attn_fns=self._attention_fns(),
+         )
+         if not do_cfg:
+             return out
++        if cfg_split:
++            out = self.sp_group.all_gather(out.contiguous(), dim=0)
+         noise_cond, noise_uncond = out[0:1], out[1:2]
+         return noise_uncond + guidance_scale * (noise_cond - noise_uncond)
+ 
+diff --git a/mstar/model/wan22/wan22_model.py b/mstar/model/wan22/wan22_model.py
+index f8139774a..2cabe99d6 100644
+--- a/mstar/model/wan22/wan22_model.py
++++ b/mstar/model/wan22/wan22_model.py
+@@ -39,7 +39,9 @@ from mstar.conductor.request_info import (
+     CurrentForwardConductorMetadata,
+     StreamingConnectionState,
+ )
++from mstar.distributed.base import ShardingConfig
+ from mstar.engine.resources import NodeResourceSpec
++from mstar.engine.resources.attn.ragged.config import RaggedAttentionConfig, RaggedAttentionSpec
+ from mstar.graph.base import (
+     GraphEdge,
+     GraphNode,
+@@ -84,6 +86,7 @@ class Wan22Model(Model):
+         skip_weight_loading: bool = False,
+         vae_decode_fast: bool = True,
+         vae_decode_fast_sizes: tuple[str, ...] | None = None,
++        attention_backend: str = "flashinfer",
+         **kwargs,
+     ):
+         if variant != WAN22_VARIANT_TI2V_5B:
+@@ -95,6 +98,7 @@ class Wan22Model(Model):
+         self.cache_dir = cache_dir
+         self.config = Wan22Config(
+             variant=variant, vae_decode_fast=vae_decode_fast, vae_decode_fast_sizes=vae_decode_fast_sizes,
++            attention_backend=attention_backend,
+         )
+         # Dummy mode: get_submodule returns None for every node, so engines run
+         # without weights, GPU or network.
+@@ -115,7 +119,8 @@ class Wan22Model(Model):
+     # ------------------------------------------------------------------
+ 
+     def get_node_resources(self) -> list[NodeResourceSpec]:
+-        """No engine-built resources: every node here is stateless.
++        """The DiT's self-attention as a cacheless ragged resource (with
++        ``attention_backend: flashinfer``); nothing here keeps state.
+ 
+         Nothing in this model reads K/V back across steps. The text encoder
+         and both VAE passes are one-shot forwards, and the DiT recomputes
+@@ -123,7 +128,36 @@ class Wan22Model(Model):
+         the only state that crosses a step is the UniPC solver's, which
+         rides the loop-back edges as ordinary tensors rather than a cache.
+         """
+-        return []
++        if self.config.attention_backend != "flashinfer":
++            return []
++        cfg = self.config
++        # Self-attention only: the cross-attention over the 512 text tokens runs
++        # SDPA (cuDNN), which measured faster than FlashInfer's ragged kernel at
++        # that shape (0.46 vs 0.59 ms per layer at 1280x704x81 on an H200), while
++        # FA3 beats it on the self-attention (12.4 vs 14.8 ms).
++        return [
++            RaggedAttentionSpec(
++                resource_key=Wan22DitSubmodule.SELF_ATTN, nodes={"dit"},
++                config=RaggedAttentionConfig(
++                    num_qo_heads=cfg.num_attention_heads,
++                    num_kv_heads=cfg.num_attention_heads,
++                    head_dim=cfg.attention_head_dim,
++                    # one segment per guidance branch
++                    max_segments_per_request=2,
++                    # the dit's sp ranks split guidance branches, not heads
++                    shard_heads=False,
++                    dtype=torch.bfloat16,
++                ),
++            ),
++        ]
++
++    def get_default_sharding_config(self) -> ShardingConfig:
++        # The dit accepts an sp group: with guidance on, each of two ranks runs one
++        # CFG branch and they all-gather the two noise predictions (see
++        # Wan22DitSubmodule). Signals stay replicated, so no shard_dim entries.
++        return ShardingConfig(
++            groups=[], tp_enabled_nodes=set(), shard_dim={}, sp_enabled_nodes={"dit"},
++        )
+ 
+     def get_graph_walk_graphs(self) -> dict[str, GraphSection]:
+         # -- encode_text: UMT5 forward; both CFG embeddings persist at the
+@@ -648,18 +682,17 @@ class Wan22Model(Model):
+         self, node_name: str, device: str = "cpu", tp_group=None,
+         autocast_dtype: torch.dtype | None = None, sp_group=None,
+     ) -> torch.nn.Module | None:
+-        # ``autocast_dtype`` and ``sp_group`` exist for interface parity only.
+-        # Weights load in the checkpoint's own dtypes, and wan22 declares no
+-        # sp-enabled nodes.
++        # ``autocast_dtype`` exists for interface parity only: weights load in the
++        # checkpoint's own dtypes. ``sp_group`` reaches the dit only.
+         if node_name in self._submodule_cache:
+             return self._submodule_cache[node_name]
+-        submodule = self._create_submodule(node_name, device)
++        submodule = self._create_submodule(node_name, device, sp_group=sp_group)
+         self._submodule_cache[node_name] = submodule
+         if submodule is not None:
+             logger.info("Loaded Wan2.2 submodule for node %s", node_name)
+         return submodule
+ 
+-    def _create_submodule(self, node_name: str, device: str = "cpu") -> NodeSubmodule | None:
++    def _create_submodule(self, node_name: str, device: str = "cpu", sp_group=None) -> NodeSubmodule | None:
+         """Construct one node's submodule from the checkpoint.
+ 
+         The wrapped components load on CPU and the EngineManager moves them; the
+@@ -696,7 +729,7 @@ class Wan22Model(Model):
+             transformer = build_wan22_dit(
+                 self.config, self.model_path_hf, device=device, cache_dir=self.cache_dir,
+             )
+-            return Wan22DitSubmodule(transformer, self.config)
++            return Wan22DitSubmodule(transformer, self.config, sp_group=sp_group)
+         logger.warning("Wan2.2 has no submodule for node %r; running it dummy.", node_name)
+         return None
+ 
+diff --git a/test/modular/test_ragged_attention.py b/test/modular/test_ragged_attention.py
+index c6f876271..b91300877 100644
+--- a/test/modular/test_ragged_attention.py
++++ b/test/modular/test_ragged_attention.py
+@@ -322,6 +322,47 @@ def test_shards_head_counts_at_build():
+     assert mgr._kwargs["head_dim"] == HEAD_DIM
+ 
+ 
++def test_shard_heads_false_keeps_every_head():
++    """A node whose ranks split something other than heads (guidance branches)
++    keeps the full head count on every rank."""
++
++    class _Group:
++        world_size = 2
++
++    spec = RaggedAttentionSpec(
++        resource_key=ATTN, nodes={"encoder"},
++        config=RaggedAttentionConfig(
++            num_qo_heads=HEADS, num_kv_heads=HEADS, head_dim=HEAD_DIM, shard_heads=False,
++        ),
++    )
++    mgr = build_resource(
++        spec,
++        EngineResourceInfo(device=DEVICE, kv_dtype=DTYPE, joint_comm_group=_Group()),
++    )
++    assert mgr._kwargs["num_qo_heads"] == HEADS
++
++
++def test_opaque_callable_stays_in_the_compiled_graph():
++    """``opaque=True`` runs the attention as a custom op: a compiled region
++    keeps one graph around it (no break) and computes what the eager call does."""
++    from mstar.engine.resources.convenience import RaggedAttentionCallable
++
++    mgr = manager()
++    spans = [128, 96]
++    mgr.plan(step(*spans), ctx(["r0", "r1"]))
++    q, k, v = qkv(sum(spans))
++    fn = RaggedAttentionCallable(mgr, "main", opaque=True)
++
++    def region(q, k, v):
++        return fn(q * 1.0, k, v) + 1.0
++
++    torch._dynamo.reset()
++    explain = torch._dynamo.explain(region)(q, k, v)
++    assert explain.graph_break_count == 0
++    compiled = torch.compile(region, fullgraph=True)
++    close(compiled(q, k, v), RaggedAttentionCallable(mgr, "main")(q, k, v) + 1.0)
++
++
+ def test_plan_then_run_matches_reference():
+     mgr = manager()
+     spans = [128, 96]
+diff --git a/test/modular/test_wan22_model.py b/test/modular/test_wan22_model.py
+index e6c580ee9..11d4b59ed 100644
+--- a/test/modular/test_wan22_model.py
++++ b/test/modular/test_wan22_model.py
+@@ -108,9 +108,15 @@ def test_wan22_declares_expected_nodes():
+     assert walk_nodes == {"text_encoder", "vae_encoder", "dit", "vae_decoder"}
+ 
+ 
+-def test_wan22_declares_no_engine_resources():
+-    """Nothing here is cached across steps, so the engine builds nothing."""
+-    model = _make_model()
++def test_wan22_declares_only_dit_attention_resources():
++    """Nothing here is cached across steps: the only resource is the dit's
++    cacheless self-attention, and the sdpa backend declares none."""
++    model = _make_model()
++    specs = model.get_node_resources()
++    assert [spec.resource_key for spec in specs] == [Wan22DitSubmodule.SELF_ATTN]
++    assert all(spec.nodes == {"dit"} for spec in specs)
++    assert all(not spec.config.shard_heads for spec in specs)
++    model.config = Wan22Config(attention_backend="sdpa")
+     assert model.get_node_resources() == []
+     assert model.get_request_resource_configs(partition_fwd_args={}) == {}
+ 
+@@ -967,3 +973,51 @@ def test_wan22_config_echo_normalizes_bogus_decode_override(monkeypatch, caplog)
+     line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("Wan2.2 request:"))
+     assert "decode=auto" in line
+     assert "banana" not in line
++
++
++# ----------------------------------------------------------------------
++# dit attention layout and guidance-branch split
++# ----------------------------------------------------------------------
++
++
++class _FakeSPGroup:
++    def __init__(self, world_size: int, rank: int = 0):
++        self.world_size = world_size
++        self.rank = rank
++
++
++def _dit_info(guidance: float) -> CurrentForwardPassInfo:
++    info = _fwd_info(requested_steps=2, iter_count=1)
++    info.step_metadata["guidance_scale"] = guidance
++    return info
++
++
++@pytest.mark.parametrize("world_size,guidance,branches", [
++    (None, 5.0, 2),  # one GPU: both guidance branches in one batch-2 forward
++    (None, 1.0, 1),  # guidance off: the conditional branch alone
++    (2, 5.0, 1),     # two ranks split the branches
++    (2, 1.0, 1),     # nothing to split: both ranks run the one branch
++    (4, 5.0, 2),     # more ranks than branches: every rank runs both
++])
++def test_wan22_dit_branches_per_rank(world_size, guidance, branches):
++    group = _FakeSPGroup(world_size) if world_size else None
++    submodule = Wan22DitSubmodule(transformer=None, config=Wan22Config(), sp_group=group)
++    node_inputs = submodule.prepare_inputs(
++        graph_walk=Wan22Model.VIDEO_GEN_WALK, fwd_info=_dit_info(guidance), inputs=_dit_loop_inputs(k=1),
++    )
++    layout = node_inputs.resource_step_info
++    # latents [1, 4, 2, 2, 2] patchify (1, 2, 2) to 2 * 1 * 1 tokens
++    assert layout.video_tokens == 2 and node_inputs.input_seq_len == 2
++    assert layout.branches == branches
++
++
++def test_wan22_dit_declares_one_segment_per_branch():
++    submodule = Wan22DitSubmodule(transformer=None, config=Wan22Config())
++    node_inputs = submodule.prepare_inputs(
++        graph_walk=Wan22Model.VIDEO_GEN_WALK, fwd_info=_dit_info(5.0), inputs=_dit_loop_inputs(k=1),
++    )
++    step = submodule.declare_step(Wan22Model.VIDEO_GEN_WALK, ["r0"], [node_inputs])
++    self_step = step.get(Wan22DitSubmodule.SELF_ATTN)
++    assert [(s.label, s.span) for s in self_step.segments] == [("video", 2), ("video", 2)]
++    sdpa = Wan22DitSubmodule(transformer=None, config=Wan22Config(attention_backend="sdpa"))
++    assert sdpa.declare_step(Wan22Model.VIDEO_GEN_WALK, ["r0"], [node_inputs]) is None

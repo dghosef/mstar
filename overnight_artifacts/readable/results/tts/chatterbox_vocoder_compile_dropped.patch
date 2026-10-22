@@ -1,0 +1,65 @@
+diff --git a/mstar/model/chatterbox/chatterbox_model.py b/mstar/model/chatterbox/chatterbox_model.py
+index 08974062f..0d464cdb3 100644
+--- a/mstar/model/chatterbox/chatterbox_model.py
++++ b/mstar/model/chatterbox/chatterbox_model.py
+@@ -150,6 +150,7 @@ class ChatterboxModel(Model):
+         s3gen_estimator_dtype: str | None = None,
+         t3_prefill_graphs: bool | None = None,
+         s3gen_max_batch_size: int | None = None,
++        s3gen_vocoder_compile: bool | None = None,
+         t3_dtype: str | None = None,
+         default_language: str | None = None,
+         max_new_tokens_limit: int | None = None,
+@@ -210,6 +211,8 @@ class ChatterboxModel(Model):
+             self.config.max_new_tokens_limit = _integer(
+                 "max_new_tokens_limit", max_new_tokens_limit, low=1, high=self.config.t3.max_speech_tokens,
+             )
++        if s3gen_vocoder_compile is not None:
++            self.config.s3gen_vocoder_compile = bool(s3gen_vocoder_compile)
+         if s3gen_max_batch_size is not None:
+             if int(s3gen_max_batch_size) < 1:
+                 raise ValueError("s3gen_max_batch_size must be at least 1")
+@@ -927,6 +930,9 @@ class ChatterboxModel(Model):
+             s3gen.decoder.estimator = torch.compile(
+                 s3gen.decoder.estimator, dynamic=True, mode=self.config.s3gen_compile_mode,
+             )
++        if self.config.s3gen_vocoder_compile:
++            s3gen.vocoder.spectrum = torch.compile(s3gen.vocoder.spectrum, dynamic=True)
++            self._warm_vocoder(s3gen)
+         gen = self._builtin_voice()["gen"]
+         builtin = ReferenceConditioning(
+             prompt_tokens=gen["prompt_token"].to(device),
+@@ -945,6 +951,18 @@ class ChatterboxModel(Model):
+             builtin_voice=builtin, watermarker=self._watermarker(device),
+         )
+ 
++    def _warm_vocoder(self, s3gen) -> None:
++        """Compile the vocoder's dynamic-shape graphs (with and without an
++        excitation cache) at startup rather than on the first requests."""
++        n_mel, device, dtype = self.config.s3gen.output_size, s3gen.device, s3gen.dtype
++        cache = self.config.stream_mel_cache_frames * self.config.s3gen.hift.upsample_factor
++        gen = torch.Generator(device=device).manual_seed(0)
++        with torch.no_grad():
++            for frames in (64, 96):
++                mel = torch.randn(1, n_mel, frames, device=device, dtype=dtype, generator=gen)
++                _, source = s3gen.vocode(mel, generator=gen)
++                s3gen.vocode(mel, generator=gen, cache_source=source[:, :, -cache:], fade_in=False)
++
+     def _graph_warmup_frames(self, prompt_frames: int) -> list[int]:
+         """Solve lengths (bucketed) the streaming chunks of the built-in voice
+         produce: prompt + 2 x (left context + chunk + look-ahead) for every
+diff --git a/mstar/model/chatterbox/config.py b/mstar/model/chatterbox/config.py
+index 1cf5ed2b3..cbae1e129 100644
+--- a/mstar/model/chatterbox/config.py
++++ b/mstar/model/chatterbox/config.py
+@@ -480,6 +480,10 @@ class ChatterboxConfig:
+     # two up to it. 16 rows solve about 1.5x more efficiently per row than 8
+     # under a graph, at the cost of a longer wait for the batch to form.
+     s3gen_max_batch_size: int = 8
++    # torch.compile (dynamic shapes) the HiFT vocoder up to its spectrum, so
++    # the chunks that run eagerly (an utterance's last chunk has a length of
++    # its own) launch fused kernels; compiled at startup.
++    s3gen_vocoder_compile: bool = False
+ 
+     @property
+     def sample_rate(self) -> int:

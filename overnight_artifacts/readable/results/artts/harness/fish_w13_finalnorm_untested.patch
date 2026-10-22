@@ -1,0 +1,114 @@
+diff --git a/mstar/model/fish_s2_pro/components/fast_ar.py b/mstar/model/fish_s2_pro/components/fast_ar.py
+index e7b04cdc4..30f633181 100644
+--- a/mstar/model/fish_s2_pro/components/fast_ar.py
++++ b/mstar/model/fish_s2_pro/components/fast_ar.py
+@@ -22,6 +22,7 @@ import torch
+ import torch.nn.functional as F
+ from torch import nn
+ 
++from mstar.model.components.norm import RMSNorm
+ from mstar.model.fish_s2_pro.components.dac import apply_rotary_emb, precompute_freqs_cis
+ from mstar.model.fish_s2_pro.config import FishFastARConfig
+ 
+@@ -80,8 +81,22 @@ class FastARFeedForward(nn.Module):
+         self.w1 = nn.Linear(cfg.dim, cfg.intermediate_size, bias=False)
+         self.w3 = nn.Linear(cfg.dim, cfg.intermediate_size, bias=False)
+         self.w2 = nn.Linear(cfg.intermediate_size, cfg.dim, bias=False)
++        # set by ``fuse_gate_up``; a buffer so ``Module.to`` moves it
++        self.register_buffer("w13", None, persistent=False)
++
++    def fuse_gate_up(self) -> None:
++        """Stack ``w1`` and ``w3`` into one ``[2 * intermediate, dim]`` GEMM
++        (after loading; the checkpoint names stay on ``w1`` / ``w3``)."""
++        with torch.no_grad():
++            self.w13 = torch.cat([self.w1.weight, self.w3.weight]).contiguous()
++        # the stacked copy replaces them; keep only an empty shell of each
++        self.w1.weight = nn.Parameter(self.w1.weight.new_empty(0), requires_grad=False)
++        self.w3.weight = nn.Parameter(self.w3.weight.new_empty(0), requires_grad=False)
+ 
+     def forward(self, x: torch.Tensor) -> torch.Tensor:
++        if self.w13 is not None:
++            gate, up = F.linear(x, self.w13).chunk(2, dim=-1)
++            return self.w2(F.silu(gate) * up)
+         return self.w2(F.silu(self.w1(x)) * self.w3(x))
+ 
+ 
+@@ -108,7 +123,11 @@ class FishFastAR(nn.Module):
+         self.codebook_embeddings = nn.Embedding(cfg.vocab_size * cfg.num_codebooks, cfg.text_dim)
+         self.embeddings = nn.Embedding(cfg.vocab_size, cfg.dim)
+         self.layers = nn.ModuleList(FastARBlock(cfg) for _ in range(cfg.n_layer))
+-        self.norm = nn.RMSNorm(cfg.dim, cfg.norm_eps)
++        # FlashInfer's norm, not Inductor's: compiled, Inductor fused the last
++        # block's residual adds into this norm as a reduction it autotuned to a
++        # single program for the whole batch (~120 us at 32-64 rows, ten times
++        # a frame, against ~3 us for the same op at the other layers).
++        self.norm = RMSNorm(cfg.dim, cfg.norm_eps)
+         self.output = nn.Linear(cfg.dim, cfg.vocab_size, bias=False)
+         self.register_buffer(
+             "freqs_cis",
+@@ -128,6 +147,12 @@ class FishFastAR(nn.Module):
+         self.freqs_cis = precompute_freqs_cis(cfg.num_codebooks, cfg.head_dim, cfg.rope_base).to(device)
+         self.codebook_offsets = torch.arange(cfg.num_codebooks, device=device) * cfg.vocab_size
+ 
++    def fuse_projections(self) -> None:
++        """One gate/up GEMM per layer instead of two: the depth loop is ten
++        positions of four layers per frame, all at decode batch sizes."""
++        for layer in self.layers:
++            layer.feed_forward.fuse_gate_up()
++
+     def kv_cache_shape(self, batch_size: int) -> tuple[int, ...]:
+         cfg = self.config
+         return (cfg.n_layer, batch_size, 2, cfg.num_codebooks, cfg.n_local_heads, cfg.head_dim)
+diff --git a/mstar/model/fish_s2_pro/fish_s2_pro_model.py b/mstar/model/fish_s2_pro/fish_s2_pro_model.py
+index 5a39657d2..3329025c3 100644
+--- a/mstar/model/fish_s2_pro/fish_s2_pro_model.py
++++ b/mstar/model/fish_s2_pro/fish_s2_pro_model.py
+@@ -583,6 +583,7 @@ class FishS2ProModel(Model):
+             iter_safetensors_shards(self.local_dir, device=device, prefix="audio_decoder."),
+         )
+         fast_ar.rematerialize_buffers()
++        fast_ar.fuse_projections()
+         return ARSubmodule(slow_ar.eval(), fast_ar.eval(), self.config)
+ 
+     def _codec_state(self) -> dict[str, torch.Tensor]:
+diff --git a/test/modular/test_fish_s2_pro_model.py b/test/modular/test_fish_s2_pro_model.py
+index b6ece9d05..a0a9bf289 100644
+--- a/test/modular/test_fish_s2_pro_model.py
++++ b/test/modular/test_fish_s2_pro_model.py
+@@ -706,3 +706,36 @@ def test_postprocess_emits_pcm16_bytes():
+     assert model.postprocess(torch.tensor([7, -3], dtype=torch.int16), "audio") == b"\x07\x00\xfd\xff"
+     with pytest.raises(ValueError, match="modality"):
+         model.postprocess(torch.zeros(1), "text")
++
++
++def test_fast_ar_step_with_deferred_residuals_and_fused_gate_up_matches_the_block_chain():
++    """``FishFastAR.step`` (residual adds deferred into the norms) and the
++    stacked gate/up GEMM compute what the plain block chain does."""
++    from mstar.model.fish_s2_pro.components.fast_ar import FishFastAR
++    from mstar.model.fish_s2_pro.config import FishFastARConfig
++
++    torch.manual_seed(0)
++    cfg = FishFastARConfig(
++        dim=64, text_dim=64, n_layer=2, n_head=4, n_local_heads=2, head_dim=16,
++        intermediate_size=96, vocab_size=32, num_codebooks=4,
++    )
++    fast_ar = FishFastAR(cfg).eval()
++    for param in fast_ar.parameters():
++        torch.nn.init.normal_(param, std=0.2)
++    x = torch.randn(3, 1, cfg.dim)
++
++    def chain(kv, pos):
++        freqs = fast_ar.freqs_cis[pos:pos + 1].unsqueeze(0)
++        h = x.clone()
++        for i, layer in enumerate(fast_ar.layers):
++            h = layer(h, freqs, kv[i], pos)
++        return fast_ar.norm(h)
++
++    with torch.no_grad():
++        kv = torch.zeros(fast_ar.kv_cache_shape(3))
++        expected = [chain(kv, pos) for pos in range(3)]
++        fast_ar.fuse_projections()
++        kv = torch.zeros(fast_ar.kv_cache_shape(3))
++        got = [fast_ar.step(x.clone(), kv, pos) for pos in range(3)]
++    for e, g in zip(expected, got, strict=True):
++        torch.testing.assert_close(g, e, atol=1e-5, rtol=1e-5)

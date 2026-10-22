@@ -1,0 +1,93 @@
+diff --git a/mstar/model/omnilingual_asr/components/wav2vec2.py b/mstar/model/omnilingual_asr/components/wav2vec2.py
+index 55033db80..4559b2c62 100644
+--- a/mstar/model/omnilingual_asr/components/wav2vec2.py
++++ b/mstar/model/omnilingual_asr/components/wav2vec2.py
+@@ -211,21 +211,32 @@ class Wav2Vec2CTC(nn.Module):
+ 
+         The lengths are host ints, so a padded batch is masked without reading
+         anything back from the device."""
+-        front = self.encoder_frontend
+-        x = front.feature_extractor(waveforms)
+-        n, t = x.shape[:2]
++        x = self.encoder_frontend.feature_extractor(waveforms)
++        frame_lens, frame_mask = self.frame_mask(x, seq_lens)
++        return self.encode(x, frame_mask), frame_lens
++
++    def frame_mask(
++        self, features: torch.Tensor, seq_lens: list[int] | None,
++    ) -> tuple[list[int], torch.Tensor | None]:
++        """Each row's valid frame count, and the ``(N, T)`` validity mask (None
++        when no row is padded), from the host lengths."""
++        n, t = features.shape[:2]
+         frame_lens = [t] * n if seq_lens is None else self.frame_lengths(seq_lens)
+-        frame_mask = None
+-        if any(f < t for f in frame_lens):
+-            lens = torch.tensor(frame_lens)
+-            if x.is_cuda:
+-                lens = lens.pin_memory()
+-            lens = lens.to(x.device, non_blocking=True)
+-            frame_mask = torch.arange(t, device=x.device)[None, :] < lens[:, None]
+-        x = front.model_dim_proj(front.post_extract_layer_norm(x))
++        if all(f == t for f in frame_lens):
++            return frame_lens, None
++        lens = torch.tensor(frame_lens)
++        if features.is_cuda:
++            lens = lens.pin_memory()
++        lens = lens.to(features.device, non_blocking=True)
++        return frame_lens, torch.arange(t, device=features.device)[None, :] < lens[:, None]
++
++    def encode(self, features: torch.Tensor, frame_mask: torch.Tensor | None) -> torch.Tensor:
++        """Feature-extractor output -> ``(N, T, vocab)`` logits; tensors only."""
++        front = self.encoder_frontend
++        x = front.model_dim_proj(front.post_extract_layer_norm(features))
+         x = front.pos_encoder(x, frame_mask)
+         # cuDNN attention builds a plan per new sequence length, and nearly
+         # every upload has its own length
+         with sdpa_kernel(_ATTENTION_BACKENDS):
+             x = self.encoder(x, None if frame_mask is None else attention_mask(frame_mask))
+-        return self.final_proj(x), frame_lens
++        return self.final_proj(x)
+diff --git a/mstar/model/omnilingual_asr/submodules.py b/mstar/model/omnilingual_asr/submodules.py
+index 99cb43f57..263593e7f 100644
+--- a/mstar/model/omnilingual_asr/submodules.py
++++ b/mstar/model/omnilingual_asr/submodules.py
+@@ -49,8 +49,11 @@ def _full_fp32_matmuls(enabled: bool):
+ 
+ 
+ class OmniASRCTCSubmodule(NodeSubmodule):
+-    # Every request has its own length, so a compiled forward would recompile
+-    # per shape; the encoder runs eagerly.
++    # Every request has its own length, and the engine's compile of
++    # `forward_batched` would recompile per shape and per batch composition.
++    # On an accelerator the tensor stages are compiled here instead, dynamic in
++    # batch and length from the first call (eager, the 300m encoder is a few
++    # hundred small launches a step).
+     disable_torch_compile = True
+     # The model runs in its own dtype end to end, as the reference does (only
+     # the conv stack's LayerNorms upcast to fp32), not under autocast.
+@@ -62,6 +65,11 @@ class OmniASRCTCSubmodule(NodeSubmodule):
+         self.dtype = next(model.parameters()).dtype
+         self._max_batch_size = max_batch_size
+         self._max_batch_samples = int(max_batch_seconds * SAMPLE_RATE)
++        self._compiled_features = torch.compile(model.encoder_frontend.feature_extractor, dynamic=True)
++        self._compiled_ids = torch.compile(self._encode_ids, dynamic=True)
++
++    def _encode_ids(self, features: torch.Tensor, frame_mask: torch.Tensor | None) -> torch.Tensor:
++        return self.model.encode(features, frame_mask).argmax(dim=-1)
+ 
+     def prepare_inputs(
+         self,
+@@ -116,8 +124,11 @@ class OmniASRCTCSubmodule(NodeSubmodule):
+                 batch[i, : lengths[row]] = waveforms[row]
+             padded = any(n < longest for n in group_lens)
+             with _full_fp32_matmuls(self.dtype == torch.float32 and batch.is_cuda):
+-                logits, frame_lens = self.model(batch, group_lens if padded else None)
+-            ids = logits.argmax(dim=-1)
++                compiled = batch.device.type != "cpu"
++                extract = self._compiled_features if compiled else self.model.encoder_frontend.feature_extractor
++                features = extract(batch)
++                frame_lens, frame_mask = self.model.frame_mask(features, group_lens if padded else None)
++                ids = (self._compiled_ids if compiled else self._encode_ids)(features, frame_mask)
+             for i, (row, n) in enumerate(zip(group, frame_lens, strict=True)):
+                 out[row] = ids[i, :n]
+         return out

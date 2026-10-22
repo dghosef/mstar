@@ -1,0 +1,98 @@
+diff --git a/mstar/model/chatterbox/components/s3gen.py b/mstar/model/chatterbox/components/s3gen.py
+index ce132097c..319506ef4 100644
+--- a/mstar/model/chatterbox/components/s3gen.py
++++ b/mstar/model/chatterbox/components/s3gen.py
+@@ -263,13 +263,19 @@ class S3Gen(nn.Module):
+             torch.cat([ref.prompt_tokens[0], row.tokens.to(self.device, torch.long).reshape(-1)])
+             for ref, row in zip(refs, rows, strict=True)
+         ]
+-        full_lens = torch.tensor([f.numel() for f in full], dtype=torch.long, device=self.device)
++        token_counts = [f.numel() for f in full]
++        full_lens = torch.tensor(token_counts, dtype=torch.long, device=self.device)
+         tokens = torch.nn.utils.rnn.pad_sequence(full, batch_first=True)
+ 
+         spk = self.flow_encoder.project_speaker(torch.cat([ref.embedding for ref in refs], dim=0))
+-        mu, h_masks = self._run_encoder(tokens, full_lens)
+-        cuts = torch.tensor([0 if row.finalize else lookahead for row in rows], device=self.device)
+-        h_lens = (h_masks.sum(dim=-1).squeeze(-1) - cuts).clamp_min(0)
++        mu, _ = self._run_encoder(tokens, full_lens)
++        # The encoder's valid frames are `ratio` per token, so the lengths are
++        # known on the host; reading them off its mask would wait for the encoder.
++        valid_frames = [
++            max(n * ratio - (0 if row.finalize else lookahead), 0)
++            for n, row in zip(token_counts, rows, strict=True)
++        ]
++        h_lens = torch.tensor(valid_frames, dtype=torch.long, device=self.device)
+         total = mu.shape[-1]
+         if frame_bucket > 0 and total % frame_bucket:
+             padded = -(-total // frame_bucket) * frame_bucket
+@@ -280,7 +286,7 @@ class S3Gen(nn.Module):
+         noise = torch.zeros_like(cond)
+         for i, (ref, row) in enumerate(zip(refs, rows, strict=True)):
+             mel_prompt = ref.num_prompt_tokens * ratio
+-            valid = int(h_lens[i])
++            valid = valid_frames[i]
+             cond[i, :, :mel_prompt] = ref.prompt_feat[0].transpose(0, 1)
+             if row.noise is not None:
+                 noise[i, :, :valid] = row.noise[0, :, :valid].to(noise.dtype)
+@@ -289,7 +295,7 @@ class S3Gen(nn.Module):
+         mask = lengths_to_mask(h_lens, total).unsqueeze(1).to(mu.dtype)
+         mel = self._run_solve(mu, mask, spk, cond, noise, n_timesteps)
+         return [
+-            mel[i : i + 1, :, ref.num_prompt_tokens * ratio : int(h_lens[i])]
++            mel[i : i + 1, :, ref.num_prompt_tokens * ratio : valid_frames[i]]
+             for i, ref in enumerate(refs)
+         ]
+ 
+diff --git a/mstar/model/chatterbox/components/s3gen_hift.py b/mstar/model/chatterbox/components/s3gen_hift.py
+index 6ee463cc3..103e80ffd 100644
+--- a/mstar/model/chatterbox/components/s3gen_hift.py
++++ b/mstar/model/chatterbox/components/s3gen_hift.py
+@@ -27,6 +27,23 @@ from torch import nn
+ from mstar.model.chatterbox.config import S3GenHiFTConfig
+ 
+ 
++def overlap_add_istft(spec: torch.Tensor, n_fft: int, hop: int, window: torch.Tensor) -> torch.Tensor:
++    """``torch.istft(spec, n_fft, hop, n_fft, window=window)`` (centered,
++    one-sided), minus its check that the window envelope is nonzero: that
++    check reads a device value on the host, which stalls the CPU until the
++    vocoder has run. The periodic Hann window at a quarter-frame hop never
++    trips it. ``spec``: ``[B, n_fft // 2 + 1, frames]`` -> ``[B, hop * (frames - 1)]``.
++    """
++    frames = torch.fft.irfft(spec, n=n_fft, dim=1) * window.view(1, -1, 1)
++    num_frames = frames.shape[-1]
++    length = n_fft + hop * (num_frames - 1)
++    fold = dict(output_size=(1, length), kernel_size=(1, n_fft), stride=(1, hop))
++    signal = F.fold(frames, **fold).view(frames.shape[0], length)
++    envelope = F.fold(window.square().view(1, -1, 1).expand(1, -1, num_frames), **fold).view(1, length)
++    half = n_fft // 2
++    return signal[:, half : length - half] / envelope[:, half : length - half]
++
++
+ def _get_padding(kernel_size: int, dilation: int = 1) -> int:
+     return int((kernel_size * dilation - dilation) / 2)
+ 
+@@ -222,9 +239,8 @@ class HiFTGenerator(nn.Module):
+         magnitude = torch.clip(magnitude, max=1e2)
+         real = magnitude * torch.cos(phase)
+         imag = magnitude * torch.sin(phase)
+-        return torch.istft(
+-            torch.complex(real, imag), self.config.istft_n_fft, self.config.istft_hop_len, self.config.istft_n_fft,
+-            window=self.stft_window,
++        return overlap_add_istft(
++            torch.complex(real, imag), self.config.istft_n_fft, self.config.istft_hop_len, self.stft_window,
+         )
+ 
+     def decode(self, mel: torch.Tensor, source: torch.Tensor) -> torch.Tensor:
+@@ -233,9 +249,8 @@ class HiFTGenerator(nn.Module):
+ 
+     def waveform(self, magnitude: torch.Tensor, phase: torch.Tensor) -> torch.Tensor:
+         """Output spectrum -> waveform: the inverse STFT and the clamp. Kept out
+-        of the vocoder's CUDA graph because ``torch.istft`` synchronises on its
+-        window-overlap check, which a capture forbids; it is a handful of
+-        16-point frames, so it costs next to nothing eagerly."""
++        of the vocoder's CUDA graph, which captures per exact chunk length; it
++        is a handful of 16-point frames, so it costs next to nothing eagerly."""
+         x = self._istft(magnitude, phase)
+         return torch.clamp(x, -self.config.audio_limit, self.config.audio_limit)
+ 
