@@ -76,7 +76,6 @@ from mstar.model.submodule_base import (
     device_loopback_enabled,
 )
 from mstar.utils.device import DeviceCapability
-from mstar.utils.knobs import ingraph_decode_rope
 from mstar.utils.profiler import PHASE_PERIOD, phase_record
 
 logger = logging.getLogger(__name__)
@@ -475,7 +474,7 @@ class LLMSubmodule(ARNodeSubmodule):
             out["input_ids"] = ids
             if PHASE_PERIOD:
                 phase_record("engine.preprocess.loopback", perf_counter() - t0)
-            if captured and ingraph_decode_rope():
+            if captured:
                 # the captured forward builds the rotary tables itself
                 return out
         elif inputs[0].input_ids is not None:
@@ -577,9 +576,10 @@ class LLMSubmodule(ARNodeSubmodule):
         captured = self._captured_decode(engine_inputs, graph_walk)
         if input_ids is None and input_embeds is None:
             input_ids = sampler.loopback_tokens(engine_inputs.request_ids)
-        if (captured and ingraph_decode_rope()) or cos_3d is None or sin_3d is None:
-            # MSTAR_INGRAPH_DECODE_ROPE: the tables come from the planned
-            # positions, inside the graph; the static cos/sin stay unread
+        if captured or cos_3d is None or sin_3d is None:
+            # A captured decode builds its tables from the planned positions,
+            # inside the graph, off the per-step critical path; the static
+            # cos/sin stay unread
             num_tokens = (input_ids if input_ids is not None else input_embeds).shape[0]
             cos_3d, sin_3d = self._decode_cos_sin(engine_inputs, num_tokens)
 

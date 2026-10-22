@@ -296,6 +296,12 @@ not the 256-slot default. The state defaults to the checkpoint's
 ``gdn_state.state_dtype: bfloat16`` halves state traffic at some precision and
 needs FlashInfer's fused bf16 decode kernel (K = V = 128).
 
+A captured decode step builds its rotary tables inside the graph from the
+planned positions, rather than staging tables built eagerly before the replay
+(that build sat on the per-step critical path: +13% output tok/s at c=32 on
+0.8B, H200). Greedy output can differ from earlier releases at near-tie
+tokens; prefill and eager steps are unchanged.
+
 ``temperature``, ``top_p``, ``max_tokens`` and ``seed`` are the standard fields.
 ``repetition_penalty`` and ``enable_thinking`` (default true; the template opens
 a ``<think>`` block) are read by the model but are not OpenAI fields — pass them
