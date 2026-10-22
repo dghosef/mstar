@@ -3284,9 +3284,11 @@ class Worker:
             range_pop(synchronize=False)
             range_push("worker.postprocess.register_outputs", synchronize=False)
         self._register_outputs(route_output)
-        # The step's sends have read the host copies; an output held for a
-        # later send (a loop's accumulated outputs) must not, since the pinned
-        # buffers behind them are this step's and the next one rewrites them.
+        # Registration, just above, is the last reader of the step's host
+        # copies (the sends below run after it); an output held for a later
+        # send (a loop's accumulated outputs) must not read them, since the
+        # pinned buffers behind them are this step's and the next one
+        # rewrites them.
         self.tensor_manager.release_host_copies(stored.flat_uuids)
         _pp_stage("register_outputs")
 

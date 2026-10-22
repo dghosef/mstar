@@ -1419,7 +1419,12 @@ def _run_warmup_requests(server: APIServer, specs: list, copies: int = 1) -> Non
     async def _all(request: WarmupRequest, index: int) -> None:
         n = copies * request.concurrency
         ids = [f"warmup-{index}"] + [f"warmup-{index}-{c}" for c in range(1, n)]
-        await asyncio.gather(*(_one(request, rid) for rid in ids))
+        # every copy runs to its end before a failure is reported, so none is
+        # cancelled mid-request and still in the server when the next spec starts
+        results = await asyncio.gather(*(_one(request, rid) for rid in ids), return_exceptions=True)
+        errors = [r for r in results if isinstance(r, BaseException)]
+        if errors:
+            raise errors[0]
 
     for index, spec in enumerate(specs):
         try:

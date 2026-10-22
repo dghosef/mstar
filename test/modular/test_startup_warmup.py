@@ -174,3 +174,23 @@ def test_concurrency_runs_copies_together_for_batched_shapes() -> None:
     fake = _FakeServer()
     entrypoint._run_warmup_requests(fake, [{"text": "a", "concurrency": 0}, {"text": "b", "concurrency": True}])
     assert fake.submitted == []
+
+
+def test_a_failing_copy_lets_its_siblings_finish(caplog) -> None:
+    """One copy failing early is reported after the others end, rather than
+    cancelling them mid-request."""
+    import asyncio
+
+    class _SlowServer(_FakeServer):
+        async def collect_results(self, request_id, raw_request=None):
+            if request_id == "warmup-0":
+                raise RuntimeError("compile blew up")
+            await asyncio.sleep(0.01)
+            self.collected.append(request_id)
+            return []
+
+    fake = _SlowServer()
+    with caplog.at_level(logging.WARNING):
+        entrypoint._run_warmup_requests(fake, [{"text": "a", "concurrency": 3}])
+    assert sorted(fake.collected) == ["warmup-0-1", "warmup-0-2"]
+    assert "warmup request 1/1 failed" in caplog.text
