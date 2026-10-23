@@ -50,6 +50,8 @@ Full methodology and caveats will be in REPORT.md when the run finishes.
 | Omnilingual ASR 1B, RTFx (2 rounds) | +74% off | | | | +62% off | | +48% off | |
 | Omnilingual ASR 3B, RTFx (2 rounds) | +112% off | | | | +35% off | | +24% off | |
 | Omnilingual ASR 7B, RTFx (2 rounds) | +91% off | | | | +19% off | | +9% off | |
+| BAGEL t2i 1024², img/s (2 rounds) | +27% vo | +24% vo | +24% vo | | | | | |
+| BAGEL edit, img/s (2 rounds) | +20% vo | | +14% vo | | | | | |
 | Kokoro 82M, audio-s/s (3 rounds) | +282% kf | +178% kf | +131% kf | +200% kf | +299% kf | +364% kf | +472% kf | |
 | FLUX.2-klein 4B, img/s (3 rounds) | −23% s | −9% s | −7% s | −7% s | −6% s | | | |
 
@@ -112,6 +114,15 @@ The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show 
   - **M* leads by 2.6–3× over chatterbox-vllm and 5–10× over the TTS server.** mstar-pr does 11.0 → 34.2 audio-s/s; chatterbox-vllm does 3.6 → 13.5.
   - **This PR vs main:** +3–10%.
   - The PR's split+MPS config, its +58% headline, isn't benchmarked here: the harness has no MPS handling.
+- **BAGEL-7B-MoT (1 GPU): done** (2 rounds, failed=0, sanity gate passed).
+  - Competitors: vllm-omni 0.30 (t2i and edit, every CFG field sent explicitly) and vLLM 0.30 core (understanding only).
+  - **Text→image 1024², 50 steps:** mstar-pr 0.102 img/s and 9.8 s at B=1, vs vllm-omni 0.080–0.082 and 12.5 s. That is **+24–27%**.
+  - **Edit:** +14–20% vs vllm-omni.
+  - **Understanding:** +27% at c=1 vs vLLM, and 2–6× at c=4–16. The large high-c margin suggests vLLM's BAGEL understanding path doesn't batch well; not investigated.
+  - **This PR vs main:**
+    - text→image +64–65%. The overnight claim was +60% at c=4.
+    - edit +0–2%.
+    - understanding −17.5% at c=1 (a regression to look at), +7–23% at c=4–16.
 - **Omnilingual ASR 300M / 1B / 3B / 7B (1 GPU): done** (2 rounds, failed=0). Same WER as the official pipeline (3B: 2.50% vs 2.54%).
   - Competitor: the official omnilingual-asr 0.2.0 `ASRInferencePipeline`, as an offline batch with no HTTP cost. No serving engine runs these CTC models.
   - **M* leads at every point**, by +26–112% at c=1 and +8–48% at c=64 (RTFx: 300M 298 → 1,754; 1B 268 → 1,789; 3B 242 → 1,005; 7B 190 → 535, +9% at c=64).
@@ -150,7 +161,7 @@ The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show 
   - **SGLang diffusion wins:** 1.26–1.27 img/s and 0.78 s at B=1, against mstar-pr's 1.14–1.21 img/s and 0.85 s (−5 to −9%).
   - **vs the other competitors:** mstar-pr beats vllm-omni by 4–10% and tuned diffusers (regional compile) by 2–16%.
   - **This PR vs main:** +2–13%, with the largest gains at c=4–8, matching the overnight claim.
-  - **Why M* trails SGLang:** the profile is GPU-bound (event_sync ~93 ms of a ~94 ms step), so the gap is kernel time, not CPU. SGLang runs FlashAttention in its speed mode.
+  - **Why M* trails SGLang:** each denoising step is GPU-bound (event_sync ~93 ms of a ~94 ms step). But a later cross-model profile pass measured ~85 ms per request *outside* the worker at c=1 (API-side encode/transfer and conductor hops are the suspects, not yet confirmed). That is about the whole c=1 gap, so the gap is mostly not kernel time.
 - **Wan2.2 (1280×704×81, 1 GPU): done.** 3 rounds, failed=0, run-to-run spread under 0.2%.
   - **Throughput, 20 steps:** mstar-pr 2.67–2.73 videos/min. That's level with vllm-omni (+1%) and ahead of SGLang (+10–12%) and diffusers (+11–14%). B=1 at 20 steps is 22.4 s vs vllm-omni 22.7 s.
   - **50 steps at B=1:** 51.8 s, against vllm-omni 51.7 s and SGLang 52.4 s.
@@ -160,7 +171,7 @@ The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show 
   - **SGLang diffusion wins:** 3.52–3.64 img/s and 0.27 s at B=1, against mstar-pr's 2.72–3.42 img/s and 0.34 s. M* is −23% at c=1 and −6 to −9% at c≥2.
   - **vs the other competitors:** mstar-pr beats vllm-omni by 25–30%. It is level with tuned offline diffusers at c≥2 (diffusers has no HTTP cost) and −16% at c=1.
   - **This PR vs main:** +2–6%.
-  - **Profile:** mostly GPU-bound (event_sync ~56 ms of a ~61 ms step), plus ~3.7 ms per-request admit at c=1. The c=1 gap is kernel time plus request overhead.
+  - **Profile:** each step is mostly GPU-bound (event_sync ~56 ms of a ~61 ms step). The cross-model pass measured ~80 ms per request outside the worker at c=1, about the whole c=1 gap; suspects are API-side encode/transfer and conductor hops, not yet confirmed.
 - **Frontend:** these M* numbers use the Python API frontend. The worker already uses the Rust graph runtime and transport.
   - On 0.8B the Rust frontend passed the gate but measured **+2.4% geomean** (−12% at c=1, +21% at c=128). That is under the +3% rule fixed before the run, so 0.8B stays on Python.
   - The +21% at c=128 suggests the Rust frontend would narrow the high-concurrency gap.

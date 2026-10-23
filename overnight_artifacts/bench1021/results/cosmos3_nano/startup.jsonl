@@ -8,3 +8,14 @@
 {"label": "tune_speed_resident_sglang_speed_resident_r0", "arm": "sglang", "seconds": 39.3, "ok": true, "time": 1792736382.3336506}
 {"label": "tune_speed_resident_compile_sglang_speed_resident_compile_r0", "arm": "sglang", "seconds": 45.2, "ok": true, "time": 1792737357.3110561}
 {"label": "tune_base_vllmomni_base_r0", "arm": "vllmomni", "seconds": 27.2, "ok": true, "time": 1792738319.0275793}
+{"label": "collect_mstar_pr_mstar-pr_config_r0", "arm": "mstar-pr", "seconds": 96.4, "ok": true, "time": 1792739344.8784964}
+{"label": "collect_mstar_pr_b_mstar-pr_config_r0", "arm": "mstar-pr", "seconds": 36.2, "ok": true, "time": 1792739709.3016884}
+{"label": "collect_mstar_main_mstar-main_config_r0", "arm": "mstar-main", "seconds": 99.4, "ok": true, "time": 1792740137.1466193}
+{"label": "main_mstar-pr_config_r1", "arm": "mstar-pr", "seconds": 99.4, "ok": true, "time": 1792740598.2369287}
+{"label": "main_mstar-main_config_r1", "arm": "mstar-main", "seconds": 99.4, "ok": true, "time": 1792742216.1964705}
+{"label": "main_sglang_speed_resident_r1", "arm": "sglang", "seconds": 39.2, "ok": true, "time": 1792743798.8934271}
+{"label": "main_vllmomni_base_r1", "arm": "vllmomni", "seconds": 27.2, "ok": true, "time": 1792745134.7257483}
+{"label": "main_mstar-main_config_r2", "arm": "mstar-main", "seconds": 36.2, "ok": true, "time": 1792746480.5032423}
+{"label": "main_sglang_speed_resident_r2", "arm": "sglang", "seconds": 39.2, "ok": true, "time": 1792748061.6224725}
+{"label": "main_vllmomni_base_r2", "arm": "vllmomni", "seconds": 27.2, "ok": true, "time": 1792749395.6839933}
+{"label": "main_mstar-pr_config_r2", "arm": "mstar-pr", "seconds": 99.4, "ok": true, "time": 1792750804.124505}

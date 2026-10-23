@@ -72,3 +72,6 @@
 {"t": "2026-10-23T05:40:44Z", "model": "q35_2b", "decision": "gate mstar_main_a", "choice": "PASS", "gsm8k": 0.748}
 {"t": "2026-10-23T05:40:44Z", "model": "q35_2b", "decision": "frontend", "choice": "rust", "python_geomean": 3935.1343209751712, "rust_geomean": 4225.882701071254, "rust_gate": "PASS"}
 {"time": "2026-10-23 06:19:02", "model": "cosmos3_nano", "kind": "gen_arms", "arms": ["mstar-pr", "mstar-main", "sglang", "vllmomni"], "dropped": {}}
+{"time": "2026-10-23 07:28:18", "model": "cosmos3_nano", "kind": "gate", "verdicts": {"mstar_pr": "PASS", "mstar_main": "PASS", "mstar_pr_b": "PASS", "sglang__speed_resident": "PASS", "sglang__speed_resident_compile": "PASS", "vllmomni__base": "PASS"}}
+{"time": "2026-10-23 07:28:18", "model": "cosmos3_nano", "kind": "tuned_config", "engine": "sglang", "config": "speed_resident", "gate_pass": true, "candidates": [[3.48177098072422, "speed_resident"], [3.4678656986671026, "speed_resident_compile"]], "rule": "best tune score among gate-passing knob sets"}
+{"time": "2026-10-23 07:28:18", "model": "cosmos3_nano", "kind": "tuned_config", "engine": "vllmomni", "config": "base", "gate_pass": true, "candidates": [[3.4611082327200067, "base"]], "rule": "best tune score among gate-passing knob sets"}

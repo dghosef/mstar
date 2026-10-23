@@ -1,0 +1,21 @@
+{
+ "vllmomni": {
+  "config": "single_step4",
+  "score": 0.06625864389390819,
+  "gate_pass": true,
+  "candidates": [
+   [
+    0.06625864389390819,
+    "single_step4"
+   ],
+   [
+    0.06617385902604428,
+    "single"
+   ],
+   [
+    0.061485252621870094,
+    "two_stage"
+   ]
+  ]
+ }
+}
