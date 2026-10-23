@@ -1,0 +1,32 @@
+{
+ "vllmomni": {
+  "config": "high_conc",
+  "score": 44.16114426578509,
+  "gate_pass": true,
+  "candidates": [
+   [
+    44.16114426578509,
+    "high_conc"
+   ],
+   [
+    42.02122449435926,
+    "default"
+   ]
+  ]
+ },
+ "sgomni": {
+  "config": "base",
+  "score": 71.0694765201479,
+  "gate_pass": true,
+  "candidates": [
+   [
+    71.0694765201479,
+    "base"
+   ],
+   [
+    70.69264508875642,
+    "mrr128"
+   ]
+  ]
+ }
+}

@@ -39,6 +39,7 @@ Full methodology and caveats will be in REPORT.md when the run finishes.
 | Fish S2-Pro, audio-s/s (3 rounds; SGLang-Omni 2 at c≥16) | +25% s | +28% s | +26% s | +19% s | +34% s | +40% s | +77% s | |
 | Qwen3-Omni text→text, tok/s (3 rounds) | −12% s | | −11% s | | −15% s | −15% s | | |
 | Qwen3-Omni text→speech, audio-s/s (3 rounds) | +33% s | | +3% s | | +9% s | +11% s | | |
+| Qwen3-Omni audio→text (ASR), tok/s (3 rounds) | −33% s | | −46% s | | −52% s | −47% s | | |
 | FLUX.2-klein 4B, img/s (3 rounds) | −23% s | −9% s | −7% s | −7% s | −6% s | | | |
 
 The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show it, with TTFT p99 ~2.5 s.
@@ -85,7 +86,12 @@ The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show 
     - SGLang-Omni does 15.3 → 200, TTFA 104–230 ms; vllm-omni does 11.6 → 108.
     - That puts M* +33% at c=1 and +3–11% at c≥4.
   - **This PR vs main:** text +5–14%; speech +27–31%, with TTFA cut 2.3–2.4× (e.g. 506 → 210 ms at c=32). The overnight claim was +23–26% speech.
-  - **Speech recognition (audio→text) is being re-run.** Without a system message, M* falls back to Qwen3-Omni's voice persona and answered spoken questions instead of transcribing them (WER 14.5% vs SGLang-Omni's 1.1%, and much longer outputs). Every engine now gets the same explicit system message.
+  - **Speech recognition (audio→text): SGLang-Omni wins by about 2×.** Re-run with every engine getting the same explicit system message; mean output length is now ~28 tokens on all arms.
+    - SGLang-Omni does 181 → 1,252 tok/s from c=1 to c=32, with TTFT p50 36–71 ms. mstar-pr does 122 → 664 tok/s, TTFT 95–355 ms: −33% to −52%.
+    - WER on LibriSpeech test-clean, c=32 cells, 3 rounds: mstar-pr 5.3–6.8%, SGLang-Omni 4.4–5.3%.
+    - The first-pass run, with no system message, had M* falling back to Qwen3-Omni's voice persona and answering spoken questions (WER 14.5%). That run is discarded.
+    - vllm-omni doesn't serve this workload.
+    - **This PR vs main:** +26–79%.
 - **Fish S2-Pro (1 GPU): done.** 3 rounds; SGLang-Omni has 2 rounds at c≥16, one being lost to a runaway clip. The sanity gate passed on every arm (Whisper WER 1.1–1.6%).
   - **M* leads at every concurrency:** mstar-pr does 6.5 → 88.6 audio-s/s from c=1 to c=64, with TTFA p50 58–237 ms.
   - **SGLang-Omni:** 5.2 → 50.0 audio-s/s with TTFA 0.47–2.5 s, so M* is +19–40% at c≤32 and +77% at c=64, with TTFA 4–10× lower.

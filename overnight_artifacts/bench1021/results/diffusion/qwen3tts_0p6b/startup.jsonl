@@ -8,3 +8,11 @@
 {"label": "collect_mstar_pr_mstar-pr_python_r0", "arm": "mstar-pr", "seconds": 87.3, "ok": true, "time": 1792716605.9071712}
 {"label": "collect_mstar_pr_b_mstar-pr_python_r0", "arm": "mstar-pr", "seconds": 84.3, "ok": true, "time": 1792716766.142424}
 {"label": "collect_mstar_main_mstar-main_python_r0", "arm": "mstar-main", "seconds": 243.7, "ok": true, "time": 1792717085.7072933}
+{"label": "main_mstar-pr_python_r1", "arm": "mstar-pr", "seconds": 192.6, "ok": true, "time": 1792717410.8272557}
+{"label": "main_mstar-main_python_r1", "arm": "mstar-main", "seconds": 177.6, "ok": true, "time": 1792717651.5114548}
+{"label": "main_vllmomni_high_conc_r1", "arm": "vllmomni", "seconds": 81.3, "ok": true, "time": 1792717801.9509537}
+{"label": "main_sgomni_base_r1", "arm": "sgomni", "seconds": 87.3, "ok": true, "time": 1792717956.644875}
+{"label": "main_mstar-main_python_r2", "arm": "mstar-main", "seconds": 72.3, "ok": true, "time": 1792718067.7217925}
+{"label": "main_vllmomni_high_conc_r2", "arm": "vllmomni", "seconds": 84.3, "ok": true, "time": 1792718220.995441}
+{"label": "main_sgomni_base_r2", "arm": "sgomni", "seconds": 87.3, "ok": true, "time": 1792718376.7524672}
+{"label": "main_mstar-pr_python_r2", "arm": "mstar-pr", "seconds": 192.6, "ok": true, "time": 1792718607.6495454}
