@@ -1,0 +1,3 @@
+mstar_pr_a: PASS  image parity PASS; video parity PASS; MMMU 0.265 (floor 0.2 = min(vLLM, SGLang) - 0.05)
+mstar_pr_rf_a: PASS  image parity PASS; video parity PASS; MMMU 0.265 (floor 0.2 = min(vLLM, SGLang) - 0.05)
+mstar_main_a: PASS  image parity PASS; video parity PASS; MMMU 0.26 (floor 0.2 = min(vLLM, SGLang) - 0.05)

@@ -1,0 +1,7 @@
+q35_0.8b: Qwen/Qwen3.5-0.8B on GPUs 0
+arms: mstar-main, vllm, sglang, mstar-pr
+competitor configs: vllm=lm-only ['--language-model-only'], sglang=attn-fa3 ['--attention-backend', 'fa3']
+M* frontend: python (python 4937 vs rust 5054 geomean tok/s; rust gate PASS; rule: rust if its gate passes and > +3%)
+gate: mstar_pr_a PASS, mstar_pr_rf_a PASS, mstar_main_a PASS, vllm_mtp PASS, sglang_mtp PASS
+GSM8K: mstar_main_a 0.536, mstar_pr_a 0.508, mstar_pr_rf_a 0.540, sglang_a 0.520, sglang_mtp 0.524, vllm_a 0.532, vllm_mtp 0.516
+decisions logged: 6 (decisions.jsonl)

@@ -1,0 +1,33 @@
+notes for klein4b (2026-10-22 09:54 UTC)
+
+server startup seconds per arm (all starts, incl. cold compiles): vllmomni: min 18 median 35 max 72 n=8; sglang: min 33 median 33 max 126 n=9; mstar-pr: min 54 median 57 max 788 n=7; mstar-main: min 96 median 110 max 334 n=4
+
+health (per server log):
+  main_mstar-main_config_r1: {"failed_capture": 0, "graph_runtime_rust": true, "recompile_lines": 0, "errors": 0}
+  main_mstar-main_config_r2: {"failed_capture": 0, "graph_runtime_rust": true, "recompile_lines": 0, "errors": 0}
+  main_mstar-main_config_r3: {"failed_capture": 0, "graph_runtime_rust": true, "recompile_lines": 0, "errors": 0}
+  main_mstar-pr_config_r1: {"failed_capture": 0, "graph_runtime_rust": true, "recompile_lines": 0, "errors": 0}
+  main_mstar-pr_config_r2: {"failed_capture": 0, "graph_runtime_rust": true, "recompile_lines": 0, "errors": 0}
+  main_mstar-pr_config_r3: {"failed_capture": 0, "graph_runtime_rust": true, "recompile_lines": 0, "errors": 0}
+  main_sglang_base_r1: {"attention": ["fa"], "speed_mode_msgs": ["performance_mode=speed keeps torch.compile disabled for this model (pass --enable-t"], "offload_msgs": [], "errors": 0}
+  main_sglang_base_r2: {"attention": ["fa"], "speed_mode_msgs": ["performance_mode=speed keeps torch.compile disabled for this model (pass --enable-t"], "offload_msgs": [], "errors": 0}
+  main_sglang_base_r3: {"attention": ["fa"], "speed_mode_msgs": ["performance_mode=speed keeps torch.compile disabled for this model (pass --enable-t"], "offload_msgs": [], "errors": 0}
+  main_vllmomni_full_r1: {"attention": ["FLASH_ATTN"], "regional_compile": false, "enforce_eager": false, "errors": 0}
+  main_vllmomni_full_r2: {"attention": ["FLASH_ATTN"], "regional_compile": false, "enforce_eager": false, "errors": 0}
+  main_vllmomni_full_r3: {"attention": ["FLASH_ATTN"], "regional_compile": false, "enforce_eager": false, "errors": 0}
+  tune_base_sglang_base_r0: {"attention": ["fa"], "speed_mode_msgs": ["performance_mode=speed keeps torch.compile disabled for this model (pass --enable-t"], "offload_msgs": [], "errors": 0}
+  tune_base_vllmomni_base_r0: {"attention": ["FLASH_ATTN"], "regional_compile": true, "enforce_eager": false, "errors": 0}
+  tune_bcg_b8_sglang_bcg_b8_r0: {"attention": ["fa"], "speed_mode_msgs": ["performance_mode=speed keeps torch.compile disabled for this model (pass --enable-t"], "offload_msgs": [], "errors": 0}
+  tune_bcg_sglang_bcg_r0: {"attention": ["fa"], "speed_mode_msgs": ["performance_mode=speed keeps torch.compile disabled for this model (pass --enable-t"], "offload_msgs": [], "errors": 0}
+  tune_compile_b8_sglang_compile_b8_r0: {"attention": ["fa"], "speed_mode_msgs": [], "offload_msgs": ["[10-22 08:36:57] Configuring layerwise offload for Flux2Transformer2DModel: transforme"], "errors": 0}
+  tune_compile_sglang_compile_r0: {"attention": ["fa"], "speed_mode_msgs": [], "offload_msgs": ["[10-22 08:31:54] Configuring layerwise offload for Flux2Transformer2DModel: transforme"], "errors": 0}
+  tune_cudnn_vllmomni_cudnn_r0: {"attention": ["CUDNN_ATTN"], "regional_compile": true, "enforce_eager": false, "errors": 0}
+  tune_eager_vllmomni_eager_r0: {"attention": ["FLASH_ATTN"], "regional_compile": false, "enforce_eager": false, "errors": 0}
+  tune_full_vllmomni_full_r0: {"attention": ["FLASH_ATTN"], "regional_compile": false, "enforce_eager": false, "errors": 0}
+
+decisions:
+  2026-10-22 08:59:55 tuned_config: {"engine": "diffusers", "config": "regional_dyn_fa3_vae", "candidates": [[3.2746882737484446, "regional_dyn_fa3_vae"], [2.8678508730668173, "regional_dyn_fa3"], [2.855378905614308, "full_dyn_fa3"], [2.8295285130558128, "full_dyn"], [2.8142014247566354, "regional_dyn"], [2.8105409335104814, "regional
+  2026-10-22 09:08:30 gate: {"verdicts": {"mstar_pr": "PASS", "mstar_pr_b": "PASS", "mstar_main": "PASS", "sglang__base": "PASS", "sglang__bcg": "PASS", "sglang__bcg_b8": "PASS", "sglang__compile": "PASS", "sglang__compile_b8": "PASS", "vllmomni__base": "PASS", "vllmomni__cudnn": "PASS", "vllmomni__eager": "PASS", "vllmomni__f
+  2026-10-22 09:08:31 tuned_config: {"engine": "vllmomni", "config": "full", "gate_pass": true, "candidates": [[2.366205198350116, "full", "PASS"], [2.3226184271418227, "base", "PASS"], [2.3206887244172965, "cudnn", "PASS"], [2.172302633085855, "eager", "PASS"]], "rule": "best tune score among gate-passing knob sets"}
+  2026-10-22 09:08:31 tuned_config: {"engine": "sglang", "config": "base", "gate_pass": true, "candidates": [[3.572452741266595, "base", "PASS"], [3.5601921589450716, "bcg", "PASS"], [3.503856708352505, "compile", "PASS"], [3.3890299185256696, "compile_b8", "PASS"], [3.3681961143541135, "bcg_b8", "PASS"]], "rule": "best tune score amo
+  2026-10-22 09:53:08 profile_points: {"points": [1], "ratios": {"1": 0.7720494871228353, "2": 0.9059189974497223, "4": 0.9318920039904629, "8": 0.9325824030462496, "16": 0.9427527559748942}, "rule": "point where mstar-pr / best competitor is lowest, plus c=1 if mstar-pr trails there"}

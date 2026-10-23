@@ -1,0 +1,13 @@
+index, name, driver_version, memory.total [MiB]
+0, NVIDIA H200, 580.178.04, 143771 MiB
+1, NVIDIA H200, 580.178.04, 143771 MiB
+2, NVIDIA H200, 580.178.04, 143771 MiB
+3, NVIDIA H200, 580.178.04, 143771 MiB
+4, NVIDIA H200, 580.178.04, 143771 MiB
+5, NVIDIA H200, 580.178.04, 143771 MiB
+6, NVIDIA H200, 580.178.04, 143771 MiB
+7, NVIDIA H200, 580.178.04, 143771 MiB
+Build cuda_12.9.r12.9/compiler.36037853_0
+CPU(s):                                  192
+Model name:                              Intel(R) Xeon(R) Platinum 8488C
+NUMA node(s):                            2

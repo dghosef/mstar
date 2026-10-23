@@ -1,0 +1,7 @@
+{"label": "correct_vllm_a", "arm": "vllm", "packages": ["flashinfer-python==0.7.0.post1", "torch==2.13.0+cu132", "transformers==5.19.0", "triton==3.7.1", "vllm==0.32.0"]}
+{"label": "correct_sglang_a", "arm": "sglang", "packages": ["flash-attn-4==4.0.0b36", "flashinfer-python==0.7.1", "sglang==0.5.22", "sglang-kernel==0.4.9", "torch==2.14.1+cu132", "transformers==5.19.0", "triton==3.8.0"]}
+{"label": "correct_mstar_pr_a", "arm": "mstar-pr", "imports": "/root/work/mstar/mstar/__init__.py 2.12.1+cu132 0.7.2 5.20.2", "commit": "perf/overnight-all 642b44668ee88b3af0bc9906cf951a880f5b69df (latest main abdfd5802 merged)"}
+{"label": "correct_mstar_pr_b", "arm": "mstar-pr", "imports": "/root/work/mstar/mstar/__init__.py 2.12.1+cu132 0.7.2 5.20.2", "commit": "perf/overnight-all 642b44668ee88b3af0bc9906cf951a880f5b69df (latest main abdfd5802 merged)"}
+{"label": "main_sglang_r9", "arm": "sglang", "packages": ["flash-attn-4==4.0.0b36", "flashinfer-python==0.7.1", "sglang==0.5.22", "sglang-kernel==0.4.9", "torch==2.14.1+cu132", "transformers==5.19.0", "triton==3.8.0"]}
+{"label": "main_mstar-pr_r9", "arm": "mstar-pr", "imports": "/root/work/mstar/mstar/__init__.py 2.12.1+cu132 0.7.2 5.20.2", "commit": "perf/overnight-all 642b44668ee88b3af0bc9906cf951a880f5b69df (latest main abdfd5802 merged)"}
+{"label": "main_vllm_r9", "arm": "vllm", "packages": ["flashinfer-python==0.7.0.post1", "torch==2.13.0+cu132", "transformers==5.19.0", "triton==3.7.1", "vllm==0.32.0"]}

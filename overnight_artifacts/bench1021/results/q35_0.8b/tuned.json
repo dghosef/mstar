@@ -1,0 +1,41 @@
+{
+ "vllm": {
+  "config": "lm-only",
+  "args": [
+   "--language-model-only"
+  ],
+  "geomean_tok_s": {
+   "default": 4631.0,
+   "perf-throughput": 4631.7,
+   "perf-interactivity": 4712.3,
+   "lm-only": 4847.1,
+   "mnbt-16k": 4691.6,
+   "attn-flashinfer": 4667.1,
+   "lm-only+interactivity": 4782.2,
+   "lm-only+async": 4815.5
+  }
+ },
+ "sglang": {
+  "config": "attn-fa3",
+  "args": [
+   "--attention-backend",
+   "fa3"
+  ],
+  "geomean_tok_s": {
+   "default": 5573.5,
+   "attn-fa3": 5679.3,
+   "attn-flashinfer": 5488.5,
+   "linattn-flashinfer": 4135.8,
+   "chunk-16k": 5620.9,
+   "lang-only": 5606.8,
+   "torch-compile-mf0.7": 940.0,
+   "fa3+lang-only": 5581.4
+  }
+ },
+ "mstar_frontend": "python",
+ "mstar_frontend_geomean": {
+  "mstar-pr": 4937.436195638403,
+  "mstar-pr-rf": 5053.812049478785
+ },
+ "mstar_frontend_reason": "python 4937 vs rust 5054 geomean tok/s; rust gate PASS; rule: rust if its gate passes and > +3%"
+}

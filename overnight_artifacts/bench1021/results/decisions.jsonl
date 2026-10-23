@@ -1,0 +1,57 @@
+{"t": "2026-10-22T05:03:24Z", "model": "setup", "decision": "drop_08b_sglang_mtp", "choice": "ok"}
+{"t": "2026-10-22T05:04:57Z", "model": "setup", "decision": "rust_frontend_main_tree", "choice": "ok"}
+{"t": "2026-10-22T05:05:11Z", "model": "setup", "decision": "install_vllm_omni", "choice": "ok"}
+{"t": "2026-10-22T05:05:26Z", "model": "setup", "decision": "install_sglang_omni", "choice": "ok"}
+{"t": "2026-10-22T05:05:26Z", "model": "setup", "decision": "weights_qwen3_omni", "choice": "failed rc=1"}
+{"t": "2026-10-22T05:08:24Z", "model": "setup", "decision": "weights_qwen3_omni", "choice": "ok"}
+{"t": "2026-10-22T05:14:53Z", "model": "q35_0.8b", "decision": "gate mstar_pr_a", "choice": "PASS", "gsm8k": 0.508}
+{"t": "2026-10-22T05:14:53Z", "model": "q35_0.8b", "decision": "gate mstar_pr_rf_a", "choice": "PASS", "gsm8k": 0.54}
+{"t": "2026-10-22T05:14:53Z", "model": "q35_0.8b", "decision": "gate mstar_main_a", "choice": "PASS", "gsm8k": 0.536}
+{"t": "2026-10-22T05:14:53Z", "model": "q35_0.8b", "decision": "gate vllm_mtp", "choice": "PASS", "gsm8k": 0.516}
+{"t": "2026-10-22T05:14:53Z", "model": "q35_0.8b", "decision": "gate sglang_mtp", "choice": "PASS", "gsm8k": 0.524}
+{"t": "2026-10-22T05:14:53Z", "model": "q35_0.8b", "decision": "frontend", "choice": "python", "python_geomean": 4937.436195638403, "rust_geomean": 5053.812049478785, "rust_gate": "PASS"}
+{"t": "2026-10-22T06:06:44Z", "model": "q35_9b", "decision": "vllm config", "choice": "lm-only", "geomean_tok_s": {"default": 1489.1, "lm-only": 1489.3, "mnbt-16k": 1488.2}}
+{"t": "2026-10-22T06:06:44Z", "model": "q35_9b", "decision": "sglang config", "choice": "chunk-16k", "geomean_tok_s": {"default": 1467.2, "attn-fa3": 1466.6, "chunk-16k": 1468.6}}
+{"t": "2026-10-22T06:15:55Z", "model": "q35_9b", "decision": "gate mstar_pr_a", "choice": "PASS", "gsm8k": 0.944}
+{"t": "2026-10-22T06:15:55Z", "model": "q35_9b", "decision": "gate mstar_pr_rf_a", "choice": "PASS", "gsm8k": 0.94}
+{"t": "2026-10-22T06:15:55Z", "model": "q35_9b", "decision": "gate mstar_main_a", "choice": "PASS", "gsm8k": 0.956}
+{"t": "2026-10-22T06:15:55Z", "model": "q35_9b", "decision": "frontend", "choice": "python", "python_geomean": 1482.4212156981393, "rust_geomean": 1503.9332930957194, "rust_gate": "PASS"}
+{"t": "2026-10-22T09:32:39Z", "model": "setup", "decision": "vllm_for_vllm_omni", "choice": "failed rc=1"}
+{"t": "2026-10-22T09:32:39Z", "model": "setup", "decision": "omni_client_copy", "choice": "ok"}
+{"t": "2026-10-22T09:32:57Z", "model": "setup", "decision": "whisper_weights", "choice": "ok"}
+{"t": "2026-10-22T09:40:03Z", "model": "setup", "decision": "vision_omni_datasets", "choice": "ok"}
+{"t": "2026-10-22T10:02:53Z", "model": "q35_9b_tp2", "decision": "vllm config", "choice": "default", "geomean_tok_s": {"default": 2261.5, "lm-only": 2259.7}}
+{"t": "2026-10-22T10:02:53Z", "model": "q35_9b_tp2", "decision": "sglang config", "choice": "chunk-16k", "geomean_tok_s": {"default": 2310.4, "chunk-16k": 2321.6}}
+{"t": "2026-10-22T10:10:50Z", "model": "q35_9b_tp2", "decision": "gate mstar_pr_a", "choice": "FAIL", "gsm8k": 0.952}
+{"t": "2026-10-22T10:10:50Z", "model": "q35_9b_tp2", "decision": "gate mstar_pr_rf_a", "choice": "FAIL", "gsm8k": 0.956}
+{"t": "2026-10-22T10:10:50Z", "model": "q35_9b_tp2", "decision": "gate mstar_main_a", "choice": "FAIL", "gsm8k": 0.944}
+{"t": "2026-10-22T10:10:50Z", "model": "q35_9b_tp2", "decision": "frontend", "choice": "python", "python_geomean": 2298.9043730842877, "rust_geomean": 2288.9345147056897, "rust_gate": "FAIL"}
+{"t": "2026-10-22T10:10:50Z", "model": "q35_9b_tp2", "decision": "gate", "choice": "mstar-pr strict parity FAIL: annotated, timed phases continue (sanity-gate rule)"}
+{"t": "2026-10-22T12:47:17Z", "model": "setup", "decision": "vllm_for_vllm_omni", "choice": "ok"}
+{"t": "2026-10-22T13:40:48Z", "model": "q35_27b_tp4", "decision": "vllm config", "choice": "lm-only", "geomean_tok_s": {"default": 1261.1, "lm-only": 1261.3}}
+{"t": "2026-10-22T13:40:48Z", "model": "q35_27b_tp4", "decision": "sglang config", "choice": "chunk-16k", "geomean_tok_s": {"default": 1253.5, "chunk-16k": 1258.5}}
+{"t": "2026-10-22T13:51:38Z", "model": "q35_27b_tp4", "decision": "gate mstar_pr_a", "choice": "FAIL", "gsm8k": 0.972}
+{"t": "2026-10-22T13:51:38Z", "model": "q35_27b_tp4", "decision": "gate mstar_pr_rf_a", "choice": "FAIL", "gsm8k": 0.976}
+{"t": "2026-10-22T13:51:38Z", "model": "q35_27b_tp4", "decision": "gate mstar_main_a", "choice": "FAIL", "gsm8k": 0.976}
+{"t": "2026-10-22T13:51:38Z", "model": "q35_27b_tp4", "decision": "frontend", "choice": "python", "python_geomean": 1312.9376260614074, "rust_geomean": 1309.061674045494, "rust_gate": "FAIL"}
+{"t": "2026-10-22T13:51:38Z", "model": "q35_27b_tp4", "decision": "gate", "choice": "mstar-pr strict parity FAIL: annotated, timed phases continue (sanity-gate rule)"}
+{"t": "2026-10-22T17:32:47Z", "model": "qwen3_omni", "decision": "exclude mstar-main", "choice": "excluded", "reason": "server did not start (twice) in the smoke phase"}
+{"t": "2026-10-22T18:01:34Z", "model": "qwen3_omni", "decision": "exclude sglang-omni", "choice": "excluded", "reason": "server did not start (twice) in the smoke phase"}
+{"t": "2026-10-22T18:58:16Z", "model": "qwen3_omni", "decision": "competitor tuning", "choice": "none: each engine runs its own recommended default config", "reason": "vllm-omni and sglang-omni run their own recommended default Qwen3-Omni speech deploy configs (2 GPUs each, as M*'s shipped qwen3omni_2gpu.yaml); no knob sweep"}
+{"t": "2026-10-22T18:58:16Z", "model": "qwen3_omni", "decision": "frontend", "choice": "python", "reason": "fixed in queue.json: the Rust frontend's speech-output path is not verified for Qwen3-Omni, and one frontend must serve every workload"}
+{"t": "2026-10-22T19:01:33Z", "model": "qwen3_omni", "decision": "gate mstar_main_a", "choice": "FAIL", "detail": "GSM8K 0.96 (competitors [0.96, 0.948]); A2T WER 0.1467379679144385 (competitors [0.07844474761255116, 0.011122994652406418]); T2S WER 0.15355727102023783, silent 0 (competitors [0.2300332778702163])"}
+{"t": "2026-10-22T19:01:33Z", "model": "qwen3_omni", "decision": "gate mstar_pr_a", "choice": "FAIL", "detail": "GSM8K 0.964 (competitors [0.96, 0.948]); A2T WER 0.14481283422459892 (competitors [0.07844474761255116, 0.011122994652406418]); T2S WER None, silent None (competitors [0.2300332778702163])"}
+{"t": "2026-10-22T19:01:33Z", "model": "qwen3_omni", "decision": "gate", "choice": "mstar-pr strict parity FAIL: annotated, timed phases continue (sanity-gate rule)"}
+{"t": "2026-10-22T19:15:35Z", "model": "qwen3_omni", "decision": "cell main mstar-main omni_t2s c=1 r1", "choice": "failed twice; recorded", "failed": null, "errors": null}
+{"t": "2026-10-22T19:25:18Z", "model": "qwen3_omni", "decision": "cell main vllm-omni omni_t2t c=16 r1", "choice": "failed twice; recorded", "failed": 1, "errors": ["empty output"]}
+{"t": "2026-10-22T19:28:15Z", "model": "qwen3_omni", "decision": "cell main vllm-omni omni_t2t c=32 r1", "choice": "failed twice; recorded", "failed": 1, "errors": ["empty output"]}
+{"t": "2026-10-22T20:05:33Z", "model": "qwen3_omni", "decision": "cell main vllm-omni omni_t2t c=16 r2", "choice": "failed twice; recorded", "failed": 1, "errors": ["empty output"]}
+{"t": "2026-10-22T20:08:29Z", "model": "qwen3_omni", "decision": "cell main vllm-omni omni_t2t c=32 r2", "choice": "failed twice; recorded", "failed": 1, "errors": ["empty output"]}
+{"t": "2026-10-22T21:33:53Z", "model": "qwen3_omni", "decision": "cell main vllm-omni omni_t2t c=16 r3", "choice": "failed twice; recorded", "failed": 1, "errors": ["empty output"]}
+{"t": "2026-10-22T21:36:49Z", "model": "qwen3_omni", "decision": "cell main vllm-omni omni_t2t c=32 r3", "choice": "failed twice; recorded", "failed": 1, "errors": ["empty output"]}
+{"t": "2026-10-22T23:06:27Z", "model": "q35_0.8b_vl", "decision": "vllm config", "choice": "default", "geomean_tok_s": {"default": 2886.0}}
+{"t": "2026-10-22T23:06:27Z", "model": "q35_0.8b_vl", "decision": "sglang config", "choice": "chunk-16k", "geomean_tok_s": {"default": 2688.3, "attn-fa3": 2671.2, "chunk-16k": 2716.7}}
+{"t": "2026-10-22T23:13:24Z", "model": "q35_0.8b_vl", "decision": "gate mstar_pr_a", "choice": "PASS", "detail": "image parity PASS; video parity PASS; MMMU 0.265 (floor 0.2 = min(vLLM, SGLang) - 0.05)"}
+{"t": "2026-10-22T23:13:24Z", "model": "q35_0.8b_vl", "decision": "gate mstar_pr_rf_a", "choice": "PASS", "detail": "image parity PASS; video parity PASS; MMMU 0.265 (floor 0.2 = min(vLLM, SGLang) - 0.05)"}
+{"t": "2026-10-22T23:13:24Z", "model": "q35_0.8b_vl", "decision": "gate mstar_main_a", "choice": "PASS", "detail": "image parity PASS; video parity PASS; MMMU 0.26 (floor 0.2 = min(vLLM, SGLang) - 0.05)"}
+{"t": "2026-10-22T23:13:24Z", "model": "q35_0.8b_vl", "decision": "frontend", "choice": "rust", "python_geomean": 3587.5294732865877, "rust_geomean": 3856.2790384570803, "rust_gate": "PASS"}

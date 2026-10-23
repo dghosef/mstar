@@ -1,0 +1,4 @@
+{
+ "mstar_frontend": "python",
+ "mstar_frontend_reason": "fixed in queue.json: the Rust frontend's speech-output path is not verified for Qwen3-Omni, and one frontend must serve every workload"
+}

@@ -1,0 +1,61 @@
+## Setup common to every model
+
+**Hardware.** node2: dedicated AWS p5en.48xlarge via Eras Cloud, 8x H200 141 GB (NVLink), driver 580.178.04,
+2x Xeon Platinum 8488C (192 vCPUs), 2 TiB RAM. Every timed run used GPU 0 with no other server on the box;
+untimed correctness collection ran arms in parallel on separate GPUs.
+
+**Arms and versions (pinned).**
+
+| arm | version | torch | notes |
+|---|---|---|---|
+| M* PR | perf/overnight-all d248477ec | 2.12.1+cu132 | each model's shipped config (`configs/<model>.yaml`), Python API frontend, Rust graph runtime (`graph runtime: rust` in the worker log), `MSTAR_SHM_ARENA=1`, `MSTAR_REQUIRE_ACCELERATOR_GRAPHS=1` for the captured image models |
+| M* main | main abdfd5802 | 2.12.1+cu132 | same settings, its own configs |
+| vllm-omni | vllm-omni 0.30.0 on vllm 0.30.0 | 2.13.0+cu132 | `vllm serve <hf> --omni` + tuned knobs |
+| SGLang diffusion | sglang 0.5.22 (`sglang[diffusion]`) | 2.14.1+cu132 | `sglang serve --model-path <hf> --num-gpus 1` + tuned knobs |
+| diffusers | 0.41.0 | 2.14.1+cu132 | in-process pipeline; eager = the correctness reference; tuned = the fastest passing knob set among eager, regional (repeated-block) or whole-transformer torch.compile with dynamic shapes, x SDPA / cuDNN / FlashAttention-3 (hub kernel), +- compiled VAE decode |
+
+M* frontend: the Rust API frontend does not serve these routes yet (`DiffusionImageAdapter` images and
+`Wan22Adapter` videos are listed in `NOT_PORTED` in test/rust/test_rust_openai_adapters.py on both trees), so
+both M* arms use the default Python frontend for every model.
+
+**Matched settings.** bf16 weights everywhere; same resolution, steps, guidance, scheduler (each checkpoint's own),
+prompts and seeds on every arm; noise from a CPU generator seeded per request (mstar's convention and its oracle
+recorders'; vllm-omni and SGLang take `generator_device: cpu` per image request, SGLang also per video request).
+No step caching (TeaCache / cache-dit / step cache off on every arm), no quantization, no reduced steps.
+
+**Prompts.** Images: a fixed 64-prompt slice of PartiPrompts (P2, `nateraw/parti-prompts`, every 25th prompt,
+indices 0, 25, ..., 1575; all 12 categories). Video: 16 VBench prompts (`prompts/all_dimension.txt`, every 59th
+line). None of these were used in the overnight tuning.
+
+**Client.** One Python client and policy for every served arm (`dclient.py`): closed loop with c workers;
+request i gets prompt i mod N and seed base + i; each response is content-checked (decodes, right size / frame
+count, not flat) and a failed check counts as a failed request. diffusers is not a server: its rows are
+in-process offline batches of b = c (pipeline call only: no HTTP, no PNG/mp4 encode), labelled as such.
+
+**Protocol.** Competitors tuned first (one server per knob set on GPU 0 alone, B=1 and c=8); knob sets whose
+outputs fail the correctness gate are not eligible. Then 3 rounds; each round restarts every server (fresh
+process) and rotates the arm order. Per server: a smoke request, one untimed pass over the whole prompt set
+(compile / capture / per-shape warmup), then per point one warmup wave of c requests and the measured requests.
+A point counts only with failed == 0 in every round. Mean and min-max over rounds; 1-min load average per cell.
+
+**Correctness gate** (criteria fixed before any output was collected, in `dgate.py`): each arm's outputs vs
+the diffusers eager reference on the same prompts and seeds; PSNR, SSIM and CLIP score (ViT-L/14). Yardstick Y =
+the worst of the reference vs itself in a second process (ref_b), under memory-efficient SDPA (ref_k), and
+under the tuned arm's torch.compile (ref_c). A seed-change control (ref_seed) shows what different noise looks
+like. A seed-matched arm passes if median PSNR >= Y - 2 dB, p10 PSNR >= Y.p10 - 3 dB, median SSIM >= Y - 0.03,
+mean CLIP >= reference - 1.0 and every output is valid. An arm whose noise is drawn differently gets a
+distribution-level check only (CLIP and valid outputs), labelled as such.
+
+**Gate amendment (2026-10-22 06:50 UTC, recorded in decisions.jsonl).** The gate was amended after observing that
+independent engines are not pixel-matched to the diffusers reference (Z-Image: vllm-omni and SGLang at 23.8-24.3 dB
+median PSNR, against a different-seed control of 10.9 dB, with equal CLIP). M* arms keep the original parity
+criteria above. Competitor arms are checked for "the same image for the same seed": valid outputs, mean CLIP >=
+reference - 0.5, and median PSNR >= (different-seed control median + yardstick median) / 2. Both verdicts are shown in
+each gate table. For TTS, M* is held to the reference-parity tier and competitors to WER within tolerance.
+
+**Gate rule as applied (2026-10-22 ~07:00 UTC, user direction, recorded in decisions.jsonl): sanity gate; parity
+reported, not gating.** An arm (M* included) is excluded only if its output is clearly broken: invalid/blank
+outputs, mean CLIP more than 2 points below the reference, or median PSNR within 3 dB of the different-seed control
+(a different image); for TTS, silent/missing audio or WER > 2x the best engine's and > 10%. Strict parity (the
+pre-registered criteria for M*, the amended same-image check for competitors, WER tolerance for TTS) is reported in
+each gate table as "parity: yes / no (annotated)", next to the original pre-registered verdict.

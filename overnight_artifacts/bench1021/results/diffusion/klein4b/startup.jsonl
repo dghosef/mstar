@@ -1,0 +1,28 @@
+{"label": "smoke_vllmomni_base", "arm": "vllmomni", "seconds": 30.2, "time": 1792642320.6072633}
+{"label": "smoke_sglang_base", "arm": "sglang", "seconds": 48.3, "time": 1792642339.6587641}
+{"label": "smoke_mstar-pr_config", "arm": "mstar-pr", "seconds": 788.0, "time": 1792643122.2322478}
+{"label": "collect_mstar_pr", "arm": "mstar-pr", "seconds": 60.3, "ok": true, "time": 1792656984.29333}
+{"label": "collect_mstar_pr_b", "arm": "mstar-pr", "seconds": 57.3, "ok": true, "time": 1792656986.4127185}
+{"label": "collect_mstar_main", "arm": "mstar-main", "seconds": 333.9, "ok": true, "time": 1792657268.1369054}
+{"label": "tune_base_vllmomni_base_r0", "arm": "vllmomni", "seconds": 21.2, "ok": true, "time": 1792657325.6785958}
+{"label": "tune_cudnn_vllmomni_cudnn_r0", "arm": "vllmomni", "seconds": 27.2, "ok": true, "time": 1792657427.5194914}
+{"label": "tune_full_vllmomni_full_r0", "arm": "vllmomni", "seconds": 72.3, "ok": true, "time": 1792657574.4813857}
+{"label": "tune_eager_vllmomni_eager_r0", "arm": "vllmomni", "seconds": 18.2, "ok": true, "time": 1792657715.1312633}
+{"label": "tune_base_sglang_base_r0", "arm": "sglang", "seconds": 33.2, "ok": true, "time": 1792657828.0917232}
+{"label": "tune_compile_sglang_compile_r0", "arm": "sglang", "seconds": 126.4, "ok": true, "time": 1792658012.437159}
+{"label": "tune_bcg_sglang_bcg_r0", "arm": "sglang", "seconds": 33.2, "ok": true, "time": 1792658132.013904}
+{"label": "tune_compile_b8_sglang_compile_b8_r0", "arm": "sglang", "seconds": 57.3, "ok": true, "time": 1792658246.1113322}
+{"label": "tune_bcg_b8_sglang_bcg_b8_r0", "arm": "sglang", "seconds": 33.2, "ok": true, "time": 1792658423.0434299}
+{"label": "main_mstar-pr_config_r1", "arm": "mstar-pr", "seconds": 57.3, "ok": true, "time": 1792660169.87405}
+{"label": "main_mstar-main_config_r1", "arm": "mstar-main", "seconds": 117.4, "ok": true, "time": 1792660391.845793}
+{"label": "main_vllmomni_full_r1", "arm": "vllmomni", "seconds": 39.3, "ok": true, "time": 1792660538.3135633}
+{"label": "main_sglang_base_r1", "arm": "sglang", "seconds": 33.2, "ok": true, "time": 1792660712.747742}
+{"label": "main_mstar-main_config_r2", "arm": "mstar-main", "seconds": 102.4, "ok": true, "time": 1792661346.6115906}
+{"label": "main_vllmomni_full_r2", "arm": "vllmomni", "seconds": 39.2, "ok": true, "time": 1792661492.84294}
+{"label": "main_sglang_base_r2", "arm": "sglang", "seconds": 33.2, "ok": true, "time": 1792661667.3984087}
+{"label": "main_mstar-pr_config_r2", "arm": "mstar-pr", "seconds": 57.3, "ok": true, "time": 1792661916.8340967}
+{"label": "main_vllmomni_full_r3", "arm": "vllmomni", "seconds": 39.2, "ok": true, "time": 1792662060.845367}
+{"label": "main_sglang_base_r3", "arm": "sglang", "seconds": 33.2, "ok": true, "time": 1792662235.2685747}
+{"label": "main_mstar-pr_config_r3", "arm": "mstar-pr", "seconds": 54.3, "ok": true, "time": 1792662480.638423}
+{"label": "main_mstar-main_config_r3", "arm": "mstar-main", "seconds": 96.4, "ok": true, "time": 1792662681.5252757}
+{"label": "profile_c1", "arm": "mstar-pr", "seconds": 57.2, "ok": true, "time": 1792662846.031768}

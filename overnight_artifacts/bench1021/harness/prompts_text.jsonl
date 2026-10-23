@@ -1,0 +1,10 @@
+{"text": "What is the capital of Australia, and why was it chosen over Sydney and Melbourne?"}
+{"text": "Write a Python function that returns the n-th Fibonacci number using memoization, with a short docstring."}
+{"text": "A train leaves at 3:15 pm and travels 210 km at 84 km/h. At what time does it arrive? Explain step by step."}
+{"text": "Explain the difference between TCP and UDP to a high-school student, in a few short paragraphs."}
+{"text": "Translate into French and then into German: 'The library opens at nine in the morning and closes at six in the evening.'"}
+{"text": "List five practical tips for reducing household energy use, one sentence each."}
+{"text": "Summarize the plot of Shakespeare's Hamlet in about 100 words."}
+{"text": "Write a haiku about autumn rain, then explain the imagery you used."}
+{"text": "Here is a log excerpt. Identify the most likely root cause and propose a fix.\n\n2026-10-21 03:14:07 INFO worker-3 starting batch 4812 (rows=64)\n2026-10-21 03:14:07 INFO worker-3 allocated 2.1 GiB pinned host buffer\n2026-10-21 03:14:09 WARN worker-3 pinned allocation slow (1.8 s)\n2026-10-21 03:14:11 INFO worker-1 starting batch 4813 (rows=64)\n2026-10-21 03:14:11 INFO worker-1 allocated 2.1 GiB pinned host buffer\n2026-10-21 03:14:15 WARN worker-1 pinned allocation slow (3.9 s)\n2026-10-21 03:14:16 ERROR worker-3 cudaHostAlloc failed: out of memory\n2026-10-21 03:14:16 ERROR worker-3 batch 4812 aborted\n2026-10-21 03:14:19 WARN worker-0 pinned allocation slow (6.2 s)\n2026-10-21 03:14:22 ERROR worker-1 cudaHostAlloc failed: out of memory\n2026-10-21 03:14:22 INFO supervisor restarting worker-3\n2026-10-21 03:14:25 INFO worker-3 allocated 2.1 GiB pinned host buffer\n2026-10-21 03:14:31 ERROR worker-0 cudaHostAlloc failed: out of memory\nThe machine has 64 GiB of RAM and runs 8 workers. Each worker never frees its pinned buffer between batches."}
+{"text": "Is 391 a prime number? Show your reasoning and give a one-word final answer."}

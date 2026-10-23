@@ -1,0 +1,915 @@
+{
+ "harness_dir": "/root/work/dbench",
+ "rounds": 3,
+ "knobs": {
+  "image": {
+   "vllmomni": {
+    "base": [],
+    "cudnn": [
+     "--diffusion-attention-backend",
+     "CUDNN_ATTN"
+    ],
+    "full": [
+     "--diffusion-compile-granularity",
+     "full"
+    ],
+    "eager": [
+     "--enforce-eager"
+    ]
+   },
+   "sglang": {
+    "base": [
+     "--performance-mode",
+     "speed"
+    ],
+    "compile": [
+     "--performance-mode",
+     "speed",
+     "--enable-torch-compile",
+     "true"
+    ],
+    "bcg": [
+     "--performance-mode",
+     "speed",
+     "--enable-breakable-cuda-graph",
+     "true",
+     "--warmup-resolutions",
+     "1024x1024"
+    ],
+    "compile_b8": [
+     "--performance-mode",
+     "speed",
+     "--enable-torch-compile",
+     "true",
+     "--batching-max-size",
+     "8"
+    ],
+    "bcg_b8": [
+     "--performance-mode",
+     "speed",
+     "--enable-breakable-cuda-graph",
+     "true",
+     "--warmup-resolutions",
+     "1024x1024",
+     "--batching-max-size",
+     "8"
+    ]
+   },
+   "diffusers": {
+    "eager": [
+     "--compile",
+     "none"
+    ],
+    "regional_dyn": [
+     "--compile",
+     "regional",
+     "--dynamic"
+    ],
+    "regional_dyn_cudnn": [
+     "--compile",
+     "regional",
+     "--dynamic",
+     "--attn",
+     "_native_cudnn"
+    ],
+    "regional_dyn_fa3": [
+     "--compile",
+     "regional",
+     "--dynamic",
+     "--attn",
+     "_flash_3_hub"
+    ],
+    "regional_dyn_fa3_vae": [
+     "--compile",
+     "regional",
+     "--dynamic",
+     "--attn",
+     "_flash_3_hub",
+     "--compile-vae"
+    ],
+    "full_dyn": [
+     "--compile",
+     "full",
+     "--dynamic"
+    ],
+    "full_dyn_fa3": [
+     "--compile",
+     "full",
+     "--dynamic",
+     "--attn",
+     "_flash_3_hub"
+    ]
+   }
+  },
+  "video": {
+   "vllmomni": {
+    "base": [],
+    "cudnn": [
+     "--diffusion-attention-backend",
+     "CUDNN_ATTN"
+    ],
+    "full": [
+     "--diffusion-compile-granularity",
+     "full"
+    ],
+    "b4": [
+     "--max-num-seqs",
+     "4"
+    ]
+   },
+   "sglang": {
+    "base": [
+     "--performance-mode",
+     "speed"
+    ],
+    "compile": [
+     "--performance-mode",
+     "speed",
+     "--enable-torch-compile",
+     "true"
+    ],
+    "bcg": [
+     "--performance-mode",
+     "speed",
+     "--enable-breakable-cuda-graph",
+     "true",
+     "--warmup-resolutions",
+     "1280x704",
+     "--warmup-num-frames",
+     "81"
+    ],
+    "compile_b4": [
+     "--performance-mode",
+     "speed",
+     "--enable-torch-compile",
+     "true",
+     "--batching-max-size",
+     "4"
+    ]
+   },
+   "diffusers": {
+    "eager": [
+     "--compile",
+     "none"
+    ],
+    "regional_dyn": [
+     "--compile",
+     "regional",
+     "--dynamic"
+    ],
+    "regional_dyn_fa3": [
+     "--compile",
+     "regional",
+     "--dynamic",
+     "--attn",
+     "_flash_3_hub"
+    ],
+    "full_dyn": [
+     "--compile",
+     "full",
+     "--dynamic"
+    ]
+   }
+  },
+  "zimage": {
+   "vllmomni": {
+    "base": [],
+    "cudnn": [
+     "--diffusion-attention-backend",
+     "CUDNN_ATTN"
+    ],
+    "full": [
+     "--diffusion-compile-granularity",
+     "full"
+    ],
+    "eager": [
+     "--enforce-eager"
+    ]
+   },
+   "sglang": {
+    "base": [
+     "--performance-mode",
+     "speed"
+    ],
+    "compile": [
+     "--performance-mode",
+     "speed",
+     "--enable-torch-compile",
+     "true"
+    ],
+    "bcg": [
+     "--performance-mode",
+     "speed",
+     "--enable-breakable-cuda-graph",
+     "true",
+     "--warmup-resolutions",
+     "1024x1024"
+    ],
+    "compile_b8": [
+     "--performance-mode",
+     "speed",
+     "--enable-torch-compile",
+     "true",
+     "--batching-max-size",
+     "8"
+    ],
+    "bcg_b8": [
+     "--performance-mode",
+     "speed",
+     "--enable-breakable-cuda-graph",
+     "true",
+     "--warmup-resolutions",
+     "1024x1024",
+     "--batching-max-size",
+     "8"
+    ]
+   },
+   "diffusers": {
+    "eager": [
+     "--compile",
+     "none"
+    ],
+    "regional_dyn": [
+     "--compile",
+     "regional",
+     "--dynamic"
+    ],
+    "regional_dyn_cudnn": [
+     "--compile",
+     "regional",
+     "--dynamic",
+     "--attn",
+     "_native_cudnn"
+    ],
+    "regional_dyn_fa3": [
+     "--compile",
+     "regional",
+     "--dynamic",
+     "--attn",
+     "_flash_3_hub"
+    ],
+    "regional_dyn_fa3_vae": [
+     "--compile",
+     "regional",
+     "--dynamic",
+     "--attn",
+     "_flash_3_hub",
+     "--compile-vae"
+    ]
+   }
+  }
+ },
+ "models": [
+  {
+   "key": "zimage",
+   "arms": [
+    "mstar-pr",
+    "mstar-main",
+    "vllmomni",
+    "sglang",
+    "diffusers"
+   ],
+   "phases": [
+    "setup",
+    "knobs",
+    "collect",
+    "tune",
+    "ref_c",
+    "gate",
+    "select",
+    "gallery",
+    "rounds",
+    "profile",
+    "summarize"
+   ]
+  },
+  {
+   "key": "klein4b",
+   "arms": [
+    "mstar-pr",
+    "mstar-main",
+    "vllmomni",
+    "sglang",
+    "diffusers"
+   ],
+   "phases": [
+    "setup",
+    "knobs",
+    "collect",
+    "tune",
+    "ref_c",
+    "gate",
+    "select",
+    "gallery",
+    "rounds",
+    "profile",
+    "summarize"
+   ]
+  },
+  {
+   "key": "wan22",
+   "arms": [
+    "mstar-pr",
+    "mstar-main",
+    "vllmomni",
+    "sglang",
+    "diffusers"
+   ],
+   "phases": [
+    "setup",
+    "knobs",
+    "collect",
+    "tune",
+    "ref_c",
+    "gate",
+    "select",
+    "gallery",
+    "rounds",
+    "profile",
+    "summarize"
+   ]
+  },
+  {
+   "key": "qwen3tts_1p7b",
+   "kind": "tts",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ]
+  },
+  {
+   "key": "fish_s2pro",
+   "kind": "tts",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ]
+  },
+  {
+   "key": "orpheus",
+   "kind": "tts",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ]
+  },
+  {
+   "key": "qwen3tts_0p6b",
+   "kind": "tts",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ]
+  },
+  {
+   "key": "kokoro",
+   "kind": "tts",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: vs Kokoro-FastAPI v0.9.0 (1 and 4 uvicorn workers)"
+  },
+  {
+   "key": "chatterbox",
+   "kind": "tts",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: base; vs chatterbox-vllm (offline batch) + Chatterbox-TTS-Server (HTTP, serial)"
+  },
+  {
+   "key": "higgs_audio",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: STT; vs official remote code transcribe_batch (offline batch)"
+  },
+  {
+   "key": "omnivoice",
+   "kind": "tts",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: vs vllm-omni 0.30.0 (default + fp16/mns32 deploy) + official omnivoice (offline batch)"
+  },
+  {
+   "key": "omniasr_300m",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: RTFx c=1/16/64 LibriSpeech; vs official omnilingual-asr 0.2.0 (offline batch)"
+  },
+  {
+   "key": "omniasr_1b",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: RTFx c=1/16/64 LibriSpeech; vs official omnilingual-asr 0.2.0 (offline batch)"
+  },
+  {
+   "key": "omniasr_3b",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: RTFx c=1/16/64 LibriSpeech; vs official omnilingual-asr 0.2.0 (offline batch)"
+  },
+  {
+   "key": "omniasr_7b",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: RTFx c=1/16/64 LibriSpeech; vs official omnilingual-asr 0.2.0 (offline batch)"
+  },
+  {
+   "key": "bagel",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: 1 GPU t2i/edit/understanding; vs vllm-omni 0.30.0 (t2i/edit) + vLLM 0.30.0 (understanding)"
+  },
+  {
+   "key": "bagel_2gpu",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: 2 GPUs CFG-parallel t2i/edit; vs vllm-omni --cfg-parallel-size 2"
+  },
+  {
+   "key": "cosmos3_nano",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: 832x480x189 35 steps; vs SGLang 0.5.22 + vllm-omni 0.30.0"
+  },
+  {
+   "key": "cosmos3_edge",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: 832x480x121 20 steps; vs SGLang 0.5.22 + vllm-omni 0.30.0"
+  },
+  {
+   "key": "cosmos3_edge_droid",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: DROID policy chunks; vs SGLang 0.5.22 /v1/actions/generations"
+  },
+  {
+   "key": "lingbot_world",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: 1.3B, 93 frames c=1; vs official repo (offline)"
+  },
+  {
+   "key": "vjepa2",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: ViT-L latents; vs HF transformers (offline batch)"
+  },
+  {
+   "key": "vjepa2_ac",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: AC rollout H=4; vs official facebookresearch/vjepa2 (offline batch)"
+  },
+  {
+   "key": "waypoint",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: 720p c=1/2; vs official world_engine 1.5.6 (offline, N processes)"
+  },
+  {
+   "key": "waypoint_360p",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: 360p c=1/8; vs official world_engine 1.5.6 (offline, N processes)"
+  },
+  {
+   "key": "zimage",
+   "arms": [
+    "mstar-pr",
+    "mstar-main",
+    "vllmomni",
+    "sglang",
+    "diffusers"
+   ],
+   "phases": [
+    "rounds_extra",
+    "resummarize"
+   ],
+   "backlog": true
+  },
+  {
+   "key": "klein4b",
+   "arms": [
+    "mstar-pr",
+    "mstar-main",
+    "vllmomni",
+    "sglang",
+    "diffusers"
+   ],
+   "phases": [
+    "rounds_extra",
+    "resummarize"
+   ],
+   "backlog": true
+  },
+  {
+   "key": "wan22",
+   "arms": [
+    "mstar-pr",
+    "mstar-main",
+    "vllmomni",
+    "sglang",
+    "diffusers"
+   ],
+   "phases": [
+    "rounds_extra",
+    "resummarize"
+   ],
+   "backlog": true
+  },
+  {
+   "key": "klein4b_2048",
+   "parent": "klein4b",
+   "arms": [
+    "mstar-pr",
+    "mstar-main",
+    "vllmomni",
+    "sglang",
+    "diffusers"
+   ],
+   "phases": [
+    "setup",
+    "inherit",
+    "collect",
+    "ref_c",
+    "gate",
+    "gallery",
+    "rounds",
+    "summarize"
+   ],
+   "backlog": true,
+   "overrides": {
+    "size": "2048x2048",
+    "concs": [
+     1,
+     2,
+     4,
+     8
+    ],
+    "nums": {
+     "1": 8,
+     "2": 8,
+     "4": 16,
+     "8": 24
+    },
+    "gate_count": 16,
+    "warm_conc": 4
+   }
+  },
+  {
+   "key": "wan22_121",
+   "parent": "wan22",
+   "arms": [
+    "mstar-pr",
+    "mstar-main",
+    "vllmomni",
+    "sglang",
+    "diffusers"
+   ],
+   "phases": [
+    "setup",
+    "inherit",
+    "collect",
+    "ref_c",
+    "gate",
+    "gallery",
+    "rounds",
+    "summarize"
+   ],
+   "backlog": true,
+   "overrides": {
+    "frames": 121,
+    "long_steps": null,
+    "nums": {
+     "1": 2,
+     "2": 4,
+     "4": 8,
+     "8": 16
+    }
+   }
+  },
+  {
+   "key": "zimage_2048",
+   "parent": "zimage",
+   "arms": [
+    "mstar-pr",
+    "mstar-main",
+    "vllmomni",
+    "sglang",
+    "diffusers"
+   ],
+   "phases": [
+    "setup",
+    "inherit",
+    "collect",
+    "ref_c",
+    "gate",
+    "gallery",
+    "rounds",
+    "summarize"
+   ],
+   "backlog": true,
+   "overrides": {
+    "size": "2048x2048",
+    "concs": [
+     1,
+     2,
+     4,
+     8
+    ],
+    "nums": {
+     "1": 8,
+     "2": 8,
+     "4": 16,
+     "8": 24
+    },
+    "gate_count": 16,
+    "warm_conc": 4
+   }
+  },
+  {
+   "key": "klein9b",
+   "arms": [
+    "mstar-pr",
+    "mstar-main",
+    "vllmomni",
+    "sglang",
+    "diffusers"
+   ],
+   "phases": [
+    "setup",
+    "knobs",
+    "collect",
+    "tune",
+    "ref_c",
+    "gate",
+    "select",
+    "gallery",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "backlog": true
+  },
+  {
+   "key": "qwen3tts_1p7b",
+   "kind": "tts",
+   "arms": [],
+   "phases": [
+    "rounds_extra",
+    "resummarize"
+   ],
+   "backlog": true
+  },
+  {
+   "key": "fish_s2pro",
+   "kind": "tts",
+   "arms": [],
+   "phases": [
+    "rounds_extra",
+    "resummarize"
+   ],
+   "backlog": true
+  },
+  {
+   "key": "orpheus",
+   "kind": "tts",
+   "arms": [],
+   "phases": [
+    "rounds_extra",
+    "resummarize"
+   ],
+   "backlog": true
+  },
+  {
+   "key": "qwen3tts_0p6b",
+   "kind": "tts",
+   "arms": [],
+   "phases": [
+    "rounds_extra",
+    "resummarize"
+   ],
+   "backlog": true
+  }
+ ]
+}
