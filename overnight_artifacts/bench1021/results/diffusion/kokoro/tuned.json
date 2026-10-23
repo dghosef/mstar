@@ -1,0 +1,17 @@
+{
+ "kokorofastapi": {
+  "config": "workers4",
+  "score": 100.195355789086,
+  "gate_pass": true,
+  "candidates": [
+   [
+    100.195355789086,
+    "workers4"
+   ],
+   [
+    87.5847918120362,
+    "workers1"
+   ]
+  ]
+ }
+}

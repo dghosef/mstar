@@ -41,6 +41,7 @@ Full methodology and caveats will be in REPORT.md when the run finishes.
 | Qwen3-Omni text→text, tok/s (3 rounds) | −12% s | | −11% s | | −15% s | −15% s | | |
 | Qwen3-Omni text→speech, audio-s/s (3 rounds) | +33% s | | +3% s | | +9% s | +11% s | | |
 | Qwen3-Omni audio→text (ASR), tok/s (3 rounds) | −33% s | | −46% s | | −52% s | −47% s | | |
+| Kokoro 82M, audio-s/s (3 rounds) | +282% kf | +178% kf | +131% kf | +200% kf | +299% kf | +364% kf | +472% kf | |
 | FLUX.2-klein 4B, img/s (3 rounds) | −23% s | −9% s | −7% s | −7% s | −6% s | | | |
 
 The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show it, with TTFT p99 ~2.5 s.
@@ -93,6 +94,11 @@ The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show 
     - The first-pass run, with no system message, had M* falling back to Qwen3-Omni's voice persona and answering spoken questions (WER 14.5%). That run is discarded.
     - vllm-omni doesn't serve this workload.
     - **This PR vs main:** +26–79%.
+- **Kokoro 82M (1 GPU): done.** 3 rounds, failed=0. Sanity gate passed (WER: M* 2.3%, Kokoro-FastAPI 1.3%).
+  - The competitor is Kokoro-FastAPI v0.9.0, tuned over 1 vs 4 workers. No vLLM/SGLang path serves Kokoro.
+  - **M* is 2.8–5.7× faster at every concurrency:** mstar-pr does 236 → 897 audio-s/s from c=1 to c=64, with TTFA p50 23–353 ms. Kokoro-FastAPI peaks at ~190 audio-s/s (c=4) with TTFA 0.1–0.6 s.
+  - **This PR vs main:** +10–17%. The overnight claim was +12–20%.
+  - **WER difference:** M*'s WER is ~1 point higher than the reference server's. Not investigated; the gate's parity column marks it.
 - **Fish S2-Pro (1 GPU): done.** 3 rounds; SGLang-Omni has 2 rounds at c≥16, one being lost to a runaway clip. The sanity gate passed on every arm (Whisper WER 1.1–1.6%).
   - **M* leads at every concurrency:** mstar-pr does 6.5 → 88.6 audio-s/s from c=1 to c=64, with TTFA p50 58–237 ms.
   - **SGLang-Omni:** 5.2 → 50.0 audio-s/s with TTFA 0.47–2.5 s, so M* is +19–40% at c≤32 and +77% at c=64, with TTFA 4–10× lower.

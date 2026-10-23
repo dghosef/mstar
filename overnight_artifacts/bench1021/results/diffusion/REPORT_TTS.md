@@ -1,6 +1,6 @@
 # TTS lane on node2: M* vs vllm-omni, SGLang-Omni, vox-serve, fish-speech
 
-_Generated 2026-10-23 00:30 UTC by report_tts.py._
+_Generated 2026-10-23 01:40 UTC by report_tts.py._
 
 Hardware: node2, 8x H200 (see REPORT_DIFFUSION.md); every timed server on GPU 0 alone. Arms: M* PR d248477ec and M* main abdfd5802 (own configs, Rust graph runtime, MSTAR_SHM_ARENA=1), each competitor on its best tuned knob set (tune table below), pinned versions in each model's versions/. Text: 256 LibriSpeech test-clean sentences (8-30 words, every ~7th utterance in id order; mean 17 words), one streaming client for every engine (dtts_client.py): TTFA = first audio bytes, RTF = e2e / audio seconds, audio-s/s = total audio / wall. Closed loop at c = 1..64, 1 warmup wave per point after an untimed 64-sentence pass, 3 rounds with fresh servers and rotated order; a point counts only with failed == 0. Sampling: each model's default as M* serves it, matched where the engine exposes it (Fish: temp 0.8, top_p 0.8, top_k 30, rep 1.0 sent to SGLang-Omni and fish-speech; vllm-omni's Fish deploy YAML copied with top_p 0.8). Gate: Whisper large-v3 WER over 128 sentences per arm (criteria in dtts.py), seconds-per-word sanity, no silent/runaway output.
 
@@ -422,7 +422,7 @@ worker.submit_spec.launch_wait               1.130    0.750    5.070       92 10
 
 ## Orpheus 3B 0.1 ft (voice tara, 24 kHz; M* single-GPU colocated config)
 
-Phases completed: collect, gate, profile, rounds, select, setup, tune.
+Phases completed: collect, gate, profile, rounds, select, setup, summarize, tune.
 
 Tuning (score = geometric-mean audio-s/s over the tune points):
 
@@ -589,6 +589,250 @@ worker.schedule                              0.010    0.000    0.010       91   
 worker.schedule_yield_away                   0.490    0.640    1.000      173    3287.8 
 worker.submit_spec.launch_wait               1.398    1.530    1.910      499   27062.5 
     * sampled on passes that ran no batch, so its time is spread over work it did not all do: 
+```
+
+</details>
+
+## Qwen3-TTS 0.6B CustomVoice (voice vivian, English, 24 kHz)
+
+Phases completed: collect, gate, profile, rounds, select, setup, tune.
+
+Tuning (score = geometric-mean audio-s/s over the tune points):
+
+| engine | knob set | per-point audio-s/s | TTFA p50 c=1 | score | chosen |
+|---|---|---|---:|---:|---|
+| vllmomni | default | c=1: 14.1, c=32: 125.7 | 0.023 | 42.02 |  |
+| vllmomni | high_conc | c=1: 14.0, c=32: 138.9 | 0.023 | 44.16 | yes |
+| sgomni | base | c=1: 19.1, c=32: 264.0 | 0.012 | 71.07 | yes |
+| sgomni | mrr128 | c=1: 19.1, c=32: 261.5 | 0.013 | 70.69 |  |
+
+Arm configs: M* PR = python; M* main = python; vllm-omni 0.30.0 = high_conc; SGLang-Omni 0.1.9 = base
+
+## audio-s/s: mean [min-max] over rounds (n rounds); FAILED if any round failed
+
+| arm | c=1 | c=2 | c=4 | c=8 | c=16 | c=32 | c=64 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| M* PR | 17.52 [17.36-17.66] n=3 | 24.28 [24.23-24.35] n=3 | 43.44 [43.26-43.61] n=3 | 69.67 [69.56-69.81] n=3 | 102.91 [102.40-103.67] n=3 | 146.15 [145.47-147.48] n=3 | 200.90 [198.16-202.80] n=3 |
+| M* main | 16.14 [16.04-16.22] n=3 | 23.43 [23.36-23.49] n=3 | 41.30 [40.99-41.62] n=3 | 66.29 [66.09-66.64] n=3 | 98.87 [98.47-99.34] n=3 | 139.63 [139.41-139.80] n=3 | 148.44 [146.36-151.81] n=3 |
+| vllm-omni 0.30.0 | 13.95 [13.90-13.98] n=3 | 24.57 [24.25-24.83] n=3 | 43.99 [43.79-44.35] n=3 | 69.30 [69.15-69.57] n=3 | 101.53 [101.01-101.88] n=3 | 138.56 [137.07-140.59] n=3 | 178.82 [177.86-179.46] n=3 |
+| SGLang-Omni 0.1.9 | 19.16 [19.14-19.17] n=3 | 34.57 [34.36-34.81] n=3 | 66.59 [66.37-66.88] n=3 | 114.96 [114.30-115.38] n=3 | 182.21 [179.13-185.44] n=3 | 266.23 [263.35-268.51] n=3 | 360.47 [356.98-365.68] n=3 |
+
+## RTF p50: mean [min-max] over rounds (n rounds); FAILED if any round failed
+
+| arm | c=1 | c=2 | c=4 | c=8 | c=16 | c=32 | c=64 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| M* PR | 0.057 [0.057-0.058] n=3 | 0.081 [0.081-0.082] n=3 | 0.090 [0.089-0.090] n=3 | 0.108 [0.107-0.110] n=3 | 0.146 [0.144-0.148] n=3 | 0.211 [0.206-0.214] n=3 | 0.305 [0.304-0.307] n=3 |
+| M* main | 0.062 [0.062-0.063] n=3 | 0.084 [0.083-0.084] n=3 | 0.093 [0.093-0.094] n=3 | 0.114 [0.112-0.114] n=3 | 0.151 [0.150-0.151] n=3 | 0.217 [0.215-0.220] n=3 | 0.432 [0.421-0.439] n=3 |
+| vllm-omni 0.30.0 | 0.072 [0.071-0.072] n=3 | 0.079 [0.078-0.080] n=3 | 0.088 [0.087-0.089] n=3 | 0.108 [0.108-0.109] n=3 | 0.146 [0.145-0.146] n=3 | 0.213 [0.212-0.215] n=3 | 0.336 [0.330-0.341] n=3 |
+| SGLang-Omni 0.1.9 | 0.052 [0.052-0.052] n=3 | 0.056 [0.055-0.056] n=3 | 0.058 [0.058-0.059] n=3 | 0.064 [0.064-0.065] n=3 | 0.080 [0.080-0.080] n=3 | 0.109 [0.108-0.110] n=3 | 0.168 [0.165-0.171] n=3 |
+
+## TTFA p50 (s): mean [min-max] over rounds (n rounds); FAILED if any round failed
+
+| arm | c=1 | c=2 | c=4 | c=8 | c=16 | c=32 | c=64 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| M* PR | 0.017 [0.017-0.018] n=3 | 0.027 [0.026-0.027] n=3 | 0.034 [0.033-0.035] n=3 | 0.039 [0.038-0.040] n=3 | 0.043 [0.040-0.047] n=3 | 0.052 [0.050-0.054] n=3 | 0.069 [0.067-0.071] n=3 |
+| M* main | 0.018 [0.018-0.018] n=3 | 0.029 [0.028-0.029] n=3 | 0.036 [0.035-0.036] n=3 | 0.041 [0.041-0.042] n=3 | 0.051 [0.051-0.052] n=3 | 0.075 [0.071-0.077] n=3 | 0.080 [0.080-0.081] n=3 |
+| vllm-omni 0.30.0 | 0.023 [0.023-0.023] n=3 | 0.033 [0.032-0.033] n=3 | 0.039 [0.037-0.041] n=3 | 0.046 [0.046-0.047] n=3 | 0.069 [0.066-0.072] n=3 | 0.101 [0.095-0.105] n=3 | 0.151 [0.148-0.155] n=3 |
+| SGLang-Omni 0.1.9 | 0.012 [0.012-0.012] n=3 | 0.015 [0.015-0.016] n=3 | 0.016 [0.015-0.017] n=3 | 0.017 [0.017-0.017] n=3 | 0.019 [0.018-0.019] n=3 | 0.022 [0.022-0.023] n=3 | 0.027 [0.026-0.028] n=3 |
+
+## TTFA p99 (s): mean [min-max] over rounds (n rounds); FAILED if any round failed
+
+| arm | c=1 | c=2 | c=4 | c=8 | c=16 | c=32 | c=64 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| M* PR | 0.022 [0.019-0.025] n=3 | 0.036 [0.036-0.037] n=3 | 0.047 [0.043-0.053] n=3 | 0.062 [0.058-0.064] n=3 | 0.079 [0.077-0.080] n=3 | 0.109 [0.102-0.122] n=3 | 0.170 [0.159-0.175] n=3 |
+| M* main | 0.020 [0.019-0.022] n=3 | 0.038 [0.037-0.039] n=3 | 0.046 [0.044-0.049] n=3 | 0.060 [0.055-0.065] n=3 | 0.087 [0.081-0.098] n=3 | 0.128 [0.124-0.132] n=3 | 0.204 [0.168-0.271] n=3 |
+| vllm-omni 0.30.0 | 0.029 [0.028-0.030] n=3 | 0.044 [0.041-0.046] n=3 | 0.054 [0.049-0.066] n=3 | 0.067 [0.060-0.072] n=3 | 0.111 [0.105-0.116] n=3 | 0.166 [0.150-0.188] n=3 | 0.284 [0.262-0.301] n=3 |
+| SGLang-Omni 0.1.9 | 0.014 [0.013-0.015] n=3 | 0.018 [0.018-0.019] n=3 | 0.024 [0.023-0.024] n=3 | 0.033 [0.032-0.033] n=3 | 0.044 [0.043-0.045] n=3 | 0.074 [0.074-0.075] n=3 | 0.127 [0.126-0.129] n=3 |
+
+## Gate (WER, Whisper large-v3)
+
+Whisper large-v3, 128 LibriSpeech test-clean sentences per arm. Best WER 1.82%, same-code spread (two M* PR processes) 0.14 pt, tolerance 1.00 pt; median s/word over arms 0.393
+
+Sanity gate: excluded only if silent/missing output or WER > 2x best and > 10%; parity (WER within tolerance and speech rate within 25%) is annotated, not gating.
+
+| tag | WER % | n | missing | median s/word | sanity gate | parity (annotated) |
+|---|---:|---:|---:|---:|---|---|
+| mstar_main | 1.82 | 128 | 0 | 0.393 | PASS | yes |
+| mstar_pr | 1.96 | 128 | 0 | 0.398 | PASS | yes |
+| mstar_pr_b | 1.82 | 128 | 0 | 0.393 | PASS | yes |
+| sgomni__base | 2.14 | 128 | 0 | 0.390 | PASS | yes |
+| sgomni__mrr128 | 2.23 | 128 | 0 | 0.387 | PASS | yes |
+| vllmomni__default | 2.28 | 128 | 0 | 0.393 | PASS | yes |
+| vllmomni__high_conc | 1.96 | 128 | 0 | 0.390 | PASS | yes |
+
+Server commands (round 1):
+
+```
+/root/work/mstar-main/.venv/bin/python -m mstar.cli.main serve qwen3_tts --config /root/work/mstar-main/configs/qwen3tts.yaml --gpus 0 --port 8400
+/root/work/mstar/.venv/bin/python -m mstar.cli.main serve qwen3_tts --config /root/work/mstar/configs/qwen3tts.yaml --gpus 0 --port 8400
+/root/work/engines/sgomni/bin/sgl-omni serve --model-path Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice --host 127.0.0.1 --port 8400 --config /root/work/dbench/tts_configs/sgomni_qwen3tts_0p6b.yaml
+/root/work/engines/vllmomni/bin/vllm serve Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice --omni --host 127.0.0.1 --port 8400 --deploy-config /root/work/engines/vllmomni/lib/python3.12/site-packages/vllm_omni/deploy/qwen3_tts_high_concurrency_mrv2_single_gpu.yaml
+```
+
+<details><summary>notes</summary>
+
+```
+notes for qwen3tts_0p6b
+dropped engines: {}
+startup s: vllmomni: median 84 n=6; sgomni: median 89 n=6; mstar-pr: median 126 n=8; mstar-main: median 178 n=4
+main_mstar-main_python_r1: failed captures 0, graph runtime rust True, rust frontend False
+main_mstar-main_python_r2: failed captures 0, graph runtime rust True, rust frontend False
+main_mstar-main_python_r3: failed captures 0, graph runtime rust True, rust frontend False
+main_mstar-pr_python_r1: failed captures 0, graph runtime rust True, rust frontend False
+main_mstar-pr_python_r2: failed captures 0, graph runtime rust True, rust frontend False
+main_mstar-pr_python_r3: failed captures 0, graph runtime rust True, rust frontend False
+```
+
+</details>
+
+<details><summary>profile phases_c1</summary>
+
+```
+
+=== worker_0  iters 100-1600  records=16  batch=1.00 (range 1.0-1.0) ===
+    work: 1,600 request-steps (bs x iters) -- us/1k is cost per unit of output, comparable across runs with a different iteration mix
+phase                                      mean_ms   p50_ms   p95_ms  samples      us/1k
+----------------------------------------------------------------------------------------
+await_gpu                                    0.036    0.000    0.850     1599   35550.0 
+engine.admit                                 0.011    0.010    0.020     1482    9818.8 
+engine.collect_outputs                       0.107    0.090    0.400     1600  106887.5 
+engine.commit                                0.094    0.090    0.130     1482   86806.3 
+engine.declare_step                          0.019    0.020    0.030     1600   19375.0 
+engine.forward                               0.137    0.110    1.840     1600  136875.0 
+engine.plan.fresh                            2.451    1.500   24.750       22   33706.2 
+engine.plan.promoted                         0.161    0.160    0.220     1460  147206.2 
+engine.postprocess                           0.011    0.010    0.090     1600   10625.0 
+engine.pre_admit                             0.020    0.020    0.030     1460   18250.0 
+engine.pre_declare                           0.020    0.020    0.030     1460   18250.0 
+engine.preprocess                            0.113    0.110    0.150     1600  112500.0 
+gpu_exec                                     4.011    3.960    5.110     1598 4005800.0 
+iter_total                                   3.897    3.960    5.640     1600 3896875.0 
+res.admit.code_predictor                     0.000    0.000    0.000      358       0.0 
+res.admit.talker_attn                        0.000    0.000    0.000      286       0.0 
+res.admit.talker_kv                          0.011    0.030    0.090      286    2050.0 
+res.admit.talker_pos                         0.000    0.000    0.000      286       0.0 
+res.admit.talker_sampler                     0.000    0.000    0.000      286       0.0 
+res.commit.code_predictor                    0.029    0.020    0.060     1482   27193.8 
+res.commit.sampler.offset                    0.020    0.020    0.030     2964   37050.0*
+res.commit.talker_attn                       0.000    0.000    0.000     1482       0.0 
+res.commit.talker_kv                         0.010    0.010    0.010     1482    9262.5 
+res.commit.talker_pos                        0.010    0.010    0.010     1482    9262.5 
+res.commit.talker_sampler                    0.042    0.040    0.060     1482   38756.2 
+res.plan.code_predictor                      0.081    0.060    0.290     1818   91712.5*
+res.plan.talker_attn                         0.710    0.000    3.470     1746  774587.5*
+res.plan.talker_kv                           0.090    0.010    0.620     1746   98168.8*
+res.plan.talker_pos                          0.012    0.000    0.130     1746   13312.5*
+res.plan.talker_sampler                      0.090    0.070    0.240     1746   97700.0*
+res.pre_plan.code_predictor                  0.012    0.010    0.010     1460   11325.0 
+res.pre_plan.talker_attn                     0.151    0.140    0.330     1460  137425.0 
+res.pre_plan.talker_kv                       0.219    0.210    0.320     1460  199612.5 
+res.pre_plan.talker_pos                      0.039    0.040    0.060     1460   35387.5 
+res.pre_plan.talker_sampler                  0.010    0.010    0.010     1460    9125.0 
+rust.send_outputs.call                       0.011    0.010    0.070     1583   11118.8 
+rust.send_outputs.marshal                    0.008    0.000    0.080     1583    8018.8 
+speculate                                    0.071    0.070    0.090     1380   61462.5 
+submit_spec                                  1.073    0.870    3.830     1543 1034668.8 
+worker.await_admit_settled                   2.079    0.580   34.530       63   81850.0 
+worker.gpu_thread.await_plan                 0.281    0.265    0.570     1543  270700.0 
+worker.gpu_thread.exec                       0.756    0.680    2.570     1600  755606.2 
+worker.gpu_thread.prepare_inputs             0.241    0.040    3.510     1600  240625.0 
+worker.plan_thread.await_commit              0.007    0.000    0.010     1460    6231.3 
+worker.plan_thread.pre_plan                  0.506    0.485    0.830     1460  461281.2 
+worker.plan_thread.reserve_slot              0.027    0.025    0.040     1460   24525.0 
+worker.postprocess.check_stop                0.040    0.030    0.150     1583   39537.5 
+worker.postprocess.check_stop_tail           0.038    0.030    0.090     1583   37718.8 
+worker.postprocess.cleanup_inputs            0.012    0.010    0.020     1599   11868.8 
+worker.postprocess.completion_event_sync     2.309    2.510    4.000     1583 2284925.0 
+worker.postprocess.event_sync                2.313    2.505    4.000     1599 2311087.5 
+worker.postprocess.pending_loop_stops        0.010    0.010    0.010     1583    9893.8 
+worker.postprocess.prematerialize            0.014    0.000    0.140     1583   13575.0 
+worker.postprocess.register_outputs          0.013    0.000    0.150     1583   12968.8 
+worker.postprocess.route                     0.027    0.020    0.040     1583   26581.2 
+worker.postprocess.route_outputs             0.087    0.080    0.130     1583   86562.5 
+worker.postprocess.send                      0.023    0.010    0.150     1583   22856.2 
+worker.postprocess.send_outputs              0.080    0.070    0.730     1583   79100.0 
+worker.postprocess.send_prep                 0.010    0.010    0.010     1583    9893.8 
+worker.postprocess.stop_loops                0.000    0.000    0.000     1583       0.0 
+worker.postprocess.store_tensors             0.052    0.050    0.080     1583   51937.5 
+worker.postprocess.update_lru                0.000    0.000    0.000     1583       0.0 
+worker.postprocess_batch                     2.577    2.725    4.470     1599 2575243.8 
+worker.
+```
+
+</details>
+
+<details><summary>profile phases_c32</summary>
+
+```
+
+=== worker_0  iters 100-100  records=1  batch=22.45 (range 22.4-22.4) ===
+    work: 2,245 request-steps (bs x iters) -- us/1k is cost per unit of output, comparable across runs with a different iteration mix
+phase                                      mean_ms   p50_ms   p95_ms  samples      us/1k
+----------------------------------------------------------------------------------------
+await_gpu                                    0.290    0.000    2.030       99   12788.4 
+engine.admit                                 0.020    0.020    0.070       76     677.1 
+engine.collect_outputs                       0.330    0.180    1.420      100   14699.3 
+engine.commit                                0.240    0.180    0.690       76    8124.7 
+engine.declare_step                          0.020    0.030    0.040      100     890.9 
+engine.forward                               0.690    0.160    2.880      100   30735.0 
+engine.plan.fresh                            3.780    1.550   24.800       11   18521.2 
+engine.plan.promoted                         0.260    0.250    0.330       65    7527.8 
+engine.postprocess                           0.070    0.050    0.210      100    3118.0 
+engine.pre_admit                             0.070    0.060    0.090       65    2026.7 
+engine.pre_declare                           0.040    0.030    0.050       65    1158.1 
+engine.preprocess                            0.190    0.160    0.340      100    8463.3 
+gpu_exec                                     7.990    6.190   19.040       98  348784.0 
+iter_total                                   9.320    6.270   32.200      100  415144.8 
+res.admit.code_predictor                     0.000    0.000    0.000      347       0.0*
+res.admit.talker_attn                        0.000    0.000    0.000      275       0.0*
+res.admit.talker_kv                          0.010    0.010    0.040      275    1224.9*
+res.admit.talker_pos                         0.000    0.000    0.000      275       0.0*
+res.admit.talker_sampler                     0.000    0.000    0.000      275       0.0*
+res.commit.code_predictor                    0.060    0.030    0.150       76    2031.2 
+res.commit.sampler.offset                    0.040    0.020    0.100      152    2708.2*
+res.commit.talker_attn                       0.000    0.000    0.000       76       0.0 
+res.commit.talker_kv                         0.030    0.030    0.050       76    1015.6 
+res.commit.talker_pos                        0.020    0.020    0.030       76     677.1 
+res.commit.talker_sampler                    0.130    0.100    0.310       76    4400.9 
+res.plan.code_predictor                      0.120    0.070    0.300      412   22022.3*
+res.plan.talker_attn                        42.750    0.280    3.540      340 6474387.5*
+res.plan.talker_kv                           0.400    0.520    0.620      340   60579.1*
+res.plan.talker_pos                          0.060    0.050    0.130      340    9086.9*
+res.plan.talker_sampler                      0.170    0.050    0.250      340   25746.1*
+res.pre_plan.code_predictor                  0.130    0.010    0.670       65    3763.9 
+res.pre_plan.talker_attn                     0.190    0.170    0.370       65    5501.1 
+res.pre_plan.talker_kv                       0.270    0.280    0.440       65    7817.4 
+res.pre_plan.talker_pos                      0.060    0.050    0.100       65    1737.2 
+res.pre_plan.talker_sampler                  0.070    0.010    0.230       65    2026.7 
+rust.send_outputs.call                       0.060    0.040    0.190       99    2645.9 
+rust.send_outputs.marshal                    0.070    0.000    0.310       99    3086.9 
+speculate                                    0.200    0.170    0.310       49    4365.3 
+submit_spec                                  2.350    1.690    5.100       99  103630.3 
+worker.await_admit_settled                   4.470    1.020   35.420       12   23893.1 
+worker.gpu_thread.await_plan                 0.270    0.220    0.940       99   11906.5 
+worker.gpu_thread.exec                       2.280    1.180    6.240      100  101559.0 
+worker.gpu_thread.prepare_inputs             1.670    0.220    7.510      100   74387.5 
+worker.plan_thread.await_commit              0.200    0.000    1.180       75    6681.5 
+worker.plan_thread.pre_plan                  0.880    0.660    1.680       65   25478.8 
+worker.plan_thread.reserve_slot              0.020    0.020    0.040       75     668.2 
+worker.postprocess.check_stop                0.210    0.080    0.970       99    9260.6 
+worker.postprocess.check_stop_tail           0.080    0.100    0.150       99    3527.8 
+worker.postprocess.cleanup_inputs            0.040    0.040    0.060       99    1763.9 
+worker.postprocess.completion_event_sync     3.070    2.230   11.950       99  135380.8 
+worker.postprocess.event_sync                3.060    2.220   11.940       99  134939.9 
+worker.postprocess.pending_loop_stops        0.010    0.010    0.020       99     441.0 
+worker.postprocess.prematerialize            0.150    0.000    0.960       99    6614.7 
+worker.postprocess.register_outputs          0.080    0.000    0.390       99    3527.8 
+worker.postprocess.route                     0.080    0.090    0.110       99    3527.8 
+worker.postprocess.route_outputs             0.250    0.290    0.340       99   11024.5 
+worker.postprocess.send                      0.140    0.060    0.500       99    6173.7 
+worker.postprocess.send_outputs              0.660    0.430    1.780       99   29104.7 
+worker.postprocess.send_prep                 0.030    0.020    0.100       99    1322.9 
+worker.postprocess.stop_loops                0.010    0.000    0.060       99     441.0 
+worker.postprocess.store_tensors             0.150    0.180    0.210       99    6614.7 
+worker.postprocess.update_lru                0.000    0.010    0.010       99       0.0 
+worker.postprocess_batch                     4.350    3.440   13.160       99  191826.3 
+worker
 ```
 
 </details>
