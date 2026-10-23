@@ -21,3 +21,6 @@
 {"label": "main_mstar-pr_rust_r2", "arm": "mstar-pr", "seconds": 210.6, "ok": true, "time": 1792713803.5579166}
 {"label": "main_voxserve_bs64_compile_r3", "arm": "voxserve", "seconds": 6.1, "ok": true, "time": 1792714013.7092361}
 {"label": "main_orpheusvllm_ignore_seed_r3", "arm": "orpheusvllm", "seconds": 36.2, "ok": true, "time": 1792714314.5446224}
+{"label": "main_mstar-pr_rust_r3", "arm": "mstar-pr", "seconds": 42.2, "ok": true, "time": 1792714505.9413133}
+{"label": "main_mstar-main_rust_r3", "arm": "mstar-main", "seconds": 210.6, "ok": true, "time": 1792714921.0639753}
+{"label": "profile_c64", "arm": "mstar-pr", "seconds": 210.6, "ok": true, "time": 1792715349.2571452}

@@ -13,6 +13,8 @@ The tables fill in as models finish. **Preliminary until every arm has ≥3 roun
 
 Full methodology and caveats will be in REPORT.md when the run finishes.
 
+**Raw data:** the reports, per-model summaries, raw `results.jsonl`, gate/decision/failure logs and the unattended harnesses are on this branch under [`overnight_artifacts/bench1021/`](../blob/perf/overnight-all/overnight_artifacts/bench1021/README.md), refreshed as models finish.
+
 **Headlines so far**
 
 **Against the strongest competitor at each point.** This is mstar-pr throughput vs whichever of vLLM (v) or SGLang (s) is faster at that concurrency, or SGLang diffusion for Z-Image. Each cell is computed from the raw rounds, mean over rounds.
@@ -30,7 +32,7 @@ Full methodology and caveats will be in REPORT.md when the run finishes.
 | Qwen3.5-0.8B image (MMMU) tok/s (2 of 3 rounds) | +58% v | | +51% s | | +22% v | +10% v | | |
 | Qwen3.5-0.8B video 8 s tok/s (2 of 3) | +56% v | | +52% v | | +42% v | +43% v | | |
 | Qwen3.5-0.8B video 60 s tok/s (2 of 3) | +47% v | | +23% v | | +26% v | +41% v | | |
-| Orpheus 3B, audio-s/s (2 of 3) | +15% ov | | +9% ov | | +10% ov | −3% ov | −9% ov | |
+| Orpheus 3B, audio-s/s (3 rounds) | +15% ov | | +9% ov | | +9% ov | −3% ov | −9% ov | |
 | Z-Image-Turbo, img/s (3 rounds) | −9% s | −6% s | −5% s | −5% s | −5% s | | | |
 | Wan2.2 1280×704×81 20 steps, videos/min (3 rounds) | +1% v | +1% v | +1% v | +1% v | | | | |
 | Qwen3-TTS 1.7B, audio-s/s (pr 3 rounds, main 2) | −12% s | −30% s | −34% s | −38% s | −41% s | −43% s | −45% s | |
@@ -71,9 +73,9 @@ The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show 
   - **Images (MMMU):** +58% vs the best competitor at c=1, falling to +10% at c=32. TTFT at c=32 is 58 ms vs vLLM's 212 ms.
   - **Video:** 8 s clips +42–56%; 60 s clips +23–47%.
   - **This PR vs main:** +3–76%, largest on long videos at high concurrency.
-- **Orpheus 3B (1 GPU): 2 of 3 rounds, preliminary.**
+- **Orpheus 3B (1 GPU): done** (3 rounds, failed=0; Rust frontend; sanity gate passed on every arm, Whisper WER 1.8–2.6%).
   - Competitors: vox-serve, plus our own vLLM 0.30 Orpheus server (no public one handles concurrent requests).
-  - **vs the vLLM server:** M* leads it by 9–15% at c≤16, but it is ahead of M* by 3% at c=32 and 9% at c=64 (101.5 vs 92.8 audio-s/s).
+  - **vs the vLLM server:** M* leads it by 9–15% at c≤16, but it is ahead of M* by 3% at c=32 and 9% at c=64 (102.4 vs 93.0 audio-s/s).
   - **vs vox-serve:** M* leads by 60–95% at every concurrency.
   - **This PR vs main:** +5–15%.
 - **Qwen3-Omni-30B-A3B (2 GPUs; vs vllm-omni and sglang-omni on their default 2-GPU deploys): text and speech output done, speech recognition being re-run.** 3 rounds.

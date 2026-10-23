@@ -18,3 +18,5 @@
 {"label": "main_mstar-pr-rf_r2", "arm": "mstar-pr-rf", "imports": "/root/work/mstar/mstar/__init__.py 2.12.1+cu132 0.7.2 5.20.2", "commit": "perf/overnight-all d248477ec795c6ddf0716e23932be15be2b573e2 (final, review fixes)"}
 {"label": "main_mstar-main-rf_r2", "arm": "mstar-main-rf", "imports": "/root/work/mstar-main/mstar/__init__.py 2.12.1+cu132 0.7.2 5.20.2", "commit": "main abdfd5802"}
 {"label": "main_sglang_r3", "arm": "sglang", "packages": ["flash-attn-4==4.0.0b36", "flashinfer-python==0.7.1", "sglang==0.5.22", "sglang-kernel==0.4.9", "torch==2.14.1+cu132", "transformers==5.19.0", "triton==3.8.0"]}
+{"label": "main_mstar-pr-rf_r3", "arm": "mstar-pr-rf", "imports": "/root/work/mstar/mstar/__init__.py 2.12.1+cu132 0.7.2 5.20.2", "commit": "perf/overnight-all d248477ec795c6ddf0716e23932be15be2b573e2 (final, review fixes)"}
+{"label": "main_mstar-main-rf_r3", "arm": "mstar-main-rf", "imports": "/root/work/mstar-main/mstar/__init__.py 2.12.1+cu132 0.7.2 5.20.2", "commit": "main abdfd5802"}
