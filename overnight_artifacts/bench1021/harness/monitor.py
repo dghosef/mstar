@@ -127,7 +127,16 @@ def main():
     seen_hb = {h: False for h in NODES}
     idle = {h: 0 for h in NODES}
     sshfail = {h: 0 for h in NODES}
-    nfail = {h: failures(h)[0] or "" for h in NODES}
+    nfail = {}
+    for h in NODES:  # an ssh hiccup here would make every old failure look new, so retry the baseline
+        for _ in range(20):
+            newest, _lines = failures(h)
+            if newest is not None:
+                nfail[h] = newest
+                break
+            time.sleep(15)
+        else:
+            nfail[h] = "99999999999999"
     if len(sys.argv) > 1 and sys.argv[1] == "--quiet-for":  # suppress wakes for N minutes (an acknowledged loop)
         quiet_until = time.time() + 60 * int(sys.argv[2])
     else:

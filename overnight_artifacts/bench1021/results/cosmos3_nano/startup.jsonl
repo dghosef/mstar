@@ -6,3 +6,5 @@
 {"label": "setup_smoke_mstar-pr", "arm": "mstar-pr", "seconds": 36.2, "ok": true, "time": 1792735912.386208}
 {"label": "setup_smoke_mstar-main", "arm": "mstar-main", "seconds": 111.4, "ok": true, "time": 1792736142.6059275}
 {"label": "tune_speed_resident_sglang_speed_resident_r0", "arm": "sglang", "seconds": 39.3, "ok": true, "time": 1792736382.3336506}
+{"label": "tune_speed_resident_compile_sglang_speed_resident_compile_r0", "arm": "sglang", "seconds": 45.2, "ok": true, "time": 1792737357.3110561}
+{"label": "tune_base_vllmomni_base_r0", "arm": "vllmomni", "seconds": 27.2, "ok": true, "time": 1792738319.0275793}
