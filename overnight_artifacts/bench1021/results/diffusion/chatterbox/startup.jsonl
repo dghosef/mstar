@@ -14,3 +14,4 @@
 {"label": "main_cbserver_default_r3", "arm": "cbserver", "seconds": 15.2, "ok": true, "time": 1792726825.3153858}
 {"label": "main_mstar-pr_python_r3", "arm": "mstar-pr", "seconds": 30.2, "ok": true, "time": 1792727273.723842}
 {"label": "main_mstar-main_python_r3", "arm": "mstar-main", "seconds": 192.6, "ok": true, "time": 1792727602.7400339}
+{"label": "profile_c8", "arm": "mstar-pr", "seconds": 192.5, "ok": true, "time": 1792727936.6769671}

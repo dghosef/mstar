@@ -1,0 +1,13 @@
+{
+ "higgs_official": {
+  "config": "eager",
+  "score": 34.952373417493924,
+  "gate_pass": true,
+  "candidates": [
+   [
+    34.952373417493924,
+    "eager"
+   ]
+  ]
+ }
+}

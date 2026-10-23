@@ -1,0 +1,9 @@
+{"label": "setup_smoke_mstar-pr", "arm": "mstar-pr", "seconds": 487.3, "ok": true, "time": 1792728481.687298}
+{"label": "setup_smoke_mstar-main", "arm": "mstar-main", "seconds": 691.7, "ok": true, "time": 1792729177.1606731}
+{"label": "collect_mstar_pr_mstar-pr_config_r0", "arm": "mstar-pr", "seconds": 207.6, "ok": true, "time": 1792729519.8785224}
+{"label": "collect_mstar_pr_b_mstar-pr_config_r0", "arm": "mstar-pr", "seconds": 42.2, "ok": true, "time": 1792729573.6791005}
+{"label": "collect_mstar_main_mstar-main_config_r0", "arm": "mstar-main", "seconds": 207.6, "ok": true, "time": 1792729792.8679385}
+{"label": "main_mstar-pr_config_r1", "arm": "mstar-pr", "seconds": 207.6, "ok": true, "time": 1792730126.4682546}
+{"label": "main_mstar-main_config_r1", "arm": "mstar-main", "seconds": 210.6, "ok": true, "time": 1792730369.0788736}
+{"label": "main_mstar-main_config_r2", "arm": "mstar-main", "seconds": 42.2, "ok": true, "time": 1792730798.2838614}
+{"label": "main_mstar-pr_config_r2", "arm": "mstar-pr", "seconds": 210.6, "ok": true, "time": 1792731392.774393}
