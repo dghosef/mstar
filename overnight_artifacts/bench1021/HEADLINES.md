@@ -46,6 +46,9 @@ Full methodology and caveats will be in REPORT.md when the run finishes.
 | Qwen3-Omni audio→text (ASR), tok/s (3 rounds) | −33% s | | −46% s | | −52% s | −47% s | | |
 | Higgs Audio v3 STT, RTFx (2 rounds) | +2150% off | | | +1173% off | | +545% off | | |
 | OmniVoice, audio-s/s (3 rounds) | −6% v | 0% v | +11% v | +9% v | −6% v | −9% v | −20% off | |
+| Omnilingual ASR 300M, RTFx (2 rounds) | +26% off | | | | +43% off | | +8% off | |
+| Omnilingual ASR 1B, RTFx (2 rounds) | +74% off | | | | +62% off | | +48% off | |
+| Omnilingual ASR 3B, RTFx (2 rounds) | +112% off | | | | +35% off | | +24% off | |
 | Kokoro 82M, audio-s/s (3 rounds) | +282% kf | +178% kf | +131% kf | +200% kf | +299% kf | +364% kf | +472% kf | |
 | FLUX.2-klein 4B, img/s (3 rounds) | −23% s | −9% s | −7% s | −7% s | −6% s | | | |
 
@@ -108,6 +111,13 @@ The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show 
   - **M* leads by 2.6–3× over chatterbox-vllm and 5–10× over the TTS server.** mstar-pr does 11.0 → 34.2 audio-s/s; chatterbox-vllm does 3.6 → 13.5.
   - **This PR vs main:** +3–10%.
   - The PR's split+MPS config, its +58% headline, isn't benchmarked here: the harness has no MPS handling.
+- **Omnilingual ASR 300M / 1B / 3B (1 GPU): done** (2 rounds, failed=0; 7B running). Same WER as the official pipeline (3B: 2.50% vs 2.54%).
+  - Competitor: the official omnilingual-asr 0.2.0 `ASRInferencePipeline`, as an offline batch with no HTTP cost. No serving engine runs these CTC models.
+  - **M* leads at every point**, by +26–112% at c=1 and +8–48% at c=64 (RTFx: 300M 298 → 1,754; 1B 268 → 1,789; 3B 242 → 1,005).
+  - **This PR vs main:**
+    - 300M: +17% at c=1, +30% at c=16, but −3% at c=64.
+    - 1B and 3B: 1.7–2.1×.
+    - The overnight claim was 300M +23–37%; 1B ~1.9–2.2×; 3B 2.0–2.9×.
 - **OmniVoice (1 GPU, 32 steps): done.** 3 rounds, failed=0. Sanity gate passed (WER 0.9–1.1% on all arms).
   - Competitors: vllm-omni 0.30, tuned to fp16 with max_num_seqs 32, and the official omnivoice package with FlashInfer as an offline batch.
   - **Level with vllm-omni at low and mid concurrency** (−6% at c=1, +9–11% at c=4–8).
@@ -159,4 +169,4 @@ The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show 
   - At random 1024/256 c=64, the default 1024-token budget is ~10% *slower* than without chunking, with higher TTFT. A 2048 budget is −3.5%, and chunking off matches base.
   - Greedy output is identical with chunking off. With chunking on, 2 of 10 long prompts diverge (expected numerics).
   - Tests: no new failures beyond two xdist flakes that pass when rerun alone.
-  - This is a single short smoke, so it's a direction, not a result. It runs as an extra arm at the end of the queue (long-prompt workloads).
+  - This is a single short smoke, so it's a direction, not a result. **Not benchmarked further:** it was dropped from the run, along with the 4096/8192-token long-prompt workloads and the Qwen3.5-2B/4B text entries (same architecture as 0.8B/9B; the PR moved them only +2–5%).

@@ -1,6 +1,6 @@
 # TTS lane on node2: M* vs vllm-omni, SGLang-Omni, vox-serve, fish-speech
 
-_Generated 2026-10-23 03:59 UTC by report_tts.py._
+_Generated 2026-10-23 05:47 UTC by report_tts.py._
 
 Hardware: node2, 8x H200 (see REPORT_DIFFUSION.md); every timed server on GPU 0 alone. Arms: M* PR d248477ec and M* main abdfd5802 (own configs, Rust graph runtime, MSTAR_SHM_ARENA=1), each competitor on its best tuned knob set (tune table below), pinned versions in each model's versions/. Text: 256 LibriSpeech test-clean sentences (8-30 words, every ~7th utterance in id order; mean 17 words), one streaming client for every engine (dtts_client.py): TTFA = first audio bytes, RTF = e2e / audio seconds, audio-s/s = total audio / wall. Closed loop at c = 1..64, 1 warmup wave per point after an untimed 64-sentence pass, 3 rounds with fresh servers and rotated order; a point counts only with failed == 0. Sampling: each model's default as M* serves it, matched where the engine exposes it (Fish: temp 0.8, top_p 0.8, top_k 30, rep 1.0 sent to SGLang-Omni and fish-speech; vllm-omni's Fish deploy YAML copied with top_p 0.8). Gate: Whisper large-v3 WER over 128 sentences per arm (criteria in dtts.py), seconds-per-word sanity, no silent/runaway output.
 

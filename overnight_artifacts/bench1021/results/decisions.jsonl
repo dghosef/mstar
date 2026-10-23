@@ -71,3 +71,4 @@
 {"t": "2026-10-23T05:40:44Z", "model": "q35_2b", "decision": "gate mstar_pr_rf_a", "choice": "PASS", "gsm8k": 0.74}
 {"t": "2026-10-23T05:40:44Z", "model": "q35_2b", "decision": "gate mstar_main_a", "choice": "PASS", "gsm8k": 0.748}
 {"t": "2026-10-23T05:40:44Z", "model": "q35_2b", "decision": "frontend", "choice": "rust", "python_geomean": 3935.1343209751712, "rust_geomean": 4225.882701071254, "rust_gate": "PASS"}
+{"time": "2026-10-23 06:19:02", "model": "cosmos3_nano", "kind": "gen_arms", "arms": ["mstar-pr", "mstar-main", "sglang", "vllmomni"], "dropped": {}}

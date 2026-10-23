@@ -1,0 +1,8 @@
+{"label": "setup_smoke_sglang", "arm": "sglang", "seconds": 63.3, "ok": true, "time": 1792735095.7742658}
+{"label": "setup_smoke_vllmomni", "arm": "vllmomni", "seconds": 48.2, "ok": true, "time": 1792735259.8004096}
+{"label": "setup_smoke_mstar-pr", "arm": "mstar-pr", "seconds": 48.2, "ok": true, "time": 1792735423.2905488}
+{"label": "setup_smoke_sglang", "arm": "sglang", "seconds": 39.2, "ok": true, "time": 1792735617.5500324}
+{"label": "setup_smoke_vllmomni", "arm": "vllmomni", "seconds": 27.2, "ok": true, "time": 1792735760.869428}
+{"label": "setup_smoke_mstar-pr", "arm": "mstar-pr", "seconds": 36.2, "ok": true, "time": 1792735912.386208}
+{"label": "setup_smoke_mstar-main", "arm": "mstar-main", "seconds": 111.4, "ok": true, "time": 1792736142.6059275}
+{"label": "tune_speed_resident_sglang_speed_resident_r0", "arm": "sglang", "seconds": 39.3, "ok": true, "time": 1792736382.3336506}

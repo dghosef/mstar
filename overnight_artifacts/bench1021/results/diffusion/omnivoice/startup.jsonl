@@ -14,3 +14,5 @@
 {"label": "main_vllmomni_fp16_mns32_r3", "arm": "vllmomni", "seconds": 30.2, "ok": true, "time": 1792733755.2819533}
 {"label": "main_mstar-pr_python_r3", "arm": "mstar-pr", "seconds": 108.4, "ok": true, "time": 1792734039.655593}
 {"label": "main_mstar-main_python_r3", "arm": "mstar-main", "seconds": 15.2, "ok": true, "time": 1792734108.6971877}
+{"label": "profile_c64", "arm": "mstar-pr", "seconds": 111.4, "ok": true, "time": 1792734385.1860273}
+{"label": "profile_c1", "arm": "mstar-pr", "seconds": 18.2, "ok": true, "time": 1792734428.5078886}

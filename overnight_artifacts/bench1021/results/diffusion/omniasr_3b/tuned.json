@@ -1,0 +1,17 @@
+{
+ "omniasr_official": {
+  "config": "bf16_sorted",
+  "score": 647.0478787518634,
+  "gate_pass": true,
+  "candidates": [
+   [
+    647.0478787518634,
+    "bf16_sorted"
+   ],
+   [
+    391.59311310916337,
+    "bf16_unsorted"
+   ]
+  ]
+ }
+}

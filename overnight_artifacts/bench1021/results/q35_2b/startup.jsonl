@@ -10,3 +10,5 @@
 {"label": "tune_sglang_chunk-16k", "arm": "sglang", "seconds": 46.2}
 {"label": "tune_mstar-pr", "arm": "mstar-pr", "seconds": 126.4}
 {"label": "tune_mstar-pr-rf", "arm": "mstar-pr-rf", "seconds": 120.4}
+{"label": "main_mstar-main-rf_r1", "arm": "mstar-main-rf", "seconds": 315.9}
+{"label": "main_vllm_r1", "arm": "vllm", "seconds": 45.2}
