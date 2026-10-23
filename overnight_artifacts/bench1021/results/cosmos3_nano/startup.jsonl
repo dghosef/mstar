@@ -19,3 +19,5 @@
 {"label": "main_sglang_speed_resident_r2", "arm": "sglang", "seconds": 39.2, "ok": true, "time": 1792748061.6224725}
 {"label": "main_vllmomni_base_r2", "arm": "vllmomni", "seconds": 27.2, "ok": true, "time": 1792749395.6839933}
 {"label": "main_mstar-pr_config_r2", "arm": "mstar-pr", "seconds": 99.4, "ok": true, "time": 1792750804.124505}
+{"label": "profile_t2v_c4", "arm": "mstar-pr", "seconds": 36.2, "ok": true, "time": 1792752358.0723336}
+{"label": "profile_t2v_c1", "arm": "mstar-pr", "seconds": 36.2, "ok": true, "time": 1792753450.7590911}

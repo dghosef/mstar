@@ -52,6 +52,7 @@ Full methodology and caveats will be in REPORT.md when the run finishes.
 | Omnilingual ASR 7B, RTFx (2 rounds) | +91% off | | | | +19% off | | +9% off | |
 | BAGEL t2i 1024², img/s (2 rounds) | +27% vo | +24% vo | +24% vo | | | | | |
 | BAGEL edit, img/s (2 rounds) | +20% vo | | +14% vo | | | | | |
+| Cosmos3 nano t2v 832×480×189, req/s (2 rounds) | −3% s | −17% s | −17% s | | | | | |
 | Kokoro 82M, audio-s/s (3 rounds) | +282% kf | +178% kf | +131% kf | +200% kf | +299% kf | +364% kf | +472% kf | |
 | FLUX.2-klein 4B, img/s (3 rounds) | −23% s | −9% s | −7% s | −7% s | −6% s | | | |
 
@@ -114,6 +115,10 @@ The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show 
   - **M* leads by 2.6–3× over chatterbox-vllm and 5–10× over the TTS server.** mstar-pr does 11.0 → 34.2 audio-s/s; chatterbox-vllm does 3.6 → 13.5.
   - **This PR vs main:** +3–10%.
   - The PR's split+MPS config, its +58% headline, isn't benchmarked here: the harness has no MPS handling.
+- **Cosmos3 nano (text→video 832×480, 189 frames, 35 steps, 1 GPU): done** (2 rounds, failed=0).
+  - **M* trails SGLang diffusion and vllm-omni.** It's level at c=1 (55.7 s vs 54.2 s, −2 to −3%) but **−17% at c=2–4**.
+  - **M* gets slower when it batches two videos:** 0.018 → 0.015 req/s. The competitors serve one at a time at a steady 0.018 req/s. A batched nano step is less efficient than two serial ones, so M* should not batch this model, or its batched path needs a look.
+  - **This PR vs main:** +1%. The PR's Cosmos3 gains were DP2/sp2 multi-GPU configs and the DROID policy, neither measured here.
 - **BAGEL-7B-MoT (1 GPU): done** (2 rounds, failed=0, sanity gate passed).
   - Competitors: vllm-omni 0.30 (t2i and edit, every CFG field sent explicitly) and vLLM 0.30 core (understanding only).
   - **Text→image 1024², 50 steps:** mstar-pr 0.102 img/s and 9.8 s at B=1, vs vllm-omni 0.080–0.082 and 12.5 s. That is **+24–27%**.

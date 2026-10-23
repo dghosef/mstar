@@ -1,0 +1,7 @@
+notes for cosmos3_nano
+dropped engines: {}
+startup s: sglang: median 39 n=6; vllmomni: median 27 n=5; mstar-pr: median 42 n=8; mstar-main: median 99 n=4
+main_mstar-main_config_r1: failed captures 0, graph runtime rust True
+main_mstar-main_config_r2: failed captures 0, graph runtime rust True
+main_mstar-pr_config_r1: failed captures 0, graph runtime rust True
+main_mstar-pr_config_r2: failed captures 0, graph runtime rust True

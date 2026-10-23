@@ -1,0 +1,2 @@
+{"label": "setup_smoke_sglang", "arm": "sglang", "seconds": 42.2, "ok": true, "time": 1792753804.936248}
+{"label": "setup_smoke_vllmomni", "arm": "vllmomni", "seconds": 27.2, "ok": true, "time": 1792753852.717862}
