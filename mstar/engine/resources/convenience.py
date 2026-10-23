@@ -145,15 +145,52 @@ class RaggedAttentionCallable:
     until Dynamo gives up.
     """
 
-    def __init__(self, attn: RaggedAttnManager | RaggedCrossAttnManager, label: str):
+    def __init__(self, attn: RaggedAttnManager | RaggedCrossAttnManager, label: str, opaque: bool = False):
         self.attn = attn
         self.label = label
+        # ``opaque``: call through the ``mstar::ragged_attention`` custom op, which
+        # a compiled region keeps in its graph as one node. Otherwise the call is a
+        # graph break per layer, which also stops Inductor fusing the pointwise
+        # work on either side of it: on Wan2.2's compiled, uncaptured DiT the
+        # breaks cost ~85 ms of a ~1 s step in extra elementwise kernels.
+        self._handle = _register_ragged(self) if opaque else None
 
-    @torch.compiler.disable
     def __call__(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     ) -> torch.Tensor:
+        if self._handle is not None:
+            return _ragged_attention_op(q, k, v, self._handle)
+        return self._run(q, k, v)
+
+    @torch.compiler.disable
+    def _run(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         return self.attn.run(q, k, v, label=self.label)
+
+
+# Opaque callables by handle: a custom op takes tensors and scalars only, so it
+# names its callable by index. One entry per callable built, i.e. per resource
+# binding and label, which is a handful per process.
+_RAGGED_CALLABLES: list[RaggedAttentionCallable] = []
+
+
+# Eager even when the callable is built inside a compiled region (a node that
+# creates its callables lazily on first forward): traced, the append is not
+# replayed but the handle Dynamo read is still baked into the graph.
+@torch.compiler.disable
+def _register_ragged(fn: RaggedAttentionCallable) -> int:
+    _RAGGED_CALLABLES.append(fn)
+    return len(_RAGGED_CALLABLES) - 1
+
+
+@torch.library.custom_op("mstar::ragged_attention", mutates_args=())
+def _ragged_attention_op(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, handle: int) -> torch.Tensor:
+    # the wrapper returns a fresh tensor (or a clone of its graph buffer), never an alias
+    return _RAGGED_CALLABLES[handle]._run(q, k, v).to(q.dtype)
+
+
+@_ragged_attention_op.register_fake
+def _(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, handle: int) -> torch.Tensor:
+    return torch.empty_like(q)
 
 
 class Mamba2Callable:

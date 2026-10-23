@@ -1,0 +1,209 @@
+{
+ "summary": {
+  "n": 32,
+  "errors": 0,
+  "wall_s": 5.92218752001645,
+  "req_per_s": 5.403408772829793,
+  "ttft_p50": 0.1710425794881303,
+  "ttft_mean": 0.7474783043144271,
+  "e2e_p50": 0.29190105851739645,
+  "ttft_p50_by_kind": {
+   "big": 0.1710425794881303
+  }
+ },
+ "rows": [
+  {
+   "id": "big_0",
+   "text": "The food dish shown in the image is **fried dough balls** \u2014 commonly known as **fried dough sticks** or **fried doughnuts**.\n\n### Key features visible",
+   "ttft": 0.07352592604001984,
+   "e2e": 5.029210362001322
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up, appetizing view of **pastries**, most likely **cheesecakes** or **puff pastries**, dusted generously",
+   "ttft": 0.09331430000020191,
+   "e2e": 5.034135087043978
+  },
+  {
+   "id": "big_2",
+   "text": "Based on the visual evidence in the photo, the dish is **Cinderella\u2019s Cake** (also known as **Cinderella\u2019s Cake** or **C",
+   "ttft": 0.1463169199996628,
+   "e2e": 5.047667247010395
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered pastry, likely a classic French dessert, sits on a dark wooden table. The pastry is generously dusted with powdered sugar and appears to be a",
+   "ttft": 0.1458756959764287,
+   "e2e": 5.0478857069974765
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in the image is **fried dough balls**, commonly known as **fried dough sticks** or **fried doughnuts**.\n\n### Key features visible:",
+   "ttft": 4.948959593020845,
+   "e2e": 5.048214105016086
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up, appetizing view of **pastries**, most likely **cheesecakes** or **puff-pastries**, dusted",
+   "ttft": 4.94858597998973,
+   "e2e": 5.048322640010156
+  },
+  {
+   "id": "big_2",
+   "text": "Based on the visual evidence in the photo, the dish is **Candied Churros** (also known as **Candied Churros** or",
+   "ttft": 4.9786477030138485,
+   "e2e": 5.047918026975822
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered pastry, likely a classic French dessert, sits on a dark wooden table. The pastry is generously dusted with powdered sugar and appears to be a",
+   "ttft": 4.947742176998872,
+   "e2e": 5.047521043976303
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in the image is **fried dough balls** \u2014 commonly known as **fried dough sticks** or **fried doughnuts**.\n\n### Key features visible",
+   "ttft": 0.05701917002443224,
+   "e2e": 0.29232910502469167
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up, appetizing view of **pastries**, most likely **cheesecakes** or **puff pastries**, dusted generously",
+   "ttft": 0.08713004598394036,
+   "e2e": 0.29219525295775384
+  },
+  {
+   "id": "big_2",
+   "text": "Based on the visual evidence in the photo, the dish is **Cinderella\u2019s Cake** (also known as **Cinderella\u2019s Cake** or **C",
+   "ttft": 0.1260280999704264,
+   "e2e": 0.2928968199994415
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered pastry, likely a classic French dessert, sits on a dark wooden table. The pastry is generously dusted with powdered sugar and appears to be a",
+   "ttft": 0.12519078399054706,
+   "e2e": 0.29275240999413654
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in the image is **fried dough balls**, commonly known as **fried dough sticks** or **fried doughnuts**.\n\n### Key features visible:",
+   "ttft": 0.1968629849725403,
+   "e2e": 0.29217476898338646
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up, appetizing view of **pastries**, most likely **cheesecakes** or **puff-pastries**, dusted",
+   "ttft": 0.19641389802563936,
+   "e2e": 0.29162734805140644
+  },
+  {
+   "id": "big_2",
+   "text": "The dish visible in this photo is **pastel** (also known as **pastel de nata** or **pastel de galleta**), a traditional Spanish",
+   "ttft": 0.19598035397939384,
+   "e2e": 0.29124052298720926
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered pastry, likely a dessert, sits on a dark wooden table. The pastry is dusted with powdered sugar and appears to be a triangular or wedge",
+   "ttft": 0.22543093701824546,
+   "e2e": 0.292564666015096
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in the image is **fried dough balls** \u2014 commonly known as **fried dough sticks** or **fried doughnuts**.\n\n### Key features visible",
+   "ttft": 0.05789152905344963,
+   "e2e": 0.28818476101150736
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up, appetizing view of **pastries**, most likely **cheesecakes** or **puff pastries**, dusted generously",
+   "ttft": 0.09123964398168027,
+   "e2e": 0.287988068012055
+  },
+  {
+   "id": "big_2",
+   "text": "Based on the visual evidence in the photo, the dish is **Cinderella\u2019s Cake** (also known as **Cinderella\u2019s Cake** or **C",
+   "ttft": 0.1288099389639683,
+   "e2e": 0.28768276795744896
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered pastry, likely a classic French dessert, sits on a dark wooden table. The pastry is generously dusted with powdered sugar and appears to be a",
+   "ttft": 0.1281185100087896,
+   "e2e": 0.28764088096795604
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in the image is **fried dough balls**, commonly known as **fried dough sticks** or **fried doughnuts**.\n\n### Key features visible:",
+   "ttft": 0.19654397398699075,
+   "e2e": 0.2872227740008384
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up, appetizing view of **pastries**, most likely **cheesecakes** or **puff-pastries**, dusted",
+   "ttft": 0.19617815304081887,
+   "e2e": 0.28685060201678425
+  },
+  {
+   "id": "big_2",
+   "text": "The dish visible in this photo is **pastel** (also known as **pastel de nata** or **pastel de galleta**), a traditional Spanish",
+   "ttft": 0.19576823897659779,
+   "e2e": 0.2863994969520718
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered pastry, likely a dessert, sits on a dark wooden table. The pastry is dusted with powdered sugar and appears to be a triangular or wedge",
+   "ttft": 0.2208001469844021,
+   "e2e": 0.2877048649825156
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in the image is **fried dough balls** \u2014 commonly known as **fried dough sticks** or **fried doughnuts**.\n\n### Key features visible",
+   "ttft": 0.05703155300579965,
+   "e2e": 0.2930900229839608
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up, appetizing view of **pastries**, most likely **cheesecakes** or **puff pastries**, dusted generously",
+   "ttft": 0.08792581496527418,
+   "e2e": 0.2934887239825912
+  },
+  {
+   "id": "big_2",
+   "text": "Based on the visual evidence in the photo, the dish is **Cinderella\u2019s Cake** (also known as **Cinderella\u2019s Cake** or **C",
+   "ttft": 0.12375437997980043,
+   "e2e": 0.28266765497392043
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered pastry, likely a classic French dessert, sits on a dark wooden table. The pastry is generously dusted with powdered sugar and appears to be a",
+   "ttft": 0.19892422301927581,
+   "e2e": 0.2857996490201913
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in the image is **fried dough balls**, commonly known as **fried dough sticks** or **fried doughnuts**.\n\n### Key features visible:",
+   "ttft": 0.198516576027032,
+   "e2e": 0.2856486170203425
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up, appetizing view of **pastries**, most likely **cheesecakes** or **puff-pastries**, dusted",
+   "ttft": 0.19814873102586716,
+   "e2e": 0.28507437801454216
+  },
+  {
+   "id": "big_2",
+   "text": "Based on the visual evidence in the photo, the dish is **Cinderella\u2019s Cake** (also known as **Cinderella\u2019s Cake** or **C",
+   "ttft": 0.12183058599475771,
+   "e2e": 0.2809898790437728
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered pastry, likely a dessert, sits on a dark wooden table. The pastry is dusted with powdered sugar and appears to be a triangular or wedge",
+   "ttft": 0.22479917004238814,
+   "e2e": 0.2890827010269277
+  }
+ ],
+ "errors": []
+}

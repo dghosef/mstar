@@ -1,0 +1,95 @@
+{
+ "label": "ta_n_sp2_off",
+ "tree": "/root/work/mstar",
+ "config": "configs/cosmos3_nano_sp2.yaml",
+ "env": [
+  "HF_HOME=/root/work/hf"
+ ],
+ "size": "832x480",
+ "frames": 189,
+ "steps": 35,
+ "guidance": 6.0,
+ "concurrency": 1,
+ "num": 2,
+ "startup_s": 42.014509439468384,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  35.54791266000393
+ ],
+ "e2e_s": [
+  31.037562670004263,
+  31.257717802000116
+ ],
+ "e2e_mean_s": 31.14764023600219,
+ "e2e_median_s": 31.14764023600219,
+ "wall_s": 62.321395323000615,
+ "videos_per_min": 1.9255024599186445,
+ "peak_gpu_mem": "0, 51733 MiB | 1, 43185 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 31.037562670004263,
+   "bytes": 4679914,
+   "t_end": 1792612538.211834
+  },
+  {
+   "idx": 1,
+   "ok": true,
+   "e2e_s": 31.257717802000116,
+   "bytes": 4018714,
+   "t_end": 1792612569.4814
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-4271a86946ea498b9edb32fe4964d631",
+   "total_ms": 31000.5,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.1,
+    "preprocess done -> conductor ingest": 0.2,
+    "conductor ingest -> conductor done": 30733.3,
+    "conductor done -> first chunk": 260.9,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 5.0
+   },
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 28265.0,
+     "fwd_ms": 28216.2
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2402.4,
+     "fwd_ms": 2390.4
+    }
+   }
+  },
+  {
+   "rid": "vid-c5e741999a914459bb7d139aa87ebf77",
+   "total_ms": 31220.6,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.7,
+    "preprocess done -> conductor ingest": 0.8,
+    "conductor ingest -> conductor done": 30952.7,
+    "conductor done -> first chunk": 260.3,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 5.0
+   },
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 28472.7,
+     "fwd_ms": 28425.4
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2418.4,
+     "fwd_ms": 2405.0
+    }
+   }
+  }
+ ]
+}

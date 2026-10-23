@@ -1,0 +1,118 @@
+{
+ "label": "w_new_480fast_r2",
+ "tree": "/root/work/mstar",
+ "config": "configs/wan22_480fast_tmp.yaml",
+ "env": [
+  "HF_HOME=/root/work/hf"
+ ],
+ "size": "832x480",
+ "frames": 81,
+ "steps": 20,
+ "guidance": 5.0,
+ "concurrency": 1,
+ "num": 3,
+ "startup_s": 21.01340889930725,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  28.31197784899996
+ ],
+ "e2e_s": [
+  8.504960719999872,
+  8.27384108700062,
+  8.474446620999515
+ ],
+ "e2e_mean_s": 8.417749476000003,
+ "e2e_median_s": 8.474446620999515,
+ "wall_s": 25.257656982999833,
+ "videos_per_min": 7.126551766901917,
+ "peak_gpu_mem": "0, 0 MiB | 1, 31767 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 8.504960719999872,
+   "bytes": 482133,
+   "t_end": 1792569841.1367083
+  },
+  {
+   "idx": 1,
+   "ok": true,
+   "e2e_s": 8.27384108700062,
+   "bytes": 215208,
+   "t_end": 1792569849.4114847
+  },
+  {
+   "idx": 2,
+   "ok": true,
+   "e2e_s": 8.474446620999515,
+   "bytes": 430889,
+   "t_end": 1792569857.8873696
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-ca2a51469cdc43e2a121bc33e7d1225b",
+   "total_ms": 8498.0,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 6798.9,
+     "fwd_ms": 6734.2
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 48.1,
+     "fwd_ms": 47.5
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 1038.4,
+     "fwd_ms": 1020.3
+    }
+   }
+  },
+  {
+   "rid": "vid-0507e27831fb48228566e173214d49cf",
+   "total_ms": 8270.2,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 6855.1,
+     "fwd_ms": 6793.7
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 45.6,
+     "fwd_ms": 45.0
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 1033.1,
+     "fwd_ms": 1026.2
+    }
+   }
+  },
+  {
+   "rid": "vid-3454976a60db406981d77c7c4d4486b9",
+   "total_ms": 8469.5,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 6869.0,
+     "fwd_ms": 6808.8
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 47.6,
+     "fwd_ms": 46.9
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 1033.9,
+     "fwd_ms": 1023.4
+    }
+   }
+  }
+ ]
+}

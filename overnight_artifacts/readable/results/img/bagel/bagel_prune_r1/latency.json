@@ -1,0 +1,32 @@
+{
+  "mode": "latency",
+  "n": 6,
+  "median_s": 10.105277667500559,
+  "mean_s": 10.100263115500638,
+  "p95_s": 10.145753304001119,
+  "min_s": 10.063737746000697,
+  "max_s": 10.145753304001119,
+  "samples_s": [
+    10.063737746000697,
+    10.099014704001092,
+    10.068274964000011,
+    10.111540631000025,
+    10.145753304001119,
+    10.113257344000885
+  ],
+  "images_saved": 6,
+  "peak_vram_mib": 50589,
+  "observed_output_format": "png",
+  "tag": "img",
+  "url": "http://localhost:8100/v1/images/generations",
+  "model": "bagel",
+  "size": "1024x1024",
+  "steps": 4,
+  "guidance": null,
+  "seed": 0,
+  "prompts_file": "/root/work/hx/prompts.txt",
+  "num_prompts": 16,
+  "output_format": null,
+  "extra_json": null,
+  "timestamp": "2026-10-21T04:29:22"
+}

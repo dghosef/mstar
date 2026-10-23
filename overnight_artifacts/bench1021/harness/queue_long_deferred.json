@@ -1,0 +1,127 @@
+[
+ {
+  "id": "q35_0.8b_long",
+  "model": "q35_0.8b",
+  "arms": [
+   "mstar-main",
+   "vllm",
+   "sglang",
+   "mstar-pr"
+  ],
+  "phases": [
+   "setup",
+   "data",
+   "rounds",
+   "summarize"
+  ],
+  "workloads": [
+   "random_4096_256",
+   "random_8192_256"
+  ],
+  "concs": [
+   1,
+   8,
+   32
+  ],
+  "rounds": [
+   1,
+   2,
+   3
+  ],
+  "rotate_pr": true
+ },
+ {
+  "id": "q35_9b_long",
+  "model": "q35_9b",
+  "arms": [
+   "mstar-main",
+   "vllm",
+   "sglang",
+   "mstar-pr"
+  ],
+  "phases": [
+   "setup",
+   "data",
+   "rounds",
+   "summarize"
+  ],
+  "workloads": [
+   "random_4096_256",
+   "random_8192_256"
+  ],
+  "concs": [
+   1,
+   8,
+   32
+  ],
+  "rounds": [
+   1,
+   2,
+   3
+  ],
+  "rotate_pr": true
+ },
+ {
+  "id": "q35_9b_tp2_long",
+  "model": "q35_9b_tp2",
+  "arms": [
+   "mstar-main",
+   "vllm",
+   "sglang",
+   "mstar-pr"
+  ],
+  "phases": [
+   "setup",
+   "data",
+   "rounds",
+   "summarize"
+  ],
+  "workloads": [
+   "random_4096_256",
+   "random_8192_256"
+  ],
+  "concs": [
+   1,
+   8,
+   32
+  ],
+  "rounds": [
+   1,
+   2,
+   3
+  ],
+  "rotate_pr": true
+ },
+ {
+  "id": "q35_27b_tp4_long",
+  "model": "q35_27b_tp4",
+  "arms": [
+   "mstar-main",
+   "vllm",
+   "sglang",
+   "mstar-pr"
+  ],
+  "phases": [
+   "setup",
+   "data",
+   "rounds",
+   "summarize"
+  ],
+  "workloads": [
+   "random_4096_256",
+   "random_8192_256"
+  ],
+  "concs": [
+   1,
+   8,
+   32
+  ],
+  "rounds": [
+   1,
+   2,
+   3
+  ],
+  "rotate_pr": true,
+  "start_timeout": 5400
+ }
+]

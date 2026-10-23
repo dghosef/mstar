@@ -73,6 +73,13 @@ class RaggedAttentionConfig:
     backend: RaggedAttnBackend = RaggedAttnBackend.AUTO
     flashinfer_backend: str = "auto"
 
+    # Whether the node's lockstep instance splits the attention heads across its
+    # ranks (tensor parallelism, Ulysses sequence parallelism), so each rank's
+    # resource attends its slice. A node that parallelizes over something else --
+    # each rank attending whole requests or guidance branches -- sets False and
+    # keeps every head on every rank.
+    shard_heads: bool = True
+
     # Activation dtype of the q / k / v the node hands the kernel (and of its
     # output). A cacheless attention doesn't need to adhere to the dtype of its
     # KV cache, so it is free to declare a separate dtype here; when None, the

@@ -1,0 +1,30 @@
+{
+  "mode": "latency",
+  "n": 4,
+  "median_s": 0.4105272859997058,
+  "mean_s": 0.40951510349987075,
+  "p95_s": 0.4168882769990887,
+  "min_s": 0.4001175650009827,
+  "max_s": 0.4168882769990887,
+  "samples_s": [
+    0.40704162399924826,
+    0.4001175650009827,
+    0.4168882769990887,
+    0.4140129480001633
+  ],
+  "images_saved": 4,
+  "peak_vram_mib": 28343,
+  "observed_output_format": "png",
+  "tag": "img",
+  "url": "http://localhost:8200/v1/images/generations",
+  "model": "flux2_klein",
+  "size": "1024x1024",
+  "steps": 4,
+  "guidance": null,
+  "seed": 0,
+  "prompts_file": "/root/work/hx/prompts.txt",
+  "num_prompts": 16,
+  "output_format": null,
+  "extra_json": null,
+  "timestamp": "2026-10-21T06:50:20"
+}

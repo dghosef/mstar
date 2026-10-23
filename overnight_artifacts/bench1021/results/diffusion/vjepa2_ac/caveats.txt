@@ -1,0 +1,1 @@
+vjepa2_ac: M* main fails the sanity gate (repeated_chunks=4 of 4: its 4 rollout steps are identical within each request; cos 0.980 vs mstar-pr). mstar-pr has no repeated chunks. So PR-vs-main here compares against a broken baseline: report it, but not as a speedup claim.

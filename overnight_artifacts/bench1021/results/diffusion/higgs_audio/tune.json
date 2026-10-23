@@ -1,0 +1,16 @@
+{
+ "higgs_official": {
+  "eager": {
+   "score": 34.952373417493924,
+   "per_point": {
+    "ls500:8": 34.95237341749393
+   }
+  },
+  "sdpa": {
+   "score": null,
+   "per_point": {
+    "ls500:8": null
+   }
+  }
+ }
+}

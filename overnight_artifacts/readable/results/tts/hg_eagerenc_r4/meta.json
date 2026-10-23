@@ -1,0 +1,49 @@
+{
+  "label": "hg_eagerenc_r4",
+  "tree": "/root/work/exp",
+  "serve": [
+    "/root/work/mstar/.venv/bin/python",
+    "-m",
+    "mstar.cli.main",
+    "serve",
+    "higgs_audio",
+    "--gpus",
+    "1",
+    "--port",
+    "8200",
+    "--config",
+    "/root/work/cfg/higgs_eagerenc.yaml"
+  ],
+  "env": {
+    "TORCH_HOME": "/workspace/.cache/torch",
+    "MSTAR_SHM_ARENA": "1",
+    "TORCHINDUCTOR_CACHE_DIR": "/root/work/inductor_cache"
+  },
+  "points": "32:200:_,1:50:_,32:200:_",
+  "started": "2026-10-21 04:53:18",
+  "mstar_file": "/root/work/exp/mstar/__init__.py",
+  "startup_s": 45.25996470451355,
+  "summaries": [
+    {
+      "point": "c32_200",
+      "wall_s": 5.538230999998632,
+      "wer": 0.014751210920299428,
+      "req_s": 36.11261429869022,
+      "errors": 0
+    },
+    {
+      "point": "c1_50",
+      "wall_s": 4.550344410999969,
+      "wer": 0.01639344262295082,
+      "req_s": 10.988179241802086,
+      "errors": 0
+    },
+    {
+      "point": "c32_200_again",
+      "wall_s": 5.120676870999887,
+      "wer": 0.014751210920299428,
+      "req_s": 39.057336566708045,
+      "errors": 0
+    }
+  ]
+}

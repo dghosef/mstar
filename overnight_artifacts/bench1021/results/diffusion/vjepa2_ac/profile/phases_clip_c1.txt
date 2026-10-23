@@ -1,0 +1,44 @@
+
+=== worker_0  iters 100-300  records=3  batch=1.00 (range 1.0-1.0) ===
+    work: 300 request-steps (bs x iters) -- us/1k is cost per unit of output, comparable across runs with a different iteration mix
+phase                                      mean_ms   p50_ms   p95_ms  samples      us/1k
+----------------------------------------------------------------------------------------
+await_gpu                                    1.693    1.720    2.460      299 1686966.7 
+engine.collect_outputs                       0.040    0.040    0.060      299   39866.7 
+engine.declare_step                          0.000    0.000    0.000      298       0.0 
+engine.forward                               1.646    1.660    2.400      299 1640433.3 
+engine.postprocess                           0.000    0.000    0.010      299       0.0 
+engine.preprocess                            0.077    0.070    0.140      299   76400.0 
+gpu_exec                                     8.455    7.230   12.630      298 8399066.7 
+iter_total                                   8.050    7.780   13.990      300 8050000.0 
+res.admit.attn                               0.000    0.000    0.000      271       0.0 
+res.admit.kv                                 0.026    0.030    0.040      271   23400.0 
+res.commit.attn                              0.000    0.000    0.000      239       0.0 
+res.commit.kv                                0.010    0.010    0.010      239    7966.7 
+res.plan.attn                                4.067    0.320    3.700      271 3674133.3 
+res.plan.kv                                  0.717    0.550    0.790      271  647666.7 
+rust.send_outputs.call                       0.047    0.010    0.110      299   46400.0 
+rust.send_outputs.marshal                    0.040    0.000    0.120      299   39866.7 
+worker.await_admit_settled                   0.383    0.340    0.690      299  382066.7 
+worker.gpu_thread.exec                       1.896    1.870    2.650      299 1889600.0 
+worker.gpu_thread.prepare_inputs             0.067    0.060    0.100      298   66200.0 
+worker.postprocess.check_stop                0.190    0.160    0.310      299  189333.3 
+worker.postprocess.check_stop_tail           0.040    0.020    0.170      299   39866.7 
+worker.postprocess.cleanup_inputs            0.010    0.010    0.020      299    9966.7 
+worker.postprocess.completion_event_sync     6.487    5.220   11.840      299 6465133.3 
+worker.postprocess.event_sync                6.483    5.220   11.840      299 6461800.0 
+worker.postprocess.pending_loop_stops        0.007    0.000    0.010      299    6633.3 
+worker.postprocess.prematerialize            0.160    0.150    0.230      299  159433.3 
+worker.postprocess.register_outputs          0.339    0.000    5.410      299  337533.3 
+worker.postprocess.route                     0.037    0.030    0.060      299   36566.7 
+worker.postprocess.route_outputs             0.107    0.100    0.170      299  106300.0 
+worker.postprocess.send                      0.090    0.010    0.220      299   89566.7 
+worker.postprocess.send_outputs              0.107    0.030    0.240      299  106166.7 
+worker.postprocess.send_prep                 0.010    0.010    0.020      299    9966.7 
+worker.postprocess.stop_loops                0.010    0.000    0.070      299    9966.7 
+worker.postprocess.store_tensors             0.060    0.060    0.100      299   59800.0 
+worker.postprocess.update_lru                0.000    0.000    0.000      299       0.0 
+worker.postprocess_batch                     7.282    5.510   12.860      299 7257633.3 
+worker.schedule                              0.013    0.010    0.070     3543  154666.7*
+worker.schedule_yield_away                   0.010    0.010    0.010       60    2000.0 
+    * sampled on passes that ran no batch, so its time is spread over work it did not all do: us/1k is an upper bound for this row

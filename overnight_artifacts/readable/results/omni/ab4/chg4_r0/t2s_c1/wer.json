@@ -1,0 +1,51 @@
+{
+ "n": 6,
+ "corpus_wer": 0.12597200622083982,
+ "median_wer": 0.08333333333333333,
+ "n_wer_gt_0.2": 2,
+ "audio_s": 317.22125,
+ "rows": [
+  {
+   "wav": "req_0.wav",
+   "dur": 74.376875,
+   "wer": 0.011560693641618497,
+   "ref": "The capital of France is **Paris**.\n\nParis is one of the most iconic and culturally rich cities in the world, renowned for its art, fashion, gastronomy, and historical landmarks. Located on the River Seine in northern France, it is the country's political, economic, and cultural center.\n\n**Key Features of Paris:**\n\n1. **Historical Significance**: Paris has been a major European city for centuries. It played a central role in the French Revolution and has been a hub of intellectual and artistic movements, including the Enlightenment, Romanticism, and the 20th-century avant-garde.\n\n2. **Landmarks and Monuments**:\n   - **Eiffel Tower**: Perhaps the most famous symbol of Paris, this iron lattice tower was built for the 1889 World's Fair and remains a global icon.\n   - **Notre-Dame Cathedral**: A masterpiece of French Gothic architecture, located on the \u00cele de la Cit\u00e9. It suffered a devastating fire in 2019 but is undergoing restoration.\n   - **Louvre Museum**: The world's largest art museum and home to masterpieces like the *Mona Lisa* and the *Venus de Milo*.\n   - **Sacr\u00e9-C\u0153ur Basilica",
+   "hyp": " The capital of France is Nam Paris. Paris is one of the most iconic and culturally rich cities in the world, renowned for its art, fashion, gastronomy, and historical landmarks. Located on the River Seine in northern France, it is the country's political, economic, and cultural center. Key Features of Paris 1. Historical Significance Paris has been a major European city for centuries. It played a central role in the French Revolution and has been a hub of intellectual and artistic movements, including the Enlightenment, Romanticism, and the 20th-century avant-garde. 2. Landmarks and Monuments Eiffel Tower, perhaps the most famous symbol of Paris, this iron lattice tower was built for the 1889 World's Fair and remains a global icon. Notre Dame Cathedral, a masterpiece of French Gothic architecture located on the Ile de la Cit\u00e9. It suffered a devastating fire in 2019 but is undergoing restoration. Louvre Museum, the world's largest art museum and home to masterpieces like the Mona Lisa and the Venus de Milo. Sacr\u00e9-C\u0153ur Basel."
+  },
+  {
+   "wav": "req_1.wav",
+   "dur": 80.616875,
+   "wer": 0.20279720279720279,
+   "ref": "Certainly! Here's a clear explanation of the difference between **machine learning** and **deep learning**:\n\n### 1. **Definition**\n- **Machine Learning (ML):** A subset of artificial intelligence (AI) that enables systems to learn from data and improve over time without being explicitly programmed. It uses algorithms to identify patterns and make decisions based on input data.\n- **Deep Learning (DL):** A subfield of machine learning that uses **artificial neural networks** with multiple layers (hence \"deep\") to model complex patterns in data. It is inspired by the human brain's structure and function.\n\n---\n\n### 2. **How They Work**\n- **Machine Learning:**\n  - Uses **traditional algorithms** like linear regression, decision trees, support vector machines (SVM), random forests, etc.\n  - Requires **feature engineering** \u2014 humans must manually select and extract relevant features from raw data.\n  - Works well with structured data (e.g., spreadsheets, databases).\n\n- **Deep Learning:**\n  - Uses **neural networks** with many layers (e.g., convolutional neural networks for images, recurrent neural networks for sequences).\n  - Automatically learns features from raw data \u2014 **no manual feature engineering** required.\n  - Excels",
+   "hyp": " Certainly! Here's a clear explanation of the difference between machine learning and deep learning, non-decent. Machine learning, ML, a subset of artificial intelligence, AI, that enables systems to learn from data not all and improve over time without being explicitly programmed. It uses algorithms to identify patterns and make decisions based on input data. Deep learning, DL, a subfield of machine learning that uses artificial neural networks with multiple layers, hence deep, to model complex patterns in data. It is inspired by the human brain's structure and function. Tell Nassim how they work. Machine learning uses traditional algorithms like linear regression, decision trees, support vector machines, SVM, random forests, etc. Requires feature engineering. Humans must manually select and extract relevant features from raw data. Works well with structured data, e.g., spreadsheets, databases. Deep learning. Uses neural networks with many layers, e.g., convolutional neural networks for images, recurrent neural networks for sequences. Automatically learns features from raw data. No manual feature engineering required. Excite."
+  },
+  {
+   "wav": "req_2.wav",
+   "dur": 34.296875,
+   "wer": 0.48,
+   "ref": "Here are 5 haikus capturing the essence of autumn leaves:\n\n1.  \nCrimson carpet\u94fa,  \nWind whispers through bare branches\u2014  \nSunlight fades to gold.\n\n2.  \nMaple flames descend,  \nDancing on the crisp morning air\u2014  \nEarth's final breath.\n\n3.  \nChestnut brown drifts,  \nGently settling on the path\u2014  \nAutumn's quiet sigh.\n\n4.  \nCrimson, amber, rust\u2014  \nA fleeting tapestry unfurls\u2014  \nSeason's last farewell.\n\n5.  \nCrisp air carries them,  \nTwirling down in silent grace\u2014  \nNature's slow goodbye.",
+   "hyp": " Here are five haikus capturing the essence of autumn leaves. autumn's quiet sigh crimson amber rust a fleeting tapestry unfurls season's last farewell five crisp air carries them twirling down in silent grace nature's slow goodbye"
+  },
+  {
+   "wav": "req_3.wav",
+   "dur": 28.616875,
+   "wer": 0.0,
+   "ref": "The French Revolution (1789\u20131799) was a period of radical social and political upheaval in France that led to the end of the monarchy and the rise of democratic ideals. Sparked by widespread discontent with the monarchy, economic hardship, and Enlightenment ideas, it resulted in the overthrow of King Louis XVI and the establishment of a republic. The revolution was marked by key events such as the Storming of the Bastille, the Reign of Terror, and the eventual rise of Napoleon Bonaparte.",
+   "hyp": " The French Revolution was a period of radical social and political upheaval in France that led to the end of the monarchy and the rise of democratic ideals. Sparked by widespread discontent with the monarchy, economic hardship, and Enlightenment ideas, it resulted in the overthrow of King Louis XVI and the establishment of a republic. The revolution was marked by key events such as the storming of the Bastille, the Reign of Terror, and the eventual rise of Napoleon Bonaparte."
+  },
+  {
+   "wav": "req_4.wav",
+   "dur": 97.416875,
+   "wer": 0.08333333333333333,
+   "ref": "Climate change is primarily driven by human activities that increase the concentration of greenhouse gases (GHGs) in the Earth's atmosphere. The main causes include:\n\n1. **Burning of Fossil Fuels**: The combustion of coal, oil, and natural gas for energy and transportation releases large amounts of carbon dioxide (CO\u2082), the most significant greenhouse gas contributing to global warming.\n\n2. **Deforestation and Land Use Changes**: Trees absorb CO\u2082 from the atmosphere. When forests are cleared or burned, not only is this carbon sink lost, but stored carbon is also released back into the atmosphere.\n\n3. **Industrial Processes**: Manufacturing activities, such as cement production, release CO\u2082 and other GHGs. Additionally, industrial processes emit potent greenhouse gases like nitrous oxide (N\u2082O) and fluorinated gases.\n\n4. **Agriculture**: Livestock farming produces methane (CH\ufffd\ufffd), a potent greenhouse gas, through enteric fermentation (digestion in ruminants). Rice cultivation also releases methane, while synthetic fertilizers emit nitrous oxide.\n\n5. **Waste Management**: Landfills generate methane as organic waste decomposes anaerobically. Wastewater treatment processes also release methane and nitrous oxide.\n\n6. **Transportation**: Cars, trucks,",
+   "hyp": " Climate change is primarily driven by human activities that increase the concentration of greenhouse gases, GHGs, in the Earth's atmosphere. The main causes include 1. Burning of fossil fuels. The combustion of coal, oil, and natural gas for energy and transportation releases large amounts of carbon dioxide, CO2, the most significant greenhouse gas contributing to global warming. 2. Deforestation and land use changes. Trees absorb CO2 from the atmosphere. When forests are cleared or burn, not only is this carbon sink lost, but stored carbon is also released back into the atmosphere. 3. TAN 2020 Fried. Industrial processes, manufacturing activities, such as cement production, release CO2 and other GHGs. Additionally, industrial processes emit potent greenhouse gases like nitrous oxide, N2O, and fluorinated gases. Agriculture, livestock farming produces methane, CHA, a potent greenhouse gas, through enteric fermentation, digestion, and ruminants. Rice cultivation also releases methane, while synthetic fertilizers emit nitrous oxide. 5. Waste Management Landfills generate methane as organic waste decomposes anaerobically. Wastewater treatment processes also release methane and nitrous oxide. 6. Transportation. Cars. Trucks."
+  },
+  {
+   "wav": "req_5.wav",
+   "dur": 1.896875,
+   "wer": 0.0,
+   "ref": "Buenos d\u00edas, \u00bfc\u00f3mo est\u00e1s?",
+   "hyp": " Buenos d\u00edas, \u00bfc\u00f3mo est\u00e1s?"
+  }
+ ]
+}

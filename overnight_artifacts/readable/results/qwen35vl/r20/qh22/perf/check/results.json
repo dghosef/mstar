@@ -1,0 +1,202 @@
+{
+ "summary": {
+  "n": 30,
+  "errors": 0,
+  "wall_s": 5.224501337041147,
+  "req_per_s": 5.7421748152887355,
+  "ttft_p50": 0.02060862199869007,
+  "ttft_mean": 0.07414538046771971,
+  "e2e_p50": 0.12507980098598637,
+  "ttft_p50_by_kind": {
+   "small": 0.020308440987719223,
+   "big": 0.052230708504794165,
+   "huge": 0.1254343425098341,
+   "text": 0.011376965005183592,
+   "xl": 0.19488663898664527,
+   "phone": 0.5129682325059548
+  }
+ },
+ "rows": [
+  {
+   "id": "small_0",
+   "text": "The food dish shown in this image is **pastries**, specifically **sugar-coated pastries** \u2014 likely **french toast** or **croissants** \u2014 generously dusted with **white powdered sugar** (often called \u201csnow\u201d or \u201cicing\u201d).\n\nThere are also:\n- A cup of **black",
+   "ttft": 0.02183142100693658,
+   "e2e": 0.12425317196175456
+  },
+  {
+   "id": "small_1",
+   "text": "This image displays a classic French-style appetizer or snack presentation, likely served at a casual dining establishment. The dish consists of three small, white ceramic ramekins arranged in a triangular formation on a rectangular white platter, which rests on a delicate, lace-patterned doily.\n\n**The Food Items:**\n\n1.",
+   "ttft": 0.019687018997501582,
+   "e2e": 0.12911776098189875
+  },
+  {
+   "id": "small_2",
+   "text": "The dish visible in this photo is **pastry** \u2014 specifically, **pastries** or **puff-pasts**, commonly known as **pastry rolls** or **puff-pasts** in some regions (like the UK or Ireland).\n\n### Key features:\n- They are golden-brown, flaky",
+   "ttft": 0.020560815988574177,
+   "e2e": 0.11744839703897014
+  },
+  {
+   "id": "small_3",
+   "text": "A close-up, slightly high-angle shot of a bowl filled with a generous mound of white powdered sugar, likely for a sweet treat like a cake, cookie, or dessert. The texture is fluffy and powdery, contrasting with the darker, baked-looking base of the food item. The lighting highlights the dustiness of the",
+   "ttft": 0.02065642800880596,
+   "e2e": 0.12082539201946929
+  },
+  {
+   "id": "small_4",
+   "text": "The food dish shown in this image is **pastries**, specifically **sugar-coated puff pastry** or **cheesecakes**, likely made with **cheese** and **flour**.\n\nKey features:\n- They are crescent-shaped or teardrop-shaped.\n- They are heavily dusted with",
+   "ttft": 0.01983634300995618,
+   "e2e": 0.12085313000716269
+  },
+  {
+   "id": "small_5",
+   "text": "The image displays a delightful breakfast or brunch spread featuring two golden-brown, crescent-shaped pastries \u2014 likely **crescent rolls** or **crescent pastries** \u2014 generously dusted with powdered sugar. These pastries are arranged on a small white plate, which rests on a dark green tray. Their soft",
+   "ttft": 0.019673291011713445,
+   "e2e": 0.11671516898786649
+  },
+  {
+   "id": "small_6",
+   "text": "The dish visible in the photo is **donuts** (also known as **doughnuts** or **crumbly donuts**), typically made from dough, yeast, and sugar.\n\nThey are commonly served with powdered sugar (often called \u201ccrumbly\u201d or \u201ccrumble\u201d) and are a popular treat in",
+   "ttft": 0.02252256899373606,
+   "e2e": 0.12590643001021817
+  },
+  {
+   "id": "small_7",
+   "text": "A close-up shot of two golden-brown, fried pastries dusted generously with powdered sugar, nestled in a paper liner on a teal surface. The soft, textured appearance of the pastries suggests a sweet, artisanal treat.",
+   "ttft": 0.02005606598686427,
+   "e2e": 0.10036384296836331
+  },
+  {
+   "id": "small_8",
+   "text": "This image shows a **breakfast or brunch meal** served on a wooden table. The dishes include:\n\n1. **Two sandwiches** \u2013 likely **ham and cheese** or **chicken and cheese**, served on crusty bread (possibly ciabatta or ciabatta roll).\n2. **A side salad",
+   "ttft": 0.027575822023209184,
+   "e2e": 0.13617492601042613
+  },
+  {
+   "id": "small_9",
+   "text": "This image features a plate of **pastries**, most likely **choux pastry** or **tortilla chips**, dusted generously with powdered sugar. Here\u2019s a detailed description:\n\n---\n\n### **Main Subject: Pastries on a Plate**\n\n- **Appearance**: The pastries are golden-brown and fl",
+   "ttft": 0.02192748402012512,
+   "e2e": 0.11901083000702783
+  },
+  {
+   "id": "small_10",
+   "text": "The dish visible in this photo is **donuts** (or puff pastry donuts), served with powdered sugar and dipping sauces.\n\n### Reasoning:\n- The food consists of round, golden-brown pastries with a textured, flaky appearance \u2014 characteristic of puff pastry or doughnuts.\n- They are generously",
+   "ttft": 0.019271536963060498,
+   "e2e": 0.1285770289832726
+  },
+  {
+   "id": "small_11",
+   "text": "A rustic wooden table is set with a plate of four golden-brown, powdered sugar-dusted donuts, likely a classic French pastry. In the center, a small metal bowl holds a vibrant red dipping sauce, possibly jam or jelly. To the left, a napkin holds a fork and knife. In the foreground,",
+   "ttft": 0.01851723500294611,
+   "e2e": 0.12706274999072775
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in the image is **fried dough balls**, commonly known as **fried dough sticks** or **fried doughnuts**.\n\n### Key features visible:\n- They are golden-brown, crispy-looking pieces.\n- They are coated in a light, granular sugar or flour crust \u2014 typical for fried dough",
+   "ttft": 0.0542898639687337,
+   "e2e": 0.16359312494751066
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up, appetizing view of **pastries**, most likely **cheesecakes** or **puff pastries**, dusted generously with **powdered sugar**.\n\nHere\u2019s a detailed description:\n\n- **Shape & Texture**: The pastries are irregularly shaped \u2014 some are roughly",
+   "ttft": 0.05227336299140006,
+   "e2e": 0.14925606601173058
+  },
+  {
+   "id": "big_2",
+   "text": "The dish visible in this photo is **pastel** (also known as **pastel de nata** or **pastel de galleta**), a traditional Spanish dessert.\n\n### Key characteristics:\n- **Appearance**: It\u2019s a golden-brown, fried pastry that is heavily dusted with powdered sugar (often called",
+   "ttft": 0.05218805401818827,
+   "e2e": 0.16825968498596922
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered pastry, likely a classic French dessert, sits on a dark wooden table. The pastry is generously dusted with powdered sugar and appears to be a layered treat, possibly a crepe or a similar sweet item. A silver spoon rests beside the plate, ready for serving. In the background, a glass of",
+   "ttft": 0.05207122699357569,
+   "e2e": 0.15648199897259474
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in the image is **pastries**, specifically **sugar cookies** or **pastel cookies**, likely made with **sugar, flour, and possibly eggs or butter**.\n\nKey features visible:\n- They are baked in a rectangular black baking pan lined with black parchment paper.\n- They are",
+   "ttft": 0.13230356597341597,
+   "e2e": 0.24550668499432504
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a close-up, appetizing view of **three heart-shaped pastries**, likely **heart-shaped donuts** or **heart-shaped donut tarts**, dusted generously with **powdered sugar**.\n\n### Key Details:\n\n- **Shape & Texture**: Each pastry is heart-shaped, with a golden",
+   "ttft": 0.11856511904625222,
+   "e2e": 0.22439708199817687
+  },
+  {
+   "id": "text_0",
+   "text": "In Python, both **lists** and **tuples** are sequences of items, but they differ fundamentally in how they store and access those items.\n\n### 1. Storage Mechanism\n*   **List**: Stores items in a **list of lists** (nested structure). Each element is a list of its own",
+   "ttft": 0.015488232020288706,
+   "e2e": 0.10964332398725674
+  },
+  {
+   "id": "text_1",
+   "text": "The deep blue fades into the dark,\nWhere the stars are just a distant spark.\nThe waves are silent, waiting for the moon,\nTo rise and wash the world away.\n\nA single light breaks through the mist,\nA ghost of a sun, a ghost of night.\nIt paints the water in",
+   "ttft": 0.011519310006406158,
+   "e2e": 0.10459911002544686
+  },
+  {
+   "id": "text_2",
+   "text": "Improving sleep quality involves a combination of environmental control, lifestyle habits, and mental relaxation techniques. Here are three effective tips:\n\n1.  **Create a Consistent Sleep Schedule**\n    Establishing a routine is the most powerful tool for regulating your body's internal clock. Try to go to bed and wake up at",
+   "ttft": 0.012338265019934624,
+   "e2e": 0.12018999102292582
+  },
+  {
+   "id": "text_3",
+   "text": "Romeo and Juliet are the tragic lovers of Verona who fall in love despite their families' hatred, leading to their tragic deaths in the night.",
+   "ttft": 0.011397600988857448,
+   "e2e": 0.06102746201213449
+  },
+  {
+   "id": "text_4",
+   "text": "A refrigerator keeps food cold through a combination of **physics principles** and **engineering design**, primarily relying on the **First Law of Thermodynamics** (conservation of energy).\n\nHere is the step-by-step process of how it works:\n\n### 1. The Core Mechanism: Phase Change\nThe most critical part",
+   "ttft": 0.011186984018422663,
+   "e2e": 0.11833518202183768
+  },
+  {
+   "id": "text_5",
+   "text": "Here is a simple, comforting, and delicious tomato soup recipe. It uses fresh tomatoes, carrots, celery, and a splash of broth to create a rich, velvety texture without needing heavy stock.\n\n### **Simple Tomato Soup**\n\n**Prep time:** 10 minutes | **Cook time:** 2",
+   "ttft": 0.011003887979313731,
+   "e2e": 0.10331807198235765
+  },
+  {
+   "id": "text_6",
+   "text": "The capital of Australia is **Canberra**.\n\nIt was chosen in 1908 by the Australian government, which was led by Prime Minister **William Hobson**. The decision was based on several key factors:\n\n*   **Geographical Location**: Canberra is situated in the middle of the Great Australian Outback,",
+   "ttft": 0.010553837986662984,
+   "e2e": 0.10403861803933978
+  },
+  {
+   "id": "text_7",
+   "text": "Photosynthesis is the process by which green plants, algae, and certain bacteria convert light energy into chemical energy. This process occurs primarily in the **chloroplasts** of plant cells, which contain a pigment called **chlorophyll**.\n\nHere is a step-by-step breakdown of how it works:\n\n### 1.",
+   "ttft": 0.011356329021509737,
+   "e2e": 0.10268407501280308
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle shot of a casual breakfast or brunch setting on a speckled white table. The scene is filled with food, drinks, and condiments, suggesting a cozy caf\u00e9 or restaurant atmosphere.\n\n**Foreground & Left Side:**\n- A white ceramic mug filled with dark coffee sits on",
+   "ttft": 0.19835520500782877,
+   "e2e": 0.29433469101786613
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly high-angle photograph of a meal served on a rectangular, light-colored serving board or tray, likely in a casual dining setting. The scene is dimly lit, with a dark, reflective surface visible in the background, possibly a table or countertop.\n\n**Foreground (Bottom of the tray",
+   "ttft": 0.19141807296546176,
+   "e2e": 0.28483993298141286
+  },
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, slightly high-angle shot of a pile of freshly baked pastries, heavily dusted with powdered sugar. The golden-brown, flaky pastry pieces are arranged in a somewhat chaotic but visually appealing cluster, suggesting they are being served or displayed.\n\nHere\u2019s a detailed breakdown:\n\n- **Past",
+   "ttft": 0.5104580780025572,
+   "e2e": 0.6232760829734616
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, slightly high-angle photograph of a dessert, likely a layered cake or cake layer, heavily dusted with powdered sugar.\n\n**Key Elements:**\n\n- **Dusted Surface:** The entire surface of the dessert is covered in a thick, fine layer of white powdered sugar. It\u2019s not a",
+   "ttft": 0.5154783870093524,
+   "e2e": 0.6179006969905458
+  }
+ ],
+ "errors": []
+}

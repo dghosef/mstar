@@ -1,0 +1,7 @@
+notes for waypoint_360p
+dropped engines: {}
+startup s: mstar-pr: median 287 n=6; mstar-main: median 298 n=4
+main_mstar-main_config_r1: failed captures 0, graph runtime rust True
+main_mstar-main_config_r2: failed captures 0, graph runtime rust True
+main_mstar-pr_config_r1: failed captures 0, graph runtime rust True
+main_mstar-pr_config_r2: failed captures 0, graph runtime rust True

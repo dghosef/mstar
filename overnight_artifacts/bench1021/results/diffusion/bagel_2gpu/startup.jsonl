@@ -1,0 +1,17 @@
+{"label": "setup_smoke_vllmomni", "arm": "vllmomni", "seconds": 123.4, "ok": true, "time": 1792751204.4881911}
+{"label": "setup_smoke_mstar-pr", "arm": "mstar-pr", "seconds": 394.0, "ok": true, "time": 1792751635.5970528}
+{"label": "setup_smoke_mstar-main", "arm": "mstar-main", "seconds": 514.3, "ok": true, "time": 1792752180.9122698}
+{"label": "tune_cfgp2_vllmomni_cfgp2_r0", "arm": "vllmomni", "seconds": 96.4, "ok": true, "time": 1792752320.691085}
+{"label": "tune_cfgp2_vllmomni_cfgp2_r0_retry", "arm": "vllmomni", "seconds": 99.4, "ok": true, "time": 1792752641.555091}
+{"label": "collect_mstar_pr_mstar-pr_config_r0", "arm": "mstar-pr", "seconds": 246.7, "ok": true, "time": 1792752918.1198788}
+{"label": "collect_mstar_pr_b_mstar-pr_config_r0", "arm": "mstar-pr", "seconds": 81.4, "ok": true, "time": 1792753224.334619}
+{"label": "collect_mstar_main_mstar-main_config_r0", "arm": "mstar-main", "seconds": 246.7, "ok": true, "time": 1792753695.1418462}
+{"label": "main_mstar-pr_config_r1", "arm": "mstar-pr", "seconds": 246.7, "ok": true, "time": 1792754276.2326715}
+{"label": "main_mstar-main_config_r1", "arm": "mstar-main", "seconds": 246.7, "ok": true, "time": 1792755117.5718124}
+{"label": "main_vllmomni_cfgp2_r1", "arm": "vllmomni", "seconds": 99.3, "ok": true, "time": 1792756053.5811582}
+{"label": "main_vllmomni_cfgp2_r1_retry", "arm": "vllmomni", "seconds": 99.4, "ok": true, "time": 1792756523.2865782}
+{"label": "main_mstar-main_config_r2", "arm": "mstar-main", "seconds": 81.3, "ok": true, "time": 1792756634.580043}
+{"label": "main_vllmomni_cfgp2_r2", "arm": "vllmomni", "seconds": 99.4, "ok": true, "time": 1792757570.1442895}
+{"label": "main_vllmomni_cfgp2_r2_retry", "arm": "vllmomni", "seconds": 99.4, "ok": true, "time": 1792758039.3332438}
+{"label": "main_mstar-pr_config_r2", "arm": "mstar-pr", "seconds": 249.7, "ok": true, "time": 1792758319.1446245}
+{"label": "profile_t2i_c2", "arm": "mstar-pr", "seconds": 81.3, "ok": true, "time": 1792758995.6405246}

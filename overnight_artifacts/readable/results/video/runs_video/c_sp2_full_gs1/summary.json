@@ -1,0 +1,95 @@
+{
+ "label": "c_sp2_full_gs1",
+ "tree": "/root/work/base",
+ "config": "configs/cosmos3_nano_sp2.yaml",
+ "env": [
+  "HF_HOME=/root/work/hf"
+ ],
+ "size": "832x480",
+ "frames": 189,
+ "steps": 35,
+ "guidance": 1.0,
+ "concurrency": 1,
+ "num": 2,
+ "startup_s": 48.02090764045715,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  43.860285860999284
+ ],
+ "e2e_s": [
+  17.495002474999637,
+  17.615332012999716
+ ],
+ "e2e_mean_s": 17.555167243999676,
+ "e2e_median_s": 17.555167243999676,
+ "wall_s": 35.13922917799937,
+ "videos_per_min": 3.4149866917152485,
+ "peak_gpu_mem": "0, 53415 MiB | 1, 42723 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 17.495002474999637,
+   "bytes": 4602310,
+   "t_end": 1792573165.9113173
+  },
+  {
+   "idx": 1,
+   "ok": true,
+   "e2e_s": 17.615332012999716,
+   "bytes": 4683104,
+   "t_end": 1792573183.5417073
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-a67f255f14504081995af92d01ca4f3c",
+   "total_ms": 17449.6,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.3,
+    "preprocess done -> conductor ingest": 0.5,
+    "conductor ingest -> conductor done": 17179.1,
+    "conductor done -> first chunk": 267.2,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 1.4
+   },
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 14228.7,
+     "fwd_ms": 14163.0
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2880.1,
+     "fwd_ms": 2865.5
+    }
+   }
+  },
+  {
+   "rid": "vid-76083e49290649d4a3350b050fb84ed4",
+   "total_ms": 17557.5,
+   "timeline_ms": {
+    "recv -> preprocess done": 2.0,
+    "preprocess done -> conductor ingest": 0.4,
+    "conductor ingest -> conductor done": 17258.1,
+    "conductor done -> first chunk": 291.8,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 5.1
+   },
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 14303.9,
+     "fwd_ms": 14233.1
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2908.4,
+     "fwd_ms": 2890.7
+    }
+   }
+  }
+ ]
+}

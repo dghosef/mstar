@@ -1,0 +1,23 @@
+- **diffusers rows are not served.** They are in-process offline batches (b = c), timing the pipeline call
+  only: no HTTP, no queueing, no PNG/mp4 encode. M*, vllm-omni and SGLang latencies include HTTP, image/mp4
+  encoding and base64 on the response; their c > 1 rows are closed-loop serving with c requests in flight.
+- **Startup is excluded.** Cold compiles (M* Z-Image ~28 min on the first start, ~4 min warm) and capture
+  happen before the untimed warm pass; every timed cell follows one untimed pass over the whole prompt set.
+- **Prompt lengths vary** (PartiPrompts range from one word to several sentences). M*'s Z-Image config captures
+  caption-length buckets 32/64/96/128 tokens and batches only equal buckets; other lengths run its eager batched
+  path. This is the realistic case the overnight tuning (fixed prompts) did not exercise.
+- **Video noise on vllm-omni** comes from a CUDA generator (its video form takes no per-request
+  `generator_device`), so its Wan2.2 outputs cannot be pixel-compared with the CPU-generator reference; its video
+  gate is distribution-level only. SGLang takes `generator_device: cpu` for both images and video.
+- **SGLang's video API is asynchronous** (POST, then poll every 0.1 s, then fetch the mp4), which adds up to
+  ~0.1 s per video to its latency.
+- **M* wan22 servers run with the HF hub online** (its tokenizer load probes a config.json that the cache does not
+  hold and fails under `HF_HUB_OFFLINE=1`); every other server runs offline. This affects only the first request's
+  tokenizer load, before any timed cell.
+- **Each engine runs its own pinned torch** (M* 2.12.1, vllm-omni 2.13.0, SGLang and diffusers 2.14.1).
+- **p99 at B=1** is over 32 requests per round for images (close to the maximum) and 3 for video; read it as a
+  tail indicator, not a percentile estimate.
+- **Few video requests per point** (3-16 per round): the DiT is GPU-bound and serial, so the spread is small, but
+  the min-max over rounds is shown for every point.
+- **Competitor tuning** is one short sweep with a single process per knob set; differences between knob sets near
+  the cross-process noise make the pick "best observed".

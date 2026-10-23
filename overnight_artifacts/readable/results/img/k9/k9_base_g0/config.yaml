@@ -1,0 +1,33 @@
+model: flux2_klein_9b
+max_seq_len: 512
+model_kwargs:
+  attention_backend: sdpa
+  compile: true
+  compile_eager_rounding: true
+  compile_exact_ops:
+  - norms
+  accelerator_graph: true
+  capture_sizes:
+  - - 1024
+    - 1024
+  capture_batch_sizes:
+  - 1
+  - 2
+  - 3
+  - 4
+  max_batch_size: 4
+  vae_compile: true
+node_groups:
+- node_names:
+  - text_encoder
+  ranks:
+  - 0
+- node_names:
+  - vae_encoder
+  - vae_decoder
+  ranks:
+  - 0
+- node_names:
+  - dit
+  ranks:
+  - 0

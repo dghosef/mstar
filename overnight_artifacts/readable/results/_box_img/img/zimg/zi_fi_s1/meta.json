@@ -1,0 +1,19 @@
+{
+ "tag": "zi_fi_s1",
+ "tree": "/root/work/img4",
+ "mstar_file": "/root/work/img4/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve z_image_turbo --config /workspace/results/img/zimg/zi_fi_s1/config.yaml --gpus 0 --port 8200",
+ "sets": [
+  "attention_backend=flashinfer"
+ ],
+ "env": [],
+ "git": "",
+ "start": "07:48:01",
+ "gpu_mem_before": [
+  0
+ ],
+ "startup_s": 240.02680206298828,
+ "gpu_mem_after": [
+  0
+ ]
+}

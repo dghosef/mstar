@@ -1,0 +1,95 @@
+{
+ "label": "cs_1g_fi_gs6",
+ "tree": "/root/work/base",
+ "config": "configs/cosmos3_nano_fi_tmp.yaml",
+ "env": [
+  "HF_HOME=/root/work/hf"
+ ],
+ "size": "832x480",
+ "frames": 33,
+ "steps": 2,
+ "guidance": 6.0,
+ "concurrency": 1,
+ "num": 2,
+ "startup_s": 36.015907526016235,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  15.525070818999666
+ ],
+ "e2e_s": [
+  1.0596587300024112,
+  1.0503871790024277
+ ],
+ "e2e_mean_s": 1.0550229545024195,
+ "e2e_median_s": 1.0550229545024195,
+ "wall_s": 2.1155622200021753,
+ "videos_per_min": 56.72251038774771,
+ "peak_gpu_mem": "0, 60191 MiB | 1, 1765 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 1.0596587300024112,
+   "bytes": 1251280,
+   "t_end": 1792573456.3774555
+  },
+  {
+   "idx": 1,
+   "ok": true,
+   "e2e_s": 1.0503871790024277,
+   "bytes": 384840,
+   "t_end": 1792573457.429296
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-006df4025cc842c6b09a36ed76d7a6c2",
+   "total_ms": 1047.2,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.2,
+    "preprocess done -> conductor ingest": 1.1,
+    "conductor ingest -> conductor done": 981.4,
+    "conductor done -> first chunk": 59.6,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 4.0
+   },
+   "nodes": {
+    "dit": {
+     "n": 3,
+     "total_ms": 391.40000000000003,
+     "fwd_ms": 385.86
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 582.9,
+     "fwd_ms": 580.6
+    }
+   }
+  },
+  {
+   "rid": "vid-46c8224b9f68472ba5d29234184dc64b",
+   "total_ms": 1045.7,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.0,
+    "preprocess done -> conductor ingest": 0.4,
+    "conductor ingest -> conductor done": 968.2,
+    "conductor done -> first chunk": 70.6,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 5.5
+   },
+   "nodes": {
+    "dit": {
+     "n": 3,
+     "total_ms": 424.4,
+     "fwd_ms": 419.1
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 534.7,
+     "fwd_ms": 532.4
+    }
+   }
+  }
+ ]
+}

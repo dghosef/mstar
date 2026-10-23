@@ -1,0 +1,7 @@
+qwen3_omni: Qwen/Qwen3-Omni-30B-A3B-Instruct on GPUs 0,1
+arms: mstar-main, vllm-omni, sglang-omni, mstar-pr
+competitor configs: 
+M* frontend: python (fixed in queue.json: the Rust frontend's speech-output path is not verified for Qwen3-Omni, and one frontend must serve every workload)
+gate: mstar_main_a FAIL, mstar_pr_a FAIL
+GSM8K: mstar_main_a 0.960, mstar_pr_a 0.964, sglang_omni_a 0.948, vllm_omni_a 0.960
+decisions logged: 17 (decisions.jsonl)

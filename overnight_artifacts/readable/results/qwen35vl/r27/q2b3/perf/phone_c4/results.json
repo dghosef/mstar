@@ -1,0 +1,89 @@
+{
+ "summary": {
+  "n": 12,
+  "errors": 0,
+  "wall_s": 8.43461005401332,
+  "req_per_s": 1.4227095174708417,
+  "ttft_p50": 1.8549977410002612,
+  "ttft_mean": 1.8925346594963532,
+  "e2e_p50": 2.8162271170003805,
+  "ttft_p50_by_kind": {
+   "phone": 1.8549977410002612
+  }
+ },
+ "rows": [
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, appetizing photo of a generous pile of **beignets** \u2014 classic French fried dough pastries.\n\nThe beignets are",
+   "ttft": 1.0881812029983848,
+   "e2e": 2.806898551993072
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, top-down photograph of several golden-brown, fried pastries \u2014 likely **donuts** or **beignets** \u2014 generously dust",
+   "ttft": 2.747242322016973,
+   "e2e": 2.819120974978432
+  },
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, appetizing photo of a generous pile of **beignets** \u2014 classic French fried pastries.\n\nThe beignets are golden",
+   "ttft": 2.1506697210134007,
+   "e2e": 2.8176150099607185
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, top-down photograph of several golden-brown, fried pastries \u2014 likely **donuts** or **beignets** \u2014 generously dust",
+   "ttft": 1.5403857220080681,
+   "e2e": 2.815782723017037
+  },
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, appetizing photo of a generous pile of **beignets** \u2014 classic French fried dough pastries.\n\nThe beignets are",
+   "ttft": 1.177109029958956,
+   "e2e": 2.816671510983724
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, top-down photograph of several golden-brown, fried pastries \u2014 likely **donuts** or **beignets** \u2014 generously dust",
+   "ttft": 1.580065825022757,
+   "e2e": 2.816990081977565
+  },
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, appetizing photo of a generous pile of **beignets** \u2014 classic French fried pastries.\n\nThe beignets are golden",
+   "ttft": 2.154505437007174,
+   "e2e": 2.8175159670063294
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, top-down photograph of several golden-brown, fried pastries \u2014 likely **donuts** or **beignets** \u2014 generously dust",
+   "ttft": 2.74524829298025,
+   "e2e": 2.8168710289755836
+  },
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, appetizing photo of a generous pile of **beignets** \u2014 classic French fried dough pastries.\n\nThe beignets are",
+   "ttft": 1.1292884309659712,
+   "e2e": 2.79679622000549
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, top-down photograph of several golden-brown, fried pastries \u2014 likely **donuts** or **beignets** \u2014 generously dust",
+   "ttft": 1.5443825470283628,
+   "e2e": 2.795480591012165
+  },
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, appetizing photo of a generous pile of **beignets** \u2014 classic French fried pastries.\n\nThe beignets are golden",
+   "ttft": 2.1299296569777653,
+   "e2e": 2.794433767965529
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, top-down photograph of several golden-brown, fried pastries \u2014 likely **donuts** or **beignets** \u2014 generously dust",
+   "ttft": 2.723407725978177,
+   "e2e": 2.7947519829613157
+  }
+ ],
+ "errors": []
+}

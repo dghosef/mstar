@@ -1,0 +1,308 @@
+{
+ "start_after": {
+  "log": "/workspace/results/bench/q35_0.8b_chainB.log",
+  "text": "CHAIN_B_DONE"
+ },
+ "models": [
+  {
+   "model": "q35_0.8b",
+   "arms": [
+    "mstar-main",
+    "vllm",
+    "sglang",
+    "mstar-pr"
+   ],
+   "rotate_pr": false,
+   "tune_knobs": "all",
+   "mtp_rounds": [
+    1,
+    2,
+    3
+   ]
+  },
+  {
+   "model": "q35_9b",
+   "arms": [
+    "mstar-main",
+    "vllm",
+    "sglang",
+    "mstar-pr"
+   ],
+   "rotate_pr": true,
+   "tune_knobs": [
+    "default",
+    "lm-only",
+    "mnbt-16k",
+    "attn-fa3",
+    "chunk-16k"
+   ],
+   "mtp_rounds": [
+    1,
+    2
+   ]
+  },
+  {
+   "model": "q35_9b_tp2",
+   "arms": [
+    "mstar-main",
+    "vllm",
+    "sglang",
+    "mstar-pr"
+   ],
+   "rotate_pr": true,
+   "tune_knobs": {
+    "from": "q35_9b"
+   },
+   "mtp_rounds": [
+    1,
+    2
+   ]
+  },
+  {
+   "model": "q35_27b_tp4",
+   "arms": [
+    "mstar-main",
+    "vllm",
+    "sglang",
+    "mstar-pr"
+   ],
+   "rotate_pr": true,
+   "tune_knobs": {
+    "from": "q35_9b"
+   },
+   "mtp_rounds": [
+    1,
+    2
+   ],
+   "start_timeout": 5400
+  },
+  {
+   "model": "qwen3_omni",
+   "arms": [
+    "mstar-main",
+    "vllm-omni",
+    "sglang-omni",
+    "mstar-pr"
+   ],
+   "rotate_pr": true,
+   "workloads": [
+    "omni_t2t",
+    "omni_a2t",
+    "omni_t2s"
+   ],
+   "concs": [
+    1,
+    4,
+    16,
+    32
+   ],
+   "rounds": [
+    1,
+    2,
+    3
+   ],
+   "tune_knobs": [],
+   "tune_note": "vllm-omni and sglang-omni run their own recommended default Qwen3-Omni speech deploy configs (2 GPUs each, as M*'s shipped qwen3omni_2gpu.yaml); no knob sweep",
+   "tune_workload": "omni_t2t",
+   "frontend": "python",
+   "frontend_note": "the Rust frontend's speech-output path is not verified for Qwen3-Omni, and one frontend must serve every workload",
+   "mtp_rounds": [],
+   "profile_points": [
+    "omni_t2t:32",
+    "omni_a2t:16"
+   ],
+   "start_timeout": 5400,
+   "phases": [
+    "setup",
+    "data",
+    "smoke",
+    "correct",
+    "tune",
+    "fetune",
+    "gate",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "trim_note": "2026-10-22 user: cut repeated work - no xcheck (client agreed within 3-4% on 3 text models) and no MTP; short tune (winning knobs elsewhere)"
+  },
+  {
+   "model": "q35_0.8b_vl",
+   "arms": [
+    "mstar-main",
+    "vllm",
+    "sglang",
+    "mstar-pr"
+   ],
+   "rotate_pr": true,
+   "workloads": [
+    "mmmu",
+    "video_8s",
+    "video_30s",
+    "video_60s"
+   ],
+   "concs": [
+    1,
+    4,
+    16,
+    32
+   ],
+   "rounds": [
+    1,
+    2,
+    3
+   ],
+   "tune_workload": "mmmu",
+   "tune_points": [
+    [
+     1,
+     8
+    ],
+    [
+     16,
+     64
+    ],
+    [
+     32,
+     128
+    ]
+   ],
+   "tune_knobs": [
+    "default",
+    "attn-fa3",
+    "chunk-16k"
+   ],
+   "mtp_rounds": [],
+   "profile_points": [
+    "mmmu:32",
+    "video_30s:16"
+   ],
+   "phases": [
+    "setup",
+    "data",
+    "smoke",
+    "correct",
+    "tune",
+    "fetune",
+    "gate",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "trim_note": "2026-10-22 user: cut repeated work - no xcheck (client agreed within 3-4% on 3 text models) and no MTP; short tune (winning knobs elsewhere)"
+  },
+  {
+   "model": "q35_9b_vl",
+   "arms": [
+    "mstar-main",
+    "vllm",
+    "sglang",
+    "mstar-pr"
+   ],
+   "rotate_pr": true,
+   "workloads": [
+    "mmmu",
+    "video_8s",
+    "video_30s",
+    "video_60s"
+   ],
+   "concs": [
+    1,
+    4,
+    16,
+    32
+   ],
+   "rounds": [
+    1,
+    2,
+    3
+   ],
+   "tune_workload": "mmmu",
+   "tune_points": [
+    [
+     1,
+     8
+    ],
+    [
+     16,
+     64
+    ],
+    [
+     32,
+     128
+    ]
+   ],
+   "tune_knobs": [
+    "default",
+    "attn-fa3",
+    "chunk-16k"
+   ],
+   "mtp_rounds": [],
+   "profile_points": [
+    "mmmu:32",
+    "video_30s:16"
+   ],
+   "phases": [
+    "setup",
+    "data",
+    "smoke",
+    "correct",
+    "tune",
+    "fetune",
+    "gate",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "trim_note": "2026-10-22 user: cut repeated work - no xcheck (client agreed within 3-4% on 3 text models) and no MTP; short tune (winning knobs elsewhere)"
+  }
+ ],
+ "extra_arms": [],
+ "setup": [
+  {
+   "name": "drop_08b_sglang_mtp",
+   "timeout": 120,
+   "cmd": "cd /workspace/results/bench/q35_0.8b && /root/work/clientenv/bin/python -c \"import json;L=[json.loads(x) for x in open('results.jsonl') if x.strip()];K=[r for r in L if not (r['tag']=='mtp' and r['arm']=='sglang')];open('results.jsonl','w').write(''.join(json.dumps(r)+'\\n' for r in K));print(len(L)-len(K),'dropped')\" && rm -f stages/mtp_sglang_r*.done"
+  },
+  {
+   "name": "rust_frontend_main_tree",
+   "timeout": 1200,
+   "cmd": "export PATH=$HOME/.local/bin:$HOME/.cargo/bin:$PATH; export HF_HOME=/root/work/hf; cd /root/work/mstar-main && cargo build --release --manifest-path rust/server/Cargo.toml"
+  },
+  {
+   "name": "install_vllm_omni",
+   "timeout": 3600,
+   "cmd": "export PATH=$HOME/.local/bin:$HOME/.cargo/bin:$PATH; export HF_HOME=/root/work/hf; cd /root/work/engines && (test -x vllm-omni/bin/python || uv venv --python 3.12 --managed-python --seed vllm-omni) && uv pip install --python vllm-omni/bin/python --torch-backend=auto 'vllm-omni==0.30.0' ninja aiohttp && uv pip freeze --python vllm-omni/bin/python | grep -iE '^(vllm|vllm-omni|torch|transformers)=='"
+  },
+  {
+   "name": "install_sglang_omni",
+   "timeout": 3600,
+   "cmd": "export PATH=$HOME/.local/bin:$HOME/.cargo/bin:$PATH; export HF_HOME=/root/work/hf; cd /root/work/engines && (test -x sglang-omni/bin/python || uv venv --python 3.12 --managed-python --seed sglang-omni) && uv pip install --python sglang-omni/bin/python --torch-backend=auto 'sglang-omni==0.1.9' ninja aiohttp && uv pip freeze --python sglang-omni/bin/python | grep -iE '^(sglang|sglang-omni|torch|transformers)=='"
+  },
+  {
+   "name": "weights_qwen3_omni",
+   "timeout": 3600,
+   "cmd": "export PATH=$HOME/.local/bin:$HOME/.cargo/bin:$PATH; export HF_HOME=/root/work/hf; /root/work/mstar/.venv/bin/python -c \"from huggingface_hub import snapshot_download as s; print(s('Qwen/Qwen3-Omni-30B-A3B-Instruct'))\""
+  },
+  {
+   "name": "vllm_for_vllm_omni",
+   "timeout": 3600,
+   "cmd": "export PATH=$HOME/.local/bin:$HOME/.cargo/bin:$PATH; export HF_HOME=/root/work/hf; cd /root/work/engines && uv pip install --python vllm-omni/bin/python --torch-backend=auto 'vllm==0.30.0' 'vllm-omni==0.30.0' && uv pip install --python vllm-omni/bin/python --torch-backend=cpu --reinstall-package torchaudio --no-deps 'torchaudio==2.11.0' && vllm-omni/bin/python -c 'import vllm, vllm_omni; print(vllm.__version__)' && uv pip freeze --python vllm-omni/bin/python | grep -iE '^(vllm|vllm-omni|torch|transformers|flashinfer-python)=='"
+  },
+  {
+   "name": "omni_client_copy",
+   "timeout": 300,
+   "cmd": "rm -rf /root/work/bench/omni_client && mkdir -p /root/work/bench/omni_client && cp -r /root/work/mstar-main/benchmark /root/work/bench/omni_client/ && find /root/work/bench/omni_client -name __pycache__ -prune -exec rm -rf {} + ; ls /root/work/bench/omni_client/benchmark/runner.py"
+  },
+  {
+   "name": "whisper_weights",
+   "timeout": 1800,
+   "cmd": "export PATH=$HOME/.local/bin:$HOME/.cargo/bin:$PATH; export HF_HOME=/root/work/hf; /root/work/mstar-main/.venv/bin/python -c \"from huggingface_hub import snapshot_download as s; print(s('openai/whisper-large-v3-turbo'))\""
+  },
+  {
+   "name": "vision_omni_datasets",
+   "timeout": 3600,
+   "cmd": "export PATH=$HOME/.local/bin:$HOME/.cargo/bin:$PATH; export HF_HOME=/root/work/hf; /root/work/mstar-main/.venv/bin/python -c \"from datasets import load_dataset; load_dataset('lmms-lab/MMMU', split='validation'); load_dataset('openslr/librispeech_asr', 'clean', split='test'); from huggingface_hub import hf_hub_download as h; [h('zhaochenyang20/Video_MME', f'data/test_part_{p}.jsonl', repo_type='dataset') for p in ('0000','0200','0400')]; print('ok')\""
+  }
+ ]
+}

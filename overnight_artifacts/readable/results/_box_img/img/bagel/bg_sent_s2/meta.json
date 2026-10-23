@@ -1,0 +1,17 @@
+{
+ "tag": "bg_sent_s2",
+ "tree": "/root/work/img2",
+ "mstar_file": "/root/work/img2/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve bagel --config /workspace/results/img/bagel/bg_sent_s2/config.yaml --gpus 1 --port 8300",
+ "sets": [],
+ "env": [],
+ "git": "",
+ "start": "07:10:11",
+ "gpu_mem_before": [
+  0
+ ],
+ "startup_s": 70.01169466972351,
+ "gpu_mem_after": [
+  0
+ ]
+}

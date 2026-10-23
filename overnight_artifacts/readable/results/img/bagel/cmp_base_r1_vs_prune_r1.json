@@ -1,0 +1,48 @@
+{
+ "summary": {
+  "n": 6,
+  "psnr_min": 37.60847442901931,
+  "psnr_median": 41.395435511739564,
+  "ssim_min": 0.9887705519340286,
+  "ssim_median": 0.9962671928303726,
+  "identical": 0
+ },
+ "rows": [
+  {
+   "name": "img_000.png",
+   "psnr": 44.86243894107243,
+   "ssim": 0.9974363628723345,
+   "identical": false
+  },
+  {
+   "name": "img_001.png",
+   "psnr": 40.18541402637294,
+   "ssim": 0.9897307379892876,
+   "identical": false
+  },
+  {
+   "name": "img_002.png",
+   "psnr": 49.16465792124133,
+   "ssim": 0.99858075228676,
+   "identical": false
+  },
+  {
+   "name": "img_003.png",
+   "psnr": 42.25439799259898,
+   "ssim": 0.9971049354933229,
+   "identical": false
+  },
+  {
+   "name": "img_004.png",
+   "psnr": 37.60847442901931,
+   "ssim": 0.9887705519340286,
+   "identical": false
+  },
+  {
+   "name": "img_005.png",
+   "psnr": 40.53647303088014,
+   "ssim": 0.9954294501674222,
+   "identical": false
+  }
+ ]
+}

@@ -1,0 +1,7 @@
+q35_0.8b_vl: Qwen/Qwen3.5-0.8B on GPUs 0
+arms: mstar-main-rf, vllm, sglang, mstar-pr-rf
+competitor configs: vllm=default [], sglang=chunk-16k ['--chunked-prefill-size', '16384']
+M* frontend: rust (python 3588 vs rust 3856 geomean tok/s; rust gate PASS; rule: rust if its gate passes and > +3%)
+gate: mstar_pr_a PASS, mstar_pr_rf_a PASS, mstar_main_a PASS
+GSM8K: 
+decisions logged: 6 (decisions.jsonl)

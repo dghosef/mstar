@@ -1,0 +1,94 @@
+{
+ "diffusers": {
+  "config": "regional_dyn_fa3_vae",
+  "candidates": [
+   [
+    3.2746882737484446,
+    "regional_dyn_fa3_vae"
+   ],
+   [
+    2.8678508730668173,
+    "regional_dyn_fa3"
+   ],
+   [
+    2.855378905614308,
+    "full_dyn_fa3"
+   ],
+   [
+    2.8295285130558128,
+    "full_dyn"
+   ],
+   [
+    2.8142014247566354,
+    "regional_dyn"
+   ],
+   [
+    2.8105409335104814,
+    "regional_dyn_cudnn"
+   ],
+   [
+    2.2347221551095107,
+    "eager"
+   ]
+  ]
+ },
+ "vllmomni": {
+  "config": "full",
+  "score": 2.366205198350116,
+  "gate_pass": true,
+  "candidates": [
+   [
+    2.366205198350116,
+    "full",
+    "PASS"
+   ],
+   [
+    2.3226184271418227,
+    "base",
+    "PASS"
+   ],
+   [
+    2.3206887244172965,
+    "cudnn",
+    "PASS"
+   ],
+   [
+    2.172302633085855,
+    "eager",
+    "PASS"
+   ]
+  ]
+ },
+ "sglang": {
+  "config": "base",
+  "score": 3.572452741266595,
+  "gate_pass": true,
+  "candidates": [
+   [
+    3.572452741266595,
+    "base",
+    "PASS"
+   ],
+   [
+    3.5601921589450716,
+    "bcg",
+    "PASS"
+   ],
+   [
+    3.503856708352505,
+    "compile",
+    "PASS"
+   ],
+   [
+    3.3890299185256696,
+    "compile_b8",
+    "PASS"
+   ],
+   [
+    3.3681961143541135,
+    "bcg_b8",
+    "PASS"
+   ]
+  ]
+ }
+}

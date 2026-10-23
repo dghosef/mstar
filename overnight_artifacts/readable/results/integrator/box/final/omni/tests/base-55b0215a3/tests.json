@@ -1,0 +1,29 @@
+{
+ "core": {
+  "rc": 1,
+  "secs": 1177,
+  "total": 6608,
+  "failed": [
+   "test.modular.test_eval_compare::test_a_job_whose_lease_is_not_renewed_stops_itself_and_its_servers",
+   "test.modular.test_eval_compare::test_stopping_compare_stops_the_job_and_its_servers",
+   "test.modular.test_eval_compare_multigpu::test_a_base_that_hangs_is_reported_broken_not_flagged",
+   "test.modular.test_eval_compare_multigpu::test_a_head_that_hangs_is_cut_at_the_cap_with_stacks_and_fails",
+   "test.modular.test_eval_compare_multigpu::test_dump_stacks_retries_with_sudo_only_when_asked[False]",
+   "test.modular.test_eval_compare_multigpu::test_dump_stacks_retries_with_sudo_only_when_asked[True]",
+   "test.modular.test_eval_compare_transport::test_seeded_transport_faults_on_the_head_arm_are_flagged_end_to_end",
+   "test.modular.test_serving_metrics::test_refusals_count_from_when_metrics_are_turned_on"
+  ]
+ },
+ "piecewise_sig": {
+  "rc": 0,
+  "secs": 9,
+  "total": 5,
+  "failed": []
+ },
+ "tp_sim": {
+  "rc": 0,
+  "secs": 74,
+  "total": 7,
+  "failed": []
+ }
+}

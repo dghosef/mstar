@@ -1,0 +1,7 @@
+notes for cosmos3_edge_droid
+dropped engines: {}
+startup s: sglang: median 39 n=5; mstar-pr: median 92 n=6; mstar-main: median 90 n=4
+main_mstar-main_config_r1: failed captures 0, graph runtime rust True
+main_mstar-main_config_r2: failed captures 0, graph runtime rust True
+main_mstar-pr_config_r1: failed captures 0, graph runtime rust True
+main_mstar-pr_config_r2: failed captures 0, graph runtime rust True

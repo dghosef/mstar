@@ -1,0 +1,251 @@
+diff --git a/mstar/model/chatterbox/components/t3.py b/mstar/model/chatterbox/components/t3.py
+index fd205a03f..694c9e928 100644
+--- a/mstar/model/chatterbox/components/t3.py
++++ b/mstar/model/chatterbox/components/t3.py
+@@ -315,6 +315,17 @@ class T3Model(nn.Module):
+             emb = emb + self.speech_pos_emb.weight[speech_position]
+         return emb
+ 
++    def embed_speech_rows(self, ids: torch.Tensor, speech_positions: list[int]) -> torch.Tensor:
++        """One speech token per row, each at its own speech position (a decode
++        batch). The positions are host ints, staged with one pinned copy."""
++        emb = self.speech_emb(ids)
++        if self.speech_pos_emb is not None:
++            index = torch.tensor(speech_positions, dtype=torch.long)
++            if ids.is_cuda:
++                index = index.pin_memory().to(ids.device, non_blocking=True)
++            emb = emb + self.speech_pos_emb.weight[index]
++        return emb
++
+     def build_prefill_embeds(
+         self, cond_emb: torch.Tensor, text_ids: torch.Tensor, *, uncond: bool = False,
+     ) -> torch.Tensor:
+diff --git a/mstar/model/chatterbox/submodules.py b/mstar/model/chatterbox/submodules.py
+index 543ac319e..137c3d77d 100644
+--- a/mstar/model/chatterbox/submodules.py
++++ b/mstar/model/chatterbox/submodules.py
+@@ -56,6 +56,8 @@ from mstar.model.chatterbox.config import (
+ from mstar.model.submodule_base import (
+     ARNodeInputs,
+     ARNodeSubmodule,
++    BatchedModelOutput,
++    HostRows,
+     ModelInputsFromEngine,
+     NodeInputs,
+     NodeSubmodule,
+@@ -291,9 +293,13 @@ class T3Submodule(ARNodeSubmodule):
+                 raise ValueError(
+                     f"speech position {step} is past the T3 table ({self.t3.speech_pos_table_size})"
+                 )
+-            token = inputs[PREV_TOKEN][0].to(device, torch.long).reshape(-1)
+-            embeds = self.model.embed_speech(token, step)
+-            tensor_inputs = {"cfg_weight": state["cfg_weight"]}
++            # embedded for the whole batch in `preprocess`
++            return ARNodeInputs(
++                input_ids=inputs[PREV_TOKEN][0].to(device, torch.long).reshape(-1),
++                input_seq_len=1,
++                tensor_inputs={"cfg_weight": state["cfg_weight"], "speech_position": step},
++                resource_step_info=requires_cfg,
++            )
+         else:
+             raise ValueError(f"Unknown T3 walk {graph_walk!r}")
+         return ARNodeInputs(
+@@ -310,7 +316,14 @@ class T3Submodule(ARNodeSubmodule):
+         ``uncond`` rows, the order the combined KV plan lays the streams out."""
+         del engine_inputs
+         requires_cfg = bool(inputs[0].resource_step_info)
+-        main = torch.cat([inp.input_embeds for inp in inputs], dim=0)
++        if inputs[0].input_embeds is None:
++            # decode rows: one embedding lookup for the batch, not one per row
++            main = self.model.embed_speech_rows(
++                torch.cat([inp.input_ids for inp in inputs]),
++                [inp.tensor_inputs["speech_position"] for inp in inputs],
++            )
++        else:
++            main = torch.cat([inp.input_embeds for inp in inputs], dim=0)
+         if requires_cfg:
+             if graph_walk in PREFILL_WALKS:
+                 uncond = torch.cat([inp.tensor_inputs["uncond_embeds"] for inp in inputs], dim=0)
+@@ -403,15 +416,16 @@ class T3Submodule(ARNodeSubmodule):
+     def forward_batched(
+         self, graph_walk: str, engine_inputs: ModelInputsFromEngine, input_embeds: torch.Tensor,
+         cfg_weight: torch.Tensor, requires_cfg: bool = False, **kwargs,
+-    ) -> dict[str, NameToTensorList]:
++    ) -> BatchedModelOutput:
+         del kwargs
+         tokens = self._forward(
+             graph_walk, engine_inputs, input_embeds, cfg_weight, requires_cfg,
+         ).reshape(-1)
+-        return {
+-            rid: {SPEECH_TOKENS: [tokens[i : i + 1]]}
+-            for i, rid in enumerate(engine_inputs.request_ids)
+-        }
++        # row i is request i: one clone and one device-to-host copy per step
++        return BatchedModelOutput(
++            row_outputs={SPEECH_TOKENS: tokens},
++            check_stop_buffers={SPEECH_TOKENS: tokens},
++        )
+ 
+     # -- loop control ---------------------------------------------------------
+ 
+@@ -434,13 +448,35 @@ class T3Submodule(ARNodeSubmodule):
+         if SPEECH_TOKENS not in outputs:
+             return set()
+         token = int(outputs[SPEECH_TOKENS][0].reshape(-1)[0].item())
++        return {DECODE_LOOP} if self._stops(request_id, request_info, token) else set()
++
++    def _stops(self, request_id: str, request_info: CurrentForwardPassInfo, token: int) -> bool:
+         generated = int(self.request_state(request_id).get("generated", 0))
+         max_new = int(request_info.step_metadata.get("max_new_tokens", request_info.max_tokens))
+         sampling = request_info.resource_configs.get(T3_SAMPLER)
+         ignore_eos = bool(getattr(sampling, "ignore_eos", False))
+-        if (not ignore_eos and token == self.t3.stop_speech_token) or generated >= max_new:
+-            return {DECODE_LOOP}
+-        return set()
++        return (not ignore_eos and token == self.t3.stop_speech_token) or generated >= max_new
++
++    def check_stop_batched(
++        self,
++        request_ids: list[str],
++        request_infos: dict[str, CurrentForwardPassInfo],
++        host_rows: HostRows,
++        step_walk: str | None = None,
++    ) -> dict[str, set[str]] | None:
++        """``check_stop`` for the whole batch off one ``tolist``."""
++        del step_walk
++        tokens = host_rows.buffers.get(SPEECH_TOKENS)
++        if not torch.is_tensor(tokens) or tokens.dim() == 0:
++            return None
++        values = tokens.reshape(tokens.shape[0], -1)[:, 0].tolist()
++        row_of = {rid: i for i, rid in enumerate(host_rows.request_ids)}
++        stops: dict[str, set[str]] = {}
++        for rid in request_ids:
++            i = row_of.get(rid)
++            if i is not None and i < len(values) and self._stops(rid, request_infos[rid], values[i]):
++                stops[rid] = {DECODE_LOOP}
++        return stops
+ 
+     # -- batching and capture ---------------------------------------------------
+ 
+@@ -494,11 +530,14 @@ class T3Submodule(ARNodeSubmodule):
+                 ))
+             configs.append(BatchedAcceleratorGraphConfig(
+                 capture_graph_walk="decode",
++                # shaped as `prepare_inputs` builds a decode row: a replay's
++                # padding rows are embedded in the same `preprocess` call
+                 single_request_inputs=ARNodeInputs(
+-                    input_embeds=torch.zeros(1, self.t3.hidden_size, dtype=dtype, device=device),
++                    input_ids=torch.zeros(1, dtype=torch.long, device=device),
+                     input_seq_len=1,
+                     tensor_inputs={
+                         "cfg_weight": torch.full((1,), 0.5 if requires_cfg else 0.0, device=device),
++                        "speech_position": 0,
+                     },
+                     resource_step_info=requires_cfg,
+                 ),
+diff --git a/test/modular/test_chatterbox_model.py b/test/modular/test_chatterbox_model.py
+index 6e57c1f5a..4271747e2 100644
+--- a/test/modular/test_chatterbox_model.py
++++ b/test/modular/test_chatterbox_model.py
+@@ -48,7 +48,7 @@ from mstar.model.chatterbox.submodules import (
+     VoiceCache,
+ )
+ from mstar.model.registry import HF_MODELS, get_model_class, model_init_kwargs
+-from mstar.model.submodule_base import ModelInputsFromEngine
++from mstar.model.submodule_base import HostRows, ModelInputsFromEngine
+ 
+ CONFIGS = Path(__file__).resolve().parents[2] / "configs"
+ 
+@@ -714,6 +714,9 @@ class _TinyT3(torch.nn.Module):
+     def embed_speech(self, ids, position):
+         return self.speech_emb(ids) + self.speech_pos_emb.weight[position]
+ 
++    def embed_speech_rows(self, ids, positions):
++        return self.speech_emb(ids) + self.speech_pos_emb.weight[torch.tensor(positions)]
++
+ 
+ def _t3_submodule(variant="chatterbox"):
+     config = ChatterboxConfig.from_variant(variant)
+@@ -779,15 +782,16 @@ def test_t3_decode_inputs_track_speech_positions_and_no_cfg_is_single_stream():
+     info = _fwd_info("a", cfg_weight=0.0)
+     sub.prepare_inputs("prefill", info, {TEXT_INPUTS: [torch.tensor([255, 5, 0])]})
+     sub.postprocess("a", info, {SPEECH_TOKENS: [torch.tensor([17])]})
++    engine = ModelInputsFromEngine(request_ids=["a"], per_request_info={})
+     d1 = sub.prepare_inputs("decode", info, {PREV_TOKEN: [torch.tensor([17])]})
+     # a step re-driven after a refused admit keeps its position
+     retry = sub.prepare_inputs("decode", info, {PREV_TOKEN: [torch.tensor([17])]})
+-    assert torch.equal(retry.input_embeds, d1.input_embeds)
++    assert retry.tensor_inputs["speech_position"] == d1.tensor_inputs["speech_position"] == 1
+     sub.postprocess("a", info, {SPEECH_TOKENS: [torch.tensor([18])]})
+     d2 = sub.prepare_inputs("decode", info, {PREV_TOKEN: [torch.tensor([18])]})
+     assert d1.input_seq_len == 1 and d1.resource_step_info is False
+     expected = sub.model.speech_emb(torch.tensor([18])) + sub.model.speech_pos_emb(torch.tensor([2]))
+-    assert torch.allclose(d2.input_embeds, expected)
++    assert torch.allclose(sub.preprocess("decode", engine, [d2])["input_embeds"], expected)
+     sub.request_state("a").add("generated", sub.t3.speech_pos_table_size)
+     with pytest.raises(ValueError, match="past the T3 table"):
+         sub.prepare_inputs("decode", info, {PREV_TOKEN: [torch.tensor([18])]})
+@@ -797,10 +801,35 @@ def test_t3_decode_inputs_track_speech_positions_and_no_cfg_is_single_stream():
+     assert [(s.label, s.span) for s in step.segments] == [(COND_LABEL, 1)]
+     assert step.steps[T3_SAMPLER].prefill_tracked_tokens == {}
+ 
+-    packed = sub.preprocess("decode", ModelInputsFromEngine(request_ids=["a"], per_request_info={}), [d1])
++    packed = sub.preprocess("decode", engine, [d1])
+     assert packed["input_embeds"].shape == (1, 8) and packed["requires_cfg"] is False
+ 
+ 
++def test_t3_decode_batch_embeds_each_row_at_its_own_position():
++    sub = _t3_submodule()
++    rows = {"a": (17, 1), "b": (40, 3)}  # rid -> (previous token, tokens generated so far)
++    inputs = []
++    for rid, (token, generated) in rows.items():
++        info = _fwd_info(rid)
++        sub.prepare_inputs("prefill", info, {TEXT_INPUTS: [torch.tensor([255, 0])]})
++        sub.request_state(rid).add("generated", generated)
++        inputs.append(sub.prepare_inputs("decode", info, {PREV_TOKEN: [torch.tensor([token])]}))
++    # a padded replay appends the capture template's row
++    (template,) = [
++        c.single_request_inputs for c in sub.get_accelerator_graph_configs(torch.device("cpu"))
++        if isinstance(c, BatchedAcceleratorGraphConfig) and c.additional_key_info is True
++    ]
++    inputs.append(template)
++    packed = sub.preprocess("decode", ModelInputsFromEngine(request_ids=list(rows), per_request_info={}), inputs)
++    main = torch.cat([
++        sub.model.embed_speech(torch.tensor([token]), generated)
++        for token, generated in [*rows.values(), (0, 0)]
++    ])
++    # guidance: the same token embedding feeds the cond and uncond streams
++    assert torch.equal(packed["input_embeds"], torch.cat([main, main]))
++    assert packed["cfg_weight"].tolist() == [[0.5], [0.5], [0.5]]
++
++
+ def test_t3_batches_only_one_guidance_mode_and_captures_both():
+     sub = _t3_submodule()
+     on = sub.prepare_inputs("prefill", _fwd_info("a", cfg_weight=0.5), {TEXT_INPUTS: [torch.tensor([255, 0])]})
+@@ -905,6 +934,26 @@ def test_t3_stop_on_eos_and_token_budget():
+     assert not sub.request_states
+ 
+ 
++def test_t3_batched_stop_check_agrees_with_the_per_request_one():
++    sub = _t3_submodule()
++    eos = sub.t3.stop_speech_token
++    infos = {rid: _fwd_info(rid, max_new=3) for rid in ("a", "b", "c", "d")}
++    for info in infos.values():
++        sub.prepare_inputs("prefill", info, {TEXT_INPUTS: [torch.tensor([255, 0])]})
++    sub.request_state("c").add("generated", 3)  # out of budget
++    infos["d"].resource_configs[T3_SAMPLER].ignore_eos = True
++    tokens = torch.tensor([12, eos, 12, eos, 99])  # a padded replay leaves a row past the real ones
++    rows = HostRows(("a", "b", "c", "d"), {SPEECH_TOKENS: tokens})
++    want = {
++        rid: stops for i, rid in enumerate(infos)
++        if (stops := sub.check_stop(rid, infos[rid], {SPEECH_TOKENS: [tokens[i:i + 1]]}))
++    }
++    assert want == {"b": {"decode_loop"}, "c": {"decode_loop"}}
++    assert sub.check_stop_batched(["d", "c", "b", "a"], infos, rows) == want
++    # a row the step has no output for is skipped, as in the per-request path
++    assert sub.check_stop_batched(["a", "b"], infos, HostRows(("a",), {SPEECH_TOKENS: tokens[:1]})) == {}
++
++
+ # ---------------------------------------------------------------------------
+ # S3Gen submodule: token filtering, references, voice cache
+ # ---------------------------------------------------------------------------

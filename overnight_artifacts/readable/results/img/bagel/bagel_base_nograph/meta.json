@@ -1,0 +1,19 @@
+{
+ "tag": "bagel_base_nograph",
+ "tree": "/root/work/base",
+ "mstar_file": "/root/work/base/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve bagel --config /workspace/results/img/bagel/bagel_base_nograph/config.yaml --gpus 0 --port 8100",
+ "sets": [
+  "accelerator_graph=false"
+ ],
+ "env": [],
+ "git": "",
+ "start": "04:50:08",
+ "gpu_mem_before": [
+  4
+ ],
+ "startup_s": 25.004728317260742,
+ "gpu_mem_after": [
+  0
+ ]
+}

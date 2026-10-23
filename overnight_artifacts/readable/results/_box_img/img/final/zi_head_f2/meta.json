@@ -1,0 +1,17 @@
+{
+ "tag": "zi_head_f2",
+ "tree": "/root/work/img8",
+ "mstar_file": "/root/work/img8/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve z_image_turbo --config /workspace/results/img/final/zi_head_f2/config.yaml --gpus 0 --port 8200",
+ "sets": [],
+ "env": [],
+ "git": "",
+ "start": "09:42:21",
+ "gpu_mem_before": [
+  0
+ ],
+ "startup_s": 220.01775932312012,
+ "gpu_mem_after": [
+  0
+ ]
+}

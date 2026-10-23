@@ -299,6 +299,10 @@ class PiecewiseAcceleratorGraphConfig(ABC):
     # (`ModelInputsFromEngine.step` is the declaration that tells it so).
     # None: every batch that fits a bucket.
     can_lease: Callable[[list[NodeInputs]], bool] | None = None
+    # The region replays a whole step as ONE row, however many requests the
+    # step carries (a vision tower packing every request's images as segments
+    # of one ragged batch), so its slot is leased at batch size 1.
+    one_row_per_step: bool = False
     # static kwargs threaded into capture_fn (e.g. cond_tokens, is_causal)
     forward_kwargs: dict[str, Any] = field(default_factory=dict)
     # None => defer to the runner's default batch-size buckets

@@ -1,0 +1,13 @@
+notes for fish_s2pro
+dropped engines: {"fishspeech": "smoke failed"}
+startup s: sgomni: median 48 n=8; vllmomni: median 65 n=6; fishspeech: median 0 n=1; mstar-pr: median 166 n=11; mstar-main: median 86 n=6
+main_mstar-main_python_r1: failed captures 0, graph runtime rust True, rust frontend False
+main_mstar-main_python_r2: failed captures 0, graph runtime rust True, rust frontend False
+main_mstar-main_python_r2_retry: failed captures 0, graph runtime rust True, rust frontend False
+main_mstar-main_python_r3: failed captures 0, graph runtime rust True, rust frontend False
+main_mstar-pr_python_r1: failed captures 0, graph runtime rust True, rust frontend False
+main_mstar-pr_python_r1_retry: failed captures 0, graph runtime rust True, rust frontend False
+main_mstar-pr_python_r2: failed captures 0, graph runtime rust True, rust frontend False
+main_mstar-pr_python_r2_retry: failed captures 0, graph runtime rust True, rust frontend False
+main_mstar-pr_python_r3: failed captures 0, graph runtime rust True, rust frontend False
+main_mstar-pr_python_r3_retry: failed captures 0, graph runtime rust True, rust frontend False

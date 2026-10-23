@@ -1,0 +1,73 @@
+{
+ "diffusers": {
+  "config": "regional_dyn",
+  "candidates": [
+   [
+    1.0580050236205216,
+    "regional_dyn"
+   ],
+   [
+    1.0374283827261725,
+    "regional_dyn_cudnn"
+   ],
+   [
+    0.7901608114958287,
+    "eager"
+   ]
+  ]
+ },
+ "vllmomni": {
+  "config": "base",
+  "score": 1.0989614038661881,
+  "gate_pass": true,
+  "candidates": [
+   [
+    1.0989614038661881,
+    "base",
+    "PASS"
+   ],
+   [
+    1.0948723641115043,
+    "full",
+    "PASS"
+   ],
+   [
+    1.0751886160966018,
+    "cudnn",
+    "PASS"
+   ],
+   [
+    0.9857838671254553,
+    "eager",
+    "PASS"
+   ]
+  ]
+ },
+ "sglang": {
+  "config": "bcg",
+  "score": 1.2708162867211232,
+  "gate_pass": true,
+  "candidates": [
+   [
+    1.2708162867211232,
+    "bcg",
+    "PASS"
+   ],
+   [
+    1.267293883834288,
+    "bcg_b8",
+    "PASS"
+   ],
+   [
+    1.2646462959218068,
+    "base",
+    "PASS"
+   ],
+   [
+    1.2261863428801187,
+    "compile",
+    "PASS"
+   ]
+  ]
+ }
+}

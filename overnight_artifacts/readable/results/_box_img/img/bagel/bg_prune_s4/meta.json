@@ -1,0 +1,17 @@
+{
+ "tag": "bg_prune_s4",
+ "tree": "/root/work/img",
+ "mstar_file": "/root/work/img/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve bagel --config /workspace/results/img/bagel/bg_prune_s4/config.yaml --gpus 1 --port 8300",
+ "sets": [],
+ "env": [],
+ "git": "",
+ "start": "07:12:54",
+ "gpu_mem_before": [
+  0
+ ],
+ "startup_s": 65.00715208053589,
+ "gpu_mem_after": [
+  0
+ ]
+}

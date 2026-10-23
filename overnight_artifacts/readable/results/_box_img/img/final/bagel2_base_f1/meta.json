@@ -1,0 +1,19 @@
+{
+ "tag": "bagel2_base_f1",
+ "tree": "/root/work/base",
+ "mstar_file": "/root/work/base/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve bagel --config /workspace/results/img/final/bagel2_base_f1/config.yaml --gpus 0,1 --port 8100",
+ "sets": [],
+ "env": [],
+ "git": "",
+ "start": "09:55:28",
+ "gpu_mem_before": [
+  0,
+  0
+ ],
+ "startup_s": 405.03576135635376,
+ "gpu_mem_after": [
+  0,
+  0
+ ]
+}

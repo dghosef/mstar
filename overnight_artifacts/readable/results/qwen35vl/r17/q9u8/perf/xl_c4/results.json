@@ -1,0 +1,89 @@
+{
+ "summary": {
+  "n": 12,
+  "errors": 0,
+  "wall_s": 6.244811041979119,
+  "req_per_s": 1.9215953724353096,
+  "ttft_p50": 1.3882081974879839,
+  "ttft_mean": 1.300835490168538,
+  "e2e_p50": 2.0663961129903328,
+  "ttft_p50_by_kind": {
+   "xl": 1.3882081974879839
+  }
+ },
+ "rows": [
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a breakfast or brunch table setting, likely in a caf\u00e9 or diner. The scene is warm and inviting, with",
+   "ttft": 0.5116009379853494,
+   "e2e": 2.084501512988936
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly angled photograph of a dessert or snack platter served in what appears to be a dimly lit restaurant or bar setting. The main",
+   "ttft": 1.4462087179999799,
+   "e2e": 2.129999087017495
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a breakfast or brunch table setting, likely in a caf\u00e9 or diner. The scene is warm and inviting, with",
+   "ttft": 1.9208834890159778,
+   "e2e": 2.1312523569795303
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly angled photograph of a dessert or snack platter served in what appears to be a dimly lit restaurant or bar setting. The main",
+   "ttft": 1.444182544015348,
+   "e2e": 2.12953351798933
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a breakfast or brunch table setting, likely in a caf\u00e9 or diner. The scene is warm and inviting, with",
+   "ttft": 0.5119406909798272,
+   "e2e": 2.0657471509766765
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly angled photograph of a dessert or snack platter served in what appears to be a dimly lit restaurant or bar setting. The main",
+   "ttft": 1.3852151980390772,
+   "e2e": 2.067045075003989
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a breakfast or brunch table setting, likely in a caf\u00e9 or diner. The scene is warm and inviting, with",
+   "ttft": 1.3835631840047427,
+   "e2e": 2.0644207849982195
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly angled photograph of a dessert or snack platter served in what appears to be a dimly lit restaurant or bar setting. The main",
+   "ttft": 1.855717703991104,
+   "e2e": 2.0646694059832953
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a breakfast or brunch table setting, likely in a caf\u00e9 or diner. The scene is warm and inviting, with",
+   "ttft": 0.5125296830083244,
+   "e2e": 2.0721380690229125
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly angled photograph of a dessert or snack platter served in what appears to be a dimly lit restaurant or bar setting. The main",
+   "ttft": 1.3888438869616948,
+   "e2e": 2.0364538480062038
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle photograph of a breakfast or brunch table setting, likely in a caf\u00e9 or diner. The scene is warm and inviting, with",
+   "ttft": 1.387572508014273,
+   "e2e": 2.0353413890115917
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly angled photograph of a dessert or snack platter served in what appears to be a dimly lit restaurant or bar setting. The main",
+   "ttft": 1.8617673380067572,
+   "e2e": 2.0442348099895753
+  }
+ ],
+ "errors": []
+}

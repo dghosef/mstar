@@ -1,0 +1,9 @@
+notes for qwen3tts_1p7b
+dropped engines: {}
+startup s: vllmomni: median 84 n=6; sgomni: median 96 n=6; mstar-pr: median 140 n=8; mstar-main: median 176 n=4
+main_mstar-main_python_r1: failed captures 0, graph runtime rust True, rust frontend False
+main_mstar-main_python_r2: failed captures 0, graph runtime rust True, rust frontend False
+main_mstar-main_python_r3: failed captures 0, graph runtime rust True, rust frontend False
+main_mstar-pr_python_r1: failed captures 0, graph runtime rust True, rust frontend False
+main_mstar-pr_python_r2: failed captures 0, graph runtime rust True, rust frontend False
+main_mstar-pr_python_r3: failed captures 0, graph runtime rust True, rust frontend False

@@ -1,0 +1,24 @@
+{
+ "arm": "hbf",
+ "tree": "/root/work/hbf",
+ "cmd": [
+  "/root/work/mstar/.venv/bin/python",
+  "-m",
+  "mstar.cli.main",
+  "serve",
+  "qwen3_5_0.8b",
+  "--gpus",
+  "0",
+  "--port",
+  "8100",
+  "--config",
+  "configs/qwen3_5_0.8b.yaml"
+ ],
+ "env_extra": {},
+ "start": "2026-10-21 07:05:40",
+ "loadavg_start": "4.96 12.10 14.70 3/3446 140208",
+ "git": "",
+ "mstar_file": "/root/work/hbf/mstar/__init__.py",
+ "startup_s": 105.0,
+ "end": "2026-10-21 07:09:02"
+}

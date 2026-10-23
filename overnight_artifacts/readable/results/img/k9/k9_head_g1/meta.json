@@ -1,0 +1,17 @@
+{
+ "tag": "k9_head_g1",
+ "tree": "/root/guest-img/head",
+ "mstar_file": "/root/guest-img/head/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve flux2_klein_9b --config /workspace/results/img/k9/k9_head_g1/config.yaml --gpus 1 --port 9110",
+ "sets": [],
+ "env": [],
+ "git": "",
+ "start": "20:57:36",
+ "gpu_mem_before": [
+  0
+ ],
+ "startup_s": 630.0488977432251,
+ "gpu_mem_after": [
+  0
+ ]
+}

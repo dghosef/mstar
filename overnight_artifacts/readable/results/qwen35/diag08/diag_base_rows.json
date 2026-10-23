@@ -1,0 +1,79 @@
+[
+ {
+  "client": "runner",
+  "conc": 64,
+  "n": 1280,
+  "rc": 0,
+  "load": 37.4,
+  "wall_s": 21.68,
+  "completed": 1280,
+  "failed": 0,
+  "request_throughput": 59.04137232014169,
+  "tok_s": 15114.4,
+  "ttft": [
+   "TTFT (text)  : mean=0.090s  p50=0.090s  p95=0.112s  p99=0.117s"
+  ],
+  "itl": [
+   "ITL  (text)  : mean=0.004s  p50=0.004s  p95=0.009s  p99=0.017s"
+  ],
+  "tps": [
+   "Text tokens: 328960 total (257.0 avg/req)",
+   "text tok/s"
+  ]
+ },
+ {
+  "client": "light1",
+  "conc": 64,
+  "procs": 1,
+  "n": 1280,
+  "tokens": 328960,
+  "errors": 0,
+  "wall_s": 22.205,
+  "tok_s": 14814.4,
+  "elapsed": 23.2
+ },
+ {
+  "client": "light4",
+  "conc": 64,
+  "procs": 4,
+  "n": 1280,
+  "tokens": 328960,
+  "errors": 0,
+  "wall_s": 21.72,
+  "tok_s": 15145.3,
+  "elapsed": 22.7
+ },
+ {
+  "client": "runner2",
+  "conc": 64,
+  "n": 1280,
+  "rc": 0,
+  "load": 23.5,
+  "wall_s": 21.39,
+  "completed": 1280,
+  "failed": 0,
+  "request_throughput": 59.84845321951222,
+  "tok_s": 15319.3,
+  "ttft": [
+   "TTFT (text)  : mean=0.084s  p50=0.084s  p95=0.104s  p99=0.113s"
+  ],
+  "itl": [
+   "ITL  (text)  : mean=0.004s  p50=0.004s  p95=0.005s  p99=0.009s"
+  ],
+  "tps": [
+   "Text tokens: 328959 total (257.0 avg/req)",
+   "text tok/s"
+  ]
+ },
+ {
+  "client": "light4_long",
+  "conc": 64,
+  "procs": 4,
+  "n": 3840,
+  "tokens": 986880,
+  "errors": 0,
+  "wall_s": 65.423,
+  "tok_s": 15084.5,
+  "elapsed": 66.4
+ }
+]

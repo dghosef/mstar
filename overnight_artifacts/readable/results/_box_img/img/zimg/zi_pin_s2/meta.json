@@ -1,0 +1,19 @@
+{
+ "tag": "zi_pin_s2",
+ "tree": "/root/work/img3",
+ "mstar_file": "/root/work/img3/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve z_image_turbo --config /workspace/results/img/zimg/zi_pin_s2/config.yaml --gpus 0 --port 8200",
+ "sets": [
+  "capture_batch_sizes=[1,2,3,4,5,6,7,8]"
+ ],
+ "env": [],
+ "git": "",
+ "start": "07:31:46",
+ "gpu_mem_before": [
+  0
+ ],
+ "startup_s": 220.01879501342773,
+ "gpu_mem_after": [
+  0
+ ]
+}

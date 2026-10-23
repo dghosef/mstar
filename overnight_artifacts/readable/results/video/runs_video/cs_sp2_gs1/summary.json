@@ -1,0 +1,95 @@
+{
+ "label": "cs_sp2_gs1",
+ "tree": "/root/work/base",
+ "config": "configs/cosmos3_nano_sp2.yaml",
+ "env": [
+  "HF_HOME=/root/work/hf"
+ ],
+ "size": "832x480",
+ "frames": 33,
+ "steps": 2,
+ "guidance": 1.0,
+ "concurrency": 1,
+ "num": 2,
+ "startup_s": 45.01645064353943,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  24.13966176899703
+ ],
+ "e2e_s": [
+  0.7664046640020388,
+  0.7519656580006995
+ ],
+ "e2e_mean_s": 0.7591851610013691,
+ "e2e_median_s": 0.7591851610013691,
+ "wall_s": 1.5231532340003469,
+ "videos_per_min": 78.78393146619723,
+ "peak_gpu_mem": "0, 53361 MiB | 1, 42309 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 0.7664046640020388,
+   "bytes": 1040956,
+   "t_end": 1792572460.3625247
+  },
+  {
+   "idx": 1,
+   "ok": true,
+   "e2e_s": 0.7519656580006995,
+   "bytes": 347720,
+   "t_end": 1792572461.115783
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-dc9f70c13aad47f6883e3502be96831b",
+   "total_ms": 756.2,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.4,
+    "preprocess done -> conductor ingest": 1.0,
+    "conductor ingest -> conductor done": 693.0,
+    "conductor done -> first chunk": 59.6,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 1.2
+   },
+   "nodes": {
+    "dit": {
+     "n": 3,
+     "total_ms": 192.3,
+     "fwd_ms": 184.2
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 488.9,
+     "fwd_ms": 481.9
+    }
+   }
+  },
+  {
+   "rid": "vid-d938e5c4359e4847abe702ef2d410895",
+   "total_ms": 747.8,
+   "timeline_ms": {
+    "recv -> preprocess done": 2.2,
+    "preprocess done -> conductor ingest": 1.1,
+    "conductor ingest -> conductor done": 688.1,
+    "conductor done -> first chunk": 55.1,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 1.4
+   },
+   "nodes": {
+    "dit": {
+     "n": 3,
+     "total_ms": 191.0,
+     "fwd_ms": 187.0
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 488.1,
+     "fwd_ms": 482.4
+    }
+   }
+  }
+ ]
+}

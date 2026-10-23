@@ -1,0 +1,637 @@
+{
+ "harness_dir": "/root/work/dbench",
+ "rounds": 3,
+ "knobs": {
+  "image": {
+   "vllmomni": {
+    "base": [],
+    "cudnn": [
+     "--diffusion-attention-backend",
+     "CUDNN_ATTN"
+    ],
+    "full": [
+     "--diffusion-compile-granularity",
+     "full"
+    ],
+    "eager": [
+     "--enforce-eager"
+    ]
+   },
+   "sglang": {
+    "base": [
+     "--performance-mode",
+     "speed"
+    ],
+    "compile": [
+     "--performance-mode",
+     "speed",
+     "--enable-torch-compile",
+     "true"
+    ],
+    "bcg": [
+     "--performance-mode",
+     "speed",
+     "--enable-breakable-cuda-graph",
+     "true",
+     "--warmup-resolutions",
+     "1024x1024"
+    ],
+    "compile_b8": [
+     "--performance-mode",
+     "speed",
+     "--enable-torch-compile",
+     "true",
+     "--batching-max-size",
+     "8"
+    ],
+    "bcg_b8": [
+     "--performance-mode",
+     "speed",
+     "--enable-breakable-cuda-graph",
+     "true",
+     "--warmup-resolutions",
+     "1024x1024",
+     "--batching-max-size",
+     "8"
+    ]
+   },
+   "diffusers": {
+    "eager": [
+     "--compile",
+     "none"
+    ],
+    "regional_dyn": [
+     "--compile",
+     "regional",
+     "--dynamic"
+    ],
+    "regional_dyn_cudnn": [
+     "--compile",
+     "regional",
+     "--dynamic",
+     "--attn",
+     "_native_cudnn"
+    ],
+    "regional_dyn_fa3": [
+     "--compile",
+     "regional",
+     "--dynamic",
+     "--attn",
+     "_flash_3_hub"
+    ],
+    "regional_dyn_fa3_vae": [
+     "--compile",
+     "regional",
+     "--dynamic",
+     "--attn",
+     "_flash_3_hub",
+     "--compile-vae"
+    ],
+    "full_dyn": [
+     "--compile",
+     "full",
+     "--dynamic"
+    ],
+    "full_dyn_fa3": [
+     "--compile",
+     "full",
+     "--dynamic",
+     "--attn",
+     "_flash_3_hub"
+    ]
+   }
+  },
+  "video": {
+   "vllmomni": {
+    "base": [],
+    "cudnn": [
+     "--diffusion-attention-backend",
+     "CUDNN_ATTN"
+    ],
+    "full": [
+     "--diffusion-compile-granularity",
+     "full"
+    ],
+    "b4": [
+     "--max-num-seqs",
+     "4"
+    ]
+   },
+   "sglang": {
+    "base": [
+     "--performance-mode",
+     "speed"
+    ],
+    "compile": [
+     "--performance-mode",
+     "speed",
+     "--enable-torch-compile",
+     "true"
+    ],
+    "bcg": [
+     "--performance-mode",
+     "speed",
+     "--enable-breakable-cuda-graph",
+     "true",
+     "--warmup-resolutions",
+     "1280x704",
+     "--warmup-num-frames",
+     "81"
+    ],
+    "compile_b4": [
+     "--performance-mode",
+     "speed",
+     "--enable-torch-compile",
+     "true",
+     "--batching-max-size",
+     "4"
+    ]
+   },
+   "diffusers": {
+    "eager": [
+     "--compile",
+     "none"
+    ],
+    "regional_dyn": [
+     "--compile",
+     "regional",
+     "--dynamic"
+    ],
+    "regional_dyn_fa3": [
+     "--compile",
+     "regional",
+     "--dynamic",
+     "--attn",
+     "_flash_3_hub"
+    ],
+    "full_dyn": [
+     "--compile",
+     "full",
+     "--dynamic"
+    ]
+   }
+  },
+  "zimage": {
+   "vllmomni": {
+    "base": [],
+    "cudnn": [
+     "--diffusion-attention-backend",
+     "CUDNN_ATTN"
+    ],
+    "full": [
+     "--diffusion-compile-granularity",
+     "full"
+    ],
+    "eager": [
+     "--enforce-eager"
+    ]
+   },
+   "sglang": {
+    "base": [
+     "--performance-mode",
+     "speed"
+    ],
+    "compile": [
+     "--performance-mode",
+     "speed",
+     "--enable-torch-compile",
+     "true"
+    ],
+    "bcg": [
+     "--performance-mode",
+     "speed",
+     "--enable-breakable-cuda-graph",
+     "true",
+     "--warmup-resolutions",
+     "1024x1024"
+    ],
+    "compile_b8": [
+     "--performance-mode",
+     "speed",
+     "--enable-torch-compile",
+     "true",
+     "--batching-max-size",
+     "8"
+    ],
+    "bcg_b8": [
+     "--performance-mode",
+     "speed",
+     "--enable-breakable-cuda-graph",
+     "true",
+     "--warmup-resolutions",
+     "1024x1024",
+     "--batching-max-size",
+     "8"
+    ]
+   },
+   "diffusers": {
+    "eager": [
+     "--compile",
+     "none"
+    ],
+    "regional_dyn": [
+     "--compile",
+     "regional",
+     "--dynamic"
+    ],
+    "regional_dyn_cudnn": [
+     "--compile",
+     "regional",
+     "--dynamic",
+     "--attn",
+     "_native_cudnn"
+    ],
+    "regional_dyn_fa3": [
+     "--compile",
+     "regional",
+     "--dynamic",
+     "--attn",
+     "_flash_3_hub"
+    ],
+    "regional_dyn_fa3_vae": [
+     "--compile",
+     "regional",
+     "--dynamic",
+     "--attn",
+     "_flash_3_hub",
+     "--compile-vae"
+    ]
+   }
+  }
+ },
+ "models": [
+  {
+   "key": "zimage",
+   "arms": [
+    "mstar-pr",
+    "mstar-main",
+    "vllmomni",
+    "sglang",
+    "diffusers"
+   ],
+   "phases": [
+    "setup",
+    "knobs",
+    "collect",
+    "tune",
+    "ref_c",
+    "gate",
+    "select",
+    "gallery",
+    "rounds",
+    "profile",
+    "summarize"
+   ]
+  },
+  {
+   "key": "klein4b",
+   "arms": [
+    "mstar-pr",
+    "mstar-main",
+    "vllmomni",
+    "sglang",
+    "diffusers"
+   ],
+   "phases": [
+    "setup",
+    "knobs",
+    "collect",
+    "tune",
+    "ref_c",
+    "gate",
+    "select",
+    "gallery",
+    "rounds",
+    "profile",
+    "summarize"
+   ]
+  },
+  {
+   "key": "wan22",
+   "arms": [
+    "mstar-pr",
+    "mstar-main",
+    "vllmomni",
+    "sglang",
+    "diffusers"
+   ],
+   "phases": [
+    "setup",
+    "knobs",
+    "collect",
+    "tune",
+    "ref_c",
+    "gate",
+    "select",
+    "gallery",
+    "rounds",
+    "profile",
+    "summarize"
+   ]
+  },
+  {
+   "key": "qwen3tts_1p7b",
+   "kind": "tts",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ]
+  },
+  {
+   "key": "fish_s2pro",
+   "kind": "tts",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ]
+  },
+  {
+   "key": "orpheus",
+   "kind": "tts",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ]
+  },
+  {
+   "key": "qwen3tts_0p6b",
+   "kind": "tts",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ]
+  },
+  {
+   "key": "kokoro",
+   "kind": "tts",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: vs Kokoro-FastAPI v0.9.0 (1 and 4 uvicorn workers)"
+  },
+  {
+   "key": "chatterbox",
+   "kind": "tts",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: base; vs chatterbox-vllm (offline batch) + Chatterbox-TTS-Server (HTTP, serial)"
+  },
+  {
+   "key": "higgs_audio",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: STT; vs official remote code transcribe_batch (offline batch)",
+   "rounds": 2,
+   "trim_note": "2026-10-22 user: cut repeated work - 2 rounds (diffusion min-max spread has been <1%)"
+  },
+  {
+   "key": "omnivoice",
+   "kind": "tts",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: vs vllm-omni 0.30.0 (default + fp16/mns32 deploy) + official omnivoice (offline batch)"
+  },
+  {
+   "key": "omniasr_300m",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: RTFx c=1/16/64 LibriSpeech; vs official omnilingual-asr 0.2.0 (offline batch)",
+   "rounds": 2,
+   "trim_note": "2026-10-22 user: cut repeated work - 2 rounds (diffusion min-max spread has been <1%)"
+  },
+  {
+   "key": "omniasr_1b",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: RTFx c=1/16/64 LibriSpeech; vs official omnilingual-asr 0.2.0 (offline batch)",
+   "rounds": 2,
+   "trim_note": "2026-10-22 user: cut repeated work - 2 rounds (diffusion min-max spread has been <1%)"
+  },
+  {
+   "key": "omniasr_3b",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: RTFx c=1/16/64 LibriSpeech; vs official omnilingual-asr 0.2.0 (offline batch)",
+   "rounds": 2,
+   "trim_note": "2026-10-22 user: cut repeated work - 2 rounds (diffusion min-max spread has been <1%)"
+  },
+  {
+   "key": "omniasr_7b",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: RTFx c=1/16/64 LibriSpeech; vs official omnilingual-asr 0.2.0 (offline batch)",
+   "rounds": 2,
+   "trim_note": "2026-10-22 user: cut repeated work - 2 rounds (diffusion min-max spread has been <1%)"
+  },
+  {
+   "key": "bagel",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: 1 GPU t2i/edit/understanding; vs vllm-omni 0.30.0 (t2i/edit) + vLLM 0.30.0 (understanding)",
+   "rounds": 2,
+   "trim_note": "2026-10-22 user: cut repeated work - 2 rounds (diffusion min-max spread has been <1%)"
+  },
+  {
+   "key": "bagel_2gpu",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: 2 GPUs CFG-parallel t2i/edit; vs vllm-omni --cfg-parallel-size 2",
+   "rounds": 2,
+   "trim_note": "2026-10-22 user: cut repeated work - 2 rounds (diffusion min-max spread has been <1%)"
+  },
+  {
+   "key": "klein9b",
+   "arms": [
+    "mstar-pr",
+    "mstar-main",
+    "vllmomni",
+    "sglang",
+    "diffusers"
+   ],
+   "phases": [
+    "setup",
+    "knobs",
+    "collect",
+    "tune",
+    "ref_c",
+    "gate",
+    "select",
+    "gallery",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "backlog": true
+  },
+  {
+   "key": "vjepa2",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: ViT-L latents; vs HF transformers (offline batch)",
+   "rounds": 2,
+   "trim_note": "2026-10-22 user: cut repeated work - 2 rounds (diffusion min-max spread has been <1%)"
+  },
+  {
+   "key": "vjepa2_ac",
+   "module": "dgen",
+   "kind": "gen",
+   "arms": [],
+   "phases": [
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
+   ],
+   "note": "added 2026-10-22 by queue-all: AC rollout H=4; vs official facebookresearch/vjepa2 (offline batch)",
+   "rounds": 2,
+   "trim_note": "2026-10-22 user: cut repeated work - 2 rounds (diffusion min-max spread has been <1%)",
+   "move_note": "2026-10-23 node2 finished first; runs here in parallel with node8 waypoint_360p"
+  }
+ ]
+}

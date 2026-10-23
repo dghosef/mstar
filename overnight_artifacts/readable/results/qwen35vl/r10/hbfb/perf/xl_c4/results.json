@@ -1,0 +1,89 @@
+{
+ "summary": {
+  "n": 12,
+  "errors": 0,
+  "wall_s": 1.9761945569771342,
+  "req_per_s": 6.072276617518711,
+  "ttft_p50": 0.37694367952644825,
+  "ttft_mean": 0.39224929141346365,
+  "e2e_p50": 0.6590226839762181,
+  "ttft_p50_by_kind": {
+   "xl": 0.37694367952644825
+  }
+ },
+ "rows": [
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle shot of a casual breakfast or brunch setting on a speckled white marble table. The scene is filled with food,",
+   "ttft": 0.2952279499731958,
+   "e2e": 0.6553878819686361
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly high-angle photograph of a meal served on a rectangular, light-colored serving board or tray, likely in a casual dining setting. The",
+   "ttft": 0.48189299303339794,
+   "e2e": 0.7567683180095628
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle shot of a casual breakfast or brunch setting on a speckled white marble table. The scene is filled with food,",
+   "ttft": 0.393066574994009,
+   "e2e": 0.7536418230156414
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly high-angle photograph of a meal served on a rectangular, light-colored serving board or tray, likely in a casual dining setting. The",
+   "ttft": 0.5921419369988143,
+   "e2e": 0.7536030729534104
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle shot of a casual breakfast or brunch setting on a speckled white marble table. The scene is filled with food,",
+   "ttft": 0.30418516998179257,
+   "e2e": 0.6552712479606271
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly high-angle photograph of a meal served on a rectangular, light-colored serving board or tray, likely in a casual dining or caf\u00e9 setting",
+   "ttft": 0.3017078390112147,
+   "e2e": 0.663301891006995
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle shot of a casual breakfast or brunch setting on a speckled white marble table. The scene is filled with food,",
+   "ttft": 0.4979468509554863,
+   "e2e": 0.663446883962024
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly high-angle photograph of a meal served on a rectangular, light-colored serving board or tray, likely in a casual dining setting. The",
+   "ttft": 0.38657757302280515,
+   "e2e": 0.6626574859838001
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle shot of a casual breakfast or brunch setting on a speckled white marble table. The scene is filled with food,",
+   "ttft": 0.30949519597925246,
+   "e2e": 0.6444265290047042
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly high-angle photograph of a meal served on a rectangular, light-colored serving board or tray, likely in a casual dining or caf\u00e9 setting",
+   "ttft": 0.29326027299975976,
+   "e2e": 0.5472938860184513
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle shot of a casual breakfast or brunch setting on a speckled white marble table. The scene is filled with food,",
+   "ttft": 0.4841793539817445,
+   "e2e": 0.5532364629907534
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly high-angle photograph of a meal served on a rectangular, light-colored serving board or tray, likely in a casual dining setting. The",
+   "ttft": 0.36730978603009135,
+   "e2e": 0.5489757720497437
+  }
+ ],
+ "errors": []
+}

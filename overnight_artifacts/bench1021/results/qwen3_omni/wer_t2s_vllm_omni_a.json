@@ -1,0 +1,8 @@
+{
+ "kind": "t2s",
+ "n": 32,
+ "wer": null,
+ "silent": 0,
+ "mean_audio_s": 85.582265625,
+ "asr_model": "openai/whisper-large-v3-turbo"
+}

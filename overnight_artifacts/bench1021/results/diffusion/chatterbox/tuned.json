@@ -1,0 +1,24 @@
+{
+ "cbvllm": {
+  "config": "eager",
+  "score": 6.402179553713105,
+  "gate_pass": true,
+  "candidates": [
+   [
+    6.402179553713105,
+    "eager"
+   ]
+  ]
+ },
+ "cbserver": {
+  "config": "default",
+  "score": 2.054190492052621,
+  "gate_pass": true,
+  "candidates": [
+   [
+    2.054190492052621,
+    "default"
+   ]
+  ]
+ }
+}

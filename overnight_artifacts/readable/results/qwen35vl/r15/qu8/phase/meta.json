@@ -1,0 +1,27 @@
+{
+ "arm": "qu8",
+ "tree": "/root/work/hu8",
+ "cmd": [
+  "/root/work/mstar/.venv/bin/python",
+  "-m",
+  "mstar.cli.main",
+  "serve",
+  "qwen3_5_0.8b",
+  "--gpus",
+  "0",
+  "--port",
+  "8100",
+  "--config",
+  "configs/qwen3_5_0.8b.yaml"
+ ],
+ "env_extra": {
+  "MSTAR_PHASE_TIMING": "100"
+ },
+ "start": "2026-10-21 07:53:35",
+ "loadavg_start": "6.70 13.98 18.37 4/3865 185217",
+ "git": "",
+ "mstar_file": "/root/work/hu8/mstar/__init__.py",
+ "startup_s": 102.0,
+ "end": "2026-10-21 07:55:53",
+ "loadavg_end": "10.00 12.07 17.03 3/3602 187523"
+}

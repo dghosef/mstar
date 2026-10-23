@@ -1,0 +1,209 @@
+{
+ "summary": {
+  "n": 32,
+  "errors": 0,
+  "wall_s": 1.2967932060128078,
+  "req_per_s": 24.67625512813178,
+  "ttft_p50": 0.1620611250109505,
+  "ttft_mean": 0.15842625034383673,
+  "e2e_p50": 0.31660630949772894,
+  "ttft_p50_by_kind": {
+   "big": 0.1620611250109505
+  }
+ },
+ "rows": [
+  {
+   "id": "big_0",
+   "text": "The food dish shown in the image is **fried dough balls** \u2014 commonly known as **fried dough sticks**, **fried doughnuts**, or **fried dumplings**.",
+   "ttft": 0.08048408100148663,
+   "e2e": 0.32021299499319866
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up, appetizing view of **pastries**, most likely **cheesecakes** or **puff pastries**, dusted generously",
+   "ttft": 0.1068194400286302,
+   "e2e": 0.34740589902503416
+  },
+  {
+   "id": "big_2",
+   "text": "Based on the visual evidence in the photo, the dish is **Candied Churros** (also known as **Candied Churros** or",
+   "ttft": 0.18329366203397512,
+   "e2e": 0.3484647290315479
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered pastry, likely a dessert, sits on a dark wooden table. The pastry is dusted with powdered sugar and appears to be a triangular or wedge",
+   "ttft": 0.13086067797848955,
+   "e2e": 0.34691467200173065
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in the image is **fried dough balls**, commonly known as **fried dough sticks** or **fried doughnuts**.\n\n### Key features visible in",
+   "ttft": 0.20686723600374535,
+   "e2e": 0.3465378599939868
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up, appetizing view of **pastries**, most likely **cheesecakes** or **puff pastries**, dusted generously",
+   "ttft": 0.21384516201214865,
+   "e2e": 0.34867691597901285
+  },
+  {
+   "id": "big_2",
+   "text": "Based on the visual evidence in the photo, the dish is **Candied Churros** (also known as **Candied Churros** or",
+   "ttft": 0.24547509499825537,
+   "e2e": 0.34780809201765805
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered pastry, likely a dessert, sits on a dark wooden table. The pastry is dusted with powdered sugar and appears to be a triangular or wedge",
+   "ttft": 0.27271097799530253,
+   "e2e": 0.3479251320241019
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in the image is **fried dough balls**, commonly known as **fried dough sticks** or **fried doughnuts**.\n\n### Key features visible:",
+   "ttft": 0.05988862394588068,
+   "e2e": 0.3166578029631637
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up, appetizing view of **pastries**, most likely **cheesecakes** or **puff pastries**, dusted generously",
+   "ttft": 0.08286238001892343,
+   "e2e": 0.31818910397123545
+  },
+  {
+   "id": "big_2",
+   "text": "Based on the visual evidence in the photo, the dish is **Candied Churros** (also known as **Candied Churros** or",
+   "ttft": 0.10556538903620094,
+   "e2e": 0.3181502490187995
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered pastry, likely a dessert, sits on a dark wooden table. The pastry is dusted with powdered sugar and appears to be a triangular or wedge",
+   "ttft": 0.24472636298742145,
+   "e2e": 0.31936013099038973
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in the image is **fried dough balls**, commonly known as **fried dough sticks** or **fried doughnuts**.\n\n### Key features visible in",
+   "ttft": 0.14918288897024468,
+   "e2e": 0.3171662950189784
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up, appetizing view of **pastries**, most likely **cheesecakes** or **puff pastries**, dusted generously",
+   "ttft": 0.1686236840323545,
+   "e2e": 0.3161423340206966
+  },
+  {
+   "id": "big_2",
+   "text": "Based on the visual evidence in the photo, the dish is **Candied Churros** (also known as **Candied Churros** or",
+   "ttft": 0.2162220329628326,
+   "e2e": 0.3173929199692793
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered pastry, likely a dessert, sits on a dark wooden table. The pastry is dusted with powdered sugar and appears to be a triangular or wedge",
+   "ttft": 0.18372774199815467,
+   "e2e": 0.3165548160322942
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in the image is **fried dough balls**, commonly known as **fried dough sticks** or **fried doughnuts**.\n\n### Key features visible:",
+   "ttft": 0.060343269957229495,
+   "e2e": 0.31781703198794276
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up, appetizing view of **pastries**, most likely **cheesecakes** or **puff-pastries**, dusted",
+   "ttft": 0.08703935099765658,
+   "e2e": 0.3141301379655488
+  },
+  {
+   "id": "big_2",
+   "text": "Based on the visual evidence in the photo, the dish is **Candied Churros** (also known as **Candied Churros** or",
+   "ttft": 0.13869579101447016,
+   "e2e": 0.314092663989868
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered pastry, likely a dessert, sits on a dark wooden table. The pastry is dusted with powdered sugar and appears to be a triangular or wedge",
+   "ttft": 0.16446244897088036,
+   "e2e": 0.3145930369501002
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in the image is **fried dough balls**, commonly known as **fried dough sticks** or **fried doughnuts**.\n\n### Key features visible in",
+   "ttft": 0.11088025802746415,
+   "e2e": 0.31326334801269695
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up, appetizing view of **pastries**, most likely **cheesecakes** or **puff pastries**, dusted generously",
+   "ttft": 0.24817782099125907,
+   "e2e": 0.3239123339881189
+  },
+  {
+   "id": "big_2",
+   "text": "Based on the visual evidence in the photo, the dish is **Candied Churros** (also known as **Candied Churros** or",
+   "ttft": 0.2200879449956119,
+   "e2e": 0.31523027102230117
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered pastry, likely a dessert, sits on a dark wooden table. The pastry is dusted with powdered sugar and appears to be a triangular or wedge",
+   "ttft": 0.1887146719964221,
+   "e2e": 0.31416320899734274
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in the image is **fried dough balls** \u2014 commonly known as **fried dough sticks**, **fried doughnuts**, or **fried dumplings**.",
+   "ttft": 0.07689141295850277,
+   "e2e": 0.31602156098233536
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up, appetizing view of **pastries**, most likely **cheesecakes** or **puff pastries**, dusted generously",
+   "ttft": 0.07330241100862622,
+   "e2e": 0.29879239201545715
+  },
+  {
+   "id": "big_2",
+   "text": "Based on the visual evidence in the photo, the dish is **Candied Churros** (also known as **Candied Churros** or",
+   "ttft": 0.139172802970279,
+   "e2e": 0.30308899498777464
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered pastry, likely a dessert, sits on a dark wooden table. The pastry is dusted with powdered sugar and appears to be a triangular or wedge",
+   "ttft": 0.18687550100730732,
+   "e2e": 0.307520892994944
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in the image is **fried dough balls**, commonly known as **fried dough sticks** or **fried doughnuts**.\n\n### Key features visible in",
+   "ttft": 0.11732827103696764,
+   "e2e": 0.30219094100175425
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up, appetizing view of **pastries**, most likely **cheesecakes** or **puff pastries**, dusted generously",
+   "ttft": 0.15965980105102062,
+   "e2e": 0.30545557104051113
+  },
+  {
+   "id": "big_2",
+   "text": "Based on the visual evidence in the photo, the dish is **Candied Churros** (also known as **Candied Churros** or",
+   "ttft": 0.21204235998447984,
+   "e2e": 0.30951726296916604
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered pastry, likely a dessert, sits on a dark wooden table. The pastry is dusted with powdered sugar and appears to be a triangular or wedge",
+   "ttft": 0.23481045803055167,
+   "e2e": 0.3037640689872205
+  }
+ ],
+ "errors": []
+}

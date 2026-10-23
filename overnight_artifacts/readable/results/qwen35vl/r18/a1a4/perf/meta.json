@@ -1,0 +1,25 @@
+{
+ "arm": "a1a4",
+ "tree": "/root/work/asr4",
+ "cmd": [
+  "/root/work/mstar/.venv/bin/python",
+  "-m",
+  "mstar.cli.main",
+  "serve",
+  "omnilingual_asr_ctc_1b",
+  "--gpus",
+  "0",
+  "--port",
+  "8100",
+  "--config",
+  "configs/omnilingual_asr_ctc_1b.yaml"
+ ],
+ "env_extra": {},
+ "start": "2026-10-21 08:52:21",
+ "loadavg_start": "72.23 50.98 32.22 8/4431 236654",
+ "git": "",
+ "mstar_file": "/root/work/asr4/mstar/__init__.py",
+ "startup_s": 21.0,
+ "end": "2026-10-21 08:53:49",
+ "loadavg_end": "80.30 60.47 37.40 5/3581 237905"
+}

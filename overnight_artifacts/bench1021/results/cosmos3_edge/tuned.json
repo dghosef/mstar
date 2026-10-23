@@ -1,0 +1,28 @@
+{
+ "sglang": {
+  "config": "speed_resident",
+  "score": 17.658885726044826,
+  "gate_pass": true,
+  "candidates": [
+   [
+    17.658885726044826,
+    "speed_resident"
+   ],
+   [
+    16.653785239427883,
+    "speed_resident_compile"
+   ]
+  ]
+ },
+ "vllmomni": {
+  "config": "base",
+  "score": 17.67366056849889,
+  "gate_pass": true,
+  "candidates": [
+   [
+    17.67366056849889,
+    "base"
+   ]
+  ]
+ }
+}

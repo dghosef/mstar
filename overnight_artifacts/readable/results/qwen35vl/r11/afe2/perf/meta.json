@@ -1,0 +1,24 @@
+{
+ "arm": "afe2",
+ "tree": "/root/work/mstar",
+ "cmd": [
+  "/root/work/mstar/.venv/bin/python",
+  "-m",
+  "mstar.cli.main",
+  "serve",
+  "omnilingual_asr_ctc_300m",
+  "--gpus",
+  "0",
+  "--port",
+  "8100",
+  "--config",
+  "configs/omnilingual_asr_ctc_300m.yaml"
+ ],
+ "env_extra": {},
+ "start": "2026-10-21 07:01:26",
+ "loadavg_start": "20.07 18.00 16.63 4/4347 134817",
+ "git": "",
+ "mstar_file": "/root/work/mstar/mstar/__init__.py",
+ "startup_s": 15.0,
+ "end": "2026-10-21 07:02:16"
+}

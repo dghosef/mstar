@@ -1,0 +1,176 @@
+{
+ "label": "c_sp2_c2",
+ "tree": "/root/work/mstar",
+ "config": "configs/cosmos3_nano_sp2.yaml",
+ "env": [
+  "HF_HOME=/root/work/hf"
+ ],
+ "size": "832x480",
+ "frames": 189,
+ "steps": 35,
+ "guidance": 6.0,
+ "concurrency": 2,
+ "num": 6,
+ "startup_s": 45.01867604255676,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  75.57003812599942,
+  78.57507966000048
+ ],
+ "e2e_s": [
+  70.90806974099905,
+  74.15147107499979,
+  71.50782323699968,
+  73.12186132700117,
+  73.07606930099973,
+  73.0657224789993
+ ],
+ "e2e_mean_s": 72.63850285999979,
+ "e2e_median_s": 73.07089588999952,
+ "wall_s": 220.37478770399866,
+ "videos_per_min": 1.6335807001821918,
+ "peak_gpu_mem": "0, 51759 MiB | 1, 47333 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 70.90806974099905,
+   "bytes": 4317924,
+   "t_end": 1792569442.254848
+  },
+  {
+   "idx": 1,
+   "ok": true,
+   "e2e_s": 74.15147107499979,
+   "bytes": 3795698,
+   "t_end": 1792569445.4971225
+  },
+  {
+   "idx": 2,
+   "ok": true,
+   "e2e_s": 71.50782323699968,
+   "bytes": 4268977,
+   "t_end": 1792569513.7750034
+  },
+  {
+   "idx": 3,
+   "ok": true,
+   "e2e_s": 73.12186132700117,
+   "bytes": 3885794,
+   "t_end": 1792569518.6298447
+  },
+  {
+   "idx": 4,
+   "ok": true,
+   "e2e_s": 73.07606930099973,
+   "bytes": 4181895,
+   "t_end": 1792569586.8629358
+  },
+  {
+   "idx": 5,
+   "ok": true,
+   "e2e_s": 73.0657224789993,
+   "bytes": 4676126,
+   "t_end": 1792569591.7089436
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-5ac03c0f54644a9aa543a6ffb205d022",
+   "total_ms": 70873.7,
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 68038.79999999999,
+     "fwd_ms": 67961.40000000001
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2433.2,
+     "fwd_ms": 2407.6
+    }
+   }
+  },
+  {
+   "rid": "vid-be91499e3598411eb7a5473a34eb0081",
+   "total_ms": 74117.6,
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 68333.0,
+     "fwd_ms": 68007.6
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2440.0,
+     "fwd_ms": 2417.2
+    }
+   }
+  },
+  {
+   "rid": "vid-b84aacd9e16c4caebe506325c4d4eff7",
+   "total_ms": 71473.8,
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 65709.40000000001,
+     "fwd_ms": 65635.5
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2419.3,
+     "fwd_ms": 2398.3
+    }
+   }
+  },
+  {
+   "rid": "vid-b0d8b3593a4b4f51a0dfef09051bfa8b",
+   "total_ms": 73090.5,
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 65968.3,
+     "fwd_ms": 65647.5
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2426.8,
+     "fwd_ms": 2412.7
+    }
+   }
+  },
+  {
+   "rid": "vid-cef183ad15fc43f3941645a7a859c9d5",
+   "total_ms": 73040.0,
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 65979.0,
+     "fwd_ms": 65654.90000000001
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2426.8,
+     "fwd_ms": 2402.8
+    }
+   }
+  },
+  {
+   "rid": "vid-e4ee2a08d9fd4a9faca6f4cd38b571b0",
+   "total_ms": 73029.2,
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 65997.59999999999,
+     "fwd_ms": 65668.06999999999
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2413.4,
+     "fwd_ms": 2399.2
+    }
+   }
+  }
+ ]
+}

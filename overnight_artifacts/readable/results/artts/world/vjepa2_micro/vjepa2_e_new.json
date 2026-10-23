@@ -1,0 +1,26 @@
+{
+ "tag": "new",
+ "mstar": "/root/guest-world/mstar/mstar/__init__.py",
+ "model": "vjepa2",
+ "compile": false,
+ "gpu": "NVIDIA H200",
+ "torch": "2.12.1+cu132",
+ "enc": {
+  "1": {
+   "ms": 44.07635498046875,
+   "peak_gib": 0.7935695648193359
+  },
+  "2": {
+   "ms": 81.68523559570312,
+   "peak_gib": 1.012319564819336
+  },
+  "4": {
+   "ms": 155.84913330078126,
+   "peak_gib": 1.402944564819336
+  }
+ },
+ "cos_vs_base": 1.0006389617919922,
+ "max_abs_vs_base": 0.0,
+ "ref_abs_mean": 2.2863214015960693,
+ "per_token_cos_min": 0.9999998807907104
+}

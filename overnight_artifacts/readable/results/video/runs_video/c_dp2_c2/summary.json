@@ -1,0 +1,176 @@
+{
+ "label": "c_dp2_c2",
+ "tree": "/root/work/mstar",
+ "config": "configs/cosmos3_nano_dp2.yaml",
+ "env": [
+  "HF_HOME=/root/work/hf"
+ ],
+ "size": "832x480",
+ "frames": 189,
+ "steps": 35,
+ "guidance": 6.0,
+ "concurrency": 2,
+ "num": 6,
+ "startup_s": 42.01700735092163,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  60.01720099399972,
+  59.17000002900022
+ ],
+ "e2e_s": [
+  54.9346904869999,
+  56.46388091300105,
+  54.9466439659991,
+  56.43913485700068,
+  54.892174271999465,
+  56.48266444799992
+ ],
+ "e2e_mean_s": 55.693198157166684,
+ "e2e_median_s": 55.69288941149989,
+ "wall_s": 169.4349602680013,
+ "videos_per_min": 2.124709088552771,
+ "peak_gpu_mem": "0, 58933 MiB | 1, 58405 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 54.9346904869999,
+   "bytes": 4524025,
+   "t_end": 1792569125.3026805
+  },
+  {
+   "idx": 1,
+   "ok": true,
+   "e2e_s": 56.46388091300105,
+   "bytes": 3940968,
+   "t_end": 1792569126.8288605
+  },
+  {
+   "idx": 2,
+   "ok": true,
+   "e2e_s": 54.9466439659991,
+   "bytes": 4044050,
+   "t_end": 1792569180.2649622
+  },
+  {
+   "idx": 3,
+   "ok": true,
+   "e2e_s": 56.43913485700068,
+   "bytes": 3923878,
+   "t_end": 1792569183.2824738
+  },
+  {
+   "idx": 4,
+   "ok": true,
+   "e2e_s": 54.892174271999465,
+   "bytes": 4127428,
+   "t_end": 1792569235.17456
+  },
+  {
+   "idx": 5,
+   "ok": true,
+   "e2e_s": 56.48266444799992,
+   "bytes": 4744845,
+   "t_end": 1792569239.7844377
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-0ced0ad58f474646a2228b616a826fc7",
+   "total_ms": 54898.5,
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 52340.9,
+     "fwd_ms": 52260.1
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2354.5,
+     "fwd_ms": 2324.0
+    }
+   }
+  },
+  {
+   "rid": "vid-0e60a84445c74bc897e535c33eea5ee4",
+   "total_ms": 56430.1,
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 53814.899999999994,
+     "fwd_ms": 53729.4
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2410.7,
+     "fwd_ms": 2389.6
+    }
+   }
+  },
+  {
+   "rid": "vid-5c973dbdfb294f0f9855b7112e6e1c02",
+   "total_ms": 54905.6,
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 52350.0,
+     "fwd_ms": 52271.020000000004
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2354.1,
+     "fwd_ms": 2324.4
+    }
+   }
+  },
+  {
+   "rid": "vid-4a19b73d1934494ca9e44982beb875b5",
+   "total_ms": 56400.7,
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 53785.3,
+     "fwd_ms": 53703.130000000005
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2411.4,
+     "fwd_ms": 2389.0
+    }
+   }
+  },
+  {
+   "rid": "vid-d6913e04c24243d4bd5b420e34c72621",
+   "total_ms": 54858.6,
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 52278.1,
+     "fwd_ms": 52197.020000000004
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2360.0,
+     "fwd_ms": 2336.1
+    }
+   }
+  },
+  {
+   "rid": "vid-1b90c878575e4c32b6f37be19e71c475",
+   "total_ms": 56444.6,
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 53814.6,
+     "fwd_ms": 53723.0
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2418.1,
+     "fwd_ms": 2399.3
+    }
+   }
+  }
+ ]
+}

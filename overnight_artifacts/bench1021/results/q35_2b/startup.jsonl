@@ -1,0 +1,14 @@
+{"label": "correct_mstar_main_a", "arm": "mstar-main", "seconds": 1623.9}
+{"label": "correct_vllm_a", "arm": "vllm", "seconds": 78.3}
+{"label": "correct_sglang_a", "arm": "sglang", "seconds": 43.2}
+{"label": "correct_mstar_pr_a", "arm": "mstar-pr", "seconds": 348.9}
+{"label": "correct_mstar_pr_b", "arm": "mstar-pr", "seconds": 135.4}
+{"label": "tune_vllm_default", "arm": "vllm", "seconds": 60.3}
+{"label": "tune_vllm_lm-only", "arm": "vllm", "seconds": 63.3}
+{"label": "tune_sglang_default", "arm": "sglang", "seconds": 43.2}
+{"label": "tune_sglang_attn-fa3", "arm": "sglang", "seconds": 43.2}
+{"label": "tune_sglang_chunk-16k", "arm": "sglang", "seconds": 46.2}
+{"label": "tune_mstar-pr", "arm": "mstar-pr", "seconds": 126.4}
+{"label": "tune_mstar-pr-rf", "arm": "mstar-pr-rf", "seconds": 120.4}
+{"label": "main_mstar-main-rf_r1", "arm": "mstar-main-rf", "seconds": 315.9}
+{"label": "main_vllm_r1", "arm": "vllm", "seconds": 45.2}

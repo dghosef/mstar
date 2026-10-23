@@ -1,0 +1,102 @@
+[
+ {
+  "round": 0,
+  "arm": "fa2",
+  "rep": 0,
+  "startup_s": 24.01072931289673,
+  "chunks": 6,
+  "frames": 93,
+  "first_chunk_s": 1.3004738220006402,
+  "total_s": 8.172559356999045,
+  "gap_mean_s": 1.374417106999681,
+  "gap_p50_s": 1.4163660729991534,
+  "fps": 11.379544147373375,
+  "env": {
+   "MSTAR_PHASE_TIMING": "2"
+  }
+ },
+ {
+  "round": 0,
+  "arm": "fa2",
+  "rep": 1,
+  "startup_s": 24.01072931289673,
+  "chunks": 6,
+  "frames": 93,
+  "first_chunk_s": 1.2852079380008945,
+  "total_s": 8.162101232001078,
+  "gap_mean_s": 1.3753786588000367,
+  "gap_p50_s": 1.4122838099992805,
+  "fps": 11.3941247917112,
+  "env": {
+   "MSTAR_PHASE_TIMING": "2"
+  }
+ },
+ {
+  "round": 0,
+  "arm": "cudnn",
+  "rep": 0,
+  "startup_s": 21.007527589797974,
+  "chunks": 6,
+  "frames": 93,
+  "first_chunk_s": 1.2455848080007854,
+  "total_s": 7.458027018999928,
+  "gap_mean_s": 1.2424884421998286,
+  "gap_p50_s": 1.282864928998606,
+  "fps": 12.469785878098184,
+  "env": {
+   "MSTAR_PHASE_TIMING": "2",
+   "LINGBOT_ATTN": "cudnn"
+  }
+ },
+ {
+  "round": 0,
+  "arm": "cudnn",
+  "rep": 1,
+  "startup_s": 21.007527589797974,
+  "chunks": 6,
+  "frames": 93,
+  "first_chunk_s": 1.255836725998961,
+  "total_s": 7.477580154998577,
+  "gap_mean_s": 1.2443486857999233,
+  "gap_p50_s": 1.2631122459988546,
+  "fps": 12.437178615575496,
+  "env": {
+   "MSTAR_PHASE_TIMING": "2",
+   "LINGBOT_ATTN": "cudnn"
+  }
+ },
+ {
+  "round": 0,
+  "arm": "fa4",
+  "rep": 0,
+  "startup_s": 21.00785255432129,
+  "chunks": 6,
+  "frames": 93,
+  "first_chunk_s": 1.2378488929989544,
+  "total_s": 7.258992844999739,
+  "gap_mean_s": 1.204228790400157,
+  "gap_p50_s": 1.2315761829995608,
+  "fps": 12.811694678010575,
+  "env": {
+   "MSTAR_PHASE_TIMING": "2",
+   "LINGBOT_ATTN": "fa4"
+  }
+ },
+ {
+  "round": 0,
+  "arm": "fa4",
+  "rep": 1,
+  "startup_s": 21.00785255432129,
+  "chunks": 6,
+  "frames": 93,
+  "first_chunk_s": 1.2244140980001248,
+  "total_s": 7.2466439260006155,
+  "gap_mean_s": 1.204445965600098,
+  "gap_p50_s": 1.231175606000761,
+  "fps": 12.833526933249804,
+  "env": {
+   "MSTAR_PHASE_TIMING": "2",
+   "LINGBOT_ATTN": "fa4"
+  }
+ }
+]

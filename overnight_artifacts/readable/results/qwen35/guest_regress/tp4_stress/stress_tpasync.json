@@ -1,0 +1,25 @@
+{
+ "stress": {
+  "ok": 1763,
+  "aborted": 386,
+  "http_err": 0,
+  "exc": 0,
+  "tokens": 513985,
+  "mass_cancel": {
+   "ok": 0,
+   "aborted": 0,
+   "http_err": 0,
+   "exc": 0,
+   "tokens": 0,
+   "cancelled": 256
+  }
+ },
+ "healthy": true,
+ "probe": {
+  "ok": 1,
+  "aborted": 0,
+  "http_err": 0,
+  "exc": 0,
+  "tokens": 33
+ }
+}

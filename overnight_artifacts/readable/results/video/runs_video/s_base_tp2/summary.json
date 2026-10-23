@@ -1,0 +1,95 @@
+{
+ "label": "s_base_tp2",
+ "tree": "/root/work/base",
+ "config": "",
+ "env": [
+  "HF_HOME=/root/work/hf"
+ ],
+ "size": "832x480",
+ "frames": 93,
+ "steps": 20,
+ "guidance": 6.0,
+ "concurrency": 1,
+ "num": 2,
+ "startup_s": 75.02133274078369,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  64.93758570800128
+ ],
+ "e2e_s": [
+  27.861440795000817,
+  28.219390838003164
+ ],
+ "e2e_mean_s": 28.04041581650199,
+ "e2e_median_s": 28.04041581650199,
+ "wall_s": 56.09791966800185,
+ "videos_per_min": 2.139116757095144,
+ "peak_gpu_mem": "0, 82635 MiB | 1, 73517 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 27.861440795000817,
+   "bytes": 2522796,
+   "t_end": 1792573360.1063402
+  },
+  {
+   "idx": 1,
+   "ok": true,
+   "e2e_s": 28.219390838003164,
+   "bytes": 2567641,
+   "t_end": 1792573388.3334992
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-9b05af8d20f74af2b1164cd58d0200ca",
+   "total_ms": 27827.0,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.8,
+    "preprocess done -> conductor ingest": 0.3,
+    "conductor ingest -> conductor done": 27683.7,
+    "conductor done -> first chunk": 137.8,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 3.4
+   },
+   "nodes": {
+    "dit": {
+     "n": 21,
+     "total_ms": 26209.0,
+     "fwd_ms": 26165.0
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 1445.0,
+     "fwd_ms": 1432.5
+    }
+   }
+  },
+  {
+   "rid": "vid-1bce6377893d4a6caff369efe83b63a8",
+   "total_ms": 28194.5,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.6,
+    "preprocess done -> conductor ingest": 1.1,
+    "conductor ingest -> conductor done": 28039.3,
+    "conductor done -> first chunk": 146.3,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 6.2
+   },
+   "nodes": {
+    "dit": {
+     "n": 21,
+     "total_ms": 26547.2,
+     "fwd_ms": 26503.8
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 1463.9,
+     "fwd_ms": 1451.5
+    }
+   }
+  }
+ ]
+}

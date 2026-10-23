@@ -1,0 +1,26 @@
+{
+ "arm": "diag",
+ "tree": "/root/work/diag",
+ "cmd": [
+  "/root/work/mstar/.venv/bin/python",
+  "-m",
+  "mstar.cli.main",
+  "serve",
+  "qwen3_5_0.8b",
+  "--gpus",
+  "0",
+  "--port",
+  "8100",
+  "--config",
+  "configs/qwen3_5_0.8b.yaml"
+ ],
+ "env_extra": {
+  "MSTAR_PHASE_TIMING": "100"
+ },
+ "start": "2026-10-21 05:03:21",
+ "loadavg_start": "18.02 22.09 17.89 9/4430 40739",
+ "git": "",
+ "mstar_file": "/root/work/diag/mstar/__init__.py",
+ "startup_s": 102.0,
+ "end": "2026-10-21 05:05:43"
+}

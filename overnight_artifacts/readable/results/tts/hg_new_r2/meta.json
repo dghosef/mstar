@@ -1,0 +1,47 @@
+{
+  "label": "hg_new_r2",
+  "tree": "/root/work/exp",
+  "serve": [
+    "/root/work/mstar/.venv/bin/python",
+    "-m",
+    "mstar.cli.main",
+    "serve",
+    "higgs_audio",
+    "--gpus",
+    "1",
+    "--port",
+    "8200"
+  ],
+  "env": {
+    "TORCH_HOME": "/workspace/.cache/torch",
+    "MSTAR_SHM_ARENA": "1",
+    "TORCHINDUCTOR_CACHE_DIR": "/root/work/inductor_cache"
+  },
+  "points": "32:200:_,1:50:_,32:200:_",
+  "started": "2026-10-21 04:37:26",
+  "mstar_file": "/root/work/exp/mstar/__init__.py",
+  "startup_s": 48.27040100097656,
+  "summaries": [
+    {
+      "point": "c32_200",
+      "wall_s": 4.860608895000041,
+      "wer": 0.014751210920299428,
+      "req_s": 41.14710817521933,
+      "errors": 0
+    },
+    {
+      "point": "c1_50",
+      "wall_s": 4.376842133000537,
+      "wer": 0.01639344262295082,
+      "req_s": 11.423761351365576,
+      "errors": 0
+    },
+    {
+      "point": "c32_200_again",
+      "wall_s": 3.6420951609998156,
+      "wer": 0.014751210920299428,
+      "req_s": 54.9134471118807,
+      "errors": 0
+    }
+  ]
+}

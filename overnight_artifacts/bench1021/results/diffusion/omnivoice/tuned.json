@@ -1,0 +1,32 @@
+{
+ "vllmomni": {
+  "config": "fp16_mns32",
+  "score": 82.71721125038756,
+  "gate_pass": true,
+  "candidates": [
+   [
+    82.71721125038756,
+    "fp16_mns32"
+   ],
+   [
+    19.64389467819188,
+    "default"
+   ]
+  ]
+ },
+ "ovofficial": {
+  "config": "flashinfer_graph",
+  "score": 68.86111375775899,
+  "gate_pass": true,
+  "candidates": [
+   [
+    68.86111375775899,
+    "flashinfer_graph"
+   ],
+   [
+    41.30422683495119,
+    "flashinfer"
+   ]
+  ]
+ }
+}

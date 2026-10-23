@@ -1,0 +1,8 @@
+{
+ "tag": "newB",
+ "ms_per_chunk": 682.7186076664779,
+ "ms_per_forward": 136.54372153329555,
+ "bit_exact_vs_base": false,
+ "max_abs_vs_base": 0.03125,
+ "cos_vs_base": 0.9998969435691833
+}

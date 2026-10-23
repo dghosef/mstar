@@ -1,0 +1,218 @@
+{
+ "collect_mstar_main": {
+  "failed_capture": 0,
+  "graph_runtime_rust": true,
+  "recompile_lines": 0,
+  "errors": 0
+ },
+ "collect_mstar_pr": {
+  "failed_capture": 0,
+  "graph_runtime_rust": true,
+  "recompile_lines": 0,
+  "errors": 0
+ },
+ "collect_mstar_pr_b": {
+  "failed_capture": 0,
+  "graph_runtime_rust": true,
+  "recompile_lines": 0,
+  "errors": 0
+ },
+ "main_mstar-main_config_r1": {
+  "failed_capture": 0,
+  "graph_runtime_rust": true,
+  "recompile_lines": 0,
+  "errors": 0
+ },
+ "main_mstar-main_config_r2": {
+  "failed_capture": 0,
+  "graph_runtime_rust": true,
+  "recompile_lines": 0,
+  "errors": 0
+ },
+ "main_mstar-main_config_r3": {
+  "failed_capture": 0,
+  "graph_runtime_rust": true,
+  "recompile_lines": 0,
+  "errors": 0
+ },
+ "main_mstar-pr_config_r1": {
+  "failed_capture": 0,
+  "graph_runtime_rust": true,
+  "recompile_lines": 0,
+  "errors": 0
+ },
+ "main_mstar-pr_config_r2": {
+  "failed_capture": 0,
+  "graph_runtime_rust": true,
+  "recompile_lines": 0,
+  "errors": 0
+ },
+ "main_mstar-pr_config_r3": {
+  "failed_capture": 0,
+  "graph_runtime_rust": true,
+  "recompile_lines": 0,
+  "errors": 0
+ },
+ "main_sglang_base_r1": {
+  "attention": [
+   "fa"
+  ],
+  "speed_mode_msgs": [
+   "performance_mode=speed keeps torch.compile disabled for this model (pass --enable-t"
+  ],
+  "offload_msgs": [],
+  "errors": 0
+ },
+ "main_sglang_base_r2": {
+  "attention": [
+   "fa"
+  ],
+  "speed_mode_msgs": [
+   "performance_mode=speed keeps torch.compile disabled for this model (pass --enable-t"
+  ],
+  "offload_msgs": [],
+  "errors": 0
+ },
+ "main_sglang_base_r3": {
+  "attention": [
+   "fa"
+  ],
+  "speed_mode_msgs": [
+   "performance_mode=speed keeps torch.compile disabled for this model (pass --enable-t"
+  ],
+  "offload_msgs": [],
+  "errors": 0
+ },
+ "main_vllmomni_full_r1": {
+  "attention": [
+   "FLASH_ATTN"
+  ],
+  "regional_compile": false,
+  "enforce_eager": false,
+  "errors": 0
+ },
+ "main_vllmomni_full_r2": {
+  "attention": [
+   "FLASH_ATTN"
+  ],
+  "regional_compile": false,
+  "enforce_eager": false,
+  "errors": 0
+ },
+ "main_vllmomni_full_r3": {
+  "attention": [
+   "FLASH_ATTN"
+  ],
+  "regional_compile": false,
+  "enforce_eager": false,
+  "errors": 0
+ },
+ "profile_c2": {
+  "errors": 0
+ },
+ "smoke_diffusers": {
+  "errors": 0
+ },
+ "smoke_mstar-main_config": {
+  "failed_capture": 0,
+  "graph_runtime_rust": true,
+  "recompile_lines": 0,
+  "errors": 0
+ },
+ "smoke_mstar-pr_config": {
+  "failed_capture": 0,
+  "graph_runtime_rust": true,
+  "recompile_lines": 0,
+  "errors": 0
+ },
+ "smoke_sglang_base": {
+  "attention": [
+   "fa"
+  ],
+  "speed_mode_msgs": [
+   "performance_mode=speed keeps torch.compile disabled for this model (pass --enable-t"
+  ],
+  "offload_msgs": [],
+  "errors": 0
+ },
+ "smoke_vllmomni_base": {
+  "attention": [
+   "FLASH_ATTN"
+  ],
+  "regional_compile": true,
+  "enforce_eager": false,
+  "errors": 0
+ },
+ "tune_b4_vllmomni_b4_r0": {
+  "attention": [
+   "FLASH_ATTN"
+  ],
+  "regional_compile": true,
+  "enforce_eager": false,
+  "errors": 0
+ },
+ "tune_base_sglang_base_r0": {
+  "attention": [
+   "fa"
+  ],
+  "speed_mode_msgs": [
+   "performance_mode=speed keeps torch.compile disabled for this model (pass --enable-t"
+  ],
+  "offload_msgs": [],
+  "errors": 0
+ },
+ "tune_base_vllmomni_base_r0": {
+  "attention": [
+   "FLASH_ATTN"
+  ],
+  "regional_compile": true,
+  "enforce_eager": false,
+  "errors": 0
+ },
+ "tune_bcg_sglang_bcg_r0": {
+  "attention": [
+   "fa"
+  ],
+  "speed_mode_msgs": [
+   "performance_mode=speed keeps torch.compile disabled for this model (pass --enable-t"
+  ],
+  "offload_msgs": [],
+  "errors": 0
+ },
+ "tune_compile_b4_sglang_compile_b4_r0": {
+  "attention": [
+   "fa"
+  ],
+  "speed_mode_msgs": [],
+  "offload_msgs": [
+   "[10-22 10:59:58] Configuring layerwise offload for WanTransformer3DModel: blocks (30 l"
+  ],
+  "errors": 0
+ },
+ "tune_compile_sglang_compile_r0": {
+  "attention": [
+   "fa"
+  ],
+  "speed_mode_msgs": [],
+  "offload_msgs": [
+   "[10-22 10:39:03] Configuring layerwise offload for WanTransformer3DModel: blocks (30 l"
+  ],
+  "errors": 0
+ },
+ "tune_cudnn_vllmomni_cudnn_r0": {
+  "attention": [
+   "CUDNN_ATTN"
+  ],
+  "regional_compile": true,
+  "enforce_eager": false,
+  "errors": 0
+ },
+ "tune_full_vllmomni_full_r0": {
+  "attention": [
+   "FLASH_ATTN"
+  ],
+  "regional_compile": false,
+  "enforce_eager": false,
+  "errors": 0
+ }
+}

@@ -1,0 +1,23 @@
+{
+ "arm": "smoke",
+ "tree": "/root/work/asrr",
+ "cmd": [
+  "/root/work/mstar/.venv/bin/python",
+  "-m",
+  "mstar.cli.main",
+  "serve",
+  "omnilingual_asr_ctc_300m",
+  "--gpus",
+  "0",
+  "--port",
+  "8200",
+  "--config",
+  "configs/omnilingual_asr_ctc_300m.yaml"
+ ],
+ "env_extra": {},
+ "start": "2026-10-21 06:22:07",
+ "loadavg_start": "40.31 23.34 19.56 8/4841 100683",
+ "git": "",
+ "mstar_file": "/root/work/asrr/mstar/__init__.py",
+ "end": "2026-10-21 06:22:16"
+}

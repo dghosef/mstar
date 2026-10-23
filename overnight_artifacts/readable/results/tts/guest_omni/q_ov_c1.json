@@ -1,0 +1,229 @@
+{
+  "base": {
+    "wer": 0.0057251908396946565,
+    "files": 26,
+    "per": {
+      "0001": {
+        "wer": 0.0,
+        "hyp": "The quick brown fox jumps over the lazy dog."
+      },
+      "0002": {
+        "wer": 0.0,
+        "hyp": "She sells seashells by the seashore and the shells she sells are surely seashells."
+      },
+      "0003": {
+        "wer": 0.0,
+        "hyp": "Please call me back at your earliest convenience. I have some important news to share."
+      },
+      "0004": {
+        "wer": 0.07407407407407407,
+        "hyp": "The meeting has been rescheduled to Thursday at 2.30 in the afternoon. Please update your calendars accordingly and let me know if you have any conflicts."
+      },
+      "0005": {
+        "wer": 0.0,
+        "hyp": "Turn left on Maple Avenue, continue for half a mile, then take the second right onto Cedar Lane. Your destination will be on the left, just past the old fire station."
+      },
+      "0006": {
+        "wer": 0.0,
+        "hyp": "Ladies and gentlemen, welcome aboard Flight 247 with service to Chicago O'Hare. Our flight time today will be approximately 2 hours and 15 minutes. Please ensure your seat backs and tray tables are in their full upright and locked positions for takeoff."
+      },
+      "0007": {
+        "wer": 0.02631578947368421,
+        "hyp": "To reset your password, click the link in the email we sent you. The link will expire in 24 hours. If you did not request a password reset, please contact our support team immediately at support.amral.com."
+      },
+      "0008": {
+        "wer": 0.0,
+        "hyp": "In a stunning upset, the home team rallied from a three-goal deficit in the final 20 minutes to win 4-3 in extra time, sending the packed stadium into an absolute frenzy."
+      },
+      "0009": {
+        "wer": 0.0,
+        "hyp": "The Amazon rainforest, often referred to as the lungs of the earth, produces roughly 20% of the world's oxygen. It spans across nine countries and is home to an estimated 10% of all species on the planet. Deforestation, driven largely by agriculture and illegal logging, threatens to permanently alter this critical ecosystem."
+      },
+      "0010": {
+        "wer": 0.0,
+        "hyp": "Good morning. You're listening to WKRX, your home for the best mix of the 80s, 90s, and today. Coming up after the break, we've got traffic, weather, and three songs in a row. No interruptions."
+      },
+      "0011": {
+        "wer": 0.0,
+        "hyp": "Attention shoppers, the store will be closing in 15 minutes. Please bring your final selections to the register. We thank you for shopping with us today and look forward to seeing you again soon."
+      },
+      "0012": {
+        "wer": 0.0,
+        "hyp": "Photosynthesis is the process by which green plants convert sunlight into energy. Using chlorophyll in their leaves, plants absorb light and combine it with carbon dioxide from the air and water drawn up from the roots. This reaction produces glucose, which fuels the plant's growth, and releases oxygen as a byproduct. The very oxygen that most life on earth depends on"
+      },
+      "0013": {
+        "wer": 0.0,
+        "hyp": "I've been thinking a lot about what you said last week and honestly I think you were right. I was too caught up in my own perspective to really hear you out. Can we find some time this week to talk it through properly?"
+      },
+      "0014": {
+        "wer": 0.0,
+        "hyp": "For the sauce, start by saut\u00e9ing two cloves of minced garlic in olive oil over medium heat until fragrant. Add a can of crushed tomatoes, a pinch of red pepper flakes, and a generous handful of fresh basil. Let it simmer for at least 20 minutes, stirring occasionally before seasoning to taste with salt and pepper."
+      },
+      "0015": {
+        "wer": 0.0,
+        "hyp": "Warning. This device generates high voltage. Do not open the casing while the unit is powered. Keep away from water and out of reach of children. In the event of a malfunction, disconnect from the power source immediately and contact a qualified technician."
+      },
+      "0016": {
+        "wer": 0.0,
+        "hyp": "Dr. Eleanor Voss spent the better part of three decades studying migratory patterns of Arctic terns. Birds that travel from pole to pole and back again each year, logging more miles in a lifetime than any other creature on Earth. She often said that watching them land after a journey of 50,000 miles was the closest thing to a miracle she had ever witnessed."
+      },
+      "0017": {
+        "wer": 0.058823529411764705,
+        "hyp": "Your package has been delivered. It was left at the front door at 2.47 p.m. If you did not receive it, please check with a neighbor or building manager before contacting support."
+      },
+      "0018": {
+        "wer": 0.0,
+        "hyp": "The key to a good night's sleep isn't just the number of hours, it's the consistency. Going to bed and waking up at the same time every day, even on weekends, helps regulate your body's internal clock and leads to deeper, more restorative rest over time."
+      },
+      "0019": {
+        "wer": 0.0,
+        "hyp": "Welcome to the Natural History Museum. Audio guides are available at the front desk in 12 languages. Photography is permitted throughout the building, but flash photography is prohibited in the fossil gallery. Enjoy your visit."
+      },
+      "0020": {
+        "wer": 0.0,
+        "hyp": "It was the kind of morning that made you forget it was November. Crisp and bright, with a low sun casting long gold shadows across the park. A few joggers passed in silence. Somewhere nearby a dog barked once and then went quiet."
+      },
+      "0021": {
+        "wer": 0.0,
+        "hyp": "To prepare for your procedure, please do not eat or drink anything after midnight the night before. Arrive at the clinic at least 30 minutes early to complete your intake paperwork. Bring a valid photo ID, your insurance card, and a list of any current medications. Arrange for a responsible adult to drive you home, as you will not be able to drive yourself following the procedure."
+      },
+      "0022": {
+        "wer": 0.0,
+        "hyp": "The word serendipity was coined by the English writer Horace Walpole in 1754, inspired by a Persian fairy tale called The Three Princes of Serendip, whose heroes were always making discoveries by accident and sagacity. It's one of the most beloved words in the English language, and somehow, no other language has ever quite managed to replace it with an equivalent."
+      },
+      "0023": {
+        "wer": 0.0,
+        "hyp": "Thanks for calling. I'm not available right now, but leave me a message and I'll get back to you as soon as I can. If this is urgent, you can also reach me by text."
+      },
+      "0024": {
+        "wer": 0.014705882352941176,
+        "hyp": "In the late 19th century, Nikola Tesla and Thomas Edison became locked in a bitter rivalry known as the War of Currents. Edison championed direct current, while Tesla, backed by George Westinghouse, advocated for alternating current. The debate was not merely technical. It involved public demonstrations, smear campaigns, and enormous financial stakes. Alternating current prevailed, and it remains the global standard for electrical transmission to this day."
+      },
+      "0025": {
+        "wer": 0.0,
+        "hyp": "Fog warning in effect for coastal areas until noon. Visibility may drop below a quarter mile in some locations. Motorists and mariners are advised to exercise extreme caution."
+      },
+      "0026": {
+        "wer": 0.0,
+        "hyp": "Sometimes the bravest thing you can do is admit you don't have all the answers and keep going anyway."
+      }
+    }
+  },
+  "test": {
+    "wer": 0.007633587786259542,
+    "files": 26,
+    "per": {
+      "0001": {
+        "wer": 0.0,
+        "hyp": "The quick brown fox jumps over the lazy dog."
+      },
+      "0002": {
+        "wer": 0.0,
+        "hyp": "She sells seashells by the seashore and the shells she sells are surely seashells."
+      },
+      "0003": {
+        "wer": 0.0,
+        "hyp": "Please call me back at your earliest convenience. I have some important news to share."
+      },
+      "0004": {
+        "wer": 0.07407407407407407,
+        "hyp": "The meeting has been rescheduled to Thursday at 2.30 in the afternoon. Please update your calendars accordingly and let me know if you have any conflicts."
+      },
+      "0005": {
+        "wer": 0.0,
+        "hyp": "Turn left on Maple Avenue, continue for half a mile, then take the second right onto Cedar Lane. Your destination will be on the left, just past the old fire station."
+      },
+      "0006": {
+        "wer": 0.0,
+        "hyp": "Ladies and gentlemen, welcome aboard Flight 247 with service to Chicago O'Hare. Our flight time today will be approximately 2 hours and 15 minutes. Please ensure your seat backs and tray tables are in their full upright and locked positions for takeoff."
+      },
+      "0007": {
+        "wer": 0.02631578947368421,
+        "hyp": "To reset your password, click the link in the email we sent you. The link will expire in 24 hours. If you did not request a password reset, please contact our support team immediately at support.oral.com."
+      },
+      "0008": {
+        "wer": 0.0,
+        "hyp": "In a stunning upset, the home team rallied from a three-goal deficit in the final 20 minutes to win 4-3 in extra time, sending the packed stadium into an absolute frenzy."
+      },
+      "0009": {
+        "wer": 0.0,
+        "hyp": "The Amazon rainforest, often referred to as the lungs of the earth, produces roughly 20% of the world's oxygen. It spans across nine countries and is home to an estimated 10% of all species on the planet. Deforestation, driven largely by agriculture and illegal logging, threatens to permanently alter this critical ecosystem."
+      },
+      "0010": {
+        "wer": 0.0,
+        "hyp": "Good morning! You're listening to WKRX, your home for the best mix of the 80s, 90s, and today. Coming up after the break, we've got traffic, weather, and three songs in a row. No interruptions."
+      },
+      "0011": {
+        "wer": 0.0,
+        "hyp": "Attention shoppers, the store will be closing in 15 minutes. Please bring your final selections to the register. We thank you for shopping with us today and look forward to seeing you again soon."
+      },
+      "0012": {
+        "wer": 0.04838709677419355,
+        "hyp": "Photosynthesis is the process by which Grimplante confers sunlight into energy. Using chlorophyll in their leaves, plants absorb light and combine it with carbon dioxide from the air and water drawn up from the roots. This reaction produces glucose, which fuels the plant's growth, and releases oxygen as a byproduct, the very oxygen that most life on Earth depends on."
+      },
+      "0013": {
+        "wer": 0.0,
+        "hyp": "I've been thinking a lot about what you said last week and honestly I think you were right. I was too caught up in my own perspective to really hear you out. Can we find some time this week to talk it through properly?"
+      },
+      "0014": {
+        "wer": 0.0,
+        "hyp": "For the sauce, start by sauteing two cloves of minced garlic in olive oil over medium heat until fragrant. Add a can of crushed tomatoes, a pinch of red pepper flakes, and a generous handful of fresh basil. Let it simmer for at least 20 minutes, stirring occasionally, before seasoning to taste with salt and pepper."
+      },
+      "0015": {
+        "wer": 0.0,
+        "hyp": "Warning! This device generates high voltage. Do not open the casing while the unit is powered. Keep away from water and out of reach of children. In the event of a malfunction, disconnect from the power source immediately and contact a qualified technician."
+      },
+      "0016": {
+        "wer": 0.0,
+        "hyp": "Dr. Eleanor Voss spent the better part of three decades studying migratory patterns of Arctic terns, birds that travel from pole to pole and back again each year, logging more miles in a lifetime than any other creature on Earth. She often said that watching them land after a journey of 50,000 miles was the closest thing to a miracle she had ever witnessed."
+      },
+      "0017": {
+        "wer": 0.058823529411764705,
+        "hyp": "Your package has been delivered. It was left at the front door at 2.47 p.m. If you did not receive it, please check with a neighbor or building manager before contacting support."
+      },
+      "0018": {
+        "wer": 0.0,
+        "hyp": "The key to a good night's sleep isn't just the number of hours, it's the consistency. Going to bed and waking up at the same time every day, even on weekends, helps regulate your body's internal clock and leads to deeper, more restorative rest over time."
+      },
+      "0019": {
+        "wer": 0.0,
+        "hyp": "Welcome to the Natural History Museum. Audio guides are available at the front desk in 12 languages. Photography is permitted throughout the building, but flash photography is prohibited in the fossil gallery. Enjoy your visit."
+      },
+      "0020": {
+        "wer": 0.0,
+        "hyp": "It was the kind of morning that made you forget it was November, crisp and bright, with a low sun casting long gold shadows across the park. A few joggers passed in silence. Somewhere nearby, a dog barked once and then went quiet."
+      },
+      "0021": {
+        "wer": 0.0,
+        "hyp": "To prepare for your procedure, please do not eat or drink anything after midnight the night before. Arrive at the clinic at least 30 minutes early to complete your intake paperwork. Bring a valid photo ID, your insurance card, and a list of any current medications. Arrange for a responsible adult to drive you home, as you will not be able to drive yourself following the procedure."
+      },
+      "0022": {
+        "wer": 0.0,
+        "hyp": "The word serendipity was coined by the English writer Horace Walpole in 1754, inspired by a Persian fairy tale called The Three Princes of Serendip, whose heroes were always making discoveries by accident and sagacity. It's one of the most beloved words in the English language, and somehow no other language has ever quite managed to replace it with an equivalent."
+      },
+      "0023": {
+        "wer": 0.0,
+        "hyp": "Thanks for calling. I'm not available right now, but leave me a message and I'll get back to you as soon as I can. If this is urgent, you can also reach me by text."
+      },
+      "0024": {
+        "wer": 0.0,
+        "hyp": "In the late 19th century, Nikola Tesla and Thomas Edison became locked in a bitter rivalry known as the War of Currents. Edison championed direct current, while Tesla, backed by George Westinghouse, advocated for alternating current. The debate was not merely technical. It involved public demonstrations, smear campaigns, and enormous financial stakes. Ultimately, alternating current prevailed, and it remains the global standard for electrical transmission to this day."
+      },
+      "0025": {
+        "wer": 0.0,
+        "hyp": "Fog warning in effect for coastal areas until noon. Visibility may drop below a quarter mile in some locations. Motorists and mariners are advised to exercise extreme caution."
+      },
+      "0026": {
+        "wer": 0.0,
+        "hyp": "Sometimes the bravest thing you can do is admit you don't have all the answers and keep going anyway."
+      }
+    }
+  },
+  "wave": {
+    "pairs": 26,
+    "corr_median": 0.0018071833765134215,
+    "corr_min": -0.13417097926139832,
+    "identical_frac": 0.0,
+    "dur_ratio_median": 1.0
+  }
+}

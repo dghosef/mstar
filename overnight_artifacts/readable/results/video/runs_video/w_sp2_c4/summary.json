@@ -1,0 +1,266 @@
+{
+ "label": "w_sp2_c4",
+ "tree": "/root/work/mstar",
+ "config": "configs/wan22_sp2.yaml",
+ "env": [
+  "HF_HOME=/root/work/hf"
+ ],
+ "size": "1280x704",
+ "frames": 81,
+ "steps": 20,
+ "guidance": 5.0,
+ "concurrency": 4,
+ "num": 8,
+ "startup_s": 24.014608144760132,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  62.99567073700018,
+  64.92438479200064,
+  68.28874622100011,
+  70.55320539900094
+ ],
+ "e2e_s": [
+  42.42367160699905,
+  48.26889128000039,
+  46.04213267100022,
+  51.41002020899941,
+  49.563141448999886,
+  49.58633986199857,
+  50.82660753700111,
+  50.84727222100082
+ ],
+ "e2e_mean_s": 48.62100960449993,
+ "e2e_median_s": 49.57474065549923,
+ "wall_s": 102.28082192500005,
+ "videos_per_min": 4.692961896140919,
+ "peak_gpu_mem": "0, 42573 MiB | 1, 15551 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 42.42367160699905,
+   "bytes": 634610,
+   "t_end": 1792565291.7022016
+  },
+  {
+   "idx": 1,
+   "ok": true,
+   "e2e_s": 48.26889128000039,
+   "bytes": 258136,
+   "t_end": 1792565297.5468082
+  },
+  {
+   "idx": 2,
+   "ok": true,
+   "e2e_s": 46.04213267100022,
+   "bytes": 583962,
+   "t_end": 1792565295.3211339
+  },
+  {
+   "idx": 3,
+   "ok": true,
+   "e2e_s": 51.41002020899941,
+   "bytes": 576498,
+   "t_end": 1792565300.6893277
+  },
+  {
+   "idx": 4,
+   "ok": true,
+   "e2e_s": 49.563141448999886,
+   "bytes": 538527,
+   "t_end": 1792565341.2672873
+  },
+  {
+   "idx": 5,
+   "ok": true,
+   "e2e_s": 49.58633986199857,
+   "bytes": 319814,
+   "t_end": 1792565344.9088378
+  },
+  {
+   "idx": 6,
+   "ok": true,
+   "e2e_s": 50.82660753700111,
+   "bytes": 614584,
+   "t_end": 1792565348.375367
+  },
+  {
+   "idx": 7,
+   "ok": true,
+   "e2e_s": 50.84727222100082,
+   "bytes": 6127841,
+   "t_end": 1792565351.5563285
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-4350a8405adf4740b08a45468b1b8019",
+   "total_ms": 42408.3,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 10143.4,
+     "fwd_ms": 10076.8
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 62.9,
+     "fwd_ms": 46.1
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2377.3,
+     "fwd_ms": 2357.2
+    }
+   }
+  },
+  {
+   "rid": "vid-be89b7f567994e67b57cf8111dd20819",
+   "total_ms": 46026.4,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 10206.3,
+     "fwd_ms": 10137.8
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 62.8,
+     "fwd_ms": 48.0
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2375.5,
+     "fwd_ms": 2362.4
+    }
+   }
+  },
+  {
+   "rid": "vid-d7763382e0944e058e99fe4199b6a646",
+   "total_ms": 48255.7,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 10157.7,
+     "fwd_ms": 10090.3
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 83.3,
+     "fwd_ms": 66.9
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2944.2,
+     "fwd_ms": 2926.9
+    }
+   }
+  },
+  {
+   "rid": "vid-7be37a5ac7df49a582a7ddef068352a4",
+   "total_ms": 51393.7,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 10704.9,
+     "fwd_ms": 10636.3
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 66.4,
+     "fwd_ms": 49.2
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2381.4,
+     "fwd_ms": 2367.9
+    }
+   }
+  },
+  {
+   "rid": "vid-4c5604370449428bb2c9ced02d47ed66",
+   "total_ms": 49551.3,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 10213.4,
+     "fwd_ms": 10145.9
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 668.0,
+     "fwd_ms": 649.6
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2380.5,
+     "fwd_ms": 2368.5
+    }
+   }
+  },
+  {
+   "rid": "vid-6454a05a14c84db090bda953f267dda7",
+   "total_ms": 49572.3,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 10238.3,
+     "fwd_ms": 10171.2
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 670.3,
+     "fwd_ms": 654.0
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2383.3,
+     "fwd_ms": 2364.4
+    }
+   }
+  },
+  {
+   "rid": "vid-2deb8e95bf54489d8bb4a73577b59560",
+   "total_ms": 50812.2,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 10212.3,
+     "fwd_ms": 10144.6
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 67.7,
+     "fwd_ms": 50.7
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2393.7,
+     "fwd_ms": 2375.7
+    }
+   }
+  },
+  {
+   "rid": "vid-550ca3b69ffb441d8c81c13423382e3f",
+   "total_ms": 50793.7,
+   "nodes": {
+    "dit": {
+     "n": 20,
+     "total_ms": 11896.0,
+     "fwd_ms": 11828.7
+    },
+    "text_encoder": {
+     "n": 1,
+     "total_ms": 65.2,
+     "fwd_ms": 47.0
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2375.6,
+     "fwd_ms": 2363.5
+    }
+   }
+  }
+ ]
+}

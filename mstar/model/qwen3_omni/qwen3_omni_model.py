@@ -84,7 +84,7 @@ from mstar.model.qwen3_omni.config import (
 from mstar.model.qwen3_omni.video_reader import header_charged, install_budgeted_readers
 from mstar.model.submodule_base import NodeSubmodule
 from mstar.model.utils import Operation, WeightConverter, drop_stop_tokens
-from mstar.streaming.chunk_policy import FixedChunkPolicy, LeftContextChunkPolicy
+from mstar.streaming.chunk_policy import FixedChunkPolicy, ScheduledLeftContextChunkPolicy
 from mstar.streaming.topology import Connection, PartitionTopology, StreamingGraphEdge
 
 logger = logging.getLogger(__name__)
@@ -572,7 +572,8 @@ class Qwen3OmniModel(Model):
                     from_partition="Talker",
                     to_partition="Code2Wav",
                     edge_name="codec_tokens",
-                    chunk_policy_factory=lambda: LeftContextChunkPolicy(
+                    chunk_policy_factory=lambda: ScheduledLeftContextChunkPolicy(
+                        schedule=self.config.code2wav.codec_chunk_schedule,
                         chunk=self.config.code2wav.codec_chunk_frames,
                         left_context=self.config.code2wav.codec_left_context_frames,
                     ),
@@ -1003,7 +1004,7 @@ class Qwen3OmniModel(Model):
         metadata.graph_walk = "code2wav_chunk"
         step_metadata = {"consumed_tokens": chunk_size}
 
-        # Don't predict the last chunk from token counts: LeftContextChunkPolicy
+        # Don't predict the last chunk from token counts: the left-context policy
         # emits an extra flush pass for the retained overlap, so a count-based
         # guess completes the request before that final chunk is emitted. The
         # `available <= 0` check above fires once consumption actually catches up.

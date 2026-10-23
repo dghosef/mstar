@@ -1,0 +1,9 @@
+model: "kokoro"
+max_seq_len: 512
+node_groups:
+  - node_names: [kokoro]
+    ranks: [0]
+    graph_walks: [synth]
+model_kwargs:
+  frame_buckets: [48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1280, 1536]
+  text_buckets: [32, 64, 96, 128, 160, 192, 224, 256, 320, 384, 448, 512]

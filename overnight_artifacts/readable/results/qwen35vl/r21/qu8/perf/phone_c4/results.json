@@ -1,0 +1,89 @@
+{
+ "summary": {
+  "n": 12,
+  "errors": 0,
+  "wall_s": 3.922359395015519,
+  "req_per_s": 3.059383088466966,
+  "ttft_p50": 0.9017218365042936,
+  "ttft_mean": 0.8754571224271785,
+  "e2e_p50": 1.2926966325030662,
+  "ttft_p50_by_kind": {
+   "phone": 0.9017218365042936
+  }
+ },
+ "rows": [
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, slightly high-angle photograph of a pile of freshly baked pastries, heavily dusted with powdered sugar. The golden-brown pastry doughs",
+   "ttft": 0.5365879230084829,
+   "e2e": 1.3269058010191657
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, slightly high-angle photograph of a dessert, likely a layered cake or cake layer, heavily dusted with powdered sugar.\n\n**Key Elements",
+   "ttft": 1.2669311010395177,
+   "e2e": 1.4974704179912806
+  },
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, slightly high-angle photograph of a pile of freshly baked pastries, heavily dusted with powdered sugar. The golden-brown, flaky",
+   "ttft": 0.7399471289827488,
+   "e2e": 1.3300166159751825
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, slightly high-angle photograph of a dessert, likely a layered cake or cake layer, heavily dusted with powdered sugar.\n\n**Key Elements",
+   "ttft": 1.2642877390026115,
+   "e2e": 1.4937041030498222
+  },
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, slightly high-angle photograph of a pile of freshly baked pastries, heavily dusted with powdered sugar. The golden-brown pastry doughs",
+   "ttft": 0.5196245000115596,
+   "e2e": 1.2861210880219005
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, slightly high-angle photograph of a dessert, likely a layered cake or cake layer, heavily dusted with powdered sugar.\n\n**Key Elements",
+   "ttft": 0.7018481200211681,
+   "e2e": 1.285731989017222
+  },
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, slightly high-angle shot of a pile of freshly baked pastries, heavily dusted with powdered sugar. The golden-brown pastry doughs",
+   "ttft": 1.0646781160030514,
+   "e2e": 1.287942095019389
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, slightly high-angle photograph of a dessert, likely a layered cake or cake layer, heavily dusted with powdered sugar.\n\n**Key Elements",
+   "ttft": 1.0634965440258384,
+   "e2e": 1.2852309820009395
+  },
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, slightly high-angle photograph of a pile of freshly baked pastries, heavily dusted with powdered sugar. The golden-brown pastry doughs",
+   "ttft": 0.5076729119755328,
+   "e2e": 1.2993289810256101
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, slightly high-angle photograph of a dessert, likely a layered cake or cake layer, heavily dusted with powdered sugar.\n\n**Key Elements",
+   "ttft": 0.7008353130077012,
+   "e2e": 1.2974511699867435
+  },
+  {
+   "id": "phone_0",
+   "text": "This is a close-up, slightly high-angle shot of a pile of freshly baked pastries, heavily dusted with powdered sugar. The golden-brown pastry doughs",
+   "ttft": 1.0703553030034527,
+   "e2e": 1.136198578053154
+  },
+  {
+   "id": "phone_1",
+   "text": "This is a close-up, slightly high-angle photograph of a dessert, likely a layered cake or cake layer, heavily dusted with powdered sugar.\n\n**Key Elements",
+   "ttft": 1.0692207690444775,
+   "e2e": 1.1350144669995643
+  }
+ ],
+ "errors": []
+}

@@ -1,0 +1,25 @@
+{
+ "arm": "v7b_2",
+ "tree": "/root/guest-qwen35vl/unf2",
+ "cmd": [
+  "/root/work/mstar/.venv/bin/python",
+  "-m",
+  "mstar.cli.main",
+  "serve",
+  "omnilingual_asr_ctc_7b",
+  "--gpus",
+  "0",
+  "--port",
+  "9100",
+  "--config",
+  "configs/omnilingual_asr_ctc_7b.yaml"
+ ],
+ "env_extra": {},
+ "start": "2026-10-21 19:18:58",
+ "loadavg_start": "186.53 93.99 47.55 3/3228 194322",
+ "git": "",
+ "mstar_file": "/root/guest-qwen35vl/unf2/mstar/__init__.py",
+ "startup_s": 33.0,
+ "end": "2026-10-21 19:20:52",
+ "loadavg_end": "115.24 96.41 53.82 100/3693 195680"
+}

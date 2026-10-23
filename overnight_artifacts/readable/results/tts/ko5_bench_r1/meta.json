@@ -1,0 +1,62 @@
+{
+  "label": "ko5_bench_r1",
+  "tree": "/root/work/exp9",
+  "serve": [
+    "/root/work/mstar/.venv/bin/python",
+    "-m",
+    "mstar.cli.main",
+    "serve",
+    "kokoro",
+    "--gpus",
+    "0",
+    "--port",
+    "8100"
+  ],
+  "env": {
+    "TORCH_HOME": "/workspace/.cache/torch",
+    "MSTAR_SHM_ARENA": "1",
+    "TORCHINDUCTOR_CACHE_DIR": "/root/work/inductor_cache"
+  },
+  "points": "1:s26:1,32:s156:2,64:s1248:1",
+  "started": "2026-10-21 07:00:54",
+  "mstar_file": "/root/work/exp9/mstar/__init__.py",
+  "startup_s": 222.68661332130432,
+  "summaries": [
+    {
+      "point": "c1_s26",
+      "ttfa_p50_ms": 33.1817719998071,
+      "ttfa_p95_ms": 52.36794299707981,
+      "e2e_p50_s": 0.053550120999716455,
+      "e2e_p95_s": 0.08650091699746554,
+      "rtf_mean": 0.004203517512169359,
+      "rtf_p95": 0.008305069411518144,
+      "audio_s_per_wall_s": 265.85859430428985,
+      "wall_s": 1.5891906789984205,
+      "errors": 0
+    },
+    {
+      "point": "c32_s156",
+      "ttfa_p50_ms": 410.81532050156966,
+      "ttfa_p95_ms": 558.2368064988259,
+      "e2e_p50_s": 0.5533969499992963,
+      "e2e_p95_s": 0.7936980485010281,
+      "rtf_mean": 0.040021796072350416,
+      "rtf_p95": 0.08010595568610406,
+      "audio_s_per_wall_s": 851.756378083242,
+      "wall_s": 2.9762082524994184,
+      "errors": 0
+    },
+    {
+      "point": "c64_s1248",
+      "ttfa_p50_ms": 730.7306109978526,
+      "ttfa_p95_ms": 827.7018619992305,
+      "e2e_p50_s": 0.9757782380002027,
+      "e2e_p95_s": 1.4152751500005252,
+      "rtf_mean": 0.07232878297116908,
+      "rtf_p95": 0.14146745683193682,
+      "audio_s_per_wall_s": 1013.2466030719524,
+      "wall_s": 20.014870949002216,
+      "errors": 0
+    }
+  ]
+}

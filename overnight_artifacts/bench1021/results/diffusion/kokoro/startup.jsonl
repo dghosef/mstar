@@ -1,0 +1,17 @@
+{"label": "setup_smoke_kokorofastapi", "arm": "kokorofastapi", "seconds": 15.2, "ok": true, "time": 1792719767.4807422}
+{"label": "setup_smoke_mstar-pr", "arm": "mstar-pr", "seconds": 279.8, "ok": true, "time": 1792720050.1009781}
+{"label": "tune_workers1_kokorofastapi_workers1_r0", "arm": "kokorofastapi", "seconds": 9.2, "ok": true, "time": 1792720062.269897}
+{"label": "tune_workers4_kokorofastapi_workers4_r0", "arm": "kokorofastapi", "seconds": 12.2, "ok": true, "time": 1792720106.8966868}
+{"label": "collect_mstar_pr_mstar-pr_python_r0", "arm": "mstar-pr", "seconds": 204.6, "ok": true, "time": 1792720328.449161}
+{"label": "collect_mstar_pr_b_mstar-pr_python_r0", "arm": "mstar-pr", "seconds": 210.6, "ok": true, "time": 1792720557.7128167}
+{"label": "collect_mstar_main_mstar-main_python_r0", "arm": "mstar-main", "seconds": 144.5, "ok": true, "time": 1792720720.8872483}
+{"label": "main_mstar-pr_python_r1", "arm": "mstar-pr", "seconds": 204.6, "ok": true, "time": 1792720984.7115185}
+{"label": "main_mstar-main_python_r1", "arm": "mstar-main", "seconds": 75.3, "ok": true, "time": 1792721077.2353427}
+{"label": "main_kokorofastapi_workers4_r1", "arm": "kokorofastapi", "seconds": 12.2, "ok": true, "time": 1792721106.136757}
+{"label": "main_mstar-main_python_r2", "arm": "mstar-main", "seconds": 75.3, "ok": true, "time": 1792721216.0836136}
+{"label": "main_kokorofastapi_workers4_r2", "arm": "kokorofastapi", "seconds": 15.2, "ok": true, "time": 1792721249.25794}
+{"label": "main_mstar-pr_python_r2", "arm": "mstar-pr", "seconds": 204.6, "ok": true, "time": 1792721486.9649518}
+{"label": "main_kokorofastapi_workers4_r3", "arm": "kokorofastapi", "seconds": 12.2, "ok": true, "time": 1792721516.3917065}
+{"label": "main_mstar-pr_python_r3", "arm": "mstar-pr", "seconds": 207.6, "ok": true, "time": 1792721756.403262}
+{"label": "main_mstar-main_python_r3", "arm": "mstar-main", "seconds": 75.3, "ok": true, "time": 1792721848.8145645}
+{"label": "profile_c4", "arm": "mstar-pr", "seconds": 204.6, "ok": true, "time": 1792722071.4792628}

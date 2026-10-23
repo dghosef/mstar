@@ -16,6 +16,7 @@ from mstar.utils.fused_moe.align import moe_align_block_size
 from mstar.utils.fused_moe.kernels import (
     act_and_mul_triton,
     get_default_config,
+    get_tuned_configs,
     invoke_fused_moe_kernel,
     invoke_fused_moe_kernel_fp8_w8a8,
     moe_sum_reduce_triton,
@@ -99,6 +100,10 @@ def fused_experts(
     topk_weights = topk_weights.contiguous()
 
     config = get_default_config(M=num_tokens, E=E, N=two_inter, K=hidden, top_k=top_k)
+    config_down = config
+    tuned = get_tuned_configs(num_tokens, E, two_inter, hidden)
+    if tuned is not None:
+        config, config_down = tuned
     compute_type = _tl_compute_type(hidden_states.dtype)
 
     # 1. Token permute + per-expert block alignment.
@@ -156,7 +161,7 @@ def fused_experts(
         num_tokens_post_padded=num_tokens_post_padded,
         mul_routed_weight=True,
         top_k=1,
-        config=config,
+        config=config_down,
         compute_type=compute_type,
     )
 

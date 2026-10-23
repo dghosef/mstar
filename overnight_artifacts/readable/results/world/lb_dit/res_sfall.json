@@ -1,0 +1,8 @@
+{
+ "tag": "sfall",
+ "ms_per_chunk": 619.0673011660692,
+ "ms_per_forward": 123.81346023321385,
+ "bit_exact_vs_base": false,
+ "max_abs_vs_base": 0.03125,
+ "cos_vs_base": 0.9998942017555237
+}

@@ -1,0 +1,165 @@
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+60.0,1415037869,2880,491332.6,445232.5,146464,896289,252159.8,nvjet_sm90_tst_256x160_64x4_1x2_h_bz_coopA_TNT
+17.6,416158239,921,451854.8,547680.0,5184,560193,196727.5,cudnn_generated_fort_native_sdpa_sm90_flash_fprop_wgmma_f16_knob_7_64x128x128_4x1x1_cga1x1x1_kernel0_0
+4.4,103492702,402,257444.5,39792.0,35808,914369,290339.9,nvjet_sm90_tst_320x128_64x3_1x2_h_bz_coopB_TNT
+2.5,58469795,1632,35827.1,38143.0,1696,39872,8493.7,"void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<c10::complex<float>, c10::complex<float>, c10::complex<float>, at::native::binary_internal::MulFunctor<c10::complex<float>>>>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+1.9,43883291,720,60949.0,61056.0,58016,62496,758.5,triton_poi_fused__unsafe_view_mul_silu_split_26
+1.4,33234313,1440,23079.4,22752.0,22176,25152,712.9,triton_poi_fused__scaled_dot_product_cudnn_attention__to_copy__unsafe_view_split_transpose_view_24
+1.2,27938328,720,38803.2,38784.0,38463,39872,146.0,triton_red_fused__to_copy__unsafe_view_add_mean_mul_pow_rsqrt_split_view_view_as_complex_23
+1.2,27908325,720,38761.6,38752.0,38432,39552,120.5,triton_red_fused__to_copy__unsafe_view_add_mean_mul_pow_rsqrt_split_view_view_as_complex_22
+1.1,25933660,336,77183.5,77984.0,66208,79488,2315.0,triton_red_fused__to_copy__unsafe_view_add_mean_mul_pow_rsqrt_split_tanh_unsqueeze_30
+0.9,20677236,360,57436.8,58464.0,46432,59744,2456.1,triton_red_fused__to_copy__unsafe_view_add_mean_mul_pow_rsqrt_split_tanh_unsqueeze_28
+0.9,20382974,36,566193.7,439505.0,404736,1644482,343322.8,sm90_xmma_fprop_implicit_gemm_bf16bf16_bf16f32_f32_nhwckrsc_nhwc_tilesize128x128x64_warpgroupsize1x1x1_g1_execute_segment_k_off_kernel__5x_cudnn
+0.9,20085439,336,59778.1,60272.0,53760,61920,1544.2,triton_red_fused__to_copy__unsafe_view_add_mean_mul_pow_rsqrt_split_tanh_unsqueeze_29
+0.7,17312692,360,48090.8,48656.0,41632,50400,1679.4,triton_red_fused__to_copy__unsafe_view_add_mean_mul_pow_rsqrt_split_tanh_unsqueeze_27
+0.7,16612949,27,615294.4,437408.0,409152,1708258,402574.0,sm90_xmma_fprop_implicit_gemm_bf16bf16_bf16f32_f32_nhwckrsc_nhwc_tilesize256x128x64_warpgroupsize2x1x1_g1_execute_segment_k_off_kernel__5x_cudnn
+0.5,12232720,3,4077573.3,4077957.0,4066918,4087845,10468.8,"fmha_cutlassF_bf16_aligned_32x128_gmem_sm80(PyTorchMemEffAttention::AttentionKernel<cutlass::bfloat16_t, cutlass::arch::Sm80, (bool)1, (int)32, (int)128, (int)65536, (bool)1, (bool)1>::Params)"
+0.2,5561288,210,26482.3,26704.5,16736,36544,9301.6,nvjet_sm90_tst_80x128_64x8_2x1_v_bz_TNN
+0.2,4074025,843,4832.8,5056.0,2560,7584,1662.1,"void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float>>>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+0.2,4042182,9,449131.3,458337.0,427713,461632,15721.7,triton_per_fused_convolution_native_group_norm_silu_41
+0.2,3857063,768,5022.2,4960.0,4416,6496,318.4,nvjet_sm90_tst_128x8_64x12_4x1_v_bz_bias_TNT
+0.1,3516195,30,117206.5,116928.0,114976,123233,2053.5,sm90_xmma_fprop_implicit_gemm_bf16bf16_bf16f32_f32_nhwckrsc_nhwc_tilesize128x256x64_warpgroupsize2x1x1_g1_execute_segment_k_off_kernel__5x_cudnn
+0.1,2895106,48,60314.7,60416.0,57632,61664,956.6,triton_poi_fused__unsafe_view_mul_silu_split_17
+0.1,2873700,6,478950.0,476320.5,474017,487521,5802.7,triton_red_fused_add_clone_convolution_native_group_norm_silu_61
+0.1,2792833,9,310314.8,308352.0,306880,315392,3751.3,triton_red_fused_convolution_native_group_norm_silu_57
+0.1,2460545,105,23433.8,23392.0,23008,24352,270.9,nvjet_sm90_tst_192x128_64x5_1x2_h_bz_coopB_TNT
+0.1,2439044,420,5807.2,6576.0,2752,7680,1804.7,"void at::native::reduce_kernel<(int)512, (int)1, at::native::ReduceOp<float, at::native::MeanOps<float, float, float, float>, unsigned int, float, (int)4, (int)4>>(T3)"
+0.1,2339971,3,779990.3,795169.0,747041,797761,28564.4,triton_per_fused_add_clone_convolution_native_group_norm_silu_45
+0.1,2217911,96,23103.2,22832.0,22368,24320,602.7,triton_poi_fused__scaled_dot_product_cudnn_attention__to_copy__unsafe_view_split_transpose_view_14
+0.1,2095231,48,43650.6,43520.0,42592,45248,676.8,nvjet_sm90_tst_192x32_64x7_4x1_v_bz_TNT
+0.1,2093636,444,4715.4,4864.0,2176,6944,1449.8,"void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float>>>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+0.1,1977230,24,82384.6,82527.0,79904,83167,691.9,triton_red_fused__to_copy__unsafe_view_add_mean_mul_native_layer_norm_pow_rsqrt_split_tanh_unsqueeze_31
+0.1,1845811,48,38454.4,38447.5,38175,38847,123.9,triton_red_fused__to_copy__unsafe_view_add_mean_mul_pow_rsqrt_split_view_view_as_complex_15
+0.1,1844919,48,38435.8,38432.0,38175,38784,111.6,triton_red_fused__to_copy__unsafe_view_add_mean_mul_pow_rsqrt_split_view_view_as_complex_13
+0.1,1696577,24,70690.7,71872.0,61440,72832,3557.6,triton_red_fused__to_copy__unsafe_view_add_mean_mul_pow_rsqrt_split_tanh_unsqueeze_view_where_16
+0.1,1642371,96,17108.0,17184.0,9920,24480,6304.0,nvjet_sm90_tst_64x32_64x16_4x1_v_bz_splitK_TNT
+0.1,1641668,24,68402.8,69152.0,61984,70273,2472.6,triton_red_fused__to_copy__unsafe_view_add_mean_mul_pow_rsqrt_split_tanh_unsqueeze_view_where_18
+0.1,1610147,3,536715.7,534593.0,533281,542273,4857.3,triton_red_fused_clone_native_group_norm_35
+0.1,1589538,234,6792.9,7168.0,2880,7552,1236.6,"void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 12)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+0.1,1587364,210,7558.9,7616.0,4352,11072,3035.4,"void at::native::<unnamed>::CatArrayBatchedCopy<at::native::<unnamed>::OpaqueType<(unsigned int)2>, unsigned int, (int)4, (int)64, (int)64>(T1 *, at::native::<unnamed>::CatArrInputTensorMetadata<T1, T2, T4, T5>, at::native::<unnamed>::TensorSizeStride<T2, (unsigned int)4>, int, T2)"
+0.1,1534945,3,511648.3,511424.0,507233,516288,4531.7,triton_red_fused_clone_native_group_norm_52
+0.1,1491970,24,62165.4,62976.0,54592,64384,2924.2,triton_red_fused__to_copy__unsafe_view_add_mean_mul_pow_rsqrt_split_tanh_unsqueeze_19
+0.1,1437795,9,159755.0,158592.0,157248,163328,2361.9,triton_poi_fused_convolution_native_group_norm_silu_59
+0.1,1330144,657,2024.6,1760.0,1152,3360,639.0,"void at::native::vectorized_elementwise_kernel<(int)8, at::native::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+0.1,1278369,24,53265.4,53888.0,47904,55456,2053.3,triton_red_fused__to_copy__unsafe_view_add_cat_mean_mul_pow_rsqrt_split_tanh_unsqueeze_25
+0.1,1228085,48,25585.1,25631.5,23840,27744,924.0,nvjet_sm90_tst_128x32_64x10_4x1_v_bz_TNT
+0.1,1227873,210,5847.0,6032.0,3520,8608,2211.1,"void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+0.1,1201278,240,5005.3,5152.0,2112,9472,814.0,"void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)"
+0.0,1147489,3,382496.3,390048.0,365696,391745,14574.2,triton_per_fused_clone_native_group_norm_48
+0.0,1117729,3,372576.3,371680.0,358817,387232,14228.7,triton_poi_fused__to_copy__unsafe_index_add_arange_clone_convolution_mul_silu_unsqueeze_50
+0.0,1116929,18,62051.6,61984.0,61440,63360,493.8,triton_per_fused_convolution_native_group_norm_3
+0.0,1114850,420,2654.4,2688.0,1472,4416,735.1,"void at::native::vectorized_elementwise_kernel<(int)4, void at::native::<unnamed>::pow_tensor_scalar_kernel_impl<float, float>(at::TensorIteratorBase &, T2)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+0.0,1107553,6,184592.2,182752.0,181921,190016,3552.4,triton_poi_fused_add_clone_convolution_native_group_norm_silu_62
+0.0,1105826,24,46076.1,46288.5,43104,47552,1102.7,triton_red_fused__to_copy_add_cat_mean_mul_pow_rsqrt_split_unsqueeze_21
+0.0,1078528,210,5135.8,5072.0,2752,7712,2319.7,"void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::CUDAFunctor_add<c10::BFloat16>>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+0.0,917602,3,305867.3,304417.0,302080,311105,4684.0,triton_poi_fused_clone_native_group_norm_silu_55
+0.0,871489,3,290496.3,290336.0,289121,292032,1462.1,triton_tem_fused_convolution_native_group_norm_silu_67
+0.0,835905,3,278635.0,278433.0,275360,282112,3380.5,triton_red_fused_clone_native_group_norm_64
+0.0,762849,3,254283.0,253184.0,252288,257377,2716.7,triton_tem_fused_convolution_58
+0.0,757152,9,84128.0,85696.0,79808,86784,2818.0,triton_poi_fused_convolution_native_group_norm_silu_43
+0.0,750337,3,250112.3,249536.0,249408,251393,1110.9,triton_poi_fused__to_copy_clone_convolution_51
+0.0,716865,3,238955.0,238816.0,238656,239393,387.7,triton_poi_fused_add_convolution_silu_63
+0.0,712034,6,118672.3,118624.5,117760,119584,745.1,triton_per_fused_add_clone_convolution_native_group_norm_silu_18
+0.0,704547,105,6710.0,6720.0,6080,7232,195.8,"void at::native::vectorized_elementwise_kernel<(int)8, at::native::BinaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float>>, std::array<char *, (unsigned long)3>>(int, T2, T3)"
+0.0,659232,105,6278.4,6272.0,6112,6848,101.3,"void at::native::vectorized_elementwise_kernel<(int)8, at::native::<unnamed>::silu_kernel(at::TensorIteratorBase &)::[lambda() (instance 1)]::operator ()() const::[lambda() (instance 6)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+0.0,639554,210,3045.5,3040.0,2784,3969,152.0,"void at::native::vectorized_elementwise_kernel<(int)8, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char *, (unsigned long)3>>(int, T2, T3)"
+0.0,638722,210,3041.5,3104.0,2208,3936,724.7,"void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::neg_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 2)]::operator ()() const::[lambda() (instance 9)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+0.0,630811,24,26283.8,26448.0,23936,27136,867.0,triton_red_fused__to_copy__unsafe_view_add_mean_mul_pow_rsqrt_split_tanh_unsqueeze_20
+0.0,626176,12,52181.3,52576.0,49248,53216,1259.7,triton_poi_fused__to_copy__unsafe_index_add_arange_clone_convolution_mul_native_group_norm_silu_unsqueeze_26
+0.0,556898,3,185632.7,189792.0,177313,189793,7205.0,triton_poi_fused__to_copy__unsafe_index_add_arange_clone_convolution_mul_silu_unsqueeze_33
+0.0,549761,3,183253.7,186177.0,176960,186624,5455.1,triton_tem_fused_convolution_42
+0.0,542753,24,22614.7,22800.0,20256,23840,993.2,triton_red_fused__to_copy_add_mean_mul_pow_rsqrt_split_unsqueeze_view_where_12
+0.0,478368,3,159456.0,162592.0,152928,162848,5654.9,triton_poi_fused_clone_native_group_norm_silu_39
+0.0,474689,420,1130.2,1152.0,992,1792,77.3,"void at::native::vectorized_elementwise_kernel<(int)4, at::native::CUDAFunctorOnSelf_add<float>, std::array<char *, (unsigned long)2>>(int, T2, T3)"
+0.0,471233,3,157077.7,156129.0,155136,159968,2551.9,triton_poi_fused_clone_native_group_norm_silu_65
+0.0,471073,420,1121.6,1120.0,992,1728,80.6,"void at::native::vectorized_elementwise_kernel<(int)4, at::native::rsqrt_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 2)]::operator ()() const::[lambda() (instance 2)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+0.0,408065,18,22670.3,22672.0,22496,22912,132.2,triton_poi_fused_convolution_native_group_norm_silu_6
+0.0,387009,105,3685.8,3680.0,3488,4032,122.2,"void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::<unnamed>::where_kernel_impl(at::TensorIterator &)::[lambda() (instance 1)]::operator ()() const::[lambda() (instance 3)]::operator ()() const::[lambda(bool, c10::BFloat16, c10::BFloat16) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+0.0,370144,3,123381.3,123360.0,123264,123520,129.3,triton_poi_fused__to_copy_clone_convolution_34
+0.0,358529,3,119509.7,119233.0,119136,120160,565.3,triton_poi_fused_add_convolution_silu_47
+0.0,357792,3,119264.0,119296.0,118368,120128,880.4,triton_per_fused_add_convolution_native_group_norm_silu_view_8
+0.0,356032,6,59338.7,59296.0,59200,59584,157.6,triton_per_fused_clone_native_group_norm_16
+0.0,330112,24,13754.7,13792.0,12032,16224,814.2,nvjet_sm90_tst_256x128_64x4_1x2_h_bz_coopA_bias_TNT
+0.0,310881,3,103627.0,103041.0,102208,105632,1785.6,triton_poi_fused_add_clone_convolution_native_group_norm_silu_46
+0.0,296704,12,24725.3,24784.0,23360,25696,655.9,triton_per_fused__to_copy__unsafe_index_add_arange_clone_convolution_mul_native_group_norm_unsqueeze_22
+0.0,291826,24,12159.4,12031.0,11743,13024,331.0,nvjet_sm90_tst_32x64_64x16_2x1_v_bz_bias_TNN
+0.0,249376,54,4618.1,4576.0,4224,5696,266.6,triton_poi_fused_convolution_silu_7
+0.0,243424,3,81141.3,82912.0,77472,83040,3178.4,triton_poi_fused_clone_native_group_norm_silu_49
+0.0,213696,96,2226.0,2240.0,1952,2528,100.9,"void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __nv_bfloat16, float, __nv_bfloat16, (bool)0, float, __nv_bfloat16, __nv_bfloat16, (bool)1, (bool)0, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+0.0,211393,24,8808.0,8832.0,8128,9184,259.3,nvjet_sm90_tst_64x16_64x16_4x2_h_bz_bias_TNT
+0.0,185760,3,61920.0,61760.0,61312,62688,701.8,triton_poi_fused__to_copy__unsafe_index_add_arange_clone_convolution_mul_native_group_norm_silu_unsqueeze_28
+0.0,181344,3,60448.0,60544.0,59872,60928,534.5,triton_poi_fused__to_copy__unsafe_index_add_arange_clone_convolution_mul_silu_unsqueeze_30
+0.0,178849,3,59616.3,60000.0,58368,60481,1107.5,triton_poi_fused_native_group_norm_silu_29
+0.0,169024,36,4695.1,4672.0,4416,5376,201.0,triton_per_fused_clone_native_group_norm_36
+0.0,167808,210,799.1,800.0,768,928,22.1,"void at::native::vectorized_elementwise_kernel<(int)8, at::native::FillFunctor<c10::BFloat16>, std::array<char *, (unsigned long)1>>(int, T2, T3)"
+0.0,165046,48,3438.5,3456.0,3039,3648,125.5,triton_per_fused__to_copy__unsafe_view_add_mean_mul_pow_rsqrt_split_view_view_as_complex_5
+0.0,156512,48,3260.7,3264.0,2848,3424,140.4,triton_per_fused__to_copy__unsafe_view_add_mean_mul_pow_rsqrt_split_view_view_as_complex_7
+0.0,140896,6,23482.7,23456.0,23360,23680,109.8,triton_poi_fused_add_clone_convolution_native_group_norm_silu_19
+0.0,138720,48,2890.0,2912.0,2592,3104,105.0,triton_red_fused__to_copy__unsafe_view_add_mean_mul_pow_rsqrt_10
+0.0,134432,96,1400.3,1392.0,1120,1568,138.8,triton_poi_fused__scaled_dot_product_cudnn_attention__to_copy__unsafe_view_split_transpose_view_6
+0.0,130496,3,43498.7,43776.0,42464,44256,927.6,triton_poi_fused_clone_native_group_norm_silu_32
+0.0,129440,6,21573.3,21584.0,21184,21920,298.4,triton_tem_fused_bmm_expand_native_group_norm_t_transpose_11
+0.0,123424,3,41141.3,41440.0,40160,41824,871.3,triton_per_fused__to_copy__unsafe_index_add_arange_clone_convolution_mul_native_group_norm_silu_unsqueeze_27
+0.0,111584,24,4649.3,4672.0,4000,5536,296.8,nvjet_sm90_tst_8x64_64x16_4x1_v_bz_bias_TNN
+0.0,100800,24,4200.0,4192.0,3808,4928,206.6,nvjet_sm90_tst_8x64_64x16_2x1_v_bz_bias_TNN
+0.0,97536,33,2955.6,2816.0,2752,3552,275.5,triton_per_fused_convolution_native_group_norm_4
+0.0,93024,48,1938.0,1984.0,1376,2688,529.3,"void at::native::vectorized_elementwise_kernel<(int)4, at::native::CUDAFunctor_add<float>, std::array<char *, (unsigned long)3>>(int, T2, T3)"
+0.0,92864,24,3869.3,3872.0,3264,4256,225.7,nvjet_sm90_tst_64x8_64x16_4x1_v_bz_bias_TNT
+0.0,92416,6,15402.7,15280.0,15200,16032,319.1,triton_poi_fused_add_convolution_silu_20
+0.0,86624,24,3609.3,3632.0,3232,4032,193.6,triton_red_fused__to_copy__unsafe_view_add_mean_mul_pow_rsqrt_unsqueeze_view_where_8
+0.0,85808,48,1787.7,1759.5,1535,2400,148.7,triton_poi_fused__unsafe_view_mul_silu_split_9
+0.0,84608,6,14101.3,14064.0,14016,14336,120.9,triton_poi_fused_clone_native_group_norm_silu_17
+0.0,84160,3,28053.3,28032.0,28032,28096,37.0,triton_poi_fused__to_copy__unsafe_index_add_arange_clone_mul_unsqueeze_21
+0.0,80673,3,26891.0,26721.0,25664,28288,1320.2,triton_per_fused_clone_native_group_norm_31
+0.0,80320,18,4462.2,4480.0,4320,4640,78.6,triton_per_fused__to_copy__unsafe_index_add_arange_clone_convolution_mul_native_group_norm_unsqueeze_23
+0.0,77120,36,2142.2,2144.0,2016,2464,89.5,triton_per_fused_clone_native_group_norm_38
+0.0,72544,3,24181.3,24256.0,24000,24288,157.9,triton_tem_fused_addmm_squeeze_t_view_14
+0.0,68192,3,22730.7,22752.0,22592,22848,129.3,triton_tem_fused__scaled_dot_product_efficient_attention_add_bmm_expand_native_group_norm_t_transpose_unsqueeze_12
+0.0,67456,24,2810.7,2816.0,2592,2944,71.7,"void at::native::<unnamed>::CatArrayBatchedCopy_vectorized<at::native::<unnamed>::OpaqueType<(unsigned int)8>, unsigned int, (int)1, (int)128, (int)1, (int)16, (int)2>(char *, at::native::<unnamed>::CatArrInputTensorMetadata<T1, T2, T4, T5>, at::native::<unnamed>::TensorSizeStride<T2, (unsigned int)4>, int, T2)"
+0.0,67296,24,2804.0,2816.0,2720,2848,29.6,"void at::native::elementwise_kernel<(int)128, (int)2, void at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)]>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+0.0,61696,24,2570.7,2576.0,2368,2688,74.7,triton_red_fused__to_copy__unsafe_view_add_mean_mul_pow_rsqrt_11
+0.0,59616,6,9936.0,9936.0,9824,10048,112.2,triton_poi_fused__scaled_dot_product_efficient_attention_add_bmm_unsqueeze_13
+0.0,58208,24,2425.3,2400.0,2112,3040,178.3,triton_red_fused__to_copy_add_mean_mul_pow_rsqrt_3
+0.0,55840,24,2326.7,2320.0,2080,2560,113.4,triton_red_fused__to_copy_add_mean_mul_pow_rsqrt_unsqueeze_view_where_4
+0.0,45569,33,1380.9,1376.0,1344,1472,30.1,triton_per_fused_convolution_native_group_norm_5
+0.0,44705,3,14901.7,14785.0,14368,15552,600.6,triton_poi_fused_add_convolution_silu_transpose_view_15
+0.0,44416,18,2467.6,2464.0,2304,2656,76.7,triton_poi_fused_convolution_silu_44
+0.0,43616,36,1211.6,1216.0,1120,1280,36.8,triton_per_fused_clone_native_group_norm_37
+0.0,42784,3,14261.3,14240.0,14208,14336,66.6,triton_poi_fused_add_convolution_native_group_norm_silu_view_9
+0.0,40832,3,13610.7,13536.0,13472,13824,187.5,triton_poi_fused_native_group_norm_10
+0.0,40416,3,13472.0,13472.0,13472,13472,0.0,triton_tem_fused_convolution_2
+0.0,37120,24,1546.7,1536.0,1536,1568,15.4,"void at::native::vectorized_elementwise_kernel<(int)4, at::native::neg_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 2)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+0.0,35968,24,1498.7,1504.0,1344,1760,82.1,triton_poi_fused__to_copy_arange_cat_cos_div_exp_mul_sin_unsqueeze_0
+0.0,34816,24,1450.7,1408.0,1344,1632,93.7,"void at::native::vectorized_elementwise_kernel<(int)4, at::native::CUDAFunctorOnOther_add<float>, std::array<char *, (unsigned long)2>>(int, T2, T3)"
+0.0,27840,15,1856.0,1856.0,1760,2016,66.2,triton_poi_fused_convolution_silu_60
+0.0,27616,24,1150.7,1152.0,1024,1280,64.3,"void at::native::vectorized_elementwise_kernel<(int)8, void at::native::compare_scalar_kernel<long>(at::TensorIteratorBase &, at::native::<unnamed>::OpType, T1)::[lambda(long) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+0.0,27552,24,1148.0,1168.0,1088,1216,46.5,"void at::native::vectorized_elementwise_kernel<(int)4, at::native::BUnaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float>>, std::array<char *, (unsigned long)2>>(int, T2, T3)"
+0.0,26848,3,8949.3,8928.0,8864,9056,97.8,"void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 1)]::operator ()() const::[lambda(unsigned char) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)"
+0.0,26464,24,1102.7,1120.0,992,1120,43.2,triton_poi_fused_silu_1
+0.0,26144,24,1089.3,1088.0,992,1120,41.6,triton_poi_fused_silu_2
+0.0,22528,27,834.4,832.0,736,960,45.2,"void <unnamed>::elementwise_kernel_with_index<int, at::native::arange_cuda_out(const c10::Scalar &, const c10::Scalar &, const c10::Scalar &, at::Tensor &)::[lambda() (instance 1)]::operator ()() const::[lambda() (instance 4)]::operator ()() const::[lambda(long) (instance 1)]>(T1, T2, function_traits<T2>::result_type *)"
+0.0,22464,18,1248.0,1248.0,1184,1312,31.0,triton_per_fused__to_copy__unsafe_index_add_arange_clone_convolution_mul_native_group_norm_unsqueeze_24
+0.0,22432,18,1246.2,1248.0,1184,1376,49.7,triton_per_fused__to_copy__unsafe_index_add_arange_clone_convolution_mul_native_group_norm_unsqueeze_25
+0.0,16672,3,5557.3,5536.0,5280,5856,288.6,"void at::native::vectorized_elementwise_kernel<(int)4, at::native::round_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 1)]::operator ()() const::[lambda() (instance 2)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+0.0,16128,3,5376.0,5376.0,5344,5408,32.0,"void at::native::vectorized_elementwise_kernel<(int)4, at::native::AUnaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float>>, std::array<char *, (unsigned long)2>>(int, T2, T3)"
+0.0,14656,6,2442.7,2432.0,1376,3552,1157.3,"void at::native::vectorized_elementwise_kernel<(int)8, at::native::CUDAFunctorOnSelf_add<c10::BFloat16>, std::array<char *, (unsigned long)2>>(int, T2, T3)"
+0.0,12512,3,4170.7,4160.0,4128,4224,48.9,"void at::native::vectorized_elementwise_kernel<(int)8, at::native::AUnaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float>>, std::array<char *, (unsigned long)2>>(int, T2, T3)"
+0.0,11616,3,3872.0,3872.0,3808,3936,64.0,"void at::native::vectorized_elementwise_kernel<(int)8, at::native::<unnamed>::launch_clamp_scalar(at::TensorIteratorBase &, c10::Scalar, c10::Scalar, at::native::detail::ClampLimits)::[lambda() (instance 1)]::operator ()() const::[lambda() (instance 9)]::operator ()() const::[lambda(c10::BFloat16) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+0.0,10368,3,3456.0,3520.0,3264,3584,169.3,triton_per_fused_clone_native_group_norm_53
+0.0,9408,3,3136.0,3136.0,3104,3168,32.0,triton_poi_fused_convolution_silu_40
+0.0,8192,3,2730.7,2720.0,2656,2816,80.5,void cutlass::Kernel2<cutlass_80_simt_sgemm_128x32_8x5_nn_align1>(T1::Params)
+0.0,8128,3,2709.3,2688.0,2560,2880,161.1,"void at::native::elementwise_kernel<(int)128, (int)4, void at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<bool, bool, bool, at::native::BitwiseAndFunctor<bool>>>(at::TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)"
+0.0,7584,3,2528.0,2560.0,2336,2688,178.2,"void at::native::vectorized_gather_kernel<(int)16, long>(char *, char *, T2 *, int, long, long, long, long, bool)"
+0.0,7552,3,2517.3,2496.0,2432,2624,97.8,"void at::native::triu_tril_kernel<bool, int, (bool)0, (int)8, (bool)0>(at::cuda::detail::TensorInfo<T1, T2>, at::cuda::detail::TensorInfo<const T1, T2>, long, long, T2)"
+0.0,6912,3,2304.0,2272.0,2272,2368,55.4,"void at::native::<unnamed>::CatArrayBatchedCopy<at::native::<unnamed>::OpaqueType<(unsigned int)4>, unsigned int, (int)2, (int)64, (int)64>(T1 *, at::native::<unnamed>::CatArrInputTensorMetadata<T1, T2, T4, T5>, at::native::<unnamed>::TensorSizeStride<T2, (unsigned int)4>, int, T2)"
+0.0,6848,3,2282.7,2304.0,2208,2336,66.6,"void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 11)]::operator ()() const::[lambda(bool) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)"
+0.0,6432,3,2144.0,2208.0,2016,2208,110.9,"void at::native::vectorized_elementwise_kernel<(int)4, at::native::sin_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 2)]::operator ()() const::[lambda() (instance 2)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+0.0,6336,3,2112.0,2112.0,2048,2176,64.0,"void at::native::vectorized_elementwise_kernel<(int)4, at::native::cos_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 2)]::operator ()() const::[lambda() (instance 2)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>>(int, T2, T3)"
+0.0,6176,3,2058.7,2048.0,1984,2144,80.5,"void at::native::reduce_kernel<(int)512, (int)1, at::native::ReduceOp<long, at::native::func_wrapper_t<bool, at::native::and_kernel_cuda(at::TensorIterator &)::[lambda() (instance 1)]::operator ()() const::[lambda() (instance 4)]::operator ()() const::[lambda(bool, long) (instance 1)]>, unsigned int, bool, (int)4, (int)4>>(T3)"
+0.0,6016,3,2005.3,2016.0,1984,2016,18.5,triton_poi_fused_convolution_silu_56
+0.0,5024,3,1674.7,1696.0,1600,1728,66.6,triton_poi_fused_convolution_1
+0.0,4384,3,1461.3,1472.0,1440,1472,18.5,triton_per_fused_clone_native_group_norm_54
+0.0,4256,3,1418.7,1408.0,1280,1568,144.3,triton_poi_fused_convolution_native_group_norm_silu_66
+0.0,4224,3,1408.0,1376.0,1376,1472,55.4,"void at::native::vectorized_elementwise_kernel<(int)8, at::native::BUnaryFunctor<c10::BFloat16, c10::BFloat16, c10::BFloat16, at::native::binary_internal::MulFunctor<float>>, std::array<char *, (unsigned long)2>>(int, T2, T3)"
+0.0,4192,3,1397.3,1408.0,1376,1408,18.5,triton_poi_fused_convolution_0
+0.0,2880,3,960.0,960.0,960,960,0.0,"void at::native::vectorized_elementwise_kernel<(int)8, at::native::FillFunctor<bool>, std::array<char *, (unsigned long)1>>(int, T2, T3)"

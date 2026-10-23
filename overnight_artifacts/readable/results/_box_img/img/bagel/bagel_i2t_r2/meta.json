@@ -1,0 +1,17 @@
+{
+ "tag": "bagel_i2t_r2",
+ "tree": "/root/work/img4",
+ "mstar_file": "/root/work/img4/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve bagel --config /workspace/results/img/bagel/bagel_i2t_r2/config.yaml --gpus 1 --port 8300",
+ "sets": [],
+ "env": [],
+ "git": "",
+ "start": "08:14:17",
+ "gpu_mem_before": [
+  0
+ ],
+ "startup_s": 65.00697183609009,
+ "gpu_mem_after": [
+  0
+ ]
+}

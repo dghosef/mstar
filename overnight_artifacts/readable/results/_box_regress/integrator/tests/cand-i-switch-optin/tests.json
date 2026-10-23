@@ -1,0 +1,24 @@
+{
+ "core": {
+  "rc": 1,
+  "secs": 71,
+  "total": 6630,
+  "failed": [
+   "test.modular.test_eval_compare_multigpu::test_dump_stacks_retries_with_sudo_only_when_asked[False]",
+   "test.modular.test_eval_compare_multigpu::test_dump_stacks_retries_with_sudo_only_when_asked[True]",
+   "test.modular.test_serving_metrics::test_refusals_count_from_when_metrics_are_turned_on"
+  ]
+ },
+ "piecewise_sig": {
+  "rc": 0,
+  "secs": 10,
+  "total": 5,
+  "failed": []
+ },
+ "tp_sim": {
+  "rc": 0,
+  "secs": 76,
+  "total": 7,
+  "failed": []
+ }
+}

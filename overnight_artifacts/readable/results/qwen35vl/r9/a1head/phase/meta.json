@@ -1,0 +1,26 @@
+{
+ "arm": "a1head",
+ "tree": "/root/work/mstar",
+ "cmd": [
+  "/root/work/mstar/.venv/bin/python",
+  "-m",
+  "mstar.cli.main",
+  "serve",
+  "omnilingual_asr_ctc_1b",
+  "--gpus",
+  "0",
+  "--port",
+  "8100",
+  "--config",
+  "configs/omnilingual_asr_ctc_1b.yaml"
+ ],
+ "env_extra": {
+  "MSTAR_PHASE_TIMING": "10"
+ },
+ "start": "2026-10-21 06:20:00",
+ "loadavg_start": "19.83 13.05 16.22 6/4761 98922",
+ "git": "",
+ "mstar_file": "/root/work/mstar/mstar/__init__.py",
+ "startup_s": 18.0,
+ "end": "2026-10-21 06:20:40"
+}

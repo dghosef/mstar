@@ -1,0 +1,21 @@
+#### gate mstar_pr_a
+PASS  parity: argmax agreement: mstar_pr_a 0.9872 over 8 prompts (need >= 0.95 and >= 0.9702); control mstar_pr_b 0.9872 gap 0.12; vllm_a 0.9902 gap 0.12; sglang_a 0.9941 gap 0.25
+PASS  parity: first disagreements are near-ties: max gap 0.12 (cap 1.00), max rank 2 (need < 5)
+PASS  parity: confident positions all agree: min over prompts 1.0000 (need >= 1.0)
+PASS  parity: prompt tokens match the oracle: UNCHECKED: the server reports no usage.prompt_tokens; a prompt-ids test vs the HF processor must cover this
+PASS  parity: no empty completions: 0 empty
+GATE PASS
+#### gate mstar_pr_rf_a
+PASS  parity: argmax agreement: mstar_pr_rf_a 0.9872 over 8 prompts (need >= 0.95 and >= 0.9702); control mstar_pr_b 0.9872 gap 0.12; vllm_a 0.9902 gap 0.12; sglang_a 0.9941 gap 0.25
+PASS  parity: first disagreements are near-ties: max gap 0.12 (cap 1.00), max rank 2 (need < 5)
+PASS  parity: confident positions all agree: min over prompts 1.0000 (need >= 1.0)
+PASS  parity: prompt tokens match the oracle: UNCHECKED: the server reports no usage.prompt_tokens; a prompt-ids test vs the HF processor must cover this
+PASS  parity: no empty completions: 0 empty
+GATE PASS
+#### gate mstar_main_a
+PASS  parity: argmax agreement: mstar_main_a 0.9902 over 8 prompts (need >= 0.95 and >= 0.9702); control mstar_pr_b 0.9872 gap 0.12; vllm_a 0.9902 gap 0.12; sglang_a 0.9941 gap 0.25
+PASS  parity: first disagreements are near-ties: max gap 0.12 (cap 1.00), max rank 1 (need < 5)
+PASS  parity: confident positions all agree: min over prompts 1.0000 (need >= 1.0)
+PASS  parity: prompt tokens match the oracle: UNCHECKED: the server reports no usage.prompt_tokens; a prompt-ids test vs the HF processor must cover this
+PASS  parity: no empty completions: 0 empty
+GATE PASS

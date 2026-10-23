@@ -1,0 +1,55 @@
+{
+ "label": "c_base_nsys",
+ "tree": "/root/guest-video/base",
+ "config": "",
+ "env": [
+  "HF_HOME=/root/work/hf"
+ ],
+ "size": "832x480",
+ "frames": 189,
+ "steps": 35,
+ "guidance": 6.0,
+ "concurrency": 1,
+ "num": 1,
+ "startup_s": 42.025399684906006,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  73.90965481499916
+ ],
+ "e2e_s": [
+  55.91568040600032
+ ],
+ "e2e_mean_s": 55.91568040600032,
+ "e2e_median_s": 55.91568040600032,
+ "wall_s": 55.929878597000425,
+ "videos_per_min": 1.0727718619295887,
+ "peak_gpu_mem": "0, 19138 MiB | 1, 59715 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 55.91568040600032,
+   "bytes": 4584140,
+   "t_end": 1792562738.9316242
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-731b2e0de6cd4e9caa8dd1c4d5882c7e",
+   "total_ms": 55873.3,
+   "nodes": {
+    "dit": {
+     "n": 36,
+     "total_ms": 52759.200000000004,
+     "fwd_ms": 52664.799999999996
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2900.8,
+     "fwd_ms": 2881.1
+    }
+   }
+  }
+ ]
+}

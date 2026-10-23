@@ -1,0 +1,6 @@
+{
+ "44096": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve qwen3_5_0.8b --gpus 0 --port 8100 --socket-path-prefix /tmp/ovq_8100_1792559685/",
+ "44241": "/root/work/mstar/.venv/bin/python -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=41, pipe_handle=43) --multiprocessing-fork",
+ "44377": "/root/work/mstar/.venv/bin/python -c from multiprocessing.spawn import spawn_main; spawn_main(tracker_fd=41, pipe_handle=21) --multiprocessing-fork",
+ "44240": "/root/work/mstar/.venv/bin/python -c from multiprocessing.resource_tracker import main;main(40)"
+}

@@ -1,0 +1,24 @@
+{
+ "arm": "baseb",
+ "tree": "/root/work/base",
+ "cmd": [
+  "/root/work/mstar/.venv/bin/python",
+  "-m",
+  "mstar.cli.main",
+  "serve",
+  "qwen3_5_0.8b",
+  "--gpus",
+  "0",
+  "--port",
+  "8100",
+  "--config",
+  "configs/qwen3_5_0.8b.yaml"
+ ],
+ "env_extra": {},
+ "start": "2026-10-21 05:24:30",
+ "loadavg_start": "5.95 13.10 18.16 5/4224 61533",
+ "git": "",
+ "mstar_file": "/root/work/base/mstar/__init__.py",
+ "startup_s": 99.0,
+ "end": "2026-10-21 05:27:31"
+}

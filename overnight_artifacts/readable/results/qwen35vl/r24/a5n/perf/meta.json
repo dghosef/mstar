@@ -1,0 +1,25 @@
+{
+ "arm": "a5n",
+ "tree": "/root/work/asr5n",
+ "cmd": [
+  "/root/work/mstar/.venv/bin/python",
+  "-m",
+  "mstar.cli.main",
+  "serve",
+  "omnilingual_asr_ctc_300m",
+  "--gpus",
+  "0",
+  "--port",
+  "8100",
+  "--config",
+  "configs/omnilingual_asr_ctc_300m.yaml"
+ ],
+ "env_extra": {},
+ "start": "2026-10-21 09:17:32",
+ "loadavg_start": "15.83 17.98 24.14 5/3521 254315",
+ "git": "",
+ "mstar_file": "/root/work/asr5n/mstar/__init__.py",
+ "startup_s": 18.0,
+ "end": "2026-10-21 09:18:40",
+ "loadavg_end": "30.65 22.14 25.13 6/4356 255220"
+}

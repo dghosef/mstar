@@ -1,0 +1,19 @@
+{
+ "tag": "cfgpar_head_r2",
+ "tree": "/root/work/img4",
+ "mstar_file": "/root/work/img4/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve bagel --config /workspace/results/img/bagel/cfgpar_head_r2/config.yaml --gpus 0,1 --port 8100",
+ "sets": [],
+ "env": [],
+ "git": "",
+ "start": "09:03:52",
+ "gpu_mem_before": [
+  0,
+  0
+ ],
+ "startup_s": 85.01242470741272,
+ "gpu_mem_after": [
+  0,
+  0
+ ]
+}

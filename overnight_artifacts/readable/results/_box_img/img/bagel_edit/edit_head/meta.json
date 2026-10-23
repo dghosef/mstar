@@ -1,0 +1,17 @@
+{
+ "tag": "edit_head",
+ "tree": "/root/work/img4",
+ "mstar_file": "/root/work/img4/mstar/__init__.py",
+ "serve": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve bagel --config /workspace/results/img/bagel_edit/edit_head/config.yaml --gpus 0 --port 8200",
+ "sets": [],
+ "env": [],
+ "git": "",
+ "start": "08:42:52",
+ "gpu_mem_before": [
+  0
+ ],
+ "startup_s": 65.00721430778503,
+ "gpu_mem_after": [
+  47069
+ ]
+}

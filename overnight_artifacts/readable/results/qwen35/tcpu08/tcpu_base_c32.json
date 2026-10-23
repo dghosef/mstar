@@ -1,0 +1,51 @@
+[
+ {
+  "pid": 137101,
+  "tid": 137101,
+  "name": "?",
+  "cpu": 0.507,
+  "proc": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve qwen3_5_0.8b --gpus 0 --port 810"
+ },
+ {
+  "pid": 137396,
+  "tid": 138635,
+  "name": "?",
+  "cpu": 0.374,
+  "proc": "/root/work/mstar/.venv/bin/python -c from multiprocessing.spawn import spawn_main; spawn_m"
+ },
+ {
+  "pid": 137101,
+  "tid": 137250,
+  "name": "?",
+  "cpu": 0.356,
+  "proc": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve qwen3_5_0.8b --gpus 0 --port 810"
+ },
+ {
+  "pid": 137396,
+  "tid": 138636,
+  "name": "?",
+  "cpu": 0.351,
+  "proc": "/root/work/mstar/.venv/bin/python -c from multiprocessing.spawn import spawn_main; spawn_m"
+ },
+ {
+  "pid": 137396,
+  "tid": 137396,
+  "name": "?",
+  "cpu": 0.345,
+  "proc": "/root/work/mstar/.venv/bin/python -c from multiprocessing.spawn import spawn_main; spawn_m"
+ },
+ {
+  "pid": 137101,
+  "tid": 138374,
+  "name": "?",
+  "cpu": 0.156,
+  "proc": "/root/work/mstar/.venv/bin/python -m mstar.cli.main serve qwen3_5_0.8b --gpus 0 --port 810"
+ },
+ {
+  "pid": 137254,
+  "tid": 137254,
+  "name": "?",
+  "cpu": 0.046,
+  "proc": "/root/work/mstar/.venv/bin/python -c from multiprocessing.spawn import spawn_main; spawn_m"
+ }
+]

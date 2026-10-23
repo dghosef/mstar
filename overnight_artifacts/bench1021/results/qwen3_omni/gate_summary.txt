@@ -1,0 +1,2 @@
+mstar_main_a: FAIL  GSM8K 0.96 (competitors [0.96, 0.948]); A2T WER None (competitors []); T2S WER 0.15355727102023783, silent 0 (competitors [0.2300332778702163])
+mstar_pr_a: FAIL  GSM8K 0.964 (competitors [0.96, 0.948]); A2T WER None (competitors []); T2S WER None, silent None (competitors [0.2300332778702163])

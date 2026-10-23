@@ -1,0 +1,95 @@
+{
+ "label": "cs189_1g_gs6",
+ "tree": "/root/work/base",
+ "config": "",
+ "env": [
+  "HF_HOME=/root/work/hf"
+ ],
+ "size": "832x480",
+ "frames": 189,
+ "steps": 2,
+ "guidance": 6.0,
+ "concurrency": 1,
+ "num": 2,
+ "startup_s": 36.01490783691406,
+ "failed": 0,
+ "warmup_failed": 0,
+ "warmup_e2e_s": [
+  24.040923127999122
+ ],
+ "e2e_s": [
+  6.2333295099997486,
+  6.191668591000052
+ ],
+ "e2e_mean_s": 6.2124990504999005,
+ "e2e_median_s": 6.2124990504999005,
+ "wall_s": 12.460180557998683,
+ "videos_per_min": 9.630679061305194,
+ "peak_gpu_mem": "0, 59571 MiB | 1, 0 MiB",
+ "requests": [
+  {
+   "idx": 0,
+   "ok": true,
+   "e2e_s": 6.2333295099997486,
+   "bytes": 7927109,
+   "t_end": 1792573531.4922345
+  },
+  {
+   "idx": 1,
+   "ok": true,
+   "e2e_s": 6.191668591000052,
+   "bytes": 3346782,
+   "t_end": 1792573537.693943
+  }
+ ],
+ "node_phases": [
+  {
+   "rid": "vid-cc7daa536d064d34a0874be42997f772",
+   "total_ms": 6145.2,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.3,
+    "preprocess done -> conductor ingest": 1.0,
+    "conductor ingest -> conductor done": 5882.2,
+    "conductor done -> first chunk": 259.2,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 1.5
+   },
+   "nodes": {
+    "dit": {
+     "n": 3,
+     "total_ms": 3009.1000000000004,
+     "fwd_ms": 3002.5299999999997
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2847.8,
+     "fwd_ms": 2838.8
+    }
+   }
+  },
+  {
+   "rid": "vid-6c9cfe07bd51421e80a05b057a9689ce",
+   "total_ms": 6164.3,
+   "timeline_ms": {
+    "recv -> preprocess done": 1.5,
+    "preprocess done -> conductor ingest": 0.9,
+    "conductor ingest -> conductor done": 5900.8,
+    "conductor done -> first chunk": 256.1,
+    "first chunk -> last chunk": 0.0,
+    "last chunk -> finish": 5.0
+   },
+   "nodes": {
+    "dit": {
+     "n": 3,
+     "total_ms": 3016.8,
+     "fwd_ms": 3010.59
+    },
+    "vae_decoder": {
+     "n": 1,
+     "total_ms": 2870.0,
+     "fwd_ms": 2853.0
+    }
+   }
+  }
+ ]
+}

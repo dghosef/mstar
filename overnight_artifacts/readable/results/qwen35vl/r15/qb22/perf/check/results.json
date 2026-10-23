@@ -1,0 +1,189 @@
+{
+ "summary": {
+  "n": 28,
+  "errors": 0,
+  "wall_s": 4.45940877700923,
+  "req_per_s": 6.27885923899953,
+  "ttft_p50": 0.024482612003339455,
+  "ttft_mean": 0.05585204089584295,
+  "e2e_p50": 0.1335612219700124,
+  "ttft_p50_by_kind": {
+   "small": 0.024482612003339455,
+   "big": 0.061654825520236045,
+   "huge": 0.19016344301053323,
+   "text": 0.010939009516732767,
+   "xl": 0.26636957700247876
+  }
+ },
+ "rows": [
+  {
+   "id": "small_0",
+   "text": "The food dish shown in this image is **pastries**, specifically **sugar-coated pastries** \u2014 likely **french toast** or **croissants** \u2014 generously dusted with **white powdered sugar** (often called \u201csnow\u201d or \u201cicing\u201d).\n\nThere are also:\n- A cup of **black",
+   "ttft": 0.029916700965259224,
+   "e2e": 0.1394096299773082
+  },
+  {
+   "id": "small_1",
+   "text": "This image displays a classic French-style appetizer or snack presentation, likely served at a casual dining establishment. The dish consists of three small, round, white ceramic bowls arranged on a rectangular white platter, which is placed on a delicate, lace-patterned doily.\n\n**The Food Items:**\n\n1.  **",
+   "ttft": 0.02385699300793931,
+   "e2e": 0.13577429298311472
+  },
+  {
+   "id": "small_2",
+   "text": "The dish visible in this photo is **pastry** \u2014 specifically, **pastries** or **puff-pasts**, commonly known as **pastry rolls** or **puff-pasts** in some regions (like the UK or Ireland).\n\n### Key features:\n- They are golden-brown, flaky",
+   "ttft": 0.022855795978102833,
+   "e2e": 0.12978264997946098
+  },
+  {
+   "id": "small_3",
+   "text": "A close-up, slightly high-angle shot of a bowl filled with a generous mound of white powdered sugar, likely for a sweet treat like a cake, cookie, or dessert. The texture is fluffy and powdery, contrasting with the darker, baked-looking base of the food item. The lighting highlights the dustiness of the",
+   "ttft": 0.02287279296433553,
+   "e2e": 0.14913970895577222
+  },
+  {
+   "id": "small_4",
+   "text": "The food dish shown in this image is **pastries**, specifically **sugar-coated pastries** \u2014 likely **puff pastry** or **cr\u00eape** pastries, dusted with powdered sugar.\n\nThey appear to be stacked on a white plate, resting on a piece of parchment paper or napkin.",
+   "ttft": 0.026501958025619388,
+   "e2e": 0.1437960949842818
+  },
+  {
+   "id": "small_5",
+   "text": "The image displays a delightful breakfast or brunch spread featuring two golden-brown, crescent-shaped pastries \u2014 likely **crescent rolls** or **crescent pastries** \u2014 generously dusted with powdered sugar. These pastries are arranged on a small white plate, which rests on a dark green tray. Their soft",
+   "ttft": 0.02332840603776276,
+   "e2e": 0.1439402470132336
+  },
+  {
+   "id": "small_6",
+   "text": "The dish visible in the photo is **donuts** (also known as **doughnuts** or **crumbly donuts**), typically made from dough, sugar, and sometimes eggs or milk. They are commonly served with powdered sugar (icing) and are a popular sweet treat in many cultures.\n\n### Key characteristics",
+   "ttft": 0.02616017998661846,
+   "e2e": 0.14162877103080973
+  },
+  {
+   "id": "small_7",
+   "text": "A close-up shot of two golden-brown, fried pastries dusted generously with powdered sugar, nestled in a paper liner on a teal surface. The soft, textured appearance of the pastries suggests a sweet, artisanal treat.",
+   "ttft": 0.0251082309987396,
+   "e2e": 0.11325165396556258
+  },
+  {
+   "id": "small_8",
+   "text": "This image shows a **breakfast or brunch meal**, featuring:\n\n- A **sandwich** (likely a baguette or ciabatta) filled with **chicken, lettuce, and possibly ham or cheese**, served on a white plate.\n- A **small bowl of red jam** (possibly raspberry or",
+   "ttft": 0.03131622401997447,
+   "e2e": 0.13059340202016756
+  },
+  {
+   "id": "small_9",
+   "text": "This image features a plate of **pastries**, most likely **tortillas** or **tortilla chips**, dusted with powdered sugar \u2014 a classic sweet treat. Here\u2019s a detailed description:\n\n---\n\n### **Main Subject: Pastries on a Plate**\n\n- **Appearance**: The pastries are golden",
+   "ttft": 0.025916297046933323,
+   "e2e": 0.12559798505390063
+  },
+  {
+   "id": "small_10",
+   "text": "The dish visible in this photo is **donuts** (or possibly **crispy donuts**, **fritters**, or **crispy fried dough balls**), served with powdered sugar and dipping sauces.\n\n### Reasoning:\n- The food consists of round, golden-brown pastries with a textured",
+   "ttft": 0.020728347008116543,
+   "e2e": 0.12161978502990678
+  },
+  {
+   "id": "small_11",
+   "text": "A rustic wooden table is set with a plate of four golden-brown, powdered sugar-dusted donuts, likely a classic French pastry. In the center, a small metal bowl holds a vibrant red dipping sauce, possibly jam or jelly. To the left, a napkin holds a fork and knife. In the foreground,",
+   "ttft": 0.02118297095876187,
+   "e2e": 0.1313481509569101
+  },
+  {
+   "id": "big_0",
+   "text": "The food dish shown in the image is **fried dough balls** \u2014 commonly known as **fried dough sticks**, **fried doughnuts**, or **fried dumplings**.\n\n### Key features visible:\n- They are golden-brown, crispy-looking, and coated in a light, granular sugar or flour crust.\n-",
+   "ttft": 0.07327460095984861,
+   "e2e": 0.180967622960452
+  },
+  {
+   "id": "big_1",
+   "text": "The image displays a close-up, appetizing view of **pastries**, most likely **cheesecakes** or **puff pastries**, dusted generously with **powdered sugar**.\n\nHere\u2019s a detailed description:\n\n- **Shape & Texture**: The pastries are irregularly shaped \u2014 some are roughly",
+   "ttft": 0.05956838099518791,
+   "e2e": 0.15877305099274963
+  },
+  {
+   "id": "big_2",
+   "text": "Based on the visual evidence in the photo, the dish is **Candee** (also known as *Candee de la Cueva* or *Candee de la Cueva de la Cueva*), a traditional Spanish dessert.\n\nHere\u2019s how we can identify it:\n\n- **Appearance**: The food",
+   "ttft": 0.061648425995372236,
+   "e2e": 0.1630476809805259
+  },
+  {
+   "id": "big_3",
+   "text": "A plate of powdered pastry, likely a dessert, sits on a dark wooden table. The pastry is dusted with powdered sugar and appears to be a triangular or wedge-shaped item, possibly a pastry or a pastry-like treat. A silver spoon rests beside the plate. In the background, there are other items on the table,",
+   "ttft": 0.061661225045099854,
+   "e2e": 0.16621457203291357
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in the image is **pastries**, specifically **sugar cookies** or **pastel cookies**, likely made with **sugar, flour, and possibly eggs or butter**.\n\nKey features visible:\n- They are baked in a rectangular black baking pan lined with black parchment paper.\n- They are",
+   "ttft": 0.19322120503056794,
+   "e2e": 0.29723877704236656
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a close-up of three **donuts**, likely **papas arrachas** (a traditional Mexican pastry), generously dusted with **powdered sugar**.\n\nHere\u2019s a detailed description:\n\n- **Donuts**: They are golden-brown, rectangular pastries with a flaky, layered texture",
+   "ttft": 0.1871056809904985,
+   "e2e": 0.2891193209798075
+  },
+  {
+   "id": "text_0",
+   "text": "In Python, both **lists** and **tuples** are sequences of items, but they differ fundamentally in how they store and access those items.\n\n### 1. Storage Mechanism\n*   **List**: Stores items in a **list of lists** (nested structure). Each element is a list of its own",
+   "ttft": 0.017644317995291203,
+   "e2e": 0.1177988940034993
+  },
+  {
+   "id": "text_1",
+   "text": "The deep blue fades into the dark,\nWhere the stars are just a distant spark.\nThe waves are silent, waiting for the moon,\nTo rise and wash the world away.\n\nA single light breaks through the mist,\nA ghost of a sun, a ghost of night.\nIt paints the water in",
+   "ttft": 0.010898631997406483,
+   "e2e": 0.11063985695363954
+  },
+  {
+   "id": "text_2",
+   "text": "Improving sleep quality involves a combination of environmental control, lifestyle habits, and mental relaxation techniques. Here are three effective tips:\n\n1.  **Create a Consistent Sleep Schedule**\n    Establishing a routine is the most powerful tool for regulating your body's internal clock. Try to go to bed and wake up at",
+   "ttft": 0.0118016850319691,
+   "e2e": 0.11252725101076066
+  },
+  {
+   "id": "text_3",
+   "text": "Romeo and Juliet are the tragic lovers of Verona who fall in love despite their families' hatred, leading to their tragic deaths in the night.",
+   "ttft": 0.01069095596903935,
+   "e2e": 0.05791951896389946
+  },
+  {
+   "id": "text_4",
+   "text": "A refrigerator keeps food cold through a combination of **physics principles** and **engineering design**, primarily relying on the **First Law of Thermodynamics** (conservation of energy).\n\nHere is the step-by-step process of how it works:\n\n### 1. The Core Mechanism: Phase Change\nThe most critical part",
+   "ttft": 0.010926624003332108,
+   "e2e": 0.11236825695959851
+  },
+  {
+   "id": "text_5",
+   "text": "Here is a simple, comforting, and delicious tomato soup recipe. It uses fresh tomatoes, carrots, celery, and a splash of broth to create a rich, velvety texture without needing heavy stock.\n\n### **Simple Tomato Soup**\n\n**Prep time:** 10 minutes | **Cook time:** 2",
+   "ttft": 0.010896690015215427,
+   "e2e": 0.11355901800561696
+  },
+  {
+   "id": "text_6",
+   "text": "The capital of Australia is **Canberra**.\n\nIt was chosen in 1908 by the Australian government, which was led by Prime Minister **William Hobson**. The decision was based on several key factors:\n\n*   **Geographical Location**: Canberra is situated in the middle of the Great Australian Outback,",
+   "ttft": 0.011083275021519512,
+   "e2e": 0.10990722000133246
+  },
+  {
+   "id": "text_7",
+   "text": "Photosynthesis is the process by which green plants, algae, and certain bacteria convert light energy into chemical energy. This process occurs primarily in the **chloroplasts** of plant cells, which contain a pigment called **chlorophyll**.\n\nHere is a step-by-step breakdown of how it works:\n\n### 1.",
+   "ttft": 0.010951395030133426,
+   "e2e": 0.1105598250287585
+  },
+  {
+   "id": "xl_0",
+   "text": "This is a close-up, slightly high-angle shot of a casual dining table set with breakfast or brunch items. The table surface appears to be a speckled white marble or laminate.\n\n**Foreground & Left Side:**\n- A white ceramic mug filled with dark coffee sits on a matching saucer. The coffee has a",
+   "ttft": 0.2642235049861483,
+   "e2e": 0.37337810097960755
+  },
+  {
+   "id": "xl_1",
+   "text": "This is a close-up, slightly high-angle photograph of a meal served on a rectangular, light-colored serving board or tray, likely in a casual dining setting. The scene is dimly lit, with a dark, reflective surface visible in the background, possibly a table or countertop.\n\n**Foreground (Bottom of the tray",
+   "ttft": 0.2685156490188092,
+   "e2e": 0.37397976900683716
+  }
+ ],
+ "errors": []
+}

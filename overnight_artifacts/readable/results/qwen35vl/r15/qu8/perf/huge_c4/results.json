@@ -1,0 +1,89 @@
+{
+ "summary": {
+  "n": 12,
+  "errors": 0,
+  "wall_s": 0.9665885329595767,
+  "req_per_s": 12.414796566288095,
+  "ttft_p50": 0.1950185649911873,
+  "ttft_mean": 0.18638119908670583,
+  "e2e_p50": 0.3143749925075099,
+  "ttft_p50_by_kind": {
+   "huge": 0.1950185649911873
+  }
+ },
+ "rows": [
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in this image is **pastries**, specifically **sugar cookies** or **pastel cookies** (often called *past\u00e9is de nata*",
+   "ttft": 0.09115660295356065,
+   "e2e": 0.3292906739516184
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a close-up, appetizing view of **three heart-shaped pastries**, likely **heart-shaped donuts** or **heart-shaped puff pastry**, dust",
+   "ttft": 0.28003419400192797,
+   "e2e": 0.3555455529713072
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in the image is **pastries**, specifically **sugar cookies** or **pastries dusted with powdered sugar**.\n\nHere\u2019s why:",
+   "ttft": 0.2789365249918774,
+   "e2e": 0.35393422096967697
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a close-up, appetizing view of **three heart-shaped pastries**, likely **heart-shaped donuts** or **heart-shaped donut tarts",
+   "ttft": 0.15201606997288764,
+   "e2e": 0.33029269898543134
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in this image is **pastries**, specifically **sugar cookies** or **pastel cookies** (often called *past\u00e9is de nata*",
+   "ttft": 0.09338427102193236,
+   "e2e": 0.3134336930233985
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a close-up, appetizing view of **three heart-shaped pastries**, likely **heart-shaped donuts** or **heart-shaped donut tarts",
+   "ttft": 0.14581614901544526,
+   "e2e": 0.3133799450006336
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in the image is **pastries**, specifically **sugar cookies** or **pastries dusted with powdered sugar**.\n\nHere\u2019s why:",
+   "ttft": 0.23860839201370254,
+   "e2e": 0.31477326003368944
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a close-up, appetizing view of **three heart-shaped pastries**, likely **heart-shaped donuts** or **heart-shaped puff pastry**, dust",
+   "ttft": 0.23802106000948697,
+   "e2e": 0.31362905603600666
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in this image is **pastries**, specifically **sugar cookies** or **pastel cookies** (often called *past\u00e9is de nata*",
+   "ttft": 0.09308124001836404,
+   "e2e": 0.3144989180145785
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a close-up, appetizing view of **three heart-shaped pastries**, likely **heart-shaped donuts** or **heart-shaped donut tarts",
+   "ttft": 0.1464869119809009,
+   "e2e": 0.31425106700044125
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in the image is **pastries**, specifically **sugar cookies** or **pastries dusted with powdered sugar**.\n\nHere\u2019s why:",
+   "ttft": 0.23984943004325032,
+   "e2e": 0.2954525360255502
+  },
+  {
+   "id": "huge_1",
+   "text": "The image displays a close-up, appetizing view of **three heart-shaped pastries**, likely **heart-shaped donuts** or **heart-shaped puff pastry**, dust",
+   "ttft": 0.23918354301713407,
+   "e2e": 0.29469135199906304
+  }
+ ],
+ "errors": []
+}

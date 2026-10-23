@@ -1,0 +1,31 @@
+{
+ "vllm": {
+  "config": "lm-only",
+  "args": [
+   "--language-model-only"
+  ],
+  "geomean_tok_s": {
+   "default": 1489.1,
+   "lm-only": 1489.3,
+   "mnbt-16k": 1488.2
+  }
+ },
+ "sglang": {
+  "config": "chunk-16k",
+  "args": [
+   "--chunked-prefill-size",
+   "16384"
+  ],
+  "geomean_tok_s": {
+   "default": 1467.2,
+   "attn-fa3": 1466.6,
+   "chunk-16k": 1468.6
+  }
+ },
+ "mstar_frontend": "python",
+ "mstar_frontend_geomean": {
+  "mstar-pr": 1482.4212156981393,
+  "mstar-pr-rf": 1503.9332930957194
+ },
+ "mstar_frontend_reason": "python 1482 vs rust 1504 geomean tok/s; rust gate PASS; rule: rust if its gate passes and > +3%"
+}

@@ -1,0 +1,89 @@
+{
+ "summary": {
+  "n": 12,
+  "errors": 0,
+  "wall_s": 2.6553019410348497,
+  "req_per_s": 4.519260056475251,
+  "ttft_p50": 0.46536494049360044,
+  "ttft_mean": 0.47867358032575186,
+  "e2e_p50": 0.8844895369838923,
+  "ttft_p50_by_kind": {
+   "huge": 0.46536494049360044
+  }
+ },
+ "rows": [
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in the image is **beignets** \u2014 specifically, two classic New Orleans-style beignets dusted generously with powdered sugar.\n\n###",
+   "ttft": 0.2700948439887725,
+   "e2e": 0.8701605009846389
+  },
+  {
+   "id": "huge_1",
+   "text": "The image showcases a classic **Beignet**, a beloved French-American pastry, served on a simple white plate. The beignet is generously dusted with fine, white",
+   "ttft": 0.7609605489997193,
+   "e2e": 0.9645733760553412
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in the image is **beignets** \u2014 specifically, two classic New Orleans-style beignets dusted generously with powdered sugar.\n\n###",
+   "ttft": 0.4157078089774586,
+   "e2e": 0.9636042810161598
+  },
+  {
+   "id": "huge_1",
+   "text": "The image showcases a classic **Beignet**, a beloved French-American pastry, served on a simple white plate. The beignet is generously dusted with **powder",
+   "ttft": 0.5930277470033616,
+   "e2e": 0.9619906290317886
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in the image is **beignets** \u2014 specifically, two classic New Orleans-style beignets dusted generously with powdered sugar.\n\n###",
+   "ttft": 0.30131208896636963,
+   "e2e": 0.8847095390083268
+  },
+  {
+   "id": "huge_1",
+   "text": "The image showcases a classic **Beignet**, a beloved French-American pastry, served on a simple white plate. The beignet is generously dusted with fine, white",
+   "ttft": 0.3502314699580893,
+   "e2e": 0.8856726789963432
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in the image is **beignets** \u2014 specifically, two classic New Orleans-style beignets dusted generously with powdered sugar.\n\n###",
+   "ttft": 0.5232045710436068,
+   "e2e": 0.8837020600331016
+  },
+  {
+   "id": "huge_1",
+   "text": "The image showcases a classic **Beignet**, a beloved French-American pastry, served on a simple white plate. The beignet is generously dusted with fine, white",
+   "ttft": 0.6881144790095277,
+   "e2e": 0.8842695349594578
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in the image is **beignets** \u2014 specifically, two classic New Orleans-style beignets dusted generously with powdered sugar.\n\n###",
+   "ttft": 0.30087449197890237,
+   "e2e": 0.8850264099892229
+  },
+  {
+   "id": "huge_1",
+   "text": "The image showcases a classic **Beignet**, a beloved French-American pastry, served on a simple white plate. The beignet is generously dusted with **powder",
+   "ttft": 0.3433755729929544,
+   "e2e": 0.7982901309733279
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in the image is **beignets** \u2014 specifically, two classic New Orleans-style beignets dusted generously with powdered sugar.\n\n###",
+   "ttft": 0.682157268980518,
+   "e2e": 0.8038706459919922
+  },
+  {
+   "id": "huge_1",
+   "text": "The image showcases a classic **Beignet**, a beloved French-American pastry, served on a simple white plate. The beignet is generously dusted with **powder",
+   "ttft": 0.5150220720097423,
+   "e2e": 0.7970008319825865
+  }
+ ],
+ "errors": []
+}

@@ -1,0 +1,530 @@
+{
+ "cell": "zimage",
+ "gpu": "0",
+ "arms": {
+  "base": "/root/work/arms/head1",
+  "cand": "/root/work/arms/cand-f"
+ },
+ "rounds": [
+  {
+   "round": 0,
+   "arm": "base",
+   "t": "07:54:08",
+   "load1": 10.54833984375,
+   "startup_s": 117.01812588099892,
+   "load1_measure": 11.7119140625,
+   "metrics": {
+    "lat_mean_s": 0.8567759911669176,
+    "lat_p50_s": 0.8538456985006633,
+    "lat_min_s": 0.8497142659998644,
+    "failed": 0,
+    "c4_img_per_s": 1.0906312723726626
+   },
+   "load1_end": 29.8935546875
+  },
+  {
+   "round": 0,
+   "arm": "cand",
+   "t": "07:56:25",
+   "load1": 29.8935546875,
+   "startup_s": 114.01629666500048,
+   "load1_measure": 10.580078125,
+   "metrics": {
+    "lat_mean_s": 0.8431638176671186,
+    "lat_p50_s": 0.8444247665001967,
+    "lat_min_s": 0.8402170200006367,
+    "failed": 0,
+    "c4_img_per_s": 1.1083515948828622
+   },
+   "load1_end": 15.9208984375
+  },
+  {
+   "round": 1,
+   "arm": "cand",
+   "t": "07:58:39",
+   "load1": 15.9208984375,
+   "startup_s": 114.01706958799878,
+   "load1_measure": 11.92919921875,
+   "metrics": {
+    "lat_mean_s": 0.855386697833031,
+    "lat_p50_s": 0.855475049499546,
+    "lat_min_s": 0.8452681060007308,
+    "failed": 0,
+    "c4_img_per_s": 1.1440647314560362
+   },
+   "load1_end": 11.24658203125
+  },
+  {
+   "round": 1,
+   "arm": "base",
+   "t": "08:00:52",
+   "load1": 11.24658203125,
+   "startup_s": 117.02224867800032,
+   "load1_measure": 8.744140625,
+   "metrics": {
+    "lat_mean_s": 0.8468414111669821,
+    "lat_p50_s": 0.8456909964997976,
+    "lat_min_s": 0.8375301980013319,
+    "failed": 0,
+    "c4_img_per_s": 1.1110224519823015
+   },
+   "load1_end": 8.0498046875
+  }
+ ],
+ "profile": {
+  "base": {
+   "load": {
+    "wall_s": 2.53968879400054
+   },
+   "workers": {
+    "worker_0": {
+     "bs": 1.0,
+     "records": 5,
+     "phases": {
+      "await_gpu": {
+       "mean_ms": 2.51,
+       "p50_ms": 0.0,
+       "us_per_1k": 2510000.0
+      },
+      "engine.collect_outputs": {
+       "mean_ms": 0.03652173913043478,
+       "p50_ms": 0.04,
+       "us_per_1k": 33600.0
+      },
+      "engine.declare_step": {
+       "mean_ms": 0.0,
+       "p50_ms": 0.0,
+       "us_per_1k": 0.0
+      },
+      "engine.forward": {
+       "mean_ms": 3.2969565217391303,
+       "p50_ms": 0.85,
+       "us_per_1k": 3033200.0
+      },
+      "engine.postprocess": {
+       "mean_ms": 0.0,
+       "p50_ms": 0.0,
+       "us_per_1k": 0.0
+      },
+      "engine.preprocess": {
+       "mean_ms": 0.10478260869565217,
+       "p50_ms": 0.11,
+       "us_per_1k": 96400.0
+      },
+      "gpu_exec": {
+       "mean_ms": 74.5468,
+       "p50_ms": 91.88,
+       "us_per_1k": 74546800.0
+      },
+      "iter_total": {
+       "mean_ms": 70.15,
+       "p50_ms": 91.89,
+       "us_per_1k": 70150000.0
+      },
+      "rust.send_outputs.call": {
+       "mean_ms": 0.016956521739130433,
+       "p50_ms": 0.01,
+       "us_per_1k": 15599.999999999998
+      },
+      "rust.send_outputs.marshal": {
+       "mean_ms": 0.012173913043478262,
+       "p50_ms": 0.0,
+       "us_per_1k": 11200.000000000002
+      },
+      "speculate": {
+       "mean_ms": 0.09368421052631577,
+       "p50_ms": 0.09,
+       "us_per_1k": 71199.99999999999
+      },
+      "submit_spec": {
+       "mean_ms": 0.48857142857142855,
+       "p50_ms": 0.51,
+       "us_per_1k": 410400.0
+      },
+      "worker.await_admit_settled": {
+       "mean_ms": 1.44,
+       "p50_ms": 2.55,
+       "us_per_1k": 230400.0
+      },
+      "worker.gpu_thread.await_plan": {
+       "mean_ms": 0.002380952380952381,
+       "p50_ms": 0.0,
+       "us_per_1k": 2000.0
+      },
+      "worker.gpu_thread.exec": {
+       "mean_ms": 3.266000000000001,
+       "p50_ms": 1.13,
+       "us_per_1k": 3266000.000000001
+      },
+      "worker.gpu_thread.prepare_inputs": {
+       "mean_ms": 0.22479999999999997,
+       "p50_ms": 0.13,
+       "us_per_1k": 224799.99999999997
+      },
+      "worker.postprocess.check_stop": {
+       "mean_ms": 0.1443478260869565,
+       "p50_ms": 0.13,
+       "us_per_1k": 132800.0
+      },
+      "worker.postprocess.check_stop_tail": {
+       "mean_ms": 0.014347826086956523,
+       "p50_ms": 0.01,
+       "us_per_1k": 13200.0
+      },
+      "worker.postprocess.cleanup_inputs": {
+       "mean_ms": 0.012000000000000002,
+       "p50_ms": 0.01,
+       "us_per_1k": 12000.000000000002
+      },
+      "worker.postprocess.completion_event_sync": {
+       "mean_ms": 77.25260869565217,
+       "p50_ms": 91.0,
+       "us_per_1k": 71072400.0
+      },
+      "worker.postprocess.event_sync": {
+       "mean_ms": 71.068,
+       "p50_ms": 90.99,
+       "us_per_1k": 71068000.0
+      },
+      "worker.postprocess.pending_loop_stops": {
+       "mean_ms": 0.010000000000000002,
+       "p50_ms": 0.01,
+       "us_per_1k": 9200.000000000002
+      },
+      "worker.postprocess.prematerialize": {
+       "mean_ms": 0.13434782608695653,
+       "p50_ms": 0.12,
+       "us_per_1k": 123600.00000000001
+      },
+      "worker.postprocess.register_outputs": {
+       "mean_ms": 0.02608695652173913,
+       "p50_ms": 0.0,
+       "us_per_1k": 24000.0
+      },
+      "worker.postprocess.route": {
+       "mean_ms": 0.03217391304347826,
+       "p50_ms": 0.03,
+       "us_per_1k": 29600.0
+      },
+      "worker.postprocess.route_outputs": {
+       "mean_ms": 0.0982608695652174,
+       "p50_ms": 0.09,
+       "us_per_1k": 90400.00000000001
+      },
+      "worker.postprocess.send": {
+       "mean_ms": 0.03304347826086956,
+       "p50_ms": 0.02,
+       "us_per_1k": 30399.999999999996
+      },
+      "worker.postprocess.send_outputs": {
+       "mean_ms": 0.048695652173913036,
+       "p50_ms": 0.03,
+       "us_per_1k": 44799.99999999999
+      },
+      "worker.postprocess.send_prep": {
+       "mean_ms": 0.005652173913043478,
+       "p50_ms": 0.01,
+       "us_per_1k": 5200.0
+      },
+      "worker.postprocess.stop_loops": {
+       "mean_ms": 0.0034782608695652175,
+       "p50_ms": 0.0,
+       "us_per_1k": 3200.0
+      },
+      "worker.postprocess.store_tensors": {
+       "mean_ms": 0.05391304347826087,
+       "p50_ms": 0.05,
+       "us_per_1k": 49600.0
+      },
+      "worker.postprocess.update_lru": {
+       "mean_ms": 0.0,
+       "p50_ms": 0.0,
+       "us_per_1k": 0.0
+      },
+      "worker.postprocess_batch": {
+       "mean_ms": 71.4,
+       "p50_ms": 91.24,
+       "us_per_1k": 71400000.0
+      },
+      "worker.schedule": {
+       "mean_ms": 0.019999999999999997,
+       "p50_ms": 0.01,
+       "us_per_1k": 18400.0
+      },
+      "worker.schedule_yield_away": {
+       "mean_ms": 0.034999999999999996,
+       "p50_ms": 0.015,
+       "us_per_1k": 8400.0
+      },
+      "worker.submit_spec.launch_wait": {
+       "mean_ms": 0.4619047619047619,
+       "p50_ms": 0.49,
+       "us_per_1k": 387999.99999999994
+      }
+     }
+    }
+   }
+  },
+  "cand": {
+   "load": {
+    "wall_s": 2.563196340999639
+   },
+   "workers": {
+    "worker_0": {
+     "bs": 1.0,
+     "records": 5,
+     "phases": {
+      "await_gpu": {
+       "mean_ms": 2.6859999999999995,
+       "p50_ms": 0.01,
+       "us_per_1k": 2685999.9999999995
+      },
+      "engine.collect_outputs": {
+       "mean_ms": 0.04217391304347826,
+       "p50_ms": 0.04,
+       "us_per_1k": 38800.0
+      },
+      "engine.declare_step": {
+       "mean_ms": 0.0,
+       "p50_ms": 0.0,
+       "us_per_1k": 0.0
+      },
+      "engine.forward": {
+       "mean_ms": 3.37,
+       "p50_ms": 0.54,
+       "us_per_1k": 3100400.0
+      },
+      "engine.postprocess": {
+       "mean_ms": 0.0,
+       "p50_ms": 0.0,
+       "us_per_1k": 0.0
+      },
+      "engine.preprocess": {
+       "mean_ms": 0.1356521739130435,
+       "p50_ms": 0.13,
+       "us_per_1k": 124800.00000000001
+      },
+      "gpu_exec": {
+       "mean_ms": 74.3828,
+       "p50_ms": 91.69,
+       "us_per_1k": 74382800.0
+      },
+      "iter_total": {
+       "mean_ms": 70.134,
+       "p50_ms": 91.76,
+       "us_per_1k": 70134000.0
+      },
+      "rust.send_outputs.call": {
+       "mean_ms": 0.02565217391304348,
+       "p50_ms": 0.01,
+       "us_per_1k": 23600.000000000004
+      },
+      "rust.send_outputs.marshal": {
+       "mean_ms": 0.017391304347826087,
+       "p50_ms": 0.0,
+       "us_per_1k": 16000.0
+      },
+      "speculate": {
+       "mean_ms": 0.10421052631578948,
+       "p50_ms": 0.1,
+       "us_per_1k": 79199.99999999999
+      },
+      "submit_spec": {
+       "mean_ms": 0.6195238095238096,
+       "p50_ms": 0.61,
+       "us_per_1k": 520400.00000000006
+      },
+      "worker.await_admit_settled": {
+       "mean_ms": 2.3825,
+       "p50_ms": 2.07,
+       "us_per_1k": 381200.0
+      },
+      "worker.gpu_thread.await_plan": {
+       "mean_ms": 0.009047619047619047,
+       "p50_ms": 0.0,
+       "us_per_1k": 7600.0
+      },
+      "worker.gpu_thread.exec": {
+       "mean_ms": 3.3920000000000003,
+       "p50_ms": 0.96,
+       "us_per_1k": 3392000.0000000005
+      },
+      "worker.gpu_thread.prepare_inputs": {
+       "mean_ms": 0.4672,
+       "p50_ms": 0.16,
+       "us_per_1k": 467200.0
+      },
+      "worker.postprocess.check_stop": {
+       "mean_ms": 0.23869565217391306,
+       "p50_ms": 0.24,
+       "us_per_1k": 219600.00000000003
+      },
+      "worker.postprocess.check_stop_tail": {
+       "mean_ms": 0.024347826086956518,
+       "p50_ms": 0.02,
+       "us_per_1k": 22399.999999999996
+      },
+      "worker.postprocess.cleanup_inputs": {
+       "mean_ms": 0.012000000000000002,
+       "p50_ms": 0.01,
+       "us_per_1k": 12000.000000000002
+      },
+      "worker.postprocess.completion_event_sync": {
+       "mean_ms": 76.6886956521739,
+       "p50_ms": 90.25,
+       "us_per_1k": 70553600.0
+      },
+      "worker.postprocess.event_sync": {
+       "mean_ms": 70.54400000000001,
+       "p50_ms": 90.24,
+       "us_per_1k": 70544000.00000001
+      },
+      "worker.postprocess.pending_loop_stops": {
+       "mean_ms": 0.010000000000000002,
+       "p50_ms": 0.01,
+       "us_per_1k": 9200.000000000002
+      },
+      "worker.postprocess.prematerialize": {
+       "mean_ms": 0.22434782608695653,
+       "p50_ms": 0.23,
+       "us_per_1k": 206400.0
+      },
+      "worker.postprocess.register_outputs": {
+       "mean_ms": 0.03304347826086956,
+       "p50_ms": 0.0,
+       "us_per_1k": 30400.0
+      },
+      "worker.postprocess.route": {
+       "mean_ms": 0.049999999999999996,
+       "p50_ms": 0.05,
+       "us_per_1k": 46000.0
+      },
+      "worker.postprocess.route_outputs": {
+       "mean_ms": 0.13869565217391305,
+       "p50_ms": 0.14,
+       "us_per_1k": 127600.00000000001
+      },
+      "worker.postprocess.send": {
+       "mean_ms": 0.05130434782608696,
+       "p50_ms": 0.02,
+       "us_per_1k": 47200.00000000001
+      },
+      "worker.postprocess.send_outputs": {
+       "mean_ms": 0.0691304347826087,
+       "p50_ms": 0.04,
+       "us_per_1k": 63600.00000000001
+      },
+      "worker.postprocess.send_prep": {
+       "mean_ms": 0.010000000000000002,
+       "p50_ms": 0.01,
+       "us_per_1k": 9200.000000000002
+      },
+      "worker.postprocess.stop_loops": {
+       "mean_ms": 0.0034782608695652175,
+       "p50_ms": 0.0,
+       "us_per_1k": 3200.0
+      },
+      "worker.postprocess.store_tensors": {
+       "mean_ms": 0.0782608695652174,
+       "p50_ms": 0.08,
+       "us_per_1k": 72000.00000000001
+      },
+      "worker.postprocess.update_lru": {
+       "mean_ms": 0.0,
+       "p50_ms": 0.0,
+       "us_per_1k": 0.0
+      },
+      "worker.postprocess_batch": {
+       "mean_ms": 71.042,
+       "p50_ms": 90.74,
+       "us_per_1k": 71042000.0
+      },
+      "worker.schedule": {
+       "mean_ms": 0.03,
+       "p50_ms": 0.01,
+       "us_per_1k": 27600.0
+      },
+      "worker.schedule_yield_away": {
+       "mean_ms": 0.04,
+       "p50_ms": 0.01,
+       "us_per_1k": 9600.0
+      },
+      "worker.submit_spec.launch_wait": {
+       "mean_ms": 0.5876190476190476,
+       "p50_ms": 0.59,
+       "us_per_1k": 493600.0
+      }
+     }
+    }
+   }
+  }
+ },
+ "errors": [],
+ "base_rev": "6e9b686b5 perf/overnight-shared dirty=0",
+ "cand_rev": "76e63021c perf/ovn-integ-cand-f dirty=0",
+ "correctness": {
+  "psnr_base_vs_cand_r0_min": 27.087200578653473,
+  "psnr_base_vs_cand_r0_median": 36.34006262777231,
+  "psnr_base_r0_vs_r1_min": 32.89345968969223,
+  "psnr_base_r0_vs_r1_median": 36.17361417349545,
+  "psnr_cand_r0_vs_r1_min": 26.850206661361142,
+  "psnr_cand_r0_vs_r1_median": 31.119496591359294
+ },
+ "summary": {
+  "c4_img_per_s": {
+   "base": [
+    1.0906312723726626,
+    1.1110224519823015
+   ],
+   "cand": [
+    1.1083515948828622,
+    1.1440647314560362
+   ],
+   "delta_pct": 2.305657852658314
+  },
+  "failed": {
+   "base": [
+    0,
+    0
+   ],
+   "cand": [
+    0,
+    0
+   ],
+   "delta_pct": null
+  },
+  "lat_mean_s": {
+   "base": [
+    0.8567759911669176,
+    0.8468414111669821
+   ],
+   "cand": [
+    0.8431638176671186,
+    0.855386697833031
+   ],
+   "delta_pct": -0.29741929301781833
+  },
+  "lat_min_s": {
+   "base": [
+    0.8497142659998644,
+    0.8375301980013319
+   ],
+   "cand": [
+    0.8402170200006367,
+    0.8452681060007308
+   ],
+   "delta_pct": -0.10427285656381391
+  },
+  "lat_p50_s": {
+   "base": [
+    0.8538456985006633,
+    0.8456909964997976
+   ],
+   "cand": [
+    0.8444247665001967,
+    0.855475049499546
+   ],
+   "delta_pct": 0.021365881675283277
+  }
+ }
+}

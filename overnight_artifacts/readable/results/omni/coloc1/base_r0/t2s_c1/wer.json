@@ -1,0 +1,51 @@
+{
+ "n": 6,
+ "corpus_wer": 0.07219662058371736,
+ "median_wer": 0.07100591715976332,
+ "n_wer_gt_0.2": 1,
+ "audio_s": 319.06125000000003,
+ "rows": [
+  {
+   "wav": "req_0.wav",
+   "dur": 83.496875,
+   "wer": 0.0273224043715847,
+   "ref": "The capital of France is **Paris**.\n\nParis is one of the most iconic and culturally rich cities in the world, often referred to as the \"City of Light\" (*La Ville Lumi\u00e8re*). Located on the River Seine in northern France, it is not only the political and economic heart of the country but also a global hub for art, fashion, gastronomy, and culture.\n\n**Key Features of Paris:**\n\n1. **Historical Significance**: Paris has been a center of power and culture for centuries. It was the capital of the Kingdom of France and later the French Republic. The city has witnessed pivotal historical events, including the French Revolution and both World Wars.\n\n2. **Architecture and Landmarks**: Paris is renowned for its stunning architecture, blending medieval, Renaissance, and modern styles. Some of its most famous landmarks include:\n   - **Eiffel Tower**: An iron lattice tower built for the 1889 World's Fair, now a global symbol of France.\n   - **Notre-Dame Cathedral**: A masterpiece of French Gothic architecture, located on the \u00cele de la Cit\u00e9.\n   - **Louvre Museum**: The world's largest art museum and home to the *Mona Lisa* and *Venus de Milo*",
+   "hyp": " The capital of France is Paris. Paris is one of the most iconic and culturally rich cities in the world, often referred to as the City of Light, La Ville Lumi\u00e8re. Located on the River Seine in northern France, it is not only the political and economic heart of the country, but also a global hub for art, fashion, gastronomy, and culture. Key Features of Paris 1. Historical Significance Paris has been a center of power and culture for centuries. It was the capital of the Kingdom of France and later the French Republic. The city has witnessed pivotal historical events, including the French Revolution and both World Wars. R. Ascanta Architecture and Landmarks Paris is renowned for its stunning architecture, blending medieval, renaissance, and modern styles. Some of its most famous landmarks include Eiffel Tower, an iron lattice tower built for the 1889 World's Fair, now a global symbol of France, Notre Dame Cathedral, a masterpiece of French Gothic architecture located on the Ile de la Cit\u00e9, Louvre Museum, the world's largest art museum and home to the Mona Lisa and Venus de Milo,"
+  },
+  {
+   "wav": "req_1.wav",
+   "dur": 86.856875,
+   "wer": 0.15,
+   "ref": "Certainly! Machine learning (ML) and deep learning (DL) are both subfields of artificial intelligence (AI), but they differ in their approach, complexity, and application. Here's a breakdown of the key differences:\n\n### 1. **Definition**\n- **Machine Learning**: A subset of AI that enables systems to learn from data and improve over time without being explicitly programmed. It uses algorithms to identify patterns and make decisions based on input data.\n- **Deep Learning**: A specialized subset of machine learning that uses artificial neural networks with multiple layers (hence \"deep\") to model complex patterns in data.\n\n### 2. **Architecture**\n- **Machine Learning**: Typically uses simpler models such as linear regression, decision trees, support vector machines (SVM), or random forests. These models often require manual feature extraction.\n- **Deep Learning**: Uses deep neural networks (e.g., convolutional neural networks (CNNs), recurrent neural networks (RNNs), transformers) that automatically learn features from raw data.\n\n### 3. **Feature Engineering**\n- **Machine Learning**: Requires significant human effort to select and engineer relevant features from raw data.\n- **Deep Learning**: Automatically extracts features from raw data (e.g., pixels in an image or raw text), reducing the need",
+   "hyp": " Certainly, machine learning, ML, and deep learning, DL, are both subfields of artificial intelligence, AI, but they differ in their approach, complexity, and application. Here's a breakdown of the key differences. 1. Definition Machine learning, a subset of AI that enables systems to learn from data and improve over time without being explicitly programmed. It uses algorithms to identify patterns and make decisions based on input data. Deep learning. A specialized subset of machine learning that uses artificial neural networks with multiple layers, hence deep, to model complex patterns in data. 230s. Architecture. Machine learning typically uses simpler models such as linear regression, decision trees, support vector machines, SVM, or random forests. These models often require manual feature extraction. Deep learning uses deep neural networks, e.g., convolutional neural networks, CNNs, recurrent neural networks, RNNs, transformers, that automatically learn features from raw data. Three, feature engineering. Machine learning requires significant human effort to select and engineer relevant features from raw data. Deep learning automatically extracts features from raw data, e.g., pixels in an image or raw text, reducing the"
+  },
+  {
+   "wav": "req_2.wav",
+   "dur": 31.976875,
+   "wer": 0.06493506493506493,
+   "ref": "Here are 5 haikus capturing the essence of autumn leaves:\n\n1.  \nCrimson carpet\u94fa,  \nWind whispers through bare branches\u2014  \nSunlight fades to gold.\n\n2.  \nMaple flames descend,  \nDancing on the crisp morning air\u2014  \nEarth's final applause.\n\n3.  \nCrisp crunch underfoot,  \nA thousand tiny sighs rise\u2014  \nAutumn's quiet song.\n\n4.  \nGilded canopy,  \nSheds its jewels to the waiting soil\u2014  \nSeasons turn again.\n\n5.  \nFalling, slow and free,  \nEach leaf a story told\u2014  \nEarth's breath in motion.",
+   "hyp": " Here are five haikus capturing the essence of autumn leaves. 1. Crimson Carpet Pool. Wind whispers through bare branches. Sunlight fades to gold. Dax maple flames descend, dancing on the crisp morning air. Earth's final applause. 3. Crisp Prunch Underfoot. A thousand tiny sighs rise. Autumn's quiet song. 4. Gilded Canopy. Sheds its jewels to the waiting waiting soil, seasons turn again. 5. Falling, slow and free, each leaf a story told, earth's breath in motion."
+  },
+  {
+   "wav": "req_3.wav",
+   "dur": 23.816875,
+   "wer": 0.0,
+   "ref": "The French Revolution (1789\u20131799) was a period of radical social and political change in France, sparked by widespread discontent with the monarchy, economic hardship, and Enlightenment ideals. It led to the end of absolute monarchy, the rise of democratic principles, and the eventual ascent of Napoleon Bonaparte. The revolution profoundly influenced modern political thought and inspired democratic movements worldwide.",
+   "hyp": " The French Revolution was a period of radical social and political change in France, sparked by widespread discontent with the monarchy, economic hardship, and Enlightenment ideals. It led to the end of absolute monarchy, the rise of democratic principles, and the eventual ascent of Napoleon Bonaparte. The revolution profoundly influenced modern political thought and inspired democratic movements worldwide."
+  },
+  {
+   "wav": "req_4.wav",
+   "dur": 89.816875,
+   "wer": 0.07100591715976332,
+   "ref": "Climate change is primarily driven by human activities that increase the concentration of greenhouse gases (GHGs) in the Earth's atmosphere. The main causes include:\n\n1. **Burning of Fossil Fuels**: The combustion of coal, oil, and natural gas for energy and transportation releases large amounts of carbon dioxide (CO\u2082), the most significant greenhouse gas contributing to global warming.\n\n2. **Deforestation and Land Use Changes**: Trees absorb CO\u2082 from the atmosphere. When forests are cleared or burned, not only is this carbon sink lost, but stored carbon is also released back into the atmosphere.\n\n3. **Industrial Processes**: Manufacturing activities, such as cement production, release CO\u2082 and other GHGs. Additionally, industrial processes emit potent greenhouse gases like nitrous oxide (N\u2082O) and fluorinated gases.\n\n4. **Agriculture**: Livestock farming produces methane (CH\ufffd\ufffd), a potent greenhouse gas, through enteric fermentation (digestive processes in animals). Rice cultivation also releases methane, while synthetic fertilizers emit nitrous oxide.\n\n5. **Waste Management**: Landfills generate methane as organic waste decomposes anaerobically. Wastewater treatment processes also release methane and nitrous oxide.\n\n6. **Transportation**: Cars, trucks, ships",
+   "hyp": " Climate change is primarily driven by human activities that increase the concentration of greenhouse gases, GHGs, in the Earth's atmosphere. The main causes include 1. Burning of fossil fuels. The combustion of coal, oil, and natural gas for energy and transportation releases large amounts of carbon dioxide, CO2, the most significant greenhouse gas contributing to global warming. 2. Deforestation and Land Use Changes Trees absorb CO2 from the atmosphere. When forests are cleared or burned, not only is this carbon sink lost, but stored carbon is also released back into the atmosphere. 3. Industrial Processes Manufacturing activities, such as cement production, release CO2 and other GHGs. Additionally, industrial processes emit potent greenhouse gases like nitrous oxide, N2O, and fluorinated gases WAC. 4. Agriculture, livestock farming produces methane, CH, a potent greenhouse gas, through enteric fermentation, digestive processes in animals. Rice cultivation also releases methane, while synthetic fertilizers emit nitrous oxide. 5. Waste Management Landfills generate methane as organic waste decomposes anaerobically. Wastewater treatment processes also release methane and nitrous oxide. 6. Transportation Cars, trucks,"
+  },
+  {
+   "wav": "req_5.wav",
+   "dur": 3.096875,
+   "wer": 0.25,
+   "ref": "Buenos d\u00edas, \u00bfc\u00f3mo est\u00e1s?",
+   "hyp": " Buenos dias, nobias! Como estas?"
+  }
+ ]
+}

@@ -1,0 +1,51 @@
+{
+ "mstar_frontend": {
+  "config": "rust",
+  "score": 17.503780731259578,
+  "gate_pass": true,
+  "candidates": [
+   [
+    17.503780731259578,
+    "rust"
+   ],
+   [
+    17.393371106813447,
+    "python"
+   ]
+  ]
+ },
+ "voxserve": {
+  "config": "bs64_compile",
+  "score": 9.72375927368111,
+  "gate_pass": true,
+  "candidates": [
+   [
+    9.72375927368111,
+    "bs64_compile"
+   ],
+   [
+    9.697587873651306,
+    "bs64_async"
+   ],
+   [
+    9.693311911064711,
+    "bs64"
+   ]
+  ]
+ },
+ "orpheusvllm": {
+  "config": "ignore_seed",
+  "score": 16.238673094867433,
+  "gate_pass": true,
+  "candidates": [
+   [
+    16.238673094867433,
+    "ignore_seed"
+   ],
+   [
+    16.089288805067323,
+    "default"
+   ]
+  ]
+ }
+}

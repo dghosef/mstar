@@ -1,0 +1,26 @@
+{
+ "arm": "pv4",
+ "tree": "/root/work/mstar",
+ "cmd": [
+  "/root/work/mstar/.venv/bin/python",
+  "-m",
+  "mstar.cli.main",
+  "serve",
+  "qwen3_5_0.8b",
+  "--gpus",
+  "0",
+  "--port",
+  "8100",
+  "--config",
+  "configs/qwen3_5_0.8b.yaml"
+ ],
+ "env_extra": {
+  "MSTAR_OVN_PV_BS": "4"
+ },
+ "start": "2026-10-21 06:09:53",
+ "loadavg_start": "3.52 12.38 20.35 3/3246 88350",
+ "git": "",
+ "mstar_file": "/root/work/mstar/mstar/__init__.py",
+ "startup_s": 102.0,
+ "end": "2026-10-21 06:12:47"
+}

@@ -1,0 +1,89 @@
+{
+ "summary": {
+  "n": 12,
+  "errors": 0,
+  "wall_s": 1.834117693011649,
+  "req_per_s": 6.542655384505789,
+  "ttft_p50": 0.40962034999392927,
+  "ttft_mean": 0.3759071743261302,
+  "e2e_p50": 0.6105423369735945,
+  "ttft_p50_by_kind": {
+   "huge": 0.40962034999392927
+  }
+ },
+ "rows": [
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in this image is **beignets** \u2014 specifically, **French beignets** (also known as *beignets* in French",
+   "ttft": 0.1601340309716761,
+   "e2e": 0.612458712013904
+  },
+  {
+   "id": "huge_1",
+   "text": "The food item pictured is a plate of **beignets** \u2014 classic French-style fried dough pastries.\n\nHere\u2019s a detailed description:\n\n- **Appearance",
+   "ttft": 0.4126943050068803,
+   "e2e": 0.6157668109517545
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in this image is **beignets** \u2014 specifically, **French beignets** (also known as *beignets* in French",
+   "ttft": 0.5454934180015698,
+   "e2e": 0.6351647270494141
+  },
+  {
+   "id": "huge_1",
+   "text": "The food item pictured is a plate of **beignets** \u2014 classic French-style fried dough pastries.\n\nHere\u2019s a detailed description:\n\n- **Appearance",
+   "ttft": 0.41115498600993305,
+   "e2e": 0.6157505890005268
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in this image is **beignets** \u2014 specifically, **French beignets** (also known as *beignets* in French",
+   "ttft": 0.1610626780311577,
+   "e2e": 0.6105889769969508
+  },
+  {
+   "id": "huge_1",
+   "text": "The food item pictured is a plate of **beignets** \u2014 classic French-style fried dough pastries.\n\nHere\u2019s a detailed description:\n\n- **Appearance",
+   "ttft": 0.4103729460039176,
+   "e2e": 0.6109052500105463
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in this image is **beignets** \u2014 specifically, **French beignets** (also known as *beignets* in French",
+   "ttft": 0.40886775398394093,
+   "e2e": 0.6087297119665891
+  },
+  {
+   "id": "huge_1",
+   "text": "The food item pictured is a plate of **beignets** \u2014 classic French-style fried dough pastries.\n\nHere\u2019s a detailed description:\n\n- **Appearance",
+   "ttft": 0.5263424039585516,
+   "e2e": 0.6104956969502382
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in this image is **beignets** \u2014 specifically, **French beignets** (also known as *beignets* in French",
+   "ttft": 0.16056088299956173,
+   "e2e": 0.6020866549806669
+  },
+  {
+   "id": "huge_1",
+   "text": "The food item pictured is a plate of **beignets** \u2014 classic French-style fried dough pastries.\n\nHere\u2019s a detailed description:\n\n- **Appearance",
+   "ttft": 0.3999914099695161,
+   "e2e": 0.6029519439907745
+  },
+  {
+   "id": "huge_0",
+   "text": "The food dish shown in this image is **beignets** \u2014 specifically, **French beignets** (also known as *beignets* in French",
+   "ttft": 0.3993265819735825,
+   "e2e": 0.6021955439937301
+  },
+  {
+   "id": "huge_1",
+   "text": "The food item pictured is a plate of **beignets** \u2014 classic French-style fried dough pastries.\n\nHere\u2019s a detailed description:\n\n- **Appearance",
+   "ttft": 0.5148846950032748,
+   "e2e": 0.5854237290332094
+  }
+ ],
+ "errors": []
+}
