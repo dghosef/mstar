@@ -23,8 +23,8 @@ Decision rules (fixed before the run; each decision is logged to decisions.jsonl
                      only if all its points ran with failed == 0)
   frontend           Rust if mstar_pr_rf_a passes the gate and its geomean > Python's x 1.03,
                      else Python; the choice applies to every M* arm of that model
-  gate               gate.py defaults; if mstar-pr's gate fails, the model's timed phases are
-                     skipped (recorded), other models continue
+  gate               sanity gate: gate.py verdicts are reported; a strict-parity FAIL is
+                     annotated and timed phases continue (skipped only if mstar-pr has no verdict)
   failures           every server start and cell has a hard timeout; a failed start or a cell
                      with failed > 0 is retried once on a fresh server, then recorded and the
                      runner moves on (an arm whose server never comes up is excluded for the
@@ -499,7 +499,7 @@ class ModelRun:
                 decide(self.key, f"gate {k}", v, detail=detail.get(k, ""))
                 if v == "FAIL":
                     failure(self.id, k, "gate", k, detail.get(k, ""),
-                            "timed phases skipped for this model" if k == "mstar_pr_a" else "recorded; arm still timed")
+                            "annotated; timed phases continue (sanity gate)" if k == "mstar_pr_a" else "recorded; arm still timed")
         (self.out / "stages" / "gate_verdicts.json").write_text(json.dumps(verdicts))
         (self.out / "gate_summary.txt").write_text("".join(f"{k}: {v}  {detail.get(k, '')}\n"
                                                            for k, v in verdicts.items()))
@@ -600,7 +600,7 @@ class ModelRun:
                 if v == "FAIL":
                     blk = gate.split(f"#### gate {k}")[1].split("####")[0]
                     failure(self.id, k, "gate", k, blk.strip(),
-                            "timed phases skipped for this model" if k == "mstar_pr_a" else "recorded; arm still timed")
+                            "annotated; timed phases continue (sanity gate)" if k == "mstar_pr_a" else "recorded; arm still timed")
         (self.out / "stages" / "gate_verdicts.json").write_text(json.dumps(verdicts))
         self.frontend_rule(verdicts)
         return verdicts
@@ -628,9 +628,16 @@ class ModelRun:
                    rust_gate=verdicts.get("mstar_pr_rf_a"))
 
     def gate_ok(self) -> bool:
+        # Sanity gate (user, 2026-10-22): a strict-parity FAIL is annotated, not gating. Timed phases
+        # are skipped only when mstar-pr produced no gate verdict at all (its server never served).
         v = json.loads((self.out / "stages" / "gate_verdicts.json").read_text()) \
             if (self.out / "stages" / "gate_verdicts.json").exists() else {}
-        return v.get("mstar_pr_a") == "PASS"
+        verdict = v.get("mstar_pr_a")
+        if verdict not in (None, "PASS") and not self.marker("gate_annotated").exists():
+            decide(self.key, "gate", f"mstar-pr strict parity {verdict}: annotated, timed phases continue "
+                   "(sanity-gate rule)")
+            self.marker("gate_annotated").touch()
+        return verdict is not None
 
     def ph_rounds(self):
         if not self.gate_ok():

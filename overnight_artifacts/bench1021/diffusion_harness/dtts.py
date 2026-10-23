@@ -848,7 +848,7 @@ def run_phase(q, spec, phase):
     elif phase == "select":
         select(b)
     elif phase == "rounds":
-        rounds(b, q.get("rounds", 3))
+        rounds(b, spec.get("rounds", q.get("rounds", 3)))
     elif phase == "rounds_extra":
         rounds(b, 2, first=4)
     elif phase == "profile":

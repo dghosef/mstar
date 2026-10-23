@@ -106,10 +106,10 @@ UND_BODY = {"model": BAGEL_ID, "stream": True, "messages": UND_MSG, "max_tokens"
 
 def vo_chat(content, cfg):
     extra = {**VO_EXTRA, **cfg}
-    # fields at the top level and in extra_body: vllm-omni's chat path reads declared extra args from either
+    # in extra_body only: vllm-omni rejects (400) a diffusion parameter given both there and at the top level
     return {"path": "/v1/chat/completions", "encoding": "json",
             "body": {"model": BAGEL_ID, "messages": [{"role": "user", "content": content}], "modalities": ["image"],
-                     "stream": False, **extra, "extra_body": extra},
+                     "stream": False, "extra_body": extra},
             "response": "json", "extract": "choices.0.message.content.0.image_url.url", "decode": "b64",
             "check": "image", "save": "png"}
 
@@ -338,7 +338,7 @@ def vjepa(ac):
             # M* fetches the 11.8 GB upstream checkpoint on first start; pre-fetch it and point torch.hub at it
             f"test -s {ckpt} || (mkdir -p $(dirname {ckpt}) && curl -sfL --retry 3 -o {ckpt}.part "
             f"https://dl.fbaipublicfiles.com/vjepa2/vjepa2-ac-vitg.pt && mv {ckpt}.part {ckpt})",
-            f"mkdir -p $HOME/.cache/torch/hub/checkpoints && ln -sf {ckpt} $HOME/.cache/torch/hub/checkpoints/vjepa2-ac-vitg.pt",
+            f"T=${{TORCH_HOME:-$HOME/.cache/torch}}/hub/checkpoints && mkdir -p $T && ln -sf {ckpt} $T/vjepa2-ac-vitg.pt",
             VJ_REPO_INSTALL,
             "mkdir -p {work}/overlays/vjepa2 && " + UV + " {pr}/.venv/bin/python --no-deps --target "
             "{work}/overlays/vjepa2 timm einops"] if ac else []),
@@ -378,7 +378,14 @@ WP_PRE = [
     + UV + " {pr}/.venv/bin/python --no-deps --target " + WP_OVERLAY + " {eng}/flash-attention/flash_attn/cute && "
     + UV + " {pr}/.venv/bin/python --no-deps --target " + WP_OVERLAY + " "
     "'taehv @ https://github.com/madebyollin/taehv/archive/7dc60ec6601af2e668e31bc70acc4cb3665e4c22.zip' "
-    "'tensordict==0.10.0')) && PYTHONPATH=" + WP_OVERLAY + " {pr}/.venv/bin/python -c 'import flash_attn.cute, taehv; print(\"ok\")'"]
+    "'tensordict==0.10.0' 'quack-kernels==0.6.5')) && PYTHONPATH=" + WP_OVERLAY + " {pr}/.venv/bin/python -c 'import flash_attn.cute, taehv; print(\"ok\")'"]
+
+
+WP_PRE.insert(0, "mkdir -p " + WP_OVERLAY + "/flash_attn && touch " + WP_OVERLAY + "/flash_attn/__init__.py")
+WP_PRE.append(
+    "mkdir -p " + WP_OVERLAY + "/flash_attn && touch " + WP_OVERLAY + "/flash_attn/__init__.py && PYTHONPATH="
+    + WP_OVERLAY + " {pr}/.venv/bin/python -c 'import flash_attn, flash_attn.cute; "
+    "from flash_attn.cute import flash_attn_func; assert \"overlays\" in flash_attn.cute.__file__; print(\"fa4 ok\")'")
 
 
 def waypoint(p360):
@@ -389,7 +396,7 @@ def waypoint(p360):
         kind="world", title=f"Waypoint-1.5-1B {h}p: 64-step interactive rollouts (256 frames each)",
         mstar="waypoint", config="configs/waypoint_360p.yaml" if p360 else "configs/waypoint.yaml", gpus="0",
         units="frames", weights=[hf, "Overworld-Models/taehv1_5"], data_key="waypoint360" if p360 else "waypoint720",
-        mstar_env={"PYTHONPATH": WP_OVERLAY}, pre_setup=WP_PRE,
+        mstar_env={"PYTHONPATH": WP_OVERLAY, "MSTAR_FLEX_BACKEND": "FLASH"}, pre_setup=WP_PRE,
         workloads={"rollout": {
             "items": "waypoint360" if p360 else "waypoint720",
             "desc": f"seed image + 64 actions -> 64 chunks of 4 {w}x{h} frames (60 fps media)",

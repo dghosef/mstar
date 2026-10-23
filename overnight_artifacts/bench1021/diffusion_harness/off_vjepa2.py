@@ -16,6 +16,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import doff_common as D  # noqa: E402
 
+# the AC arm imports timm/einops from an overlay (installed --no-deps beside the M* venv)
+for _p in filter(None, os.environ.get("DGEN_OVERLAY", "").split(":")):
+    sys.path.insert(0, _p)
+
 
 def extra(ap):
     ap.add_argument("--mode", choices=["vitl", "ac"], required=True)

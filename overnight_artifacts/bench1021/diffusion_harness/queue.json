@@ -436,7 +436,9 @@
     "profile",
     "summarize"
    ],
-   "note": "added 2026-10-22 by queue-all: STT; vs official remote code transcribe_batch (offline batch)"
+   "note": "added 2026-10-22 by queue-all: STT; vs official remote code transcribe_batch (offline batch)",
+   "rounds": 2,
+   "trim_note": "2026-10-22 user: cut repeated work - 2 rounds (diffusion min-max spread has been <1%)"
   },
   {
    "key": "omnivoice",
@@ -469,7 +471,9 @@
     "profile",
     "summarize"
    ],
-   "note": "added 2026-10-22 by queue-all: RTFx c=1/16/64 LibriSpeech; vs official omnilingual-asr 0.2.0 (offline batch)"
+   "note": "added 2026-10-22 by queue-all: RTFx c=1/16/64 LibriSpeech; vs official omnilingual-asr 0.2.0 (offline batch)",
+   "rounds": 2,
+   "trim_note": "2026-10-22 user: cut repeated work - 2 rounds (diffusion min-max spread has been <1%)"
   },
   {
    "key": "omniasr_1b",
@@ -486,7 +490,9 @@
     "profile",
     "summarize"
    ],
-   "note": "added 2026-10-22 by queue-all: RTFx c=1/16/64 LibriSpeech; vs official omnilingual-asr 0.2.0 (offline batch)"
+   "note": "added 2026-10-22 by queue-all: RTFx c=1/16/64 LibriSpeech; vs official omnilingual-asr 0.2.0 (offline batch)",
+   "rounds": 2,
+   "trim_note": "2026-10-22 user: cut repeated work - 2 rounds (diffusion min-max spread has been <1%)"
   },
   {
    "key": "omniasr_3b",
@@ -503,7 +509,9 @@
     "profile",
     "summarize"
    ],
-   "note": "added 2026-10-22 by queue-all: RTFx c=1/16/64 LibriSpeech; vs official omnilingual-asr 0.2.0 (offline batch)"
+   "note": "added 2026-10-22 by queue-all: RTFx c=1/16/64 LibriSpeech; vs official omnilingual-asr 0.2.0 (offline batch)",
+   "rounds": 2,
+   "trim_note": "2026-10-22 user: cut repeated work - 2 rounds (diffusion min-max spread has been <1%)"
   },
   {
    "key": "omniasr_7b",
@@ -520,7 +528,9 @@
     "profile",
     "summarize"
    ],
-   "note": "added 2026-10-22 by queue-all: RTFx c=1/16/64 LibriSpeech; vs official omnilingual-asr 0.2.0 (offline batch)"
+   "note": "added 2026-10-22 by queue-all: RTFx c=1/16/64 LibriSpeech; vs official omnilingual-asr 0.2.0 (offline batch)",
+   "rounds": 2,
+   "trim_note": "2026-10-22 user: cut repeated work - 2 rounds (diffusion min-max spread has been <1%)"
   },
   {
    "key": "bagel",
@@ -537,7 +547,9 @@
     "profile",
     "summarize"
    ],
-   "note": "added 2026-10-22 by queue-all: 1 GPU t2i/edit/understanding; vs vllm-omni 0.30.0 (t2i/edit) + vLLM 0.30.0 (understanding)"
+   "note": "added 2026-10-22 by queue-all: 1 GPU t2i/edit/understanding; vs vllm-omni 0.30.0 (t2i/edit) + vLLM 0.30.0 (understanding)",
+   "rounds": 2,
+   "trim_note": "2026-10-22 user: cut repeated work - 2 rounds (diffusion min-max spread has been <1%)"
   },
   {
    "key": "bagel_2gpu",
@@ -554,298 +566,9 @@
     "profile",
     "summarize"
    ],
-   "note": "added 2026-10-22 by queue-all: 2 GPUs CFG-parallel t2i/edit; vs vllm-omni --cfg-parallel-size 2"
-  },
-  {
-   "key": "cosmos3_nano",
-   "module": "dgen",
-   "kind": "gen",
-   "arms": [],
-   "phases": [
-    "setup",
-    "tune",
-    "collect",
-    "gate",
-    "select",
-    "rounds",
-    "profile",
-    "summarize"
-   ],
-   "note": "added 2026-10-22 by queue-all: 832x480x189 35 steps; vs SGLang 0.5.22 + vllm-omni 0.30.0"
-  },
-  {
-   "key": "cosmos3_edge",
-   "module": "dgen",
-   "kind": "gen",
-   "arms": [],
-   "phases": [
-    "setup",
-    "tune",
-    "collect",
-    "gate",
-    "select",
-    "rounds",
-    "profile",
-    "summarize"
-   ],
-   "note": "added 2026-10-22 by queue-all: 832x480x121 20 steps; vs SGLang 0.5.22 + vllm-omni 0.30.0"
-  },
-  {
-   "key": "cosmos3_edge_droid",
-   "module": "dgen",
-   "kind": "gen",
-   "arms": [],
-   "phases": [
-    "setup",
-    "tune",
-    "collect",
-    "gate",
-    "select",
-    "rounds",
-    "profile",
-    "summarize"
-   ],
-   "note": "added 2026-10-22 by queue-all: DROID policy chunks; vs SGLang 0.5.22 /v1/actions/generations"
-  },
-  {
-   "key": "lingbot_world",
-   "module": "dgen",
-   "kind": "gen",
-   "arms": [],
-   "phases": [
-    "setup",
-    "tune",
-    "collect",
-    "gate",
-    "select",
-    "rounds",
-    "profile",
-    "summarize"
-   ],
-   "note": "added 2026-10-22 by queue-all: 1.3B, 93 frames c=1; vs official repo (offline)"
-  },
-  {
-   "key": "vjepa2",
-   "module": "dgen",
-   "kind": "gen",
-   "arms": [],
-   "phases": [
-    "setup",
-    "tune",
-    "collect",
-    "gate",
-    "select",
-    "rounds",
-    "profile",
-    "summarize"
-   ],
-   "note": "added 2026-10-22 by queue-all: ViT-L latents; vs HF transformers (offline batch)"
-  },
-  {
-   "key": "vjepa2_ac",
-   "module": "dgen",
-   "kind": "gen",
-   "arms": [],
-   "phases": [
-    "setup",
-    "tune",
-    "collect",
-    "gate",
-    "select",
-    "rounds",
-    "profile",
-    "summarize"
-   ],
-   "note": "added 2026-10-22 by queue-all: AC rollout H=4; vs official facebookresearch/vjepa2 (offline batch)"
-  },
-  {
-   "key": "waypoint",
-   "module": "dgen",
-   "kind": "gen",
-   "arms": [],
-   "phases": [
-    "setup",
-    "tune",
-    "collect",
-    "gate",
-    "select",
-    "rounds",
-    "profile",
-    "summarize"
-   ],
-   "note": "added 2026-10-22 by queue-all: 720p c=1/2; vs official world_engine 1.5.6 (offline, N processes)"
-  },
-  {
-   "key": "waypoint_360p",
-   "module": "dgen",
-   "kind": "gen",
-   "arms": [],
-   "phases": [
-    "setup",
-    "tune",
-    "collect",
-    "gate",
-    "select",
-    "rounds",
-    "profile",
-    "summarize"
-   ],
-   "note": "added 2026-10-22 by queue-all: 360p c=1/8; vs official world_engine 1.5.6 (offline, N processes)"
-  },
-  {
-   "key": "zimage",
-   "arms": [
-    "mstar-pr",
-    "mstar-main",
-    "vllmomni",
-    "sglang",
-    "diffusers"
-   ],
-   "phases": [
-    "rounds_extra",
-    "resummarize"
-   ],
-   "backlog": true
-  },
-  {
-   "key": "klein4b",
-   "arms": [
-    "mstar-pr",
-    "mstar-main",
-    "vllmomni",
-    "sglang",
-    "diffusers"
-   ],
-   "phases": [
-    "rounds_extra",
-    "resummarize"
-   ],
-   "backlog": true
-  },
-  {
-   "key": "wan22",
-   "arms": [
-    "mstar-pr",
-    "mstar-main",
-    "vllmomni",
-    "sglang",
-    "diffusers"
-   ],
-   "phases": [
-    "rounds_extra",
-    "resummarize"
-   ],
-   "backlog": true
-  },
-  {
-   "key": "klein4b_2048",
-   "parent": "klein4b",
-   "arms": [
-    "mstar-pr",
-    "mstar-main",
-    "vllmomni",
-    "sglang",
-    "diffusers"
-   ],
-   "phases": [
-    "setup",
-    "inherit",
-    "collect",
-    "ref_c",
-    "gate",
-    "gallery",
-    "rounds",
-    "summarize"
-   ],
-   "backlog": true,
-   "overrides": {
-    "size": "2048x2048",
-    "concs": [
-     1,
-     2,
-     4,
-     8
-    ],
-    "nums": {
-     "1": 8,
-     "2": 8,
-     "4": 16,
-     "8": 24
-    },
-    "gate_count": 16,
-    "warm_conc": 4
-   }
-  },
-  {
-   "key": "wan22_121",
-   "parent": "wan22",
-   "arms": [
-    "mstar-pr",
-    "mstar-main",
-    "vllmomni",
-    "sglang",
-    "diffusers"
-   ],
-   "phases": [
-    "setup",
-    "inherit",
-    "collect",
-    "ref_c",
-    "gate",
-    "gallery",
-    "rounds",
-    "summarize"
-   ],
-   "backlog": true,
-   "overrides": {
-    "frames": 121,
-    "long_steps": null,
-    "nums": {
-     "1": 2,
-     "2": 4,
-     "4": 8,
-     "8": 16
-    }
-   }
-  },
-  {
-   "key": "zimage_2048",
-   "parent": "zimage",
-   "arms": [
-    "mstar-pr",
-    "mstar-main",
-    "vllmomni",
-    "sglang",
-    "diffusers"
-   ],
-   "phases": [
-    "setup",
-    "inherit",
-    "collect",
-    "ref_c",
-    "gate",
-    "gallery",
-    "rounds",
-    "summarize"
-   ],
-   "backlog": true,
-   "overrides": {
-    "size": "2048x2048",
-    "concs": [
-     1,
-     2,
-     4,
-     8
-    ],
-    "nums": {
-     "1": 8,
-     "2": 8,
-     "4": 16,
-     "8": 24
-    },
-    "gate_count": 16,
-    "warm_conc": 4
-   }
+   "note": "added 2026-10-22 by queue-all: 2 GPUs CFG-parallel t2i/edit; vs vllm-omni --cfg-parallel-size 2",
+   "rounds": 2,
+   "trim_note": "2026-10-22 user: cut repeated work - 2 rounds (diffusion min-max spread has been <1%)"
   },
   {
    "key": "klein9b",
@@ -872,44 +595,43 @@
    "backlog": true
   },
   {
-   "key": "qwen3tts_1p7b",
-   "kind": "tts",
+   "key": "vjepa2",
+   "module": "dgen",
+   "kind": "gen",
    "arms": [],
    "phases": [
-    "rounds_extra",
-    "resummarize"
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
    ],
-   "backlog": true
+   "note": "added 2026-10-22 by queue-all: ViT-L latents; vs HF transformers (offline batch)",
+   "rounds": 2,
+   "trim_note": "2026-10-22 user: cut repeated work - 2 rounds (diffusion min-max spread has been <1%)"
   },
   {
-   "key": "fish_s2pro",
-   "kind": "tts",
+   "key": "vjepa2_ac",
+   "module": "dgen",
+   "kind": "gen",
    "arms": [],
    "phases": [
-    "rounds_extra",
-    "resummarize"
+    "setup",
+    "tune",
+    "collect",
+    "gate",
+    "select",
+    "rounds",
+    "profile",
+    "summarize"
    ],
-   "backlog": true
-  },
-  {
-   "key": "orpheus",
-   "kind": "tts",
-   "arms": [],
-   "phases": [
-    "rounds_extra",
-    "resummarize"
-   ],
-   "backlog": true
-  },
-  {
-   "key": "qwen3tts_0p6b",
-   "kind": "tts",
-   "arms": [],
-   "phases": [
-    "rounds_extra",
-    "resummarize"
-   ],
-   "backlog": true
+   "note": "added 2026-10-22 by queue-all: AC rollout H=4; vs official facebookresearch/vjepa2 (offline batch)",
+   "rounds": 2,
+   "trim_note": "2026-10-22 user: cut repeated work - 2 rounds (diffusion min-max spread has been <1%)",
+   "move_note": "2026-10-23 node2 finished first; runs here in parallel with node8 waypoint_360p"
   }
  ]
 }

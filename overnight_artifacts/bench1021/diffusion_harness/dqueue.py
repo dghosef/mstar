@@ -108,7 +108,7 @@ def run_diffusion_phase(q, spec, phase):
                         m["kind"], "--tags", ",".join(tags), "--items", items, "--out",
                         str(b.out / f"sheet_{b.key}.jpg")], timeout=900)
     elif phase == "rounds":
-        b.phase_rounds(arms, q.get("rounds", 3))
+        b.phase_rounds(arms, spec.get("rounds", q.get("rounds", 3)))
     elif phase == "rounds_extra":  # backlog: rounds 4-5
         b.phase_rounds(arms, 2, first=4)
     elif phase == "profile":

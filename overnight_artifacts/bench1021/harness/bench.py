@@ -136,14 +136,19 @@ def server_pids() -> list[int]:
             roots.append(int((st / f).read_text().strip()))
         except (OSError, ValueError):
             pass
-    out = subprocess.run(["ps", "-e", "-o", "pid=,ppid=,etimes="], capture_output=True, text=True).stdout
-    parent, age = {}, {}
+    out = subprocess.run(["ps", "-e", "-o", "pid=,ppid=,etimes=,args="], capture_output=True, text=True).stdout
+    parent, age, helper = {}, {}, set()
     for line in out.splitlines():
+        parts = line.split(None, 3)
         try:
-            pid, ppid, et = (int(x) for x in line.split())
+            pid, ppid, et = (int(x) for x in parts[:3])
         except ValueError:
             continue
         parent[pid], age[pid] = ppid, et
+        # torch Inductor's compile-worker pool is long-lived but recycles itself on a lazy compile;
+        # its exit is not the server dying.
+        if len(parts) > 3 and ("compile_worker" in parts[3] or "_inductor" in parts[3]):
+            helper.add(pid)
     keep = set(r for r in roots if r in parent)
     for pid in parent:
         q = pid
@@ -152,7 +157,7 @@ def server_pids() -> list[int]:
                 keep.add(pid)
                 break
             q = parent[q]
-    return sorted(p for p in keep if age.get(p, 0) >= 60)   # long-lived ones: workers, not helpers
+    return sorted(p for p in keep if age.get(p, 0) >= 60 and p not in helper)   # long-lived workers only
 
 
 def run_watched(cmd, timeout, gpus, server_log, **kw):
@@ -293,7 +298,10 @@ class Bench:
             v = ENGINES / "sglang-omni"
             env["PATH"] = f"{v}/bin:{env['PATH']}"
             env["CUDA_VISIBLE_DEVICES"] = self.m["gpus"]
-            # its default speech pipeline: thinker (+ encoders, code2wav) GPU 0, talker GPU 1
+            # its default speech pipeline: thinker (+ encoders, code2wav) GPU 0, talker GPU 1.
+            # The talker's first start (compile + graph capture) runs past the default 600 s stall
+            # timeout; the error message names this knob.
+            env["SGLANG_OMNI_STARTUP_TIMEOUT"] = "3600"
             cmd = [f"{v}/bin/python", "-m", "sglang_omni.cli", "serve", "--model-path", self.m["hf"],
                    "--host", "127.0.0.1", "--port", str(PORT)]
             cwd = ENGINES

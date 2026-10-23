@@ -81,7 +81,8 @@ def body_for(model_id: str, row: dict, ignore_eos: bool) -> dict:
         content = parts + [{"type": "text", "text": row["prompt"]}]
     body = {
         "model": model_id,
-        "messages": [{"role": "user", "content": content}],
+        "messages": ([{"role": "system", "content": row["system"]}] if row.get("system") else [])
+                    + [{"role": "user", "content": content}],
         "max_tokens": int(row["output_len"]),
         "temperature": 0.0,
         "stream": True,
