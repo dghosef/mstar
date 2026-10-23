@@ -6,6 +6,7 @@ or every node reports DONE.
                                 # for two checks), 2 (one node DONE: rebalance), 3 (a new line in a node's
                                 # failures.jsonl), 0 (all done)
 """
+import json
 import pathlib
 import re
 import subprocess
@@ -68,23 +69,52 @@ def heartbeat(host):
 def gpu_busy(host):
     """True if any GPU on the node is above 5% utilization right now (None if unreadable)."""
     try:
-        r = ssh(host, "nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits")
+        # sample 10× over ~20 s; a single sample often lands between cells or during a server start
+        r = ssh(host, "for i in $(seq 10); do nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits; "
+                      "sleep 2; done", timeout=60)
     except subprocess.TimeoutExpired:
         return None
     vals = [int(x) for x in r.stdout.split() if x.strip().isdigit()]
     return any(v > 5 for v in vals) if vals else None
 
 
-def failures(host):
-    """Line count and the tail of the node's failures.jsonl (None on an ssh error)."""
+def _ts(line):
+    """Sortable digits of a failures.jsonl line's time (nodes write different ISO styles)."""
     try:
-        r = ssh(host, "f=/workspace/results/bench/failures.jsonl; [ -f $f ] && { wc -l < $f; tail -n 5 $f; } || echo 0")
+        t = json.loads(line).get("time", "")
+    except ValueError:
+        return ""
+    return re.sub(r"\D", "", t)[:14]
+
+
+def _tune_knob(line):
+    """Expected, recorded-only failures: competitor knob sets failing in tune, and gate parity
+    misses the sanity gate only annotates. Neither changes what runs."""
+    try:
+        r = json.loads(line)
+    except ValueError:
+        return False
+    act = str(r.get("action_taken", ""))
+    competitor_empty = "empty output" in str(r.get("error", "")) and not str(r.get("arm", "")).startswith("mstar")
+    # sampled TTS occasionally never emits its end token (seen on M* and SGLang-Omni alike); recorded, not actionable
+    competitor_empty = competitor_empty or "runaway length" in str(r.get("error", ""))
+    # vllm-omni BAGEL edit needs 3 GPUs for image CFG; the 2-GPU lane has no vllm-omni edit arm
+    competitor_empty = competitor_empty or "requires cfg_parallel_size=3" in str(r.get("error", ""))
+    return (competitor_empty or str(r.get("phase", "")).startswith("tune") or "annotated" in act
+            or "arm still timed" in act or "ineligible for selection" in act)
+
+
+def failures(host):
+    """(newest failure timestamp, its lines) from the node's failures.jsonl; (None, "") on an ssh error.
+    Keyed on time, not line count: runners sometimes rewrite or reset old entries."""
+    try:
+        r = ssh(host, "f=/workspace/results/bench/failures.jsonl; [ -f $f ] && tail -n 200 $f || true")
     except subprocess.TimeoutExpired:
-        return None, ""
-    if r.returncode != 0 or not r.stdout.strip():
-        return None, ""
-    first, *rest = r.stdout.strip().splitlines()
-    return int(first), "\n".join(rest)
+        return None, []
+    if r.returncode != 0:
+        return None, []
+    lines = [x for x in r.stdout.splitlines() if x.strip()]
+    return max((_ts(x) for x in lines), default=""), lines
 
 
 def sync(host, dest):
@@ -98,7 +128,21 @@ def sync(host, dest):
 def main():
     seen_hb = {h: False for h in NODES}
     idle = {h: 0 for h in NODES}
-    nfail = {h: failures(h)[0] or 0 for h in NODES}
+    sshfail = {h: 0 for h in NODES}
+    nfail = {}
+    for h in NODES:  # an ssh hiccup here would make every old failure look new, so retry the baseline
+        for _ in range(20):
+            newest, _lines = failures(h)
+            if newest is not None:
+                nfail[h] = newest
+                break
+            time.sleep(15)
+        else:
+            nfail[h] = "99999999999999"
+    if len(sys.argv) > 1 and sys.argv[1] == "--quiet-for":  # suppress wakes for N minutes (an acknowledged loop)
+        quiet_until = time.time() + 60 * int(sys.argv[2])
+    else:
+        quiet_until = 0
     log(f"failures at start: {nfail}")
     while True:
         done, alerts = [], []
@@ -108,8 +152,11 @@ def main():
                 age, info = heartbeat(host)
             log(f"{host}: age={age} {info}")
             if age is None and "ssh" in info:
-                alerts.append(f"{host}: {info}")
+                sshfail[host] += 1
+                if sshfail[host] >= 2:  # one miss is usually the Mac's own network blipping
+                    alerts.append(f"{host}: {info}")
                 continue
+            sshfail[host] = 0
             try:
                 sync(host, dest)
             except subprocess.TimeoutExpired:
@@ -124,10 +171,11 @@ def main():
                 continue
             if age > STALE_S:
                 alerts.append(f"{host}: heartbeat stale {age}s ({info})")
-            busy = gpu_busy(host)
+            starting = any(k in info.lower() for k in ("starting", "server start", "setup", "compil", "cell=start"))
+            busy = True if starting else gpu_busy(host)
             idle[host] = 0 if busy or busy is None else idle[host] + 1
-            if idle[host] >= 2:  # two checks in a row (~15 min apart) with every GPU idle
-                alerts.append(f"{host}: all GPUs idle for 2 checks ({info})")
+            if idle[host] >= 3:  # three checks in a row (~45 min) with every GPU idle; phases with many server starts dip below 2
+                alerts.append(f"{host}: all GPUs idle for 3 checks ({info})")
         try:
             subprocess.run([sys.executable, str(HOME / "runs/bench1021/harness/report.py"), "--results", str(RES),
                             "--out", str(HOME / "runs/bench1021/REPORT.md"),
@@ -153,10 +201,17 @@ def main():
         for _ in range(INTERVAL // FAIL_POLL):
             time.sleep(FAIL_POLL)
             for host in NODES:
-                n, tail = failures(host)
-                if n is not None and n > nfail[host]:
-                    log(f"FAILURE {host}: {n - nfail[host]} new\n{tail}")
-                    sys.exit(3)
+                newest, lines = failures(host)
+                if newest is None or newest <= nfail[host]:
+                    continue
+                new = [x for x in lines if _ts(x) > nfail[host] and not _tune_knob(x)]
+                nfail[host] = newest
+                if not new:  # only competitor knob sets failing during tune: expected, recorded, not worth a wake
+                    continue
+                if time.time() < quiet_until:
+                    continue
+                log(f"FAILURE {host}: {len(new)} new\n" + "\n".join(x[:1500] for x in new[-5:]))
+                sys.exit(3)
 
 
 if __name__ == "__main__":
