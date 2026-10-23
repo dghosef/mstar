@@ -29,9 +29,9 @@ Full methodology and caveats will be in REPORT.md when the run finishes.
 | Qwen3.5-9B TP2 random 1024/256 (3 rounds) | +7% s | −8% s | −5% s | −3% s | −11% s | −10% s | −9% s | −10% v |
 | Qwen3.5-27B TP4 ShareGPT (3 rounds) | +14% s | +6% s | +7% s | +13% s | +19% s | +20% v | +21% v | +21% v |
 | Qwen3.5-27B TP4 random 1024/256 (3 rounds) | +11% s | 0% s | −4% s | −1% s | −2% s | −4% s | −7% v | −10% v |
-| Qwen3.5-0.8B image (MMMU) tok/s (2 of 3 rounds) | +58% v | | +51% s | | +22% v | +10% v | | |
-| Qwen3.5-0.8B video 8 s tok/s (2 of 3) | +56% v | | +52% v | | +42% v | +43% v | | |
-| Qwen3.5-0.8B video 60 s tok/s (2 of 3) | +47% v | | +23% v | | +26% v | +41% v | | |
+| Qwen3.5-0.8B image (MMMU) tok/s (3 rounds) | +63% s | | +52% s | | +23% v | +8% v | | |
+| Qwen3.5-0.8B video 8 s tok/s (3 rounds) | +58% v | | +51% v | | +37% v | +37% v | | |
+| Qwen3.5-0.8B video 60 s tok/s (3 rounds) | +47% v | | +22% v | | +23% v | +39% v | | |
 | Orpheus 3B, audio-s/s (3 rounds) | +15% ov | | +9% ov | | +9% ov | −3% ov | −9% ov | |
 | Z-Image-Turbo, img/s (3 rounds) | −9% s | −6% s | −5% s | −5% s | −5% s | | | |
 | Wan2.2 1280×704×81 20 steps, videos/min (3 rounds) | +1% v | +1% v | +1% v | +1% v | | | | |
@@ -68,10 +68,10 @@ The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show 
   - **vs the strongest competitor:**
     - ShareGPT: +11% at c=1, about level at c=2–4, then rising to +19% at c=64 and +28% at c=128.
     - Random 1024/256: +7% at c=1, then −3 to −11% at c=2–128.
-- **Qwen3.5-0.8B image/video→text (1 GPU): 2 of 3 rounds, preliminary.**
+- **Qwen3.5-0.8B image/video→text (1 GPU): done.** 3 rounds, failed=0. The gate passed on every M* arm: image and video parity PASS, MMMU-200 0.265 for mstar-pr, 0.26 for main.
   - **M* leads at every point, with the Rust frontend** (chosen by the rule: +7.5% geomean, gate PASS).
-  - **Images (MMMU):** +58% vs the best competitor at c=1, falling to +10% at c=32. TTFT at c=32 is 58 ms vs vLLM's 212 ms.
-  - **Video:** 8 s clips +42–56%; 60 s clips +23–47%.
+  - **Images (MMMU):** +63% vs the best competitor at c=1, falling to +8% at c=32. TTFT at c=32 is 56 ms vs vLLM's 213 ms.
+  - **Video:** 8 s clips +37–58%; 30 s clips +23–53%; 60 s clips +22–47%.
   - **This PR vs main:** +3–76%, largest on long videos at high concurrency.
 - **Orpheus 3B (1 GPU): done** (3 rounds, failed=0; Rust frontend; sanity gate passed on every arm, Whisper WER 1.8–2.6%).
   - Competitors: vox-serve, plus our own vLLM 0.30 Orpheus server (no public one handles concurrent requests).

@@ -29,3 +29,5 @@
 {"label": "main_vllm-omni_r2", "arm": "vllm-omni", "seconds": 87.3}
 {"label": "main_vllm-omni_r3", "arm": "vllm-omni", "seconds": 87.3}
 {"label": "profile_mstar-pr", "arm": "mstar-pr", "seconds": 342.9}
+{"label": "main_mstar-main_r1", "arm": "mstar-main", "seconds": 345.9}
+{"label": "main_sglang-omni_r1", "arm": "sglang-omni", "seconds": 72.3}

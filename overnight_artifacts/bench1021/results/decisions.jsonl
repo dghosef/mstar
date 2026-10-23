@@ -55,3 +55,6 @@
 {"t": "2026-10-22T23:13:24Z", "model": "q35_0.8b_vl", "decision": "gate mstar_pr_rf_a", "choice": "PASS", "detail": "image parity PASS; video parity PASS; MMMU 0.265 (floor 0.2 = min(vLLM, SGLang) - 0.05)"}
 {"t": "2026-10-22T23:13:24Z", "model": "q35_0.8b_vl", "decision": "gate mstar_main_a", "choice": "PASS", "detail": "image parity PASS; video parity PASS; MMMU 0.26 (floor 0.2 = min(vLLM, SGLang) - 0.05)"}
 {"t": "2026-10-22T23:13:24Z", "model": "q35_0.8b_vl", "decision": "frontend", "choice": "rust", "python_geomean": 3587.5294732865877, "rust_geomean": 3856.2790384570803, "rust_gate": "PASS"}
+{"t": "2026-10-23T00:44:58Z", "model": "qwen3_omni", "decision": "gate mstar_main_a", "choice": "FAIL", "detail": "GSM8K 0.96 (competitors [0.96, 0.948]); A2T WER None (competitors []); T2S WER 0.15355727102023783, silent 0 (competitors [0.2300332778702163])"}
+{"t": "2026-10-23T00:44:58Z", "model": "qwen3_omni", "decision": "gate mstar_pr_a", "choice": "FAIL", "detail": "GSM8K 0.964 (competitors [0.96, 0.948]); A2T WER None (competitors []); T2S WER None, silent None (competitors [0.2300332778702163])"}
+{"t": "2026-10-23T00:44:58Z", "model": "qwen3_omni", "decision": "gate", "choice": "mstar-pr strict parity FAIL: annotated, timed phases continue (sanity-gate rule)"}

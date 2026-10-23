@@ -1,0 +1,10 @@
+{"label": "setup_smoke_vllmomni", "arm": "vllmomni", "seconds": 204.6, "ok": true, "time": 1792715667.571018}
+{"label": "setup_smoke_sgomni", "arm": "sgomni", "seconds": 90.3, "ok": true, "time": 1792715770.119649}
+{"label": "setup_smoke_mstar-pr", "arm": "mstar-pr", "seconds": 165.5, "ok": true, "time": 1792715938.9578335}
+{"label": "tune_default_vllmomni_default_r0", "arm": "vllmomni", "seconds": 66.3, "ok": true, "time": 1792716009.9433541}
+{"label": "tune_high_conc_vllmomni_high_conc_r0", "arm": "vllmomni", "seconds": 180.5, "ok": true, "time": 1792716238.215402}
+{"label": "tune_base_sgomni_base_r0", "arm": "sgomni", "seconds": 90.3, "ok": true, "time": 1792716376.271867}
+{"label": "tune_mrr128_sgomni_mrr128_r0", "arm": "sgomni", "seconds": 93.3, "ok": true, "time": 1792716493.9864202}
+{"label": "collect_mstar_pr_mstar-pr_python_r0", "arm": "mstar-pr", "seconds": 87.3, "ok": true, "time": 1792716605.9071712}
+{"label": "collect_mstar_pr_b_mstar-pr_python_r0", "arm": "mstar-pr", "seconds": 84.3, "ok": true, "time": 1792716766.142424}
+{"label": "collect_mstar_main_mstar-main_python_r0", "arm": "mstar-main", "seconds": 243.7, "ok": true, "time": 1792717085.7072933}

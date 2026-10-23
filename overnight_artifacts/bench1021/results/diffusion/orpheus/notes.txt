@@ -1,0 +1,9 @@
+notes for orpheus
+dropped engines: {}
+startup s: voxserve: median 6 n=7; orpheusvllm: median 36 n=6; mstar-pr: median 42 n=9; mstar-main: median 211 n=4
+main_mstar-main_rust_r1: failed captures 0, graph runtime rust True, rust frontend True
+main_mstar-main_rust_r2: failed captures 0, graph runtime rust True, rust frontend True
+main_mstar-main_rust_r3: failed captures 0, graph runtime rust True, rust frontend True
+main_mstar-pr_rust_r1: failed captures 0, graph runtime rust True, rust frontend True
+main_mstar-pr_rust_r2: failed captures 0, graph runtime rust True, rust frontend True
+main_mstar-pr_rust_r3: failed captures 0, graph runtime rust True, rust frontend True

@@ -6,10 +6,10 @@ Output tok/s: mean (min-max) over rounds, each round a fresh server process; n =
 
 | c | mstar-pr tok/s | mstar-main tok/s | vllm-omni tok/s | sglang-omni tok/s | mstar-pr vs mstar-main | mstar-pr vs vllm-omni | mstar-pr vs sglang-omni | TTFT p50/p99 mstar-pr | TTFT p50/p99 mstar-main | TTFT p50/p99 vllm-omni | TTFT p50/p99 sglang-omni | TPOT p50/p99 mstar-pr | TPOT p50/p99 mstar-main | TPOT p50/p99 vllm-omni | TPOT p50/p99 sglang-omni |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 119 (118-120) n=3 | 20 (9-26) n=3 | - | 178 (178-179) n=3 | **+485.0%** | - | **-33.1%** | 99.9/129.9 | 288.9/13546.6 | - | 38.8/51.6 | 4.31/5.08 | 4.90/5.51 | - | 4.20/4.52 |
-| 4 | 251 (220-311) n=3 | 168 (144-180) n=3 | - | 418 (406-439) n=3 | **+49.6%** | - | **-40.0%** | 156.7/259.1 | 157.0/3355.1 | - | 46.6/92.2 | 12.09/16.48 | 12.50/210.70 | - | 6.93/9.44 |
-| 16 | 452 (436-478) n=3 | 230 (140-315) n=3 | - | 886 (876-899) n=3 | **+96.7%** | - | **-49.0%** | 260.2/414.3 | 269.9/5395.2 | - | 67.6/137.1 | 27.20/50.53 | 31.81/544.97 | - | 15.21/23.28 |
-| 32 | 663 (649-684) n=3 | 584 (566-603) n=3 | - | 1,278 (1,234-1,328) n=3 | **+13.5%** | - | **-48.1%** | 344.7/595.6 | 355.0/1245.5 | - | 72.8/282.9 | 36.86/70.04 | 37.14/110.51 | - | 20.69/29.28 |
+| 1 | - | 45 (45-45) n=1 | - | 181 (181-181) n=1 | - | - | - | - | 92.6/2274.3 | - | 35.4/45.7 | - | 4.86/5.51 | - | 4.20/4.48 |
+| 4 | - | 172 (172-172) n=1 | - | 391 (391-391) n=1 | - | - | - | - | 164.3/905.8 | - | 46.5/92.1 | - | 12.96/48.86 | - | 6.82/9.63 |
+| 16 | - | 320 (320-320) n=1 | - | 900 (900-900) n=1 | - | - | - | - | 263.6/1730.5 | - | 69.6/130.8 | - | 32.31/148.70 | - | 14.90/21.37 |
+| 32 | - | 560 (560-560) n=1 | - | 1,264 (1,264-1,264) n=1 | - | - | - | - | 356.5/885.1 | - | 71.8/286.8 | - | 37.76/112.45 | - | 20.69/28.22 |
 
 #### omni_t2t
 
@@ -27,7 +27,7 @@ audio-s/s and text tok/s: mean (min-max) over rounds; TTFA (first audio) and TTF
 | c | arm | audio s/s | text tok/s | TTFA p50/p99 ms | TTFT p50/p99 ms | RTF p50 | mean audio s |
 |---:|---|---:|---:|---:|---:|---:|---:|
 | 1 | mstar-pr | 20.3 (20.2-20.3) n=3 | 65 | 79/83 | 28/30 | 0.049 | 68.367 |
-| 1 | mstar-main | 16.0 (15.9-16.0) n=2 | 53 | 186/198 | 28/31 | 0.0625 | 66.5745 |
+| 1 | mstar-main | 16.0 (15.9-16.1) n=3 | 52 | 186/194 | 27/30 | 0.062 | 67.047 |
 | 1 | vllm-omni | 11.6 (11.6-11.7) n=6 | - | 88/93 | -/- | 0.086 | 79.73949999999999 |
 | 1 | sglang-omni | 15.3 (15.2-15.3) n=3 | 49 | 104/146 | 18/61 | 0.065 | 68.666 |
 | 4 | mstar-pr | 53.2 (52.5-54.4) n=3 | 174 | 120/143 | 30/56 | 0.074 | 70.734 |
@@ -45,8 +45,6 @@ audio-s/s and text tok/s: mean (min-max) over rounds; TTFA (first audio) and TTF
 
 Excluded cells (failed != 0 or no result):
 
-- mstar-main omni_t2s c=1 r1: failed=None None watchdog: server process(es) exited: [784187, 784189, 784191, 784193, 784195] no results.json: FileNotFoundError(2, 'No such file or directory')
-- mstar-main omni_t2s c=1 r1: failed=None None watchdog: server process(es) exited: [789138, 789140, 789142, 789144, 789146] no results.json: FileNotFoundError(2, 'No such file or directory')
 - vllm-omni omni_t2t c=16 r1: failed=1 ['empty output'] 
 - vllm-omni omni_t2t c=16 r1: failed=1 ['empty output'] 
 - vllm-omni omni_t2t c=32 r1: failed=1 ['empty output'] 

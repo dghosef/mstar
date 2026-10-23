@@ -24,3 +24,5 @@
 {"label": "main_sglang_r3", "arm": "sglang", "seconds": 46.2}
 {"label": "main_mstar-pr-rf_r3", "arm": "mstar-pr-rf", "seconds": 300.9}
 {"label": "main_mstar-main-rf_r3", "arm": "mstar-main-rf", "seconds": 297.8}
+{"label": "main_vllm_r3", "arm": "vllm", "seconds": 57.3}
+{"label": "profile_mstar-pr-rf", "arm": "mstar-pr-rf", "seconds": 300.8}
