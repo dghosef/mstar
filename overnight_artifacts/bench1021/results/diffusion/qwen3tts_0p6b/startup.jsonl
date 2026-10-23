@@ -16,3 +16,8 @@
 {"label": "main_vllmomni_high_conc_r2", "arm": "vllmomni", "seconds": 84.3, "ok": true, "time": 1792718220.995441}
 {"label": "main_sgomni_base_r2", "arm": "sgomni", "seconds": 87.3, "ok": true, "time": 1792718376.7524672}
 {"label": "main_mstar-pr_python_r2", "arm": "mstar-pr", "seconds": 192.6, "ok": true, "time": 1792718607.6495454}
+{"label": "main_vllmomni_high_conc_r3", "arm": "vllmomni", "seconds": 84.3, "ok": true, "time": 1792718755.4525046}
+{"label": "main_sgomni_base_r3", "arm": "sgomni", "seconds": 87.3, "ok": true, "time": 1792718911.305501}
+{"label": "main_mstar-pr_python_r3", "arm": "mstar-pr", "seconds": 87.3, "ok": true, "time": 1792719037.2302773}
+{"label": "main_mstar-main_python_r3", "arm": "mstar-main", "seconds": 177.6, "ok": true, "time": 1792719278.3694649}
+{"label": "profile_c32", "arm": "mstar-pr", "seconds": 192.6, "ok": true, "time": 1792719540.4456818}

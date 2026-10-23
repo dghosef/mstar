@@ -1,0 +1,3 @@
+{"label": "smoke_mstar-main", "arm": "mstar-main", "seconds": 210.6}
+{"label": "smoke_vllm", "arm": "vllm", "seconds": 66.3}
+{"label": "smoke_sglang", "arm": "sglang", "seconds": 49.2}

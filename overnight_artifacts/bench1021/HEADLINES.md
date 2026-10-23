@@ -35,7 +35,8 @@ Full methodology and caveats will be in REPORT.md when the run finishes.
 | Orpheus 3B, audio-s/s (3 rounds) | +15% ov | | +9% ov | | +9% ov | −3% ov | −9% ov | |
 | Z-Image-Turbo, img/s (3 rounds) | −9% s | −6% s | −5% s | −5% s | −5% s | | | |
 | Wan2.2 1280×704×81 20 steps, videos/min (3 rounds) | +1% v | +1% v | +1% v | +1% v | | | | |
-| Qwen3-TTS 1.7B, audio-s/s (pr 3 rounds, main 2) | −12% s | −30% s | −34% s | −38% s | −41% s | −43% s | −45% s | |
+| Qwen3-TTS 1.7B, audio-s/s (3 rounds) | −12% s | −30% s | −34% s | −38% s | −41% s | −43% s | −45% s | |
+| Qwen3-TTS 0.6B, audio-s/s (3 rounds) | −9% s | −30% s | −35% s | −39% s | −44% s | −45% s | −44% s | |
 | Fish S2-Pro, audio-s/s (3 rounds; SGLang-Omni 2 at c≥16) | +25% s | +28% s | +26% s | +19% s | +34% s | +40% s | +77% s | |
 | Qwen3-Omni text→text, tok/s (3 rounds) | −12% s | | −11% s | | −15% s | −15% s | | |
 | Qwen3-Omni text→speech, audio-s/s (3 rounds) | +33% s | | +3% s | | +9% s | +11% s | | |
@@ -99,11 +100,11 @@ The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show 
   - **This PR vs main: +48% at c=1 to 2.5× at c=64.** The overnight claim was 2.4× at c=64.
   - **Runaway clips** (a sampled clip that never ends) occurred on M* main and SGLang-Omni; it's the model's own sampling behaviour.
   - The official fish-speech server was dropped: its install was broken, and it serves one request at a time.
-- **Qwen3-TTS 1.7B (CustomVoice, 1 GPU): preliminary** (mstar-pr 3 rounds, mstar-main 2 of 3). failed=0. Sanity gate passed on every arm (Whisper WER 1.4–2.0%, same speech rate).
+- **Qwen3-TTS 1.7B and 0.6B (CustomVoice, 1 GPU): done.** 3 rounds each. The 1.7B numbers are below; 0.6B has the same shape (SGLang-Omni 19 → 360 audio-s/s vs mstar-pr 17.5 → 201, so M* is −9% to −45%; M* ≈ vllm-omni, and +12% vs vllm-omni at c=64). failed=0. Sanity gate passed on every arm (Whisper WER 1.4–2.0%, same speech rate).
   - **SGLang-Omni wins by a lot:** 17.7 → 346 audio-s/s from c=1 to c=64, with TTFA p50 13–27 ms. mstar-pr does 15.6 → 191 audio-s/s, TTFA 18–70 ms: −12% at c=1, widening to −45% at c=64.
   - **vs vllm-omni:** M* is level with it (12.7 → 171 audio-s/s, TTFA 29–151 ms) at c≤16, and ahead by 4–12% at c=32–64.
   - **The engines produce the same amount of audio per request** (7.1–7.9 s), so this is real throughput, not shorter output.
-  - **This PR vs main:** +2–29%, largest at c=32–64. The overnight claim was +11–15% at c=64.
+  - **This PR vs main:** 1.7B +2–31%, 0.6B +4–35%, largest at c=64. The overnight claim was +11–15% (1.7B) and +25–27% (0.6B) at c=64.
 - **Z-Image-Turbo (1024², 8 steps, 1 GPU): done.** 3 rounds, failed=0. The sanity gate passed on all arms. M* is pixel-close to diffusers at 29.5–30.2 dB; the competitors produce the same images but aren't pixel-close (~24 dB).
   - **SGLang diffusion wins:** 1.26–1.27 img/s and 0.78 s at B=1, against mstar-pr's 1.14–1.21 img/s and 0.85 s (−5 to −9%).
   - **vs the other competitors:** mstar-pr beats vllm-omni by 4–10% and tuned diffusers (regional compile) by 2–16%.

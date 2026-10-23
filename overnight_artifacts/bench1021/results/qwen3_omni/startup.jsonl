@@ -31,3 +31,10 @@
 {"label": "profile_mstar-pr", "arm": "mstar-pr", "seconds": 342.9}
 {"label": "main_mstar-main_r1", "arm": "mstar-main", "seconds": 345.9}
 {"label": "main_sglang-omni_r1", "arm": "sglang-omni", "seconds": 72.3}
+{"label": "main_mstar-pr_r1", "arm": "mstar-pr", "seconds": 339.9}
+{"label": "main_sglang-omni_r2", "arm": "sglang-omni", "seconds": 72.3}
+{"label": "main_mstar-pr_r2", "arm": "mstar-pr", "seconds": 132.5}
+{"label": "main_mstar-main_r2", "arm": "mstar-main", "seconds": 348.9}
+{"label": "main_sglang-omni_r3", "arm": "sglang-omni", "seconds": 72.3}
+{"label": "main_mstar-pr_r3", "arm": "mstar-pr", "seconds": 336.9}
+{"label": "main_mstar-main_r3", "arm": "mstar-main", "seconds": 342.9}
