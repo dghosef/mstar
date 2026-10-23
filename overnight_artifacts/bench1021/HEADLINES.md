@@ -33,6 +33,9 @@ Full methodology and caveats will be in REPORT.md when the run finishes.
 | Qwen3.5-0.8B video 8 s tok/s (3 rounds) | +58% v | | +51% v | | +37% v | +37% v | | |
 | Qwen3.5-0.8B video 60 s tok/s (3 rounds) | +47% v | | +22% v | | +23% v | +39% v | | |
 | Orpheus 3B, audio-s/s (3 rounds) | +15% ov | | +9% ov | | +9% ov | −3% ov | −9% ov | |
+| Qwen3.5-9B image (MMMU) tok/s (M* 1 round, preliminary) | +14% v | | +8% v | | 0% v | −2% v | | |
+| Qwen3.5-9B video 60 s tok/s (M* 1 round, preliminary) | +14% v | | −1% v | | −10% v | −14% v | | |
+| Chatterbox, audio-s/s (3 rounds) | +206% cv | | +835% cs | | | +183% cv | +153% cv | |
 | Z-Image-Turbo, img/s (3 rounds) | −9% s | −6% s | −5% s | −5% s | −5% s | | | |
 | Wan2.2 1280×704×81 20 steps, videos/min (3 rounds) | +1% v | +1% v | +1% v | +1% v | | | | |
 | Qwen3-TTS 1.7B, audio-s/s (3 rounds) | −12% s | −30% s | −34% s | −38% s | −41% s | −43% s | −45% s | |
@@ -94,6 +97,15 @@ The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show 
     - The first-pass run, with no system message, had M* falling back to Qwen3-Omni's voice persona and answering spoken questions (WER 14.5%). That run is discarded.
     - vllm-omni doesn't serve this workload.
     - **This PR vs main:** +26–79%.
+- **Qwen3.5-9B image/video→text (1 GPU): preliminary** (M* arms 1 round so far, competitors 2). Python frontend: Rust was +1.2% and below the rule's bar.
+  - **M* leads at c=1** (+14% images, +14–19% video) and **trails vLLM at high concurrency** (c=32: −2% images, −6% to −14% video, worst on 60 s clips).
+  - **Gate:** image parity FAILs (annotated, not gating), video parity passes, and MMMU-200 is 0.445 vs a floor of 0.40.
+  - **This PR vs main:** +1–22%, flat on 60 s clips.
+- **Chatterbox (base, 1 GPU): done** (3 rounds, failed=0; sanity gate passed on every arm, WER 1.1–1.9%).
+  - Competitors: chatterbox-vllm (offline batch; its TTFA is batch latency) and Chatterbox-TTS-Server (official package; serial, ~2 audio-s/s).
+  - **M* leads by 2.6–3× over chatterbox-vllm and 5–10× over the TTS server.** mstar-pr does 11.0 → 34.2 audio-s/s; chatterbox-vllm does 3.6 → 13.5.
+  - **This PR vs main:** +3–10%.
+  - The PR's split+MPS config, its +58% headline, isn't benchmarked here: the harness has no MPS handling.
 - **Kokoro 82M (1 GPU): done.** 3 rounds, failed=0. Sanity gate passed (WER: M* 2.3%, Kokoro-FastAPI 1.3%).
   - The competitor is Kokoro-FastAPI v0.9.0, tuned over 1 vs 4 workers. No vLLM/SGLang path serves Kokoro.
   - **M* is 2.8–5.7× faster at every concurrency:** mstar-pr does 236 → 897 audio-s/s from c=1 to c=64, with TTFA p50 23–353 ms. Kokoro-FastAPI peaks at ~190 audio-s/s (c=4) with TTFA 0.1–0.6 s.

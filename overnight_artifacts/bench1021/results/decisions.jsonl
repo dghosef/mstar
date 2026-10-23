@@ -60,3 +60,8 @@
 {"t": "2026-10-23T00:44:58Z", "model": "qwen3_omni", "decision": "gate", "choice": "mstar-pr strict parity FAIL: annotated, timed phases continue (sanity-gate rule)"}
 {"t": "2026-10-23T02:06:27Z", "model": "q35_9b_vl", "decision": "vllm config", "choice": "default", "geomean_tok_s": {"default": 1149.0}}
 {"t": "2026-10-23T02:06:27Z", "model": "q35_9b_vl", "decision": "sglang config", "choice": "chunk-16k", "geomean_tok_s": {"default": 1079.3, "attn-fa3": 1079.2, "chunk-16k": 1083.0}}
+{"t": "2026-10-23T02:15:56Z", "model": "q35_9b_vl", "decision": "gate mstar_pr_a", "choice": "FAIL", "detail": "image parity FAIL; video parity PASS; MMMU 0.445 (floor 0.4 = min(vLLM, SGLang) - 0.05)"}
+{"t": "2026-10-23T02:15:56Z", "model": "q35_9b_vl", "decision": "gate mstar_pr_rf_a", "choice": "FAIL", "detail": "image parity FAIL; video parity PASS; MMMU 0.445 (floor 0.4 = min(vLLM, SGLang) - 0.05)"}
+{"t": "2026-10-23T02:15:56Z", "model": "q35_9b_vl", "decision": "gate mstar_main_a", "choice": "FAIL", "detail": "image parity FAIL; video parity PASS; MMMU 0.45 (floor 0.4 = min(vLLM, SGLang) - 0.05)"}
+{"t": "2026-10-23T02:15:56Z", "model": "q35_9b_vl", "decision": "frontend", "choice": "python", "python_geomean": 1171.18200392261, "rust_geomean": 1185.4877980743302, "rust_gate": "FAIL"}
+{"t": "2026-10-23T02:15:56Z", "model": "q35_9b_vl", "decision": "gate", "choice": "mstar-pr strict parity FAIL: annotated, timed phases continue (sanity-gate rule)"}

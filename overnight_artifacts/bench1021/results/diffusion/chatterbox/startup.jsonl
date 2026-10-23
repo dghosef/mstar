@@ -1,0 +1,16 @@
+{"label": "setup_smoke_cbserver", "arm": "cbserver", "seconds": 15.2, "ok": false, "time": 1792722212.3284357}
+{"label": "setup_smoke_cbserver", "arm": "cbserver", "seconds": 15.2, "ok": true, "time": 1792722398.1128283}
+{"label": "setup_smoke_mstar-pr", "arm": "mstar-pr", "seconds": 30.2, "ok": true, "time": 1792722449.7440407}
+{"label": "tune_default_cbserver_default_r0", "arm": "cbserver", "seconds": 15.2, "ok": true, "time": 1792722761.5146215}
+{"label": "collect_mstar_pr_mstar-pr_python_r0", "arm": "mstar-pr", "seconds": 30.2, "ok": true, "time": 1792723253.6339715}
+{"label": "collect_mstar_pr_b_mstar-pr_python_r0", "arm": "mstar-pr", "seconds": 30.2, "ok": true, "time": 1792723445.553579}
+{"label": "collect_mstar_main_mstar-main_python_r0", "arm": "mstar-main", "seconds": 195.6, "ok": true, "time": 1792723800.333663}
+{"label": "main_mstar-pr_python_r1", "arm": "mstar-pr", "seconds": 195.6, "ok": true, "time": 1792724202.8265214}
+{"label": "main_mstar-main_python_r1", "arm": "mstar-main", "seconds": 192.6, "ok": true, "time": 1792724530.7610137}
+{"label": "main_cbserver_default_r1", "arm": "cbserver", "seconds": 15.2, "ok": true, "time": 1792724940.2135434}
+{"label": "main_mstar-main_python_r2", "arm": "mstar-main", "seconds": 30.2, "ok": true, "time": 1792725393.7082622}
+{"label": "main_cbserver_default_r2", "arm": "cbserver", "seconds": 15.2, "ok": true, "time": 1792725806.4150863}
+{"label": "main_mstar-pr_python_r2", "arm": "mstar-pr", "seconds": 192.6, "ok": true, "time": 1792726421.190169}
+{"label": "main_cbserver_default_r3", "arm": "cbserver", "seconds": 15.2, "ok": true, "time": 1792726825.3153858}
+{"label": "main_mstar-pr_python_r3", "arm": "mstar-pr", "seconds": 30.2, "ok": true, "time": 1792727273.723842}
+{"label": "main_mstar-main_python_r3", "arm": "mstar-main", "seconds": 192.6, "ok": true, "time": 1792727602.7400339}
