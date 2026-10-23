@@ -56,10 +56,13 @@ Full methodology and caveats will be in REPORT.md when the run finishes.
 | Cosmos3 nano t2v 832×480×189, req/s (2 rounds) | −3% s | −17% s | −17% s | | | | | |
 | Cosmos3 Edge t2v 832×480×121, frames/s (2 rounds) | +8% s | −13% v | −14% v | | | | | |
 | Cosmos3 Edge DROID policy, chunks/s (2 rounds) | +25% s | | +20% s | +21% s | | | | |
+| LingBot-World-V2 1.3B 480×832×93, frames/s (2 rounds) | +22% off | | | | | | | |
 | Kokoro 82M, audio-s/s (3 rounds) | +282% kf | +178% kf | +131% kf | +200% kf | +299% kf | +364% kf | +472% kf | |
 | FLUX.2-klein 4B, img/s (3 rounds) | −23% s | −9% s | −7% s | −7% s | −6% s | | | |
 
 The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show it, with TTFT p99 ~2.5 s.
+
+**Profiles:** every model got a `MSTAR_PHASE_TIMING` pass on mstar-pr at its weakest cell. What they show across models (nine general fixes, ranked) and links to every phase table are in the **Profiles** comment below and in `overnight_artifacts/bench1021/PROFILES.md`.
 
 - **Qwen3.5-0.8B, text, 1 GPU: done.** 3 rounds, failed=0 everywhere, and the gate passed on every arm.
   - **Correctness:** argmax agreement with the reference is mstar-pr 0.981 (same as its control re-run), main 0.991, vLLM 0.987, SGLang 0.993. Every first disagreement is a near-tie. GSM8K, n=250: pr 0.508, main 0.536, vLLM 0.532, SGLang 0.520; the sd is about 0.03, so none of these differ meaningfully.
@@ -130,6 +133,10 @@ The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show 
   - **M* leads SGLang diffusion by 20–25%** at c=1/4/8: 3.90 → 4.73 chunks/s, against SGLang's 3.12 → 3.89. Latency at c=1 is 256 ms against 320 ms.
   - **This PR vs main: +39–46% at c=4–8** (level at c=1). Main gets slower as concurrency rises (3.88 → 3.24); the PR scales up.
   - M* is driven over HTTP /generate here, not the WebSocket pipelining the PR measured. SGLang rewraps the task into a JSON caption, so the prompts aren't byte-identical (annotated).
+- **LingBot-World-V2 1.3B causal-fast (480×832, 93 frames, 1 GPU): done** (2 rounds, failed=0, gate passed).
+  - Competitor: the official `WanI2VCausal` offline. SGLang and vllm-omni serve only the 14B checkpoint, and diffusers has no LingBot pipeline.
+  - **M* +22%:** 11.2 frames/s and 8.3 s per rollout, against 9.1 frames/s and 10.2 s. c=1 only, since M* serves one rollout per GPU.
+  - **This PR vs main: +19%.**
 - **BAGEL-7B-MoT (1 GPU): done** (2 rounds, failed=0, sanity gate passed).
   - Competitors: vllm-omni 0.30 (t2i and edit, every CFG field sent explicitly) and vLLM 0.30 core (understanding only).
   - **Text→image 1024², 50 steps:** mstar-pr 0.102 img/s and 9.8 s at B=1, vs vllm-omni 0.080–0.082 and 12.5 s. That is **+24–27%**.

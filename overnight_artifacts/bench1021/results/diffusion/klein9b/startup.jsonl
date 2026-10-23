@@ -3,3 +3,10 @@
 {"label": "collect_mstar_main", "arm": "mstar-main", "seconds": 102.4, "ok": true, "time": 1792759211.0136487}
 {"label": "tune_base_vllmomni_base_r0", "arm": "vllmomni", "seconds": 30.2, "ok": true, "time": 1792759295.7231622}
 {"label": "tune_cudnn_vllmomni_cudnn_r0", "arm": "vllmomni", "seconds": 30.2, "ok": true, "time": 1792759445.926837}
+{"label": "tune_full_vllmomni_full_r0", "arm": "vllmomni", "seconds": 87.3, "ok": true, "time": 1792759653.930982}
+{"label": "tune_eager_vllmomni_eager_r0", "arm": "vllmomni", "seconds": 21.2, "ok": true, "time": 1792759854.0303674}
+{"label": "tune_base_sglang_base_r0", "arm": "sglang", "seconds": 39.2, "ok": true, "time": 1792760019.753289}
+{"label": "tune_compile_sglang_compile_r0", "arm": "sglang", "seconds": 117.4, "ok": true, "time": 1792760242.1397874}
+{"label": "tune_bcg_sglang_bcg_r0", "arm": "sglang", "seconds": 36.2, "ok": true, "time": 1792760411.10038}
+{"label": "tune_compile_b8_sglang_compile_b8_r0", "arm": "sglang", "seconds": 69.3, "ok": true, "time": 1792760585.3658388}
+{"label": "tune_bcg_b8_sglang_bcg_b8_r0", "arm": "sglang", "seconds": 36.2, "ok": true, "time": 1792760803.1389196}

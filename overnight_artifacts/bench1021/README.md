@@ -8,6 +8,8 @@ artifacts), mstar-main = abdfd5802.
 - `results/<model>/`: per-model `summary.md` / `summary_main.md`, raw `results.jsonl` (one row per
   timed cell), gate results, tuning choices, engine versions. `results/diffusion/` is node2's lane
   (diffusion, TTS and others).
+- `PROFILES.md`: what the profile pass found across models, and an index of every phase table
+  (`results/**/phases*.txt`, mstar-pr with MSTAR_PHASE_TIMING=100).
 - `results/decisions.jsonl`, `results/failures.jsonl`: every rule-based decision and every recorded failure.
 - `harness/` (node8: text, vision, Omni) and `diffusion_harness/` (node2): the unattended runners.
 

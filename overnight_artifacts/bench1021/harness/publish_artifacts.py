@@ -18,7 +18,7 @@ DST = TREE / "overnight_artifacts/bench1021"
 KEEP = {"results.jsonl", "summary.md", "summary_main.md", "notes.txt", "decisions.jsonl", "failures.jsonl",
         "gate.txt", "gate_summary.txt", "gate.md", "tuned.json", "tune.json", "versions.jsonl", "startup.jsonl",
         "caveats.txt", "hardware.txt", "REPORT_DIFFUSION.md", "REPORT_TTS.md", "knob_failed.json", "health.json"}
-SKIP_DIRS = {"cells", "servers", "gallery", "stages", "profile", "data", "smoke", "evidence", "parity_video"}
+SKIP_DIRS = {"cells", "servers", "gallery", "stages", "data", "smoke", "evidence", "parity_video"}
 
 
 def copy_results():
@@ -30,7 +30,10 @@ def copy_results():
         rel = p.relative_to(SRC / "results")
         if not p.is_file() or set(rel.parts[:-1]) & SKIP_DIRS:
             continue
+        if "profile" in rel.parts[:-1] and not (p.name.startswith("phases") and p.suffix == ".txt"):
+            continue  # profile dirs: only the phase tables (client logs and raw outputs stay on the box)
         if p.name in KEEP or (p.name.startswith("gsm8k_") and p.suffix == ".json") or \
+                (p.name.startswith("phases") and p.suffix == ".txt") or p.name == "profile_verdict.txt" or \
                 (p.name.startswith("wer_") and p.suffix == ".json") or (p.parent.name == "gate" and p.suffix == ".md"):
             (out / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(p, out / rel)
@@ -48,6 +51,7 @@ def copy_harness():
         if (SRC / f).exists():
             shutil.copy2(SRC / f, DST / f)
     shutil.copy2(HOME / "runs/overnight/BENCH_HEAD.md", DST / "HEADLINES.md")
+    shutil.copy2(HOME / "runs/overnight/PROFILES.md", DST / "PROFILES.md")
 
 
 def main():
@@ -63,6 +67,8 @@ def main():
         "- `results/<model>/`: per-model `summary.md` / `summary_main.md`, raw `results.jsonl` (one row per\n"
         "  timed cell), gate results, tuning choices, engine versions. `results/diffusion/` is node2's lane\n"
         "  (diffusion, TTS and others).\n"
+        "- `PROFILES.md`: what the profile pass found across models, and an index of every phase table\n"
+        "  (`results/**/phases*.txt`, mstar-pr with MSTAR_PHASE_TIMING=100).\n"
         "- `results/decisions.jsonl`, `results/failures.jsonl`: every rule-based decision and every recorded failure.\n"
         "- `harness/` (node8: text, vision, Omni) and `diffusion_harness/` (node2): the unattended runners.\n\n"
         "No media, traces or server logs (too large).\n")
