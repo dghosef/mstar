@@ -52,7 +52,10 @@ Full methodology and caveats will be in REPORT.md when the run finishes.
 | Omnilingual ASR 7B, RTFx (2 rounds) | +91% off | | | | +19% off | | +9% off | |
 | BAGEL t2i 1024², img/s (2 rounds) | +27% vo | +24% vo | +24% vo | | | | | |
 | BAGEL edit, img/s (2 rounds) | +20% vo | | +14% vo | | | | | |
+| BAGEL 2-GPU t2i 1024², img/s (2 rounds) | +20% vo | +15% vo | +17% vo | | | | | |
 | Cosmos3 nano t2v 832×480×189, req/s (2 rounds) | −3% s | −17% s | −17% s | | | | | |
+| Cosmos3 Edge t2v 832×480×121, frames/s (2 rounds) | +8% s | −13% v | −14% v | | | | | |
+| Cosmos3 Edge DROID policy, chunks/s (2 rounds) | +25% s | | +20% s | +21% s | | | | |
 | Kokoro 82M, audio-s/s (3 rounds) | +282% kf | +178% kf | +131% kf | +200% kf | +299% kf | +364% kf | +472% kf | |
 | FLUX.2-klein 4B, img/s (3 rounds) | −23% s | −9% s | −7% s | −7% s | −6% s | | | |
 
@@ -119,6 +122,14 @@ The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show 
   - **M* trails SGLang diffusion and vllm-omni.** It's level at c=1 (55.7 s vs 54.2 s, −2 to −3%) but **−17% at c=2–4**.
   - **M* gets slower when it batches two videos:** 0.018 → 0.015 req/s. The competitors serve one at a time at a steady 0.018 req/s. A batched nano step is less efficient than two serial ones, so M* should not batch this model, or its batched path needs a look.
   - **This PR vs main:** +1%. The PR's Cosmos3 gains were DP2/sp2 multi-GPU configs and the DROID policy, neither measured here.
+- **Cosmos3 Edge (text→video 832×480, 121 frames, 20 steps, 1 GPU): done** (2 rounds, failed=0).
+  - **M* leads at c=1:** 18.9 frames/s and 6.26 s, against SGLang's 17.4 and 6.76 s and vllm-omni's 17.2 and 6.98 s. That is **+8.5%**.
+  - **At c=2–4 it trails by 13–14%:** 15.8 frames/s, against 18.1–18.2 for vllm-omni. It's the same pattern as nano: batching two videos makes M* slower (18.9 → 15.8), while the competitors stay level or gain.
+  - **This PR vs main:** +2–5%.
+- **Cosmos3 Edge DROID policy (one observation + task → one 32×10 action chunk, 4 steps, 1 GPU): done** (2 rounds, failed=0).
+  - **M* leads SGLang diffusion by 20–25%** at c=1/4/8: 3.90 → 4.73 chunks/s, against SGLang's 3.12 → 3.89. Latency at c=1 is 256 ms against 320 ms.
+  - **This PR vs main: +39–46% at c=4–8** (level at c=1). Main gets slower as concurrency rises (3.88 → 3.24); the PR scales up.
+  - M* is driven over HTTP /generate here, not the WebSocket pipelining the PR measured. SGLang rewraps the task into a JSON caption, so the prompts aren't byte-identical (annotated).
 - **BAGEL-7B-MoT (1 GPU): done** (2 rounds, failed=0, sanity gate passed).
   - Competitors: vllm-omni 0.30 (t2i and edit, every CFG field sent explicitly) and vLLM 0.30 core (understanding only).
   - **Text→image 1024², 50 steps:** mstar-pr 0.102 img/s and 9.8 s at B=1, vs vllm-omni 0.080–0.082 and 12.5 s. That is **+24–27%**.
@@ -128,6 +139,10 @@ The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show 
     - text→image +64–65%. The overnight claim was +60% at c=4.
     - edit +0–2%.
     - understanding −17.5% at c=1 (a regression to look at), +7–23% at c=4–16.
+- **BAGEL-7B-MoT on 2 GPUs (CFG parallel): done** (2 rounds, failed=0 for every M* arm).
+  - **Text→image 1024²: M* +15–20% vs vllm-omni (cfg_parallel 2).** That's 0.167–0.171 img/s and 5.97 s at c=1, against 0.140–0.146 and 7.13 s.
+  - **This PR vs main: +91–97% on t2i** (main 0.085 img/s, no faster than 1 GPU). Edit is +1–3%.
+  - **Edit has no vllm-omni number:** vllm-omni refuses image-CFG edit below 3 GPUs (`cfg_parallel_size=3` required). The 1-GPU edit comparison above stands.
 - **Omnilingual ASR 300M / 1B / 3B / 7B (1 GPU): done** (2 rounds, failed=0). Same WER as the official pipeline (3B: 2.50% vs 2.54%).
   - Competitor: the official omnilingual-asr 0.2.0 `ASRInferencePipeline`, as an offline batch with no HTTP cost. No serving engine runs these CTC models.
   - **M* leads at every point**, by +26–112% at c=1 and +8–48% at c=64 (RTFx: 300M 298 → 1,754; 1B 268 → 1,789; 3B 242 → 1,005; 7B 190 → 535, +9% at c=64).

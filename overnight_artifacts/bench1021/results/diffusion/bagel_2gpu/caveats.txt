@@ -1,0 +1,1 @@
+bagel_2gpu: vllm-omni edit cannot run at 2 GPUs (vllm-omni requires cfg_parallel_size=3 for image CFG); 2-GPU edit is compared vs M* main only. The 1-GPU BAGEL lane has the vllm-omni edit comparison.

@@ -98,6 +98,8 @@ def _tune_knob(line):
     competitor_empty = "empty output" in str(r.get("error", "")) and not str(r.get("arm", "")).startswith("mstar")
     # sampled TTS occasionally never emits its end token (seen on M* and SGLang-Omni alike); recorded, not actionable
     competitor_empty = competitor_empty or "runaway length" in str(r.get("error", ""))
+    # vllm-omni BAGEL edit needs 3 GPUs for image CFG; the 2-GPU lane has no vllm-omni edit arm
+    competitor_empty = competitor_empty or "requires cfg_parallel_size=3" in str(r.get("error", ""))
     return (competitor_empty or str(r.get("phase", "")).startswith("tune") or "annotated" in act
             or "arm still timed" in act or "ineligible for selection" in act)
 
