@@ -45,7 +45,7 @@ def _worker(
     w._pending_drains = set(pending_drains)
     w._draining_rids = set(draining)
     w._reads_done_sent = set(reads_done)
-    w._pending_removes = set()
+    w._pending_removes = {}
     # Identity interning: these tests use the rid string as its own handle, so
     # the string/handle split is exercised without a real runtime.
     w._graph_runtime = SimpleNamespace(
@@ -192,7 +192,7 @@ def test_a_walk_the_cache_served_whole_is_still_routed():
     )
     tensors.cleanup_collectable = lambda *freed: None
     tensors.increment_ref_batch_uniform = tensors.dereference_batch_uniform = lambda *args: None
-    tensors.release_host_copies = lambda uuids: None
+    tensors.drop_host_copies = lambda: None
     # counts each rid's outputs and stores none of them
     tensors.store_and_return_tensor_info_batch = lambda rids, outputs, signals, **kwargs: StoredOutputs(
         flat_uuids=[], flat_rids=[], signal_idxs=[],
@@ -232,7 +232,7 @@ def test_a_walk_the_cache_served_whole_is_still_routed():
 def test_draining_and_pending_removal_rids_are_not_published():
     w = _worker(known_rids=("healthy", "draining", "pending", "failed"))
     w._draining_rids.add("draining")
-    w._pending_removes.add("pending")
+    w._pending_removes["pending"] = None
     w.scheduler.failed_rids.add("failed")
     batch = SimpleNamespace(
         request_ids=["healthy", "draining", "pending", "failed"],
@@ -340,7 +340,7 @@ def test_speculation_stops_for_a_rid_being_torn_down():
     assert "X" in w._draining_rids and "X" in w.scheduler.failed_rids
     assert w._is_tearing_down("X")
 
-    w._pending_removes.add("Y")
+    w._pending_removes["Y"] = None
     assert w._is_tearing_down("Y")
 
 
@@ -427,7 +427,7 @@ def test_add_new_request_hands_off_the_handle_not_the_string():
     info = SimpleNamespace(resource_configs={}, graph_walk="g", partition_name="p")
     Worker._add_new_request(w, SimpleNamespace(
         request_id="X", request_info=info, initial_inputs=[],
-        partition_worker_graph_ids=[], worker_graph_to_workers={},
+        partition_worker_graph_ids=[], worker_graph_to_workers={}, loop_caps={},
     ))
 
     handle = w._graph_runtime.get_rid_handle("X")

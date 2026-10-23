@@ -577,7 +577,8 @@ class TensorStore:
         self._tensors: dict[int, torch.Tensor] = {}
         # {UUID -> producer's host copy}, for a ``needs_cpu_tensor`` transport
         # to send from. Optional and never the only copy; the producer reuses
-        # its memory after the send, so nothing but the send may read it.
+        # its memory after the send, so nothing but the send may read it, and
+        # the worker drops them once its step's sends are done.
         self._tensors_cpu: dict[int, torch.Tensor] = {}
         # Only for teardown: which uuids a request is responsible for, and the
         # reverse so a single removal does not scan every request. A sliced
@@ -600,6 +601,11 @@ class TensorStore:
     def get_cpu_tensor(self, uuid: int) -> torch.Tensor | None:
         """The host copy stored alongside ``uuid``, if the producer gave one."""
         return self._tensors_cpu.get(uuid)
+
+    def drop_cpu_tensors(self) -> None:
+        """Forget every host copy. A tensor sent after this is read from its
+        own memory."""
+        self._tensors_cpu.clear()
 
     def put_tensor(
         self, request_id: Rid, uuid: int,
@@ -673,15 +679,6 @@ class TensorStore:
             for uuid, cpu_tensor in zip(uuids, cpu_tensors, strict=True):
                 if cpu_tensor is not None:
                     self._tensors_cpu[uuid] = cpu_tensor
-
-    def drop_cpu_tensors(self, uuids: list[int]) -> None:
-        """Forget the host copies stored for ``uuids``. They are views of the
-        producer's pinned buffers, which its next step overwrites, so a send
-        after that (a tensor held across steps) must read the device tensor."""
-        if self._tensors_cpu:
-            pop = self._tensors_cpu.pop
-            for uuid in uuids:
-                pop(uuid, None)
 
     def check_uuid_presence(self, uuid: int) -> bool:
         return uuid in self._tensors

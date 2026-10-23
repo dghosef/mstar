@@ -357,7 +357,7 @@ def test_qwen3_tts_process_prompt_matches_official_template():
     assert result.new_input_tensors["text_inputs"][0].tolist() == ASSISTANT_PREFIX + [1000] + ASSISTANT_SUFFIX
     # CustomVoice default: whole text in the prefill (stream_text = 0); no
     # reference transcript or frames. Host values, for the prefill's step metadata.
-    assert result.metadata == {
+    assert {key: value for key, value in result.metadata.items() if key != "kv_layout"} == {
         PROMPT_LAYOUT_KEY: [0, 1, 0, 0, 0], SPEAKER_ID_KEY: 3065, LANGUAGE_ID_KEY: 2055,
         Qwen3TTSModel.CODEC_STREAM_LEAD_KEY: 0,
     }
@@ -456,7 +456,7 @@ def test_qwen3_tts_base_process_prompt_builds_in_context_clone():
     assert model.tokenizer.texts[-1] == "<|im_start|>assistant\nthe reference says<|im_end|>\n"
     assert list(result.new_input_tensors) == ["text_inputs"]
     assert result.new_input_tensors["text_inputs"][0].tolist() == assistant_ids + ref_ids
-    assert result.metadata == {
+    assert {key: value for key, value in result.metadata.items() if key != "kv_layout"} == {
         # [instruct_len, text_len, stream_text (Base default: streaming), ref_text_len, ref_frames]
         PROMPT_LAYOUT_KEY: [0, 3, 1, len(ref_ids), 13],
         SPEAKER_ID_KEY: -1,
@@ -671,12 +671,11 @@ def test_qwen3_tts_initial_partition_args_route_expected_inputs():
         input_modalities=["text"],
         output_modalities=["audio"],
         input_signals=pointers,
-        model_kwargs={"max_new_tokens": 12, "subtalker_top_k": 7, **prompt},
+        model_kwargs={"subtalker_top_k": 7, **prompt},
     )
     assert talker.full_metadata.graph_walk == "talker_prefill"
     assert [edge.name for edge in talker.inputs] == list(pointers)
-    assert talker.full_metadata.kwargs["talker_max_tokens"] == 12
-    assert talker.step_metadata == {"is_prefill": True, "talker_max_tokens": 12, **prompt}
+    assert talker.step_metadata == {"is_prefill": True, **prompt}
     # Residual-group sampling rides the code predictor's own per-request
     # sampler config, not step metadata.
     assert "subtalker_sampling" not in talker.step_metadata
@@ -701,9 +700,6 @@ def test_qwen3_tts_talker_prefill_transitions_to_decode():
         output_modalities=["audio"],
         graph_walk="talker_prefill",
         is_prefill=True,
-        kwargs={
-            "talker_max_tokens": 100,
-        },
     )
 
     result = model.get_partition_forward_pass_args(
@@ -976,9 +972,9 @@ def test_qwen3_tts_prefill_frame_counts_toward_generation_limit():
     outputs = {"new_token": [torch.tensor(1)]}
     request_info = SimpleNamespace(
         graph_walk="talker_decode",
-        step_metadata={"talker_max_tokens": 1},
+        step_metadata={},
         resource_configs={},
-        max_tokens=8192,
+        max_tokens=1,
     )
 
     submodule.postprocess("request", request_info, outputs)
@@ -1001,7 +997,7 @@ def test_qwen3_tts_stops_on_eos_from_routed_codec_tokens():
     ])]}
     request_info = SimpleNamespace(
         graph_walk="talker_decode",
-        step_metadata={"talker_max_tokens": 100},
+        step_metadata={},
         resource_configs={TALKER_SAMPLER: SimpleNamespace(ignore_eos=False)},
         max_tokens=8192,
     )
@@ -1027,7 +1023,7 @@ def test_qwen3_tts_honors_ignore_eos_for_fixed_length_benchmarks():
     )]}
     request_info = SimpleNamespace(
         graph_walk="talker_decode",
-        step_metadata={"talker_max_tokens": 100},
+        step_metadata={},
         resource_configs={TALKER_SAMPLER: SimpleNamespace(ignore_eos=True)},
         max_tokens=8192,
     )
@@ -1048,9 +1044,9 @@ def test_qwen3_tts_batched_stop_check_agrees_with_the_per_request_one():
     def info(ignore_eos: bool, limit: int) -> SimpleNamespace:
         return SimpleNamespace(
             graph_walk="talker_decode",
-            step_metadata={"talker_max_tokens": limit},
+            step_metadata={},
             resource_configs={TALKER_SAMPLER: SimpleNamespace(ignore_eos=ignore_eos)},
-            max_tokens=8192,
+            max_tokens=limit,
         )
 
     #          rid: (code, ignore_eos, limit, frames already generated)

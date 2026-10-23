@@ -33,6 +33,7 @@ from mstar.distributed.communication import WorkerParallelGroups
 from mstar.engine import apply_torch_config
 from mstar.engine.engine import ExecutingBatch
 from mstar.engine.resources import AdmitFailedReason, AllocationFailed, StepContext
+from mstar.engine.resources.kv.config import without_layouts
 from mstar.engine.resources.kv.transfer import (
     TransferEngineInfo,
     make_deployment_kv_shm_dir,
@@ -599,9 +600,10 @@ class Worker:
         # from _process_messages on any iter — reads/writes them.
         # _in_flight_rids: rids referenced by an in-flight GPU step or its
         #   speculation; REMOVE_REQUEST for these is deferred.
-        # _pending_removes: deferred REMOVE_REQUESTs.
+        # _pending_removes: deferred REMOVE_REQUESTs, in the order they were
+        #   deferred (a dict for that order: a follower's is rank 0's).
         self._in_flight_rids: set[int] = set()
-        self._pending_removes: set[int] = set()
+        self._pending_removes: dict[int, None] = {}
 
         # step seq -> rids rank 0 released after that step, held until this rank
         # has consumed it. See ``_removal_step_reached``.
@@ -794,6 +796,7 @@ class Worker:
             graph_walk=body.request_info.graph_walk,
             partition_worker_graph_ids=body.partition_worker_graph_ids,
             worker_graph_to_workers=ParallelList.from_dict(body.worker_graph_to_workers),
+            loop_caps=body.loop_caps,
         )
         body.request_info.rid_handle = request_id
 
@@ -815,6 +818,7 @@ class Worker:
             self._fail_requests({request_id: f"Error in worker: {type(err).__name__}: {err}"})
             self._process_unprocessed(body.request_id)
             return
+        body.request_info.resource_configs = without_layouts(body.request_info.resource_configs)
 
         # Create StreamBuffers for consumer connections on this worker. A request
         # with several partitions here arrives once per partition: keep the
@@ -877,6 +881,11 @@ class Worker:
                     body.after_tp_seq, []
                 ).append(body.request_id)
                 return
+            if body.source == MessageSource.TP_RANK_0:
+                # Removals held above came from rank 0 before this one, so the ones
+                # whose step has landed go first. The free list hands pages back out
+                # in the order they were freed.
+                self._apply_removes_whose_step_landed()
 
         # Async-scheduling deferral: if this rid is currently held by an
         # in-flight GPU step (or its speculation), tearing down engine /
@@ -892,8 +901,14 @@ class Worker:
             # later message would ever pop it.
             self.scheduler.clear_wire_rid(body.request_id)
             return
-        if request_id in self._in_flight_rids:
-            self._pending_removes.add(request_id)
+        # A follower tears down in rank 0's order, so never ahead of one it deferred
+        # earlier.
+        behind = (
+            self.is_tp_follower
+            and next(iter(self._pending_removes), request_id) != request_id
+        )
+        if request_id in self._in_flight_rids or behind:
+            self._pending_removes.setdefault(request_id)
             return
 
         # If we are the TP leader for this request, signal the followers to
@@ -939,7 +954,7 @@ class Worker:
         self.profile_info.pop_request(request_id)
         self.streaming_buffers.pop(request_id, None)
         self.scheduler.clear_rid(request_id, body.request_id)
-        self._pending_removes.discard(request_id)
+        self._pending_removes.pop(request_id, None)
 
         for node_name in self.engine_manager.evictable_nodes():
             self._last_active.pop((request_id, node_name), None)
@@ -1413,7 +1428,7 @@ class Worker:
         if not engine.evictable(node_name):
             return None
 
-        candidates = [
+        active = [
             rid for (rid, node) in self._last_active
             if node == node_name and not engine.is_offloaded(node_name, rid)
         ]
@@ -1421,20 +1436,16 @@ class Worker:
         # a request admitted but not yet run holds no pages: offloading it
         # frees nothing and the retry would re-pick it
         candidates = [
-            rid for rid in candidates if engine.reclaimable(node_name, rid, affected_resources)
+            rid for rid in active if engine.reclaimable(node_name, rid, affected_resources)
         ]
 
         if not candidates:
-            # Nothing holds pages of the resource that ran out. Eviction is the
-            # wrong tool here — the working set does not fit — and saying so
-            # separates it from the host pool being full, which looks identical
-            # from the caller and wants the opposite response.
             logger.warning(
-                "No eviction candidate on %s for %s: nothing holds reclaimable "
-                "pages of it. The working set does not fit; eviction cannot "
-                "help.", node_name,
+                "No eviction candidate on %s for %s: %d active requests, none "
+                "with pages of it to reclaim now.", node_name,
                 "any resource" if affected_resources is None
                 else ", ".join(sorted(affected_resources)),
+                len(active),
             )
             return None
 
@@ -1444,7 +1455,7 @@ class Worker:
         freed = engine.offload_request(node_name, victim_id)
         if freed <= 0:
             # A victim was found and would not move. The usual cause is the host
-            # pool being full (see ``CPUPagePool.offload_stream``) — different
+            # pool being full (see ``CPUPagePool.place``) - different
             # from having no candidate, and fixed by a larger
             # ``cpu_offload_pages`` rather than by scheduling less.
             logger.warning(
@@ -1654,6 +1665,8 @@ class Worker:
         # nothing. Each gets its own copy because each pops as it replays.
         engine = self.engine_manager.get_engine(node_batch.node_name)
         resident_delta = engine.take_resident_delta(node_batch.node_name)
+        prefix_hits = engine.decide_cached_prefix(node_batch)
+        page_trails = engine.page_trails(node_batch.node_name)
         # this worker is only a part of one TP group for this node,
         # so, we can just look at the sharding_config for the first
         # request to get the relevant workers
@@ -1682,6 +1695,8 @@ class Worker:
                         resident_delta=resident_delta.copy(),
                         walks=walks,
                         walk_idx=walk_idx,
+                        prefix_hits=prefix_hits,
+                        page_trails=page_trails,
                     )
                 )
             )
@@ -2213,10 +2228,11 @@ class Worker:
         # rid torn down here cannot be pushed onto queues that have just been dismantled.
         self._apply_removes_whose_step_landed()
 
-        # ``referenced_rids``, not ``_in_flight_rids``: this step's admit refused,
-        # so no forward ran and its own pages are fair game. Empty in practice —
+        # ``referenced_rids``: what a speculation still touches. Empty in practice —
         # nothing is speculated on a refusal — so it only guards a future caller
-        # that broadcasts something here.
+        # that broadcasts something here. This step's own rids stay in
+        # ``_in_flight_rids`` until the loop clears the pending step, and their
+        # removals wait for that.
         self._apply_pending_removes_safe_to_drop(referenced_rids)
 
         if self._is_tp_follower_node(batch.node_name):
@@ -2297,6 +2313,16 @@ class Worker:
                 and batch.node_name in self.parallel_leader_nodes
             )
         return True
+
+    def _plans_ahead(self, spec: Speculation) -> bool:
+        """With the prefix cache open, a TP leader admits a yield-away step at exec, as its followers
+        do. A pre-plan refused on rank 0 alone puts its pages back at the end of rank 0's free list,
+        and the ranks then hand out different page ids, which only the cache reads."""
+        node = spec.node_batch.node_name
+        return not (spec.is_yield_away and node in self.parallel_nodes and self._prefix_cache_open(node))
+
+    def _prefix_cache_open(self, node_name: str) -> bool:
+        return self.engine_manager.get_engine(node_name).prefix_cache_open(node_name)
 
     def _is_tp_follower_node(self, node_name: str) -> bool:
         """This rank follows ``node_name``: rank 0 of its instance decides both
@@ -2487,6 +2513,8 @@ class Worker:
         # The kept rids' chunks now belong to the step; nothing is left to undo.
         speculation.spec_id = 0
         speculation.consumed_streaming_edges.clear()
+        if not success:
+            self.engine_manager.get_engine(batch.node_name).release_cached_prefix(speculation.node_batch)
 
     @staticmethod
     def _speculated_rids(speculation: Speculation | None) -> frozenset[int]:
@@ -2782,7 +2810,10 @@ class Worker:
         # state that is still mid-replay. Every poll retries the owed moves, so
         # returning here makes progress where reading the half-applied state as
         # "not ready" never could.
-        if not self.scheduler.settle_tp_follow_delta():
+        if not self.scheduler.settle_tp_follow_delta(
+            # Of the steps before the head, only N may still index a page of the head's hit
+            caught_up=pending.node_batch.commit_done.is_set(),
+        ):
             return None
 
         batch_N = pending.batch
@@ -2946,6 +2977,8 @@ class Worker:
         head = self.scheduler.peek_tp_follow()
         if head is not None and head.speculative and head.spec_from_seq == pending.tp_seq:
             self.scheduler.pop_tp_follow_head()
+            # settle may have adopted some of the head's hit, and the leader releases the whole lease
+            self.engine_manager.get_engine(head.node_name).drop_cached_prefix(head)
 
     @staticmethod
     def _step_voids_head(pending: PendingBatch) -> str | None:
@@ -2975,7 +3008,7 @@ class Worker:
             head = self.scheduler.peek_tp_follow()
             if head is not None and head.speculative and head.spec_from_seq == s:
                 void = self._step_voids_head(pending) if outputs is not None else None
-                if void is not None:
+                if void is not None and not self._prefix_cache_open(head.node_name):
                     # The leader clears its speculation on this verdict too.
                     self.scheduler.pop_tp_follow_head()
                     logger.debug(
@@ -2983,6 +3016,8 @@ class Worker:
                         self.worker_id, head.spec_seq, s, void,
                     )
                     return outputs, None
+                # With the prefix cache open, build the head even when N's verdict voids it, since the
+                # leader pre-plans every head it sends and this rank's pages must move as the leader's do.
                 spec = self._try_follow_speculation(pending)
                 if spec is not None:
                     arm(spec)
@@ -3284,12 +3319,8 @@ class Worker:
             range_pop(synchronize=False)
             range_push("worker.postprocess.register_outputs", synchronize=False)
         self._register_outputs(route_output)
-        # Registration, just above, is the last reader of the step's host
-        # copies (the sends below run after it); an output held for a later
-        # send (a loop's accumulated outputs) must not read them, since the
-        # pinned buffers behind them are this step's and the next one
-        # rewrites them.
-        self.tensor_manager.release_host_copies(stored.flat_uuids)
+        # Those sends were the last readers of this step's host copies.
+        self.tensor_manager.drop_host_copies()
         _pp_stage("register_outputs")
 
         # send outputs
@@ -3349,7 +3380,7 @@ class Worker:
         # share one (refuse_combined_walks_across_tp_groups).
         # Pass the stop check's host copies so a host-memory transport needn't
         # copy the rows again. They are views of pinned buffers the next step
-        # reuses; safe because the sends below are their last reader.
+        # reuses, so they are dropped once this step's sends are done.
         # Row views of one batch clone (a decode step) are described from one
         # row; anything else goes through the general per-tensor path. Both
         # take the real walk, not the combined label: the runtime keys the
@@ -3793,7 +3824,7 @@ class Worker:
         The host tensors are views of pinned buffers the next step reuses. Their
         one other reader, a ``needs_cpu_tensor`` transport, gets them through
         the store and sends in ``_register_outputs`` later in the same
-        ``_postprocess_batch``, never reading them after.
+        ``_postprocess_batch``, which then drops them from the store.
         """
         source = outputs.get_check_stop_input()
         # Rows are in forward order, which the engine stamped on the output.
@@ -3889,14 +3920,19 @@ class Worker:
         self, in_flight_rids: set[int]
     ) -> None:
         """Apply ``REMOVE_REQUEST`` for any rid that is not currently held by
-        an in-flight GPU step. Removes for in-flight rids stay deferred and
-        are reattempted next iter."""
-        to_apply = [r for r in self._pending_removes if r not in in_flight_rids]
-        for rid in to_apply:
-            self._pending_removes.discard(rid)
+        an in-flight GPU step, in the order they were deferred. Removes for
+        in-flight rids stay deferred and are reattempted next iter; on a
+        follower, so do the ones after them, which rank 0 tore down later."""
+        for rid in list(self._pending_removes):
+            if rid in in_flight_rids or rid in self._in_flight_rids:
+                if self.is_tp_follower:
+                    break
+                continue
             self._remove_request(RemoveRequest(
                 request_id=self._rid_str(rid), source=MessageSource.SELF,
             ))
+            # torn down above, unless its handle was already gone
+            self._pending_removes.pop(rid, None)
 
     def _drop_failed_rids(
         self, pending: PendingBatch,
@@ -4275,7 +4311,7 @@ class Worker:
             # commit event, then reserves a slot and pre-plans —
             # while the main thread sits in await_gpu with the GIL
             # released and N's kernels are still running.
-            if plan_executor is not None:
+            if plan_executor is not None and self._plans_ahead(spec):
                 spec.plan_future = plan_executor.submit(
                     self._preplan_spec, pending, spec,
                 )
@@ -4586,6 +4622,13 @@ class Worker:
                     self._apply_pending_removes_safe_to_drop(in_flight)
                     self._apply_pending_drains(in_flight)
                     _set_pending(None)
+                    if spec_pending is None and self.is_tp_follower:
+                        # N is done and nothing runs. Rank 0 tore down what N held
+                        # here, and what it stamped with a step this rank dropped,
+                        # before it sent the next step, so this rank does too, before
+                        # it takes that step.
+                        self._apply_removes_whose_step_landed()
+                        self._apply_pending_removes_safe_to_drop(set())
 
                 if spec_pending is not None:
                     if speculation.is_yield_away:

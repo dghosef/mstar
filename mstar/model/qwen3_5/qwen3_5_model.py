@@ -39,9 +39,13 @@ from mstar.graph.base import (
 from mstar.graph.special_destinations import EMIT_TO_CLIENT
 from mstar.model.base import (
     ForwardPassArgs,
+    KVLabel,
+    LabelLayout,
     Model,
     ProcessPromptOutput,
+    Span,
     TensorAndMetadata,
+    prompt_spans,
 )
 from mstar.model.media_limits import read_image
 from mstar.model.multimodal import (
@@ -56,6 +60,7 @@ from mstar.model.multimodal import (
     split_around_spans,
 )
 from mstar.model.qwen3_5.components.language_model import Qwen3_5ForCausalLM
+from mstar.model.qwen3_5.components.rope import vision_position_advance
 from mstar.model.qwen3_5.config import (
     ATTN,
     GDN_STATE,
@@ -603,6 +608,24 @@ class Qwen3_5DenseModel(Model):
             result["video_grid_thw"] = [video.grid for video in videos]
             # the decoded frames are spent; don't hold them for the request's life
             result["video_inputs"] = []
+        walk = "prefill_vision" if images or videos else "prefill_text"
+        merge = self.vision_config.spatial_merge_size
+        owners = group_owners(groups)
+
+        def media(step: PromptPart) -> tuple[Span]:
+            # A span is the merged tokens and two sentinels, and each temporal group of a video
+            # is placed like a one-frame image.
+            video = step.modality == VIDEO
+            grid = result["video_grid_thw"][owners[step.index]] if video else result["image_grid_thw"][step.index]
+            grid = grid[0] if grid.dim() == 2 else grid
+            t, h, w = (int(v) for v in grid.tolist())
+            grid = torch.tensor((1 if video else t, h, w))
+            rows = int(grid.prod()) // merge**2 + 2
+            source = (VIDEO, owners[step.index]) if video else ("image", step.index)
+            return (Span("rows" if video else "digest", walk, rows, vision_position_advance(grid, merge) + 2, source),)
+
+        plan = prefill_plan(expand_video_parts(parts, groups))
+        layout = LabelLayout(spans=tuple(prompt_spans(plan, segments, walk, media)), growth=(("decode_loop", 1),))
         def host(grids) -> list[tuple[int, ...]]:
             return [tuple(int(v) for v in g.reshape(-1).tolist()) for g in grids]
 
@@ -610,9 +633,18 @@ class Qwen3_5DenseModel(Model):
         # schedule; the grids ride to the nodes as step metadata
         return ProcessPromptOutput(result, {
             "video_groups": groups,
+            "kv_layout": {KV_CACHE: {"main": layout}},
             IMAGE_GRIDS_KEY: host(result.get("image_grid_thw", [])),
             VIDEO_GRIDS_KEY: host(result.get("video_grid_thw", [])),
         })
+
+    def get_loop_caps(self, **model_kwargs) -> dict[str, int]:
+        return {"decode_loop": self.get_max_output_tokens(**model_kwargs)}
+
+    def kv_labels(self) -> dict[str, dict[str, KVLabel]]:
+        return {KV_CACHE: {"main": KVLabel(
+            growth=(("decode", "decode_loop"),),
+        )}}
 
 
     def postprocess(
