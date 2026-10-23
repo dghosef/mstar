@@ -7,3 +7,4 @@
 {"label": "main_mstar-main_config_r1", "arm": "mstar-main", "seconds": 210.6, "ok": true, "time": 1792730369.0788736}
 {"label": "main_mstar-main_config_r2", "arm": "mstar-main", "seconds": 42.2, "ok": true, "time": 1792730798.2838614}
 {"label": "main_mstar-pr_config_r2", "arm": "mstar-pr", "seconds": 210.6, "ok": true, "time": 1792731392.774393}
+{"label": "profile_ls500_c32", "arm": "mstar-pr", "seconds": 42.2, "ok": true, "time": 1792731467.5807762}

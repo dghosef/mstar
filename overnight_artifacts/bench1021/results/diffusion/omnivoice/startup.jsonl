@@ -1,0 +1,16 @@
+{"label": "setup_smoke_vllmomni", "arm": "vllmomni", "seconds": 33.2, "ok": true, "time": 1792731539.2198863}
+{"label": "setup_smoke_mstar-pr", "arm": "mstar-pr", "seconds": 111.4, "ok": true, "time": 1792731756.3236055}
+{"label": "tune_default_vllmomni_default_r0", "arm": "vllmomni", "seconds": 30.2, "ok": true, "time": 1792731790.0840938}
+{"label": "tune_fp16_mns32_vllmomni_fp16_mns32_r0", "arm": "vllmomni", "seconds": 30.2, "ok": true, "time": 1792731925.518962}
+{"label": "collect_mstar_pr_mstar-pr_python_r0", "arm": "mstar-pr", "seconds": 108.4, "ok": true, "time": 1792732239.445603}
+{"label": "collect_mstar_pr_b_mstar-pr_python_r0", "arm": "mstar-pr", "seconds": 18.2, "ok": true, "time": 1792732317.2042296}
+{"label": "collect_mstar_main_mstar-main_python_r0", "arm": "mstar-main", "seconds": 15.2, "ok": true, "time": 1792732391.280495}
+{"label": "main_mstar-pr_python_r1", "arm": "mstar-pr", "seconds": 108.4, "ok": true, "time": 1792732731.7115896}
+{"label": "main_mstar-main_python_r1", "arm": "mstar-main", "seconds": 15.2, "ok": true, "time": 1792732800.3254063}
+{"label": "main_vllmomni_fp16_mns32_r1", "arm": "vllmomni", "seconds": 30.2, "ok": true, "time": 1792732999.3949249}
+{"label": "main_mstar-main_python_r2", "arm": "mstar-main", "seconds": 15.2, "ok": true, "time": 1792733189.2847502}
+{"label": "main_vllmomni_fp16_mns32_r2", "arm": "vllmomni", "seconds": 30.2, "ok": true, "time": 1792733385.7351334}
+{"label": "main_mstar-pr_python_r2", "arm": "mstar-pr", "seconds": 111.4, "ok": true, "time": 1792733672.2078075}
+{"label": "main_vllmomni_fp16_mns32_r3", "arm": "vllmomni", "seconds": 30.2, "ok": true, "time": 1792733755.2819533}
+{"label": "main_mstar-pr_python_r3", "arm": "mstar-pr", "seconds": 108.4, "ok": true, "time": 1792734039.655593}
+{"label": "main_mstar-main_python_r3", "arm": "mstar-main", "seconds": 15.2, "ok": true, "time": 1792734108.6971877}

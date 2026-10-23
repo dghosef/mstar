@@ -45,6 +45,7 @@ Full methodology and caveats will be in REPORT.md when the run finishes.
 | Qwen3-Omni text→speech, audio-s/s (3 rounds) | +33% s | | +3% s | | +9% s | +11% s | | |
 | Qwen3-Omni audio→text (ASR), tok/s (3 rounds) | −33% s | | −46% s | | −52% s | −47% s | | |
 | Higgs Audio v3 STT, RTFx (2 rounds) | +2150% off | | | +1173% off | | +545% off | | |
+| OmniVoice, audio-s/s (3 rounds) | −6% v | 0% v | +11% v | +9% v | −6% v | −9% v | −20% off | |
 | Kokoro 82M, audio-s/s (3 rounds) | +282% kf | +178% kf | +131% kf | +200% kf | +299% kf | +364% kf | +472% kf | |
 | FLUX.2-klein 4B, img/s (3 rounds) | −23% s | −9% s | −7% s | −7% s | −6% s | | | |
 
@@ -107,6 +108,12 @@ The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show 
   - **M* leads by 2.6–3× over chatterbox-vllm and 5–10× over the TTS server.** mstar-pr does 11.0 → 34.2 audio-s/s; chatterbox-vllm does 3.6 → 13.5.
   - **This PR vs main:** +3–10%.
   - The PR's split+MPS config, its +58% headline, isn't benchmarked here: the harness has no MPS handling.
+- **OmniVoice (1 GPU, 32 steps): done.** 3 rounds, failed=0. Sanity gate passed (WER 0.9–1.1% on all arms).
+  - Competitors: vllm-omni 0.30, tuned to fp16 with max_num_seqs 32, and the official omnivoice package with FlashInfer as an offline batch.
+  - **Level with vllm-omni at low and mid concurrency** (−6% at c=1, +9–11% at c=4–8).
+  - **Behind at high concurrency:** mstar-pr plateaus at ~105–120 audio-s/s from c=8. That's −6% to −15% vs vllm-omni at c=16–64, and −20% vs the official offline batch at c=64 (141 audio-s/s).
+  - **This PR vs main: 4× at c=1** (15 → 60 audio-s/s, TTFA 387 → 93 ms), +25–90% at higher concurrency. The overnight claim was +150% at c=1.
+  - The PR's split+MPS config (+52–53% at c=8–32 overnight) isn't benchmarked here; the harness has no MPS handling.
 - **Higgs Audio v3 STT (speech recognition, 1 GPU): done** (2 rounds per the trimmed plan, failed=0; WER: M* 1.66%, official 1.66%, main 1.59%).
   - **No serving engine runs this architecture.** vLLM has no Higgs class; vLLM-Omni and SGLang-Omni only serve the Higgs TTS models. So the competitor is the model card's official remote code (`transcribe_batch`), as an offline batch, tuned over eager vs SDPA.
   - **mstar-pr runs at 111 → 795× real time from c=1 to c=32,** with p50 latency 58–263 ms. The official code reaches 4.9 → 123× real time at batch 1 → 32, with ~1.5–1.8 s per batch. That is 6.5–22× in M*'s favour, and the offline arm pays no HTTP cost.

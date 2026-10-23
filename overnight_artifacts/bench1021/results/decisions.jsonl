@@ -65,3 +65,9 @@
 {"t": "2026-10-23T02:15:56Z", "model": "q35_9b_vl", "decision": "gate mstar_main_a", "choice": "FAIL", "detail": "image parity FAIL; video parity PASS; MMMU 0.45 (floor 0.4 = min(vLLM, SGLang) - 0.05)"}
 {"t": "2026-10-23T02:15:56Z", "model": "q35_9b_vl", "decision": "frontend", "choice": "python", "python_geomean": 1171.18200392261, "rust_geomean": 1185.4877980743302, "rust_gate": "FAIL"}
 {"t": "2026-10-23T02:15:56Z", "model": "q35_9b_vl", "decision": "gate", "choice": "mstar-pr strict parity FAIL: annotated, timed phases continue (sanity-gate rule)"}
+{"t": "2026-10-23T05:33:30Z", "model": "q35_2b", "decision": "vllm config", "choice": "lm-only", "geomean_tok_s": {"default": 4217.5, "lm-only": 4248.8}}
+{"t": "2026-10-23T05:33:30Z", "model": "q35_2b", "decision": "sglang config", "choice": "chunk-16k", "geomean_tok_s": {"default": 4290.2, "attn-fa3": 4290.8, "chunk-16k": 4321.9}}
+{"t": "2026-10-23T05:40:44Z", "model": "q35_2b", "decision": "gate mstar_pr_a", "choice": "PASS", "gsm8k": 0.76}
+{"t": "2026-10-23T05:40:44Z", "model": "q35_2b", "decision": "gate mstar_pr_rf_a", "choice": "PASS", "gsm8k": 0.74}
+{"t": "2026-10-23T05:40:44Z", "model": "q35_2b", "decision": "gate mstar_main_a", "choice": "PASS", "gsm8k": 0.748}
+{"t": "2026-10-23T05:40:44Z", "model": "q35_2b", "decision": "frontend", "choice": "rust", "python_geomean": 3935.1343209751712, "rust_geomean": 4225.882701071254, "rust_gate": "PASS"}

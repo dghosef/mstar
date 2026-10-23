@@ -1,0 +1,7 @@
+notes for higgs_audio
+dropped engines: {}
+startup s: mstar-pr: median 208 n=6; mstar-main: median 209 n=4
+main_mstar-main_config_r1: failed captures 0, graph runtime rust True
+main_mstar-main_config_r2: failed captures 0, graph runtime rust True
+main_mstar-pr_config_r1: failed captures 0, graph runtime rust True
+main_mstar-pr_config_r2: failed captures 0, graph runtime rust True
