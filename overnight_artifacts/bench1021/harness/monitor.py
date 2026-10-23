@@ -171,7 +171,7 @@ def main():
                 continue
             if age > STALE_S:
                 alerts.append(f"{host}: heartbeat stale {age}s ({info})")
-            starting = any(k in info.lower() for k in ("starting", "server start", "setup", "compil"))
+            starting = any(k in info.lower() for k in ("starting", "server start", "setup", "compil", "cell=start"))
             busy = True if starting else gpu_busy(host)
             idle[host] = 0 if busy or busy is None else idle[host] + 1
             if idle[host] >= 3:  # three checks in a row (~45 min) with every GPU idle; phases with many server starts dip below 2

@@ -57,8 +57,13 @@ Full methodology and caveats will be in REPORT.md when the run finishes.
 | Cosmos3 Edge t2v 832×480×121, frames/s (2 rounds) | +8% s | −13% v | −14% v | | | | | |
 | Cosmos3 Edge DROID policy, chunks/s (2 rounds) | +25% s | | +20% s | +21% s | | | | |
 | LingBot-World-V2 1.3B 480×832×93, frames/s (2 rounds) | +22% off | | | | | | | |
+| Waypoint-1.5-1B 720p rollout, frames/s (2 rounds) | −30% off | −7% off | | | | | | |
+| Waypoint-1.5-1B 360p rollout, frames/s (2 rounds) | −8% off | | | +77% off | | | | |
+| V-JEPA 2 ViT-L 64-frame latents, req/s (2 rounds) | −23% off | | 0% off | −4% off | −2% off | | | |
+| V-JEPA 2-AC ViT-g 4-step rollout, req/s (2 rounds) | −16% off | | −66% off | −74% off | −78% off | | | |
 | Kokoro 82M, audio-s/s (3 rounds) | +282% kf | +178% kf | +131% kf | +200% kf | +299% kf | +364% kf | +472% kf | |
 | FLUX.2-klein 4B, img/s (3 rounds) | −23% s | −9% s | −7% s | −7% s | −6% s | | | |
+| FLUX.2-klein 9B, img/s (3 rounds) | −11% off | −8% s | −4% s | −5% s | −6% s | | | |
 
 The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show it, with TTFT p99 ~2.5 s.
 
@@ -137,6 +142,30 @@ The 0.8B random c=16 cell (−43%) is the unexplained M* dip; both M* arms show 
   - Competitor: the official `WanI2VCausal` offline. SGLang and vllm-omni serve only the 14B checkpoint, and diffusers has no LingBot pipeline.
   - **M* +22%:** 11.2 frames/s and 8.3 s per rollout, against 9.1 frames/s and 10.2 s. c=1 only, since M* serves one rollout per GPU.
   - **This PR vs main: +19%.**
+- **FLUX.2-klein 9B (1024², 4 steps, 1 GPU): done** (3 rounds, failed=0).
+  - **M* trails SGLang by 4–8% and diffusers' offline batch by 11% at c=1:** 1.56 → 1.75 img/s and 0.611 s at c=1, against SGLang's 1.72 → 1.87 img/s and 0.570 s, and diffusers' 1.76 img/s and 0.567 s.
+  - **M* leads vllm-omni by 10–15%.**
+  - **This PR vs main:** +1–2%.
+  - The c=1 gap (~40 ms per image) is in line with the per-request time outside the worker that the profiles show for Z-Image and klein 4B (see Profiles).
+- **Waypoint-1.5-1B 720p (64-step interactive rollout, 256 frames, 1 GPU): done** (2 rounds, failed=0).
+  - Competitor: Overworld's official `world_engine` 1.5.6, run as an offline loop with its own compile and CUDA graphs. No serving engine has Waypoint, and its only server (Biome) is single-session.
+  - **M* trails by 30% at c=1 and 7% at c=2:** 88 → 119 frames/s and 2.77 s per rollout, against 127 frames/s and 2.04 s.
+  - **The worker isn't where the time goes.** Measured: a step (one 4-frame chunk) is 22.6 ms, 19.3 ms of it GPU wait. That is 64 × 22.6 ms ≈ 1.45 s of worker time per rollout, already less than the official loop's 2.04 s. The other ~1.3 s is outside the worker. Hypothesis: M* streams raw 720p RGB frames over HTTP (~2.8 MB each, ~700 MB per rollout), while the official loop keeps frames in process.
+  - **This PR vs main:** −2% to +2%, within noise.
+- **Waypoint-1.5-1B 360p (same rollout, 640×360, 1 GPU): done** (2 rounds, failed=0).
+  - **−8% at c=1, +77% at c=8:** 233 → 462 frames/s and 1.07 s per rollout, against the official loop's 253 → 261 frames/s and 0.99 s. The official library serves one world per process, so concurrent worlds share the GPU without batching; M* batches them.
+  - Profile at c=1: a step is 11.3 ms, 8.8 ms of it GPU wait, so 64 steps ≈ 0.72 s of the 1.07 s rollout is in the worker. The rest is outside it, the same pattern as 720p (raw frames over HTTP: hypothesis).
+  - **This PR vs main:** −1% to −3%, within noise.
+- **V-JEPA 2 ViT-L (64-frame clip → encoder + predictor latents, 1 GPU): done** (2 rounds, failed=0).
+  - Competitor: HF transformers `VJEPA2Model` (SDPA), offline in batches, with decode, preprocessing and the copy back to the CPU included. No engine serves V-JEPA 2.
+  - **Level at c≥4** (0 to −4%): 1.90–1.97 req/s against 1.90–2.02. **−23% at c=1:** 0.70 s against 0.55 s.
+  - Hypothesis for the c=1 gap: M* returns its 32 MiB float32 output over HTTP, which the offline run never does.
+  - **This PR vs main: +102–151%** (main: 0.70–0.79 req/s).
+- **V-JEPA 2-AC ViT-g (8-frame clip + actions → 4-step action-conditioned rollout, 1 GPU): done** (2 rounds, failed=0 for every arm).
+  - Competitor: the official facebookresearch/vjepa2 `vjepa2_ac_vit_giant` (torch.hub, as shipped), offline in batches with the same inputs.
+  - **−16% at c=1** (0.535 s against 0.458 s), and **−66% to −78% at c=4–16.**
+  - **M* doesn't scale with concurrency here** (measured): 1.82 → 2.07 req/s from c=1 to c=16, with p50 latency growing in step with c (0.54 → 7.7 s). The official batch scales 2.2 → 9.5 req/s. So M* runs these rollouts essentially one at a time, although the vjepa2 submodules implement `can_batch` / `forward_batched`. Why the rows don't batch isn't checked yet; the profile pass only covered c=1.
+  - **This PR vs main: +141–153%,** but main fails the sanity gate here: its non-streaming rollout returns the last latent H times (fixed in this PR). So main isn't a valid baseline for a speedup claim.
 - **BAGEL-7B-MoT (1 GPU): done** (2 rounds, failed=0, sanity gate passed).
   - Competitors: vllm-omni 0.30 (t2i and edit, every CFG field sent explicitly) and vLLM 0.30 core (understanding only).
   - **Text→image 1024², 50 steps:** mstar-pr 0.102 img/s and 9.8 s at B=1, vs vllm-omni 0.080–0.082 and 12.5 s. That is **+24–27%**.

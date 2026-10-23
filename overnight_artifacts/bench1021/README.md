@@ -13,4 +13,8 @@ artifacts), mstar-main = abdfd5802.
 - `results/decisions.jsonl`, `results/failures.jsonl`: every rule-based decision and every recorded failure.
 - `harness/` (node8: text, vision, Omni) and `diffusion_harness/` (node2): the unattended runners.
 
-No media, traces or server logs (too large).
+- `media_sample/node8`, `media_sample/node2`: one output per engine arm per model (image, video or
+  audio) from the sanity-gate and gallery folders, picked by `harness/pick_media.py`. The rest of the
+  media (~32 GB) was deleted with the bench volumes.
+
+No traces or server logs (too large).

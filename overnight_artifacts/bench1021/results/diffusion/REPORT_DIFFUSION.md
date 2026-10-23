@@ -1,6 +1,6 @@
 # Diffusion lane: M* vs vllm-omni, SGLang diffusion and diffusers (node2, 8x H200)
 
-_Generated 2026-10-22 17:47 UTC by report_diffusion.py from /workspace/results/bench/<model>/ on node2._
+_Generated 2026-10-23 14:34 UTC by report_diffusion.py from /workspace/results/bench/<model>/ on node2._
 
 ## Setup common to every model
 
@@ -484,7 +484,7 @@ decisions:
 
 **Workload.** 1280x704 x 81 frames (24 fps), guidance 5.0 (CFG), empty negative prompt, UniPC flow_shift 5.0 (checkpoint scheduler), bf16; 20 steps for the sweep, 50 steps for the B=1 latency row; 16 VBench prompts (gate: first 4).
 
-Queue phases completed: collect, gallery, gate, knobs, profile, ref_c, rounds, select, setup, tune.
+Queue phases completed: collect, gallery, gate, knobs, profile, ref_c, rounds, select, setup, summarize, tune.
 
 ### Correctness gate (vs diffusers eager reference, same prompts and seeds)
 
@@ -709,6 +709,203 @@ decisions:
 
 </details>
 
+## FLUX.2 [klein] 9B (black-forest-labs/FLUX.2-klein-9B), text to image
+
+**Workload.** 1024x1024, 4 steps, no CFG (distilled), FlowMatch Euler, bf16, 64 PartiPrompts.
+
+Queue phases completed: collect, gallery, gate, knobs, profile, ref_c, rounds, select, setup, tune.
+
+### Correctness gate (vs diffusers eager reference, same prompts and seeds)
+
+Yardstick Y (worst of ref_b/ref_k/ref_c vs ref_a): median PSNR 30.45 dB, p10 PSNR 24.86 dB, median SSIM 0.9763; ref_a CLIP 27.94; different-seed control median PSNR 10.65 dB; competitor same-image threshold 20.55 dB (amended gate, see dgate.py)
+
+| tag | median PSNR | p10 PSNR | min PSNR | median SSIM | mean CLIP | missing | sanity gate | parity (annotated) | parity tier | original pre-registered verdict |
+|---|---:|---:|---:|---:|---:|---:|---|---|---|---|
+| ref_b | 32.39 | 26.51 | 22.55 | 0.9836 | 27.92 | 0 | yardstick | - | - | - |
+| ref_k | 32.16 | 26.04 | 20.95 | 0.9844 | 27.90 | 0 | yardstick | - | - | - |
+| ref_c | 30.45 | 24.86 | 19.61 | 0.9763 | 27.93 | 0 | yardstick | - | - | - |
+| ref_seed | 10.65 | 8.26 | 6.47 | 0.3536 | 27.82 | 0 | yardstick | - | - | - |
+| mstar_pr | 31.77 | 25.91 | 21.53 | 0.9833 | 27.96 | 0 | PASS | yes | parity (M*) | PASS |
+| mstar_pr_b | 31.77 | 25.91 | 21.53 | 0.9833 | 27.96 | 0 | PASS | yes | parity (M*) | PASS |
+| mstar_main | 31.77 | 25.91 | 21.53 | 0.9833 | 27.95 | 0 | PASS | yes | parity (M*) | PASS |
+| sglang__base | 24.37 | 20.34 | 15.51 | 0.8933 | 27.93 | 0 | PASS | yes | same-image (competitor, amended) | FAIL |
+| sglang__bcg | 24.37 | 20.34 | 15.51 | 0.8933 | 27.93 | 0 | PASS | yes | same-image (competitor, amended) | FAIL |
+| sglang__bcg_b8 | 24.37 | 20.34 | 15.51 | 0.8933 | 27.93 | 0 | PASS | yes | same-image (competitor, amended) | FAIL |
+| sglang__compile | 24.28 | 20.09 | 15.17 | 0.8812 | 27.91 | 0 | PASS | yes | same-image (competitor, amended) | FAIL |
+| sglang__compile_b8 | 24.02 | 20.13 | 15.41 | 0.8804 | 27.87 | 0 | PASS | yes | same-image (competitor, amended) | FAIL |
+| vllmomni__base | 25.40 | 21.21 | 16.29 | 0.9394 | 27.86 | 0 | PASS | yes | same-image (competitor, amended) | FAIL |
+| vllmomni__cudnn | 25.75 | 21.71 | 16.41 | 0.9421 | 27.88 | 0 | PASS | yes | same-image (competitor, amended) | FAIL |
+| vllmomni__eager | 25.28 | 21.52 | 16.34 | 0.9352 | 27.86 | 0 | PASS | yes | same-image (competitor, amended) | FAIL |
+| vllmomni__full | 25.25 | 20.83 | 16.61 | 0.9305 | 27.86 | 0 | PASS | yes | same-image (competitor, amended) | FAIL |
+| ref_a | - | - | - | - | 27.94 | 0 | reference | - | - | - |
+
+
+Tags: ref_b = reference in a second process; ref_k = memory-efficient SDPA; ref_c = diffusers with the tuned arm's compile/attention; ref_seed = reference with other seeds (different noise); mstar_pr_b = a second M* PR server process (same-code control); `<engine>__<knobs>` = each competitor knob set from the tune pass. Contact sheet: `sheet_klein9b.jpg` in the results folder.
+
+### Competitor tuning (one server process per knob set, GPU 0 alone; score = geometric mean throughput over the tune points, img/s)
+
+| engine | knob set | flags | per-point throughput | B=1 latency (s) | score | gate | chosen |
+|---|---|---|---|---:|---:|---|---|
+| vllm-omni | base | `(defaults)` | c=1: 1.348, c=8: 1.549 | 0.717 | 1.445 | PASS |  |
+| vllm-omni | cudnn | `--diffusion-attention-backend CUDNN_ATTN` | c=1: 1.335, c=8: 1.545 | 0.725 | 1.436 | PASS |  |
+| vllm-omni | full | `--diffusion-compile-granularity full` | c=1: 1.360, c=8: 1.568 | 0.711 | 1.460 | PASS | yes |
+| vllm-omni | eager | `--enforce-eager` | c=1: 1.272, c=8: 1.453 | 0.762 | 1.359 | PASS |  |
+| SGLang | base | `--performance-mode speed` | c=1: 1.706, c=8: 1.766 | 0.575 | 1.736 | PASS |  |
+| SGLang | compile | `--performance-mode speed --enable-torch-compile true` | c=1: 1.716, c=8: 1.789 | 0.571 | 1.752 | PASS |  |
+| SGLang | bcg | `--performance-mode speed --enable-breakable-cuda-graph true --warmup-resolutions 1024x1024` | c=1: 1.706, c=8: 1.761 | 0.575 | 1.734 | PASS |  |
+| SGLang | compile_b8 | `--performance-mode speed --enable-torch-compile true --batching-max-size 8` | c=1: 1.717, c=8: 1.842 | 0.570 | 1.778 | PASS | yes |
+| SGLang | bcg_b8 | `--performance-mode speed --enable-breakable-cuda-graph true --warmup-resolutions 1024x1024 --batching-max-size 8` | c=1: 1.696, c=8: 1.814 | 0.578 | 1.754 | PASS |  |
+| diffusers | eager | `--compile none` | c=1: 1.276, c=8: 1.310 | 0.784 | 1.293 | n/a (reference impl.) |  |
+| diffusers | regional_dyn | `--compile regional --dynamic` | c=1: 1.596, c=8: 1.654 | 0.626 | 1.625 | n/a (reference impl.) |  |
+| diffusers | regional_dyn_cudnn | `--compile regional --dynamic --attn _native_cudnn` | c=1: 1.597, c=8: 1.651 | 0.626 | 1.624 | n/a (reference impl.) |  |
+| diffusers | regional_dyn_fa3 | `--compile regional --dynamic --attn _flash_3_hub` | c=1: 1.624, c=8: 1.685 | 0.616 | 1.654 | n/a (reference impl.) |  |
+| diffusers | regional_dyn_fa3_vae | `--compile regional --dynamic --attn _flash_3_hub --compile-vae` | c=1: 1.767, c=8: 1.793 | 0.566 | 1.780 | n/a (reference impl.) | yes |
+| diffusers | full_dyn | `--compile full --dynamic` | c=1: 1.616, c=8: 1.643 | 0.619 | 1.630 | n/a (reference impl.) |  |
+| diffusers | full_dyn_fa3 | `--compile full --dynamic --attn _flash_3_hub` | c=1: 1.629, c=8: 1.669 | 0.614 | 1.649 | n/a (reference impl.) |  |
+
+### Exact server commands (round 1)
+
+```
+/root/work/mstar-main/.venv/bin/python -m mstar.cli.main serve flux2_klein_9b --config /root/work/mstar-main/configs/flux2_klein_9b.yaml --gpus 0 --port 8400
+/root/work/mstar/.venv/bin/python -m mstar.cli.main serve flux2_klein_9b --config /root/work/mstar/configs/flux2_klein_9b.yaml --gpus 0 --port 8400
+/root/work/engines/sgld/bin/sglang serve --model-path black-forest-labs/FLUX.2-klein-9B --num-gpus 1 --host 127.0.0.1 --port 8400 --scheduler-port 8500 --performance-mode speed --enable-torch-compile true --batching-max-size 8
+/root/work/engines/vllmomni/bin/vllm serve black-forest-labs/FLUX.2-klein-9B --omni --host 127.0.0.1 --port 8400 --diffusion-compile-granularity full
+```
+
+Versions: diffusers: {"packages": ["diffusers==0.41.0", "kernels==0.17.2", "torch==2.14.1+cu132", "transformers==5.20.2", "triton==3.8.0"]}; mstar-main: {"imports": "/root/work/mstar-main/mstar/__init__.py 2.12.1+cu132 0.41.0", "commit": "HEAD abdfd580296a843f62ce967ddb93b0a3dfb225e3"}; mstar-pr: {"imports": "/root/work/mstar/mstar/__init__.py 2.12.1+cu132 0.41.0", "commit": "perf/overnight-all d248477ec795c6ddf0716e23932be15be2b573e2"}; sglang: {"packages": ["cache-dit==1.5.1", "diffusers==0.37.0", "flash-attn-4==4.0.0b36", "flashinfer-python==0.7.1", "kernels==0.14.1", "kernels-data==0.16.2", "sgl-deep-ep==0.1.2.post1", "sgl-deep-gemm==0.2.2", "sglang==0.5.22", "sglang-kernel==0.4.9", "torch==2.14.1+cu132", "transformers==5.19.0", "triton; vllmomni: {"packages": ["cache-dit==1.5.0", "diffusers==0.40.0", "fa3-fwd==0.0.3", "flashinfer-python==0.6.18.post1", "kernels==0.16.1", "kernels-data==0.16.2", "torch==2.13.0+cu132", "transformers==5.14.1", "triton==3.7.1", "vllm==0.30.0", "vllm-omni==0.30.0"]}
+
+### Timed results (3 rounds, fresh server per round, rotated order)
+
+Arm configs: M* PR = config; M* main = config; vllm-omni = full; SGLang = compile_b8; diffusers (tuned, offline batch) = regional_dyn_fa3_vae
+
+## Throughput (img/s), steps=4: mean [min-max] over rounds; n rounds; failed
+
+| arm | c=1 | c=2 | c=4 | c=8 | c=16 |
+|---|---:|---:|---:|---:|---:|
+| M* PR | 1.560 [1.557-1.564] n=3 | 1.719 [1.714-1.727] n=3 | 1.740 [1.736-1.744] n=3 | 1.748 [1.746-1.749] n=3 | 1.750 [1.749-1.751] n=3 |
+| M* main | 1.537 [1.531-1.542] n=3 | 1.694 [1.693-1.694] n=3 | 1.721 [1.720-1.722] n=3 | 1.729 [1.729-1.731] n=3 | 1.733 [1.732-1.733] n=3 |
+| vllm-omni | 1.354 [1.351-1.357] n=3 | 1.564 [1.563-1.565] n=3 | 1.568 [1.560-1.576] n=3 | 1.571 [1.570-1.572] n=3 | 1.569 [1.562-1.573] n=3 |
+| SGLang | 1.719 [1.717-1.720] n=3 | 1.865 [1.863-1.865] n=3 | 1.816 [1.815-1.816] n=3 | 1.845 [1.843-1.846] n=3 | 1.856 [1.855-1.858] n=3 |
+| diffusers (tuned, offline batch) | 1.762 [1.759-1.767] n=3 | 1.765 [1.764-1.766] n=3 | 1.775 [1.775-1.776] n=3 | 1.781 [1.779-1.782] n=3 | 1.777 [1.775-1.779] n=3 |
+
+M* PR throughput relative to each arm (mean / mean):
+
+| vs | c=1 | c=2 | c=4 | c=8 | c=16 |
+|---|---:|---:|---:|---:|---:|
+| M* main | 1.02x | 1.01x | 1.01x | 1.01x | 1.01x |
+| vllm-omni | 1.15x | 1.10x | 1.11x | 1.11x | 1.12x |
+| SGLang | 0.91x | 0.92x | 0.96x | 0.95x | 0.94x |
+| diffusers (tuned, offline batch) | 0.89x | 0.97x | 0.98x | 0.98x | 0.99x |
+
+## B=1 latency (s), steps=4, c=1: mean of round means [min-max]; p50; p99 (per round, averaged); requests per round
+
+| arm | mean | p50 | p99 | n req/round | rounds | failed |
+|---|---:|---:|---:|---:|---:|---:|
+| M* PR | 0.611 [0.610-0.612] | 0.612 | 0.627 | 32 | 3 | 0 |
+| M* main | 0.620 [0.619-0.621] | 0.620 | 0.634 | 32 | 3 | 0 |
+| vllm-omni | 0.715 [0.714-0.716] | 0.715 | 0.727 | 32 | 3 | 0 |
+| SGLang | 0.570 [0.570-0.571] | 0.571 | 0.578 | 32 | 3 | 0 |
+| diffusers (tuned, offline batch) | 0.567 [0.566-0.569] | 0.567 | 0.579 | 32 | 3 | 0 |
+
+1-min load average at cell start: median 2.4, max 5.8 over 75 cells (192 vCPUs).
+
+### Profile (phases_c1, MSTAR_PHASE_TIMING=100, benchmark/worker_phases): GPU-bound (worker waits on the GPU most of each step); event_sync / iter_total up to 105%
+
+<details><summary>phase tables</summary>
+
+```
+=== worker_0  iters 100-200  records=2  batch=1.00 (range 1.0-1.0) ===
+    work: 200 request-steps (bs x iters) -- us/1k is cost per unit of output, comparable across runs with a different iteration mix
+phase                                      mean_ms   p50_ms   p95_ms  samples      us/1k
+----------------------------------------------------------------------------------------
+await_gpu                                    0.839    0.000    4.870      199  834850.0 
+engine.collect_outputs                       0.030    0.030    0.040      172   25800.0 
+engine.declare_step                          0.000    0.000    0.000      172       0.0 
+engine.forward                               1.192    0.360    4.900      172 1025350.0 
+engine.postprocess                           0.000    0.000    0.010      200       0.0 
+engine.preprocess                            0.085    0.085    0.150      172   73050.0 
+gpu_exec                                    78.589  121.555  129.470      19877803100.0 
+iter_total                                  73.690  126.980  130.180      20073690000.0 
+rust.send_outputs.call                       0.020    0.025    0.050      171   17100.0 
+rust.send_outputs.marshal                    0.030    0.020    0.080      171   25650.0 
+speculate                                    0.095    0.085    0.180      114   54100.0 
+submit_spec                                  0.325    0.360    0.570      142  230600.0 
+worker.await_admit_settled                   3.745    3.730    7.540       58 1086050.0 
+worker.gpu_thread.await_plan                 0.010    0.000    0.030      142    7100.0 
+worker.gpu_thread.exec                       1.218    0.560    5.090      200 1217900.0 
+worker.gpu_thread.prepare_inputs             1.045    0.060    6.940      200 1045050.0 
+worker.postprocess.check_stop                0.245    0.165    0.390      171  209200.0 
+worker.postprocess.check_stop_tail           0.010    0.010    0.020      171    8550.0 
+worker.postprocess.cleanup_inputs            0.010    0.010    0.020      199    9950.0 
+worker.postprocess.completion_event_sync    90.081  124.040  128.810      17177019650.0 
+worker.postprocess.event_sync               77.400  120.355  128.800      19977013100.0 
+worker.postprocess.pending_loop_stops        0.010    0.010    0.010      171    8550.0 
+worker.postprocess.prematerialize            0.235    0.155    0.380      171  200650.0 
+worker.postprocess.register_outputs          0.065    0.000    0.560      171   55500.0 
+worker.postprocess.route                     0.035    0.030    0.060      171   29900.0 
+worker.postprocess.route_outputs             0.105    0.095    0.180      171   89750.0 
+worker.postprocess.send                      0.055    0.050    0.140      171   47000.0 
+worker.postprocess.send_outputs              0.075    0.070    0.160      171   64100.0 
+worker.postprocess.send_prep                 0.010    0.010    0.010      171    8550.0 
+worker.postprocess.stop_loops                0.010    0.000    0.030      171    8550.0 
+worker.postprocess.store_tensors             0.060    0.055    0.100      171   51300.0 
+worker.postprocess.update_lru                0.000    0.000    0.000      171       0.0 
+worker.postprocess_batch                    77.865  120.740  129.150      19977475400.0 
+worker.schedule                              0.012    0.005    0.100      939   56550.0*
+worker.schedule_yield_away                   0.030    0.010    0.100       85   12750.0 
+worker.submit_spec.launch_wait               0.285    0.335    0.550      142  202200.0 
+    * sampled on passes that ran no batch, so its time is spread over work it did not all do: us/1k is an upper bound for this row
+```
+
+</details>
+
+### Summary (generated from the tables above)
+
+- vs M* main: throughput 1.01x (c=16) to 1.02x (c=1); B=1 latency 0.611 s vs 0.620 s (0.99x). M* PR is not slower at any point.
+- vs vllm-omni: throughput 1.10x (c=2) to 1.15x (c=1); B=1 latency 0.611 s vs 0.715 s (0.85x). M* PR is not slower at any point.
+- vs SGLang: throughput 0.91x (c=1) to 0.96x (c=4); B=1 latency 0.611 s vs 0.570 s (1.07x). M* PR is slower at c=1 (0.91x), c=2 (0.92x), c=4 (0.96x), c=8 (0.95x), c=16 (0.94x).
+- vs diffusers (offline batch, no serving): throughput 0.89x (c=1) to 0.99x (c=16); B=1 latency 0.611 s vs 0.567 s (1.08x). M* PR is slower at c=1 (0.89x), c=2 (0.97x), c=4 (0.98x), c=8 (0.98x), c=16 (0.99x).
+
+<details><summary>notes.txt (startup times, health checks, decisions)</summary>
+
+```
+notes for klein9b (2026-10-23 14:34 UTC)
+
+server startup seconds per arm (all starts, incl. cold compiles): mstar-pr: min 42 median 42 max 75 n=6; mstar-main: min 60 median 65 max 102 n=4; vllmomni: min 21 median 48 max 87 n=7; sglang: min 36 median 69 max 117 n=8
+
+health (per server log):
+  main_mstar-main_config_r1: {"failed_capture": 0, "graph_runtime_rust": true, "recompile_lines": 0, "errors": 0}
+  main_mstar-main_config_r2: {"failed_capture": 0, "graph_runtime_rust": true, "recompile_lines": 0, "errors": 0}
+  main_mstar-main_config_r3: {"failed_capture": 0, "graph_runtime_rust": true, "recompile_lines": 0, "errors": 0}
+  main_mstar-pr_config_r1: {"failed_capture": 0, "graph_runtime_rust": true, "recompile_lines": 0, "errors": 0}
+  main_mstar-pr_config_r2: {"failed_capture": 0, "graph_runtime_rust": true, "recompile_lines": 0, "errors": 0}
+  main_mstar-pr_config_r3: {"failed_capture": 0, "graph_runtime_rust": true, "recompile_lines": 0, "errors": 0}
+  main_sglang_compile_b8_r1: {"attention": ["fa"], "speed_mode_msgs": [], "offload_msgs": ["[10-23 13:46:46] Configuring layerwise offload for Flux2Transformer2DModel: transforme"], "errors": 0}
+  main_sglang_compile_b8_r2: {"attention": ["fa"], "speed_mode_msgs": [], "offload_msgs": ["[10-23 14:03:05] Configuring layerwise offload for Flux2Transformer2DModel: transforme"], "errors": 0}
+  main_sglang_compile_b8_r3: {"attention": ["fa"], "speed_mode_msgs": [], "offload_msgs": ["[10-23 14:18:45] Configuring layerwise offload for Flux2Transformer2DModel: transforme"], "errors": 0}
+  main_vllmomni_full_r1: {"attention": ["FLASH_ATTN"], "regional_compile": false, "enforce_eager": false, "errors": 0}
+  main_vllmomni_full_r2: {"attention": ["FLASH_ATTN"], "regional_compile": false, "enforce_eager": false, "errors": 0}
+  main_vllmomni_full_r3: {"attention": ["FLASH_ATTN"], "regional_compile": false, "enforce_eager": false, "errors": 0}
+  tune_base_sglang_base_r0: {"attention": ["fa"], "speed_mode_msgs": ["performance_mode=speed keeps torch.compile disabled for this model (pass --enable-t"], "offload_msgs": [], "errors": 0}
+  tune_base_vllmomni_base_r0: {"attention": ["FLASH_ATTN"], "regional_compile": true, "enforce_eager": false, "errors": 0}
+  tune_bcg_b8_sglang_bcg_b8_r0: {"attention": ["fa"], "speed_mode_msgs": ["performance_mode=speed keeps torch.compile disabled for this model (pass --enable-t"], "offload_msgs": [], "errors": 0}
+  tune_bcg_sglang_bcg_r0: {"attention": ["fa"], "speed_mode_msgs": ["performance_mode=speed keeps torch.compile disabled for this model (pass --enable-t"], "offload_msgs": [], "errors": 0}
+  tune_compile_b8_sglang_compile_b8_r0: {"attention": ["fa"], "speed_mode_msgs": [], "offload_msgs": ["[10-23 13:02:28] Configuring layerwise offload for Flux2Transformer2DModel: transforme"], "errors": 0}
+  tune_compile_sglang_compile_r0: {"attention": ["fa"], "speed_mode_msgs": [], "offload_msgs": ["[10-23 12:55:56] Configuring layerwise offload for Flux2Transformer2DModel: transforme"], "errors": 0}
+  tune_cudnn_vllmomni_cudnn_r0: {"attention": ["CUDNN_ATTN"], "regional_compile": true, "enforce_eager": false, "errors": 0}
+  tune_eager_vllmomni_eager_r0: {"attention": ["FLASH_ATTN"], "regional_compile": false, "enforce_eager": false, "errors": 0}
+  tune_full_vllmomni_full_r0: {"attention": ["FLASH_ATTN"], "regional_compile": false, "enforce_eager": false, "errors": 0}
+
+decisions:
+  2026-10-23 13:24:34 tuned_config: {"engine": "diffusers", "config": "regional_dyn_fa3_vae", "candidates": [[1.7801666661992679, "regional_dyn_fa3_vae"], [1.6543828841908845, "regional_dyn_fa3"], [1.6487392934824232, "full_dyn_fa3"], [1.6295093049048965, "full_dyn"], [1.6248909710381334, "regional_dyn"], [1.6236889374912653, "regiona
+  2026-10-23 13:33:31 gate: {"verdicts": {"mstar_pr": "PASS", "mstar_pr_b": "PASS", "mstar_main": "PASS", "sglang__base": "PASS", "sglang__bcg": "PASS", "sglang__bcg_b8": "PASS", "sglang__compile": "PASS", "sglang__compile_b8": "PASS", "vllmomni__base": "PASS", "vllmomni__cudnn": "PASS", "vllmomni__eager": "PASS", "vllmomni__f
+  2026-10-23 13:33:31 tuned_config: {"engine": "vllmomni", "config": "full", "gate_pass": true, "candidates": [[1.460405480464895, "full", "PASS"], [1.4450468836437518, "base", "PASS"], [1.4360967698269846, "cudnn", "PASS"], [1.3593541631954291, "eager", "PASS"]], "rule": "best tune score among gate-passing knob sets"}
+  2026-10-23 13:33:31 tuned_config: {"engine": "sglang", "config": "compile_b8", "gate_pass": true, "candidates": [[1.7781264737173148, "compile_b8", "PASS"], [1.7539606523402222, "bcg_b8", "PASS"], [1.7520298821271554, "compile", "PASS"], [1.735731476533582, "base", "PASS"], [1.7335678240722798, "bcg", "PASS"]], "rule": "best tune sc
+  2026-10-23 14:33:19 profile_points: {"points": [1], "ratios": {"1": 0.8853013945916687, "2": 0.9219329480599454, "4": 0.9584011130709397, "8": 0.9473066671111461, "16": 0.942853615130029}, "rule": "point where mstar-pr / best competitor is lowest, plus c=1 if mstar-pr trails there"}
+```
+
+</details>
+
 ## Caveats
 
 - **diffusers rows are not served.** They are in-process offline batches (b = c), timing the pipeline call
@@ -741,5 +938,12 @@ decisions:
 - 2026-10-22 04:51:35 zimage: pass_failed {"tag": "tune_cudnn", "arm": "vllmomni", "knob": "cudnn", "round": 0}
 - 2026-10-22 04:52:38 zimage: pass_failed {"tag": "tune_full", "arm": "vllmomni", "knob": "full", "round": 0}
 - 2026-10-22 05:00:26 zimage: pass_failed {"tag": "tune_base", "arm": "vllmomni", "knob": "base", "round": 0}
+- 2026-10-22 20:42:54 fish_s2pro: pass_failed {"tag": "collect_mstar_main", "arm": "mstar-main", "knob": "python", "round": 0}
+- 2026-10-22 21:03:54 fish_s2pro: pass_failed {"tag": "main", "arm": "sgomni", "knob": "mrr128", "round": 1}
+- 2026-10-23 02:32:26 chatterbox: pass_failed {"tag": "tune_graphs", "arm": "cbvllm", "knob": "graphs", "round": 0}
+- 2026-10-23 04:21:51 higgs_audio: pass_failed {"tag": "tune_sdpa", "arm": "higgs_official", "knob": "sdpa", "round": 0}
+- 2026-10-23 10:51:11 bagel_2gpu: pass_failed {"tag": "tune_cfgp2", "arm": "vllmomni", "knob": "cfgp2", "round": 0}
+- 2026-10-23 11:55:53 bagel_2gpu: pass_failed {"tag": "main", "arm": "vllmomni", "knob": "cfgp2", "round": 1}
+- 2026-10-23 12:21:09 bagel_2gpu: pass_failed {"tag": "main", "arm": "vllmomni", "knob": "cfgp2", "round": 2}
 - Multi-GPU rows (Wan2.2 CFG split on 2 GPUs, DP2) were not run: out of the night's budget.
 

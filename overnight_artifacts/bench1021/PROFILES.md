@@ -65,6 +65,7 @@ Each link is the worker phase table for the profiled cell (named by workload and
 | fish_s2pro | [c8](https://github.com/dghosef/mstar/blob/perf/overnight-all/overnight_artifacts/bench1021/results/diffusion/fish_s2pro/profile/phases_c8.txt) |
 | higgs_audio | [ls500_c32](https://github.com/dghosef/mstar/blob/perf/overnight-all/overnight_artifacts/bench1021/results/diffusion/higgs_audio/profile/phases_ls500_c32.txt) |
 | klein4b | [c1](https://github.com/dghosef/mstar/blob/perf/overnight-all/overnight_artifacts/bench1021/results/diffusion/klein4b/profile/phases_c1.txt) |
+| klein9b | [c1](https://github.com/dghosef/mstar/blob/perf/overnight-all/overnight_artifacts/bench1021/results/diffusion/klein9b/profile/phases_c1.txt) |
 | kokoro | [c4](https://github.com/dghosef/mstar/blob/perf/overnight-all/overnight_artifacts/bench1021/results/diffusion/kokoro/profile/phases_c4.txt) |
 | lingbot_world | [rollout_c1](https://github.com/dghosef/mstar/blob/perf/overnight-all/overnight_artifacts/bench1021/results/lingbot_world/profile/phases_rollout_c1.txt) |
 | omniasr_1b | [ls500_c64](https://github.com/dghosef/mstar/blob/perf/overnight-all/overnight_artifacts/bench1021/results/diffusion/omniasr_1b/profile/phases_ls500_c64.txt) |
@@ -82,5 +83,8 @@ Each link is the worker phase table for the profiled cell (named by workload and
 | qwen3_omni | [mstar-pr](https://github.com/dghosef/mstar/blob/perf/overnight-all/overnight_artifacts/bench1021/results/qwen3_omni/phases_mstar-pr.txt) |
 | qwen3tts_0p6b | [c1](https://github.com/dghosef/mstar/blob/perf/overnight-all/overnight_artifacts/bench1021/results/diffusion/qwen3tts_0p6b/profile/phases_c1.txt) · [c32](https://github.com/dghosef/mstar/blob/perf/overnight-all/overnight_artifacts/bench1021/results/diffusion/qwen3tts_0p6b/profile/phases_c32.txt) |
 | qwen3tts_1p7b | [c1](https://github.com/dghosef/mstar/blob/perf/overnight-all/overnight_artifacts/bench1021/results/diffusion/qwen3tts_1p7b/profile/phases_c1.txt) · [c64](https://github.com/dghosef/mstar/blob/perf/overnight-all/overnight_artifacts/bench1021/results/diffusion/qwen3tts_1p7b/profile/phases_c64.txt) |
+| vjepa2 | [clip_c1](https://github.com/dghosef/mstar/blob/perf/overnight-all/overnight_artifacts/bench1021/results/diffusion/vjepa2/profile/phases_clip_c1.txt) |
 | wan22 | [c2](https://github.com/dghosef/mstar/blob/perf/overnight-all/overnight_artifacts/bench1021/results/diffusion/wan22/profile/phases_c2.txt) |
+| waypoint | [rollout_c1](https://github.com/dghosef/mstar/blob/perf/overnight-all/overnight_artifacts/bench1021/results/waypoint/profile/phases_rollout_c1.txt) |
+| waypoint_360p | [rollout_c1](https://github.com/dghosef/mstar/blob/perf/overnight-all/overnight_artifacts/bench1021/results/waypoint_360p/profile/phases_rollout_c1.txt) |
 | zimage | [c1](https://github.com/dghosef/mstar/blob/perf/overnight-all/overnight_artifacts/bench1021/results/diffusion/zimage/profile/phases_c1.txt) |

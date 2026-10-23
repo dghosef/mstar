@@ -52,6 +52,10 @@ def copy_harness():
             shutil.copy2(SRC / f, DST / f)
     shutil.copy2(HOME / "runs/overnight/BENCH_HEAD.md", DST / "HEADLINES.md")
     shutil.copy2(HOME / "runs/overnight/PROFILES.md", DST / "PROFILES.md")
+    if (SRC / "media_sample").exists():  # one output per engine arm per model (pick_media.py), ~160 MB
+        if (DST / "media_sample").exists():
+            shutil.rmtree(DST / "media_sample")
+        shutil.copytree(SRC / "media_sample", DST / "media_sample")
 
 
 def main():
@@ -71,7 +75,10 @@ def main():
         "  (`results/**/phases*.txt`, mstar-pr with MSTAR_PHASE_TIMING=100).\n"
         "- `results/decisions.jsonl`, `results/failures.jsonl`: every rule-based decision and every recorded failure.\n"
         "- `harness/` (node8: text, vision, Omni) and `diffusion_harness/` (node2): the unattended runners.\n\n"
-        "No media, traces or server logs (too large).\n")
+        "- `media_sample/node8`, `media_sample/node2`: one output per engine arm per model (image, video or\n"
+        "  audio) from the sanity-gate and gallery folders, picked by `harness/pick_media.py`. The rest of the\n"
+        "  media (~32 GB) was deleted with the bench volumes.\n\n"
+        "No traces or server logs (too large).\n")
     print(f"copied {n} result files")
     subprocess.run(["git", "-C", str(TREE), "add", "-f", str(DST)], check=True)
     stat = subprocess.run(["git", "-C", str(TREE), "diff", "--cached", "--stat"], capture_output=True, text=True).stdout
