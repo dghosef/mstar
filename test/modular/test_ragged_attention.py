@@ -322,6 +322,51 @@ def test_shards_head_counts_at_build():
     assert mgr._kwargs["head_dim"] == HEAD_DIM
 
 
+def test_opaque_callable_stays_in_the_compiled_graph():
+    """``opaque=True`` runs the attention as a custom op: a compiled region
+    keeps one graph around it (no break) and computes what the eager call does."""
+    from mstar.engine.resources.convenience import RaggedAttentionCallable
+
+    mgr = manager()
+    spans = [128, 96]
+    mgr.plan(step(*spans), ctx(["r0", "r1"]))
+    q, k, v = qkv(sum(spans))
+    fn = RaggedAttentionCallable(mgr, "main", opaque=True)
+
+    def region(q, k, v):
+        return fn(q * 1.0, k, v) + 1.0
+
+    torch._dynamo.reset()
+    explain = torch._dynamo.explain(region)(q, k, v)
+    assert explain.graph_break_count == 0
+    compiled = torch.compile(region, fullgraph=True)
+    close(compiled(q, k, v), RaggedAttentionCallable(mgr, "main")(q, k, v) + 1.0)
+
+
+def test_opaque_callable_built_inside_a_compiled_region():
+    """A node that builds its opaque callables lazily on first forward does so
+    inside the compiled region; the handle must still name a registered callable."""
+    from mstar.engine.resources.convenience import RaggedAttentionCallable
+
+    mgr = manager()
+    spans = [128, 96]
+    mgr.plan(step(*spans), ctx(["r0", "r1"]))
+    q, k, v = qkv(sum(spans))
+    fns: dict[int, RaggedAttentionCallable] = {}
+
+    def region(q, k, v):
+        fn = fns.get(id(mgr))
+        if fn is None:
+            fn = fns[id(mgr)] = RaggedAttentionCallable(mgr, "main", opaque=True)
+        return fn(q, k, v) + 1.0
+
+    torch._dynamo.reset()
+    compiled = torch.compile(region)
+    expected = RaggedAttentionCallable(mgr, "main")(q, k, v) + 1.0
+    for _ in range(2):
+        close(compiled(q, k, v), expected)
+
+
 def test_plan_then_run_matches_reference():
     mgr = manager()
     spans = [128, 96]

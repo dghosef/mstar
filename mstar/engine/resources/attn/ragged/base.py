@@ -27,7 +27,7 @@ def resolve_ragged_attn_backend(
 
 def _build_ragged(spec, info: EngineResourceInfo, manager_cls):
     config = spec.config
-    if info.joint_comm_group is not None:
+    if info.joint_comm_group is not None and config.shard_heads:
         config.shard(info.joint_comm_group.world_size)
     dtype = config.dtype if config.dtype is not None else info.kv_dtype
     if dtype is None:
