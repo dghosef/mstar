@@ -486,7 +486,7 @@ def test_qwen3_omni_caps_the_thinkers_decode_where_its_stop_check_ends_it(max_to
     cap = Qwen3OmniModel.get_loop_caps(object.__new__(Qwen3OmniModel), max_output_tokens=max_tokens)
 
     assert cap["thinker_decode_loop"] == _stops_after(
-        ThinkerSubmodule(None, _omni_submodule().config).check_stop, "thinker_decode_loop", "thinker_decode",
+        lambda *args: ThinkerSubmodule.check_stop(_omni_submodule(), *args), "thinker_decode_loop", "thinker_decode",
         2048, {"new_token": [torch.tensor([NOT_EOS])]}, max_tokens=max_tokens,
         resource_configs={THINKER_SAMPLER: SamplingReqConfig(ignore_eos=True)},
     ), "the cap and the stop check end decode on different iterations"
