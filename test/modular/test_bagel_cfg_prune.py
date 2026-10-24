@@ -272,10 +272,7 @@ def test_image_gen_walk_names_the_loop_the_counter_is_read_from():
     from mstar.model.bagel.bagel_model import BagelModel
 
     model = BagelModel.__new__(BagelModel)
-    model.config = types.SimpleNamespace(
-        num_timesteps=N, temperature=1.0, top_k=0, top_p=1.0,
-        repetition_penalty=1.0, ignore_eos=False, vocab_size=32,
-    )
+    model.config = types.SimpleNamespace(num_timesteps=N, max_position_embeddings=32768)
     model._has_cfg_parallel = False
     model._has_llm_disaggregation = False
     model._image_gen_remote_handoff = False
@@ -367,10 +364,7 @@ def test_image_gen_cfg_walk_names_the_loop_too():
     from mstar.model.bagel.bagel_model import BagelModel
 
     model = BagelModel.__new__(BagelModel)
-    model.config = types.SimpleNamespace(
-        num_timesteps=N, temperature=1.0, top_k=0, top_p=1.0,
-        repetition_penalty=1.0, ignore_eos=False, vocab_size=32,
-    )
+    model.config = types.SimpleNamespace(num_timesteps=N, max_position_embeddings=32768)
     model._has_cfg_parallel = True
     model._has_llm_disaggregation = False
     model._image_gen_remote_handoff = False
