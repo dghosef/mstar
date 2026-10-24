@@ -150,8 +150,8 @@ class LingBotDitSubmodule(_SingleRequestMixin, NodeSubmodule):
     At the first iteration the request's state is seeded: the K/V cache, the
     generator (seeded with the request seed) and the full rollout's initial
     noise drawn from it in one call. The reference draws the initial noise the
-    same way, which is what makes the rollout reproducible bit for bit; it
-    requires the rollout length up front.
+    same way, which is what makes the rollout follow the reference's from the
+    same seed; it requires the rollout length up front.
 
     ``image`` arrives resized and normalized to [-1, 1] by
     ``LingBotWorldModel.process_prompt``, which runs the reference's CPU bicubic

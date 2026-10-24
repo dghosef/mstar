@@ -126,6 +126,10 @@ Registry keys live in ``mstar/model/registry.py`` (``MODEL_REGISTRY`` / ``HF_MOD
        A request carries the whole camera trajectory as JSON in ``model_kwargs``, which the API
        server caps at 1 MiB: about 3,900 frames of ``[4, 4]`` float32 poses; send ``[F, 3, 4]``
        rows for up to the 4,077-frame maximum. Needs ``flash-attn``; one rollout per GPU.
+       The default keeps the reference's numerics except the VAE decode, which runs
+       channels-last and compiled: deterministic, and within ~73 dB of the reference's
+       decode rather than bit-exact. ``configs/lingbot_world_1_3b_fast.yaml`` trades
+       more of that closeness for ~1.5x the speed.
        The weights are CC-BY-NC-SA-4.0 (non-commercial, share-alike), not Apache-2.0; check it
        before deploying. The code is Apache-2.0, adapted from LingBot-World v1 (``Robbyant/lingbot-world``).
    * - ``flux2_klein``
