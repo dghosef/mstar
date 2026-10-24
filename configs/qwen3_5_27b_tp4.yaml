@@ -3,10 +3,6 @@ max_seq_len: 32768
 # GIL switch interval of the API server process (see docs/serving.rst):
 # token streaming keeps three of its threads busy
 api_switch_interval_s: 0.001
-# Speculate and pre-plan step N+1 of the TP LLM during step N, as single-GPU
-# nodes do (see MSTAR_TP_ASYNC_SCHED); without it each step's schedule and
-# plan run serially between the ranks' forwards.
-tp_async_sched: true
 node_groups:
   - node_names: [vision_encoder]
     ranks: [0]

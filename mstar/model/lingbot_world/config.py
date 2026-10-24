@@ -84,7 +84,9 @@ class LingBotWorldConfig:
     vae_decode_cudnn_benchmark: bool = False
     vae_decode_compile: bool = True
 
-    # False trades bit-parity with the reference for speed: flash-attn-4
+    # True (the default) keeps the reference's numerics but for the decode
+    # above: deterministic, within ~73 dB of the reference's, not bit-exact.
+    # False trades closeness to the reference for speed: flash-attn-4
     # attention (needs flash-attn-4, see docs/installation.rst), compiled block
     # pointwise ops, and a cuDNN-autotuned condition encoder and bf16 decode:
     # 12.6 -> 18.6 fps at 480x832 on an H200. A free-running rollout then drifts

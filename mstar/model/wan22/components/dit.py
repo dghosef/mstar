@@ -29,6 +29,7 @@ bidirectional video DiT with 3D RoPE would have to override all of it. The
 two-linear MLPs ARE the shared ``components.mlp.MLP``.
 """
 
+import logging
 import math
 from typing import NamedTuple
 
@@ -39,6 +40,8 @@ from torch import nn
 from mstar.model.components.diffusion.attention import RaggedAttentionFn, joint_attention
 from mstar.model.components.mlp import MLP
 from mstar.model.wan22.config import Wan22Config
+
+logger = logging.getLogger(__name__)
 
 # 3D RoPE base frequency (reference WanRotaryPosEmbed default `theta`).
 ROPE_THETA = 10000.0
@@ -352,7 +355,11 @@ class Wan22DiT(nn.Module):
     def set_fuse_ffn_gelu(self, enabled: bool) -> None:
         """Run every block's FFN GELU in the GEMM epilogue (see
         ``_ffn_gelu_epilogue``); off by default, so the module alone stays the
-        reference port."""
+        reference port. ``torch._addmm_activation`` is private: without it the
+        blocks keep the unfused GELU."""
+        if enabled and not hasattr(torch, "_addmm_activation"):
+            logger.warning("Wan2.2 DiT: torch._addmm_activation is missing; the FFN GELU stays unfused")
+            enabled = False
         for block in self.blocks:
             block.fuse_ffn_gelu = enabled
 

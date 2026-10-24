@@ -1,6 +1,6 @@
 model: "lingbot_world_1_3b"
 
-# Speed over bit-parity with the reference (~1.5x at 480x832 on an H200):
+# Speed over closeness to the reference (~1.5x at 480x832 on an H200):
 # flash-attn-4 attention, compiled block pointwise ops, an autotuned condition
 # encoder and a bf16 decode. Rollouts drift from the reference's about as far as
 # under any other attention kernel. Needs flash-attn-4.

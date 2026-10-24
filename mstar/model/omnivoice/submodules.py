@@ -51,6 +51,8 @@ from mstar.model.submodule_base import ModelInputsFromEngine, NodeInputs, NodeSu
 logger = logging.getLogger(__name__)
 
 UNMASK_LOOP_NAME = "unmask_loop"
+# Step metadata: the canvas length, in frames
+TARGET_LEN = "target_len"
 # The backbone's ragged attention resource, and its captured layer stack.
 BACKBONE_ATTN = "backbone_attn"
 BACKBONE_LAYERS = "backbone_layers"
@@ -227,12 +229,16 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
 
         if "audio_tokens" not in inputs or len(inputs["audio_tokens"]) == 0:
             # Iteration 0: the loop-back edges arrive empty, and the loop starts
-            # from the all-MASK canvas the data worker built (it knows the
-            # target length from the tokenizer and the duration estimator).
-            # There is no noise and no seed to honour: the stochastic part of
-            # this model is the reveal order, not the starting state.
-            tokens = inputs["initial_canvas"][0].to(device)
-            target_len = tokens.shape[-1]
+            # from an all-MASK canvas. There is no noise and no seed to honour:
+            # the stochastic part of this model is the reveal order, not the
+            # starting state.
+            target_len = int(meta[TARGET_LEN])
+            tokens = torch.full(
+                (self.config.num_audio_codebook, target_len),
+                self.config.audio_mask_id,
+                dtype=torch.long,
+                device=device,
+            )
             # 1-D, not 0-dim: the worker's output fanout reads dims[0] of
             # every routed edge.
             step_index = torch.zeros(1, dtype=torch.int64, device=device)

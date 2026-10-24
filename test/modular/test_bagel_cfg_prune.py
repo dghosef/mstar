@@ -217,6 +217,24 @@ def test_preprocess_hands_the_forward_the_declared_count(n_branches):
     assert out["requires_cfg"] is True
 
 
+def test_image_gen_shape_inputs_stay_bounded_across_output_sizes():
+    """The output size is the client's, so the per-size device inputs are an LRU, not a dict
+    that grows with every size requested."""
+    from mstar.model.bagel.submodules import _IMAGE_GEN_SHAPES_CACHED
+
+    stub = _stub(
+        config=types.SimpleNamespace(latent_downsample=16, max_latent_size=64),
+        _image_gen_shape_cache={},
+        _get_text_vae_idxs=lambda n, device: LLMSubmodule._get_text_vae_idxs(None, n, device),
+    )
+    first = LLMSubmodule._image_gen_shape_inputs(stub, 256, 256, "cpu")
+    for i in range(3 * _IMAGE_GEN_SHAPES_CACHED):
+        LLMSubmodule._image_gen_shape_inputs(stub, 256, 256 + 16 * (i + 1), "cpu")
+        # the size in use stays cached while others come and go
+        assert LLMSubmodule._image_gen_shape_inputs(stub, 256, 256, "cpu") is first
+    assert len(stub._image_gen_shape_cache) == _IMAGE_GEN_SHAPES_CACHED
+
+
 def _request(k, first_iter, prune=True, **meta):
     cfg = types.SimpleNamespace(
         num_timesteps=N, timestep_shift=SHIFT,
@@ -295,9 +313,54 @@ def test_parallel_combine_reduces_to_the_old_combine():
     for k in (0, N - 2):
         time_index = torch.full((16,), float(k))
         n = _branches(k, **T2I)
-        old = node.forward("image_gen_cfg", None, *v, latents, time_index)["latents"][0]
-        new = node.forward("image_gen_cfg", None, *v, latents, time_index, cfg_branches=n)["latents"][0]
+        tensors = dict(
+            v_main=v[0], v_cfg_text=v[1], v_cfg_img=v[2], latents=latents, time_index=time_index,
+        )
+        old = node.forward("image_gen_cfg", None, **tensors)["latents"][0]
+        new = node.forward("image_gen_cfg", None, **tensors, cfg_branches=n)["latents"][0]
         torch.testing.assert_close(new, old, rtol=0, atol=1e-6)
+
+
+def _combine_inputs(k: int, sat_out: tuple[str, ...]):
+    """combine_cfg's prepare_inputs at step ``k`` of a t2i request, with the named
+    branch nodes having sat the step out."""
+    from mstar.model.bagel.submodules import CombineCFGSubmodule, sat_out_velocity
+
+    cfg = types.SimpleNamespace(cfg_prune=True, **{k_: _DEFAULTS[k_] for k_ in (
+        "num_timesteps", "timestep_shift", "cfg_text_scale", "cfg_img_scale",
+        "cfg_interval", "cfg_renorm_type", "cfg_renorm_min",
+    )})
+    latents = torch.randn(16, 8, generator=torch.Generator().manual_seed(0))
+    inputs = {
+        name: [sat_out_velocity(latents) if name[2:] in sat_out else torch.randn(16, 8)]
+        for name in ("v_main", "v_cfg_text", "v_cfg_img")
+    }
+    inputs.update(latents=[latents], time_index=[torch.full((16,), float(k))])
+    info = types.SimpleNamespace(
+        step_metadata={"requires_cfg": True},
+        dynamic_loop_iter_counts={IMAGE_GEN_LOOP: k},
+    )
+    node = CombineCFGSubmodule(cfg)
+    return node, node.prepare_inputs("image_gen_cfg", info, inputs)
+
+
+def test_combine_never_reads_a_branch_that_sat_the_step_out():
+    """A branch node counts from its own worker's loop counter: if it sat out a step
+    whose combine reads its velocity, the request fails rather than combining a
+    placeholder as the unconditional velocity."""
+    k_out = N - 2
+    assert _branches(k_out, **T2I) == 1
+    node, prepared = _combine_inputs(k_out, sat_out=("cfg_text", "cfg_img"))
+    assert set(prepared.tensor_inputs) == {"v_main", "latents", "time_index"}
+    out = node.forward("image_gen_cfg", None, **prepared.tensor_inputs, **prepared.kwargs)
+    assert out["latents"][0].shape == (16, 8)
+
+    k_in = next(k for k in STEPS if k > 0 and _branches(k, **T2I) == 2)
+    # t2i never reads cfg_img, so it sitting out is consistent
+    _, prepared = _combine_inputs(k_in, sat_out=("cfg_img",))
+    assert "v_cfg_img" not in prepared.tensor_inputs
+    with pytest.raises(ValueError, match="cfg_text sat out"):
+        _combine_inputs(k_in, sat_out=("cfg_text", "cfg_img"))
 
 
 def test_image_gen_cfg_walk_names_the_loop_too():

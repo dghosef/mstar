@@ -126,6 +126,10 @@ Registry keys live in ``mstar/model/registry.py`` (``MODEL_REGISTRY`` / ``HF_MOD
        A request carries the whole camera trajectory as JSON in ``model_kwargs``, which the API
        server caps at 1 MiB: about 3,900 frames of ``[4, 4]`` float32 poses; send ``[F, 3, 4]``
        rows for up to the 4,077-frame maximum. Needs ``flash-attn``; one rollout per GPU.
+       The default keeps the reference's numerics except the VAE decode, which runs
+       channels-last and compiled: deterministic, and within ~73 dB of the reference's
+       decode rather than bit-exact. ``configs/lingbot_world_1_3b_fast.yaml`` trades
+       more of that closeness for ~1.5x the speed.
        The weights are CC-BY-NC-SA-4.0 (non-commercial, share-alike), not Apache-2.0; check it
        before deploying. The code is Apache-2.0, adapted from LingBot-World v1 (``Robbyant/lingbot-world``).
    * - ``flux2_klein``
@@ -1067,15 +1071,16 @@ tiles only when free VRAM at decode time is short of the untiled estimate
 32 GiB card. No CUDA-graph capture, no continuous batching (one request per
 step) and no component offload.
 
-**Two GPUs.** ``configs/wan22_sp2.yaml`` runs the dit as a two-rank lockstep
-instance (``sp_size: 2``) that splits the classifier-free guidance batch: each
-rank runs one branch at batch 1 and the two noise predictions are all-gathered
+**Two GPUs.** ``configs/wan22_cfg_parallel_2gpu.yaml`` is CFG-parallel: it runs
+the dit as a two-rank lockstep instance (``sp_size: 2``, though nothing splits
+the sequence) that splits the classifier-free guidance batch: each rank runs one
+branch at batch 1 and the two noise predictions are all-gathered
 every step, so a guided step costs one branch's forward (502 vs 1000 ms at
 1280x704x81 on H200s; one request 13.4 s vs 23.3 s end to end at 20 steps). The
 text encoder and VAE run on rank 0. Without guidance both ranks compute the same
 step, correct but no faster. For throughput under concurrency,
 ``configs/wan22_dp2.yaml`` serves a whole replica per GPU instead: 5.2 videos/min
-at 4 concurrent vs 4.7 for sp2 (sp2's rank 1 idles through rank 0's VAE
+at 4 concurrent vs 4.7 CFG-parallel (whose rank 1 idles through rank 0's VAE
 decode), while one request takes the 1-GPU time.
 
 LTX-2.5 (``ltx2_5``)
