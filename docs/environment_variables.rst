@@ -514,11 +514,6 @@ Worker scheduling
        decoder) no longer pays the eager-step master write, a small
        synchronous host-to-device copy per step. ``0`` keeps every node on
        the per-request tensor path.
-   * - ``MSTAR_INGRAPH_DECODE_ROPE``
-     - ``0``
-     - A captured decode step builds its rotary tables inside the graph from
-       the position resource's planned positions instead of staging them.
-       Experiment knob, measured and gated on its own.
    * - ``MSTAR_SAMPLER_INGRAPH_SCATTER``
      - ``0``
      - The captured sampler gathers its RNG offsets from the slot masters
@@ -546,9 +541,9 @@ Worker scheduling
    * - ``MSTAR_KV_DEBUG_ASSERTS``
      - ``0``
      - ``1``: after every ``admit``, ``commit``, ``reset_request`` and
-       ``remove_request``, check the KV page bookkeeping (free list, owner
-       counts, seals) against the streams holding the pages. Walks every
-       live stream; tests and debugging only.
+       ``remove_request``, check the KV page bookkeeping against the streams
+       holding the pages, and each commit against its request's layout. Logs a
+       label left under its footprint at removal. Tests and debugging only.
 
 Compilation
 -----------

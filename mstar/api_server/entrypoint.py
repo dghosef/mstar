@@ -202,6 +202,10 @@ def _shutdown_conductor_process(
 #: The Rust frontend waits the same (``DUPLICATE_ID_GRACE`` in serving.rs).
 DUPLICATE_ID_GRACE_S = 0.5
 
+#: How often a non-streaming handler (``collect_results``) asks whether its
+#: client left while it waits for the request to finish.
+DISCONNECT_CHECK_S = 0.1
+
 
 def _client_text(text: str, key: str, request_id: str | None) -> str:
     """``text`` with the submission key ``key`` (``<request_id>#<n>``) shown
@@ -244,6 +248,9 @@ class PendingRequest:
     # sleeps between chunks instead of polling every millisecond per request.
     wake: Any | None = None
     loop: Any | None = None
+    # Set by collect_results, which reads no chunk before the request ends:
+    # the wake then waits for the finish instead of firing on every chunk.
+    wake_on_finish: bool = False
     # The client's request_id. The engine knows the request by its key, so
     # the message thread restamps each chunk with this before the client sees it.
     request_id: str | None = None
@@ -253,7 +260,7 @@ class PendingRequest:
     def notify(self) -> None:
         """Wake the streaming handler, from any thread."""
         loop, wake = self.loop, self.wake
-        if loop is None or wake is None:
+        if loop is None or wake is None or (self.wake_on_finish and not self.event.is_set()):
             return
         try:
             loop.call_soon_threadsafe(wake.set)
@@ -274,7 +281,7 @@ def notify_many(reqs) -> None:
     by_loop: dict[int, tuple[Any, list]] = {}
     for req in reqs:
         loop, wake = req.loop, req.wake
-        if loop is None or wake is None:
+        if loop is None or wake is None or (req.wake_on_finish and not req.event.is_set()):
             continue
         entry = by_loop.get(id(loop))
         if entry is None:
@@ -1156,19 +1163,41 @@ class APIServer:
         return its chunks. Disconnecting or timing out releases engine state."""
         start = time.time()
         key = self.submission_key(request_id)
+        # Woken by the message thread (PendingRequest.notify) when the request
+        # finishes, not on each chunk (wake_on_finish). Polling every 5 ms per
+        # request (lock, cancel scope, timer) held the event loop at high
+        # concurrency; the timeout is checked on each pass and a disconnect
+        # every DISCONNECT_CHECK_S.
+        wake = asyncio.Event()
+        with self.request_lock:
+            req = self.pending_requests.get(key)
+            if req is not None:
+                req.loop = asyncio.get_running_loop()
+                req.wake = wake
+                req.wake_on_finish = True
+        checked = start
         while True:
+            # Cleared before the read: a notification that lands after this
+            # point stays set and the wait below returns at once.
+            wake.clear()
             with self.request_lock:
                 req = self.pending_requests.get(key)
                 done = req.event.is_set() if req else True
             if done:
                 break
-            if time.time() - start > self.timeout_seconds:
+            now = time.time()
+            if now - start > self.timeout_seconds:
                 self.abort_submission(key, outcome="timeout")
                 raise HTTPException(status_code=500, detail="Request timed out")
-            if raw_request is not None and await raw_request.is_disconnected():
-                self.abort_submission(key)
-                return []
-            await asyncio.sleep(0.005)
+            if raw_request is not None and now - checked >= DISCONNECT_CHECK_S:
+                checked = now
+                if await raw_request.is_disconnected():
+                    self.abort_submission(key)
+                    return []
+            try:
+                await asyncio.wait_for(wake.wait(), timeout=DISCONNECT_CHECK_S)
+            except asyncio.TimeoutError:
+                pass
 
         with self.request_lock:
             req = self.pending_requests.pop(key, None)
@@ -1319,18 +1348,20 @@ class WarmupRequest:
     """One entry of the deployment's ``warmup_requests``: a ``/generate``
     request in yaml form. ``files`` are the media inputs in prompt order
     (any modality, any number), followed by ``text`` as on ``/generate``,
-    ``repeat`` times over (a long prompt for a long-context path)."""
+    ``repeat`` times over (a long prompt for a long-context path).
+    ``concurrency`` holds the batch sizes it runs at, one warmup each, in order."""
 
     text: str | None = None
     files: list[WarmupMedia] = field(default_factory=list)
     output_modalities: list[str] = field(default_factory=lambda: ["text"])
     model_kwargs: dict | None = None
+    concurrency: tuple[int, ...] = (1,)
 
     @classmethod
     def from_config(cls, spec: Any) -> "WarmupRequest":
         if not isinstance(spec, dict):
             raise ValueError("not a mapping")
-        unknown = set(spec) - {"text", "files", "output_modalities", "model_kwargs", "repeat"}
+        unknown = set(spec) - {"text", "files", "output_modalities", "model_kwargs", "repeat", "concurrency"}
         if unknown:
             raise ValueError(f"unknown key(s) {sorted(unknown)}")
         text = spec.get("text")
@@ -1341,6 +1372,10 @@ class WarmupRequest:
             raise ValueError(f"repeat must be a positive integer, got {repeat!r}")
         if repeat > 1 and not text:
             raise ValueError("repeat needs text")
+        concurrency = spec.get("concurrency", 1)
+        levels = concurrency if isinstance(concurrency, list) else [concurrency]
+        if not levels or any(isinstance(n, bool) or not isinstance(n, int) or n < 1 for n in levels):
+            raise ValueError(f"concurrency must be a positive integer or a list of them, got {concurrency!r}")
         out_mods = spec.get("output_modalities") or ["text"]
         if isinstance(out_mods, str):
             out_mods = [m.strip() for m in out_mods.split(",") if m.strip()]
@@ -1355,6 +1390,7 @@ class WarmupRequest:
             files=[WarmupMedia.from_config(f) for f in files],
             output_modalities=list(out_mods),
             model_kwargs=model_kwargs,
+            concurrency=tuple(levels),
         )
 
     def submit(self, server: APIServer, request_id: str) -> str:
@@ -1380,13 +1416,29 @@ class WarmupRequest:
         )
 
 
-def _run_warmup_requests(server: APIServer, specs: list) -> None:
+def _data_parallel_replicas(config: dict) -> int:
+    """The most replicas any node group serves (its ranks over its tp x sp
+    instance size): how many copies of a request it takes to reach them all."""
+    replicas = 1
+    for group in config.get("node_groups") or []:
+        instance = int(group.get("tp_size", 1)) * int(group.get("sp_size", 1))
+        replicas = max(replicas, len(group.get("ranks") or []) // max(instance, 1))
+    return replicas
+
+
+def _run_warmup_requests(server: APIServer, specs: list, copies: int = 1) -> None:
     """Run the deployment's ``warmup_requests`` once the workers are ready and
     before the server binds, so the first client does not pay what a first
     request of a shape costs (torch.compile of a denoise step, a cold
     inductor cache). Each spec is parsed into a :class:`WarmupRequest`. A
     warmup that is malformed or fails is logged and skipped; it must not keep
     the server from coming up.
+
+    Each spec runs as ``copies`` x its ``concurrency`` concurrent requests,
+    once per value when ``concurrency`` is a list: ``copies`` warms every
+    replica of a data-parallel deployment, since the conductor sends
+    concurrent requests to different replicas (the least-loaded one each), and
+    ``concurrency`` lets them batch, for a step that compiles per batch size.
     """
     if not isinstance(specs, list):
         logger.warning("warmup_requests must be a list; ignoring %r", type(specs).__name__)
@@ -1395,27 +1447,38 @@ def _run_warmup_requests(server: APIServer, specs: list) -> None:
     async def _one(request: WarmupRequest, request_id: str) -> None:
         await server.collect_results(request.submit(server, request_id))
 
+    async def _all(request: WarmupRequest, base_id: str, n: int) -> None:
+        ids = [base_id] + [f"{base_id}-{c}" for c in range(1, n)]
+        # every copy runs to its end before a failure is reported, so none is
+        # cancelled mid-request and still in the server when the next spec starts
+        results = await asyncio.gather(*(_one(request, rid) for rid in ids), return_exceptions=True)
+        errors = [r for r in results if isinstance(r, BaseException)]
+        if errors:
+            raise errors[0]
+
     for index, spec in enumerate(specs):
         try:
             request = WarmupRequest.from_config(spec)
         except Exception as exc:  # noqa: BLE001 — a repeat too large to build, say
             logger.warning("warmup_requests[%d] skipped: %s", index, exc)
             continue
-        t0 = time.perf_counter()
-        try:
-            asyncio.run(_one(request, f"warmup-{index}"))
-        except Exception as exc:  # noqa: BLE001 — a cold server is better than none
-            logger.warning(
-                "warmup request %d/%d failed after %.1f s: %s",
-                index + 1, len(specs), time.perf_counter() - t0,
-                getattr(exc, "detail", exc),
+        for level, concurrency in enumerate(request.concurrency):
+            t0 = time.perf_counter()
+            try:
+                base_id = f"warmup-{index}" + (f".{level}" if level else "")
+                asyncio.run(_all(request, base_id, copies * concurrency))
+            except Exception as exc:  # noqa: BLE001 — a cold server is better than none
+                logger.warning(
+                    "warmup request %d/%d failed after %.1f s at concurrency %d: %s",
+                    index + 1, len(specs), time.perf_counter() - t0, concurrency,
+                    getattr(exc, "detail", exc),
+                )
+                continue
+            logger.info(
+                "warmup request %d/%d (%s) done in %.1f s at concurrency %d",
+                index + 1, len(specs), ",".join(request.output_modalities),
+                time.perf_counter() - t0, concurrency,
             )
-            continue
-        logger.info(
-            "warmup request %d/%d (%s) done in %.1f s",
-            index + 1, len(specs), ",".join(request.output_modalities),
-            time.perf_counter() - t0,
-        )
 
 
 # ------------------------------------------------------------------
@@ -1920,6 +1983,19 @@ def _set_preprocess_threads(model, config: dict) -> None:
     torch.set_num_threads(int(threads))
 
 
+def _set_switch_interval(config: dict) -> None:
+    """``api_switch_interval_s`` from the config: the GIL switch interval of
+    this process only (the conductor and workers are spawned fresh). Unset
+    keeps Python's 5 ms. Streaming many small chunks keeps three of this
+    process's threads busy (event loop, message thread, data worker); a
+    shorter interval hands the GIL between them sooner, which also preempts a
+    model's preprocessing on the data-worker thread more often."""
+    interval = config.get("api_switch_interval_s")
+    if interval is not None:
+        sys.setswitchinterval(float(interval))
+        logger.info("API server GIL switch interval: %s s", interval)
+
+
 def main(argv: list[str] | None = None):
     import argparse
 
@@ -2030,6 +2106,7 @@ def main(argv: list[str] | None = None):
         **{**model_init_kwargs(model_name), **yaml_model_kwargs},
     )
     _set_preprocess_threads(model, config)
+    _set_switch_interval(config)
 
     global api_server
     log_stats = args.log_stats or args.log_stats_file is not None
@@ -2080,8 +2157,12 @@ def main(argv: list[str] | None = None):
         # client never sees the first request of a shape.
         warmups = config.get("warmup_requests") or []
         if warmups:
-            logger.info("Running %d warmup request(s) before binding", len(warmups))
-            _run_warmup_requests(api_server, warmups)
+            copies = _data_parallel_replicas(config)
+            logger.info(
+                "Running %d warmup request(s) before binding, %d at a time (one per replica)",
+                len(warmups), copies,
+            )
+            _run_warmup_requests(api_server, warmups, copies)
         if args.enable_metrics:
             api_server.enable_metrics()
         if args.rust_frontend:

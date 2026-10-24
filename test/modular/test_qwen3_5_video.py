@@ -341,6 +341,17 @@ def test_video_plan_puts_text_around_every_group():
 # ---------------------------------------------------------------------------
 
 
+def normalized(model, patches: torch.Tensor) -> torch.Tensor:
+    """`process_prompt` ships byte patches; the vision encoder normalizes them
+    on the device into the processor's pixels."""
+    from mstar.model.qwen3_5.submodules import VisionEncoderSubmodule
+
+    encoder = VisionEncoderSubmodule.__new__(VisionEncoderSubmodule)
+    encoder._pixel_normalizer = model.pixel_normalizer()
+    assert patches.dtype == torch.uint8
+    return VisionEncoderSubmodule._normalize(encoder, patches)
+
+
 @needs_new_layout
 @pytest.mark.parametrize("layout", list(LAYOUTS))
 def test_prompt_ids_match_processor(model, processor, layout):
@@ -355,10 +366,10 @@ def test_patches_and_grids_match_processor(model, processor, layout):
     _, out, ref = run_both(model, processor, layout)
     tensors = out.new_input_tensors
     assert torch.equal(torch.stack(tensors["video_grid_thw"]), ref["video_grid_thw"])
-    assert torch.equal(torch.cat(tensors["pixel_values_videos"]), ref["pixel_values_videos"])
+    assert torch.equal(normalized(model, torch.cat(tensors["pixel_values_videos"])), ref["pixel_values_videos"])
     if "image_grid_thw" in tensors:
         assert torch.equal(torch.stack(tensors["image_grid_thw"]), ref["image_grid_thw"])
-        assert torch.equal(torch.cat(tensors["pixel_values"]), ref["pixel_values"])
+        assert torch.equal(normalized(model, torch.cat(tensors["pixel_values"])), ref["pixel_values"])
     # the raw frames are not kept past preprocessing
     assert tensors["video_inputs"] == []
 
@@ -383,7 +394,7 @@ IMAGE_MARK, VIDEO_MARK = -1.0, -2.0
 def test_vision_walk_matches_get_rope_index(model, processor, rope_model, layout):
     """The schedule and the LLM's `prefill_vision` row, against transformers:
     the row's token order and its 3D positions, plus where decode resumes."""
-    from mstar.model.qwen3_5.config import ROPE
+    from mstar.model.qwen3_5.config import KV_CACHE, ROPE
     from mstar.model.qwen3_5.submodules import LLMSubmodule
 
     _, out, ref = run_both(model, processor, layout)
@@ -435,6 +446,9 @@ def test_vision_walk_matches_get_rope_index(model, processor, rope_model, layout
     assert torch.equal(row.custom_pos_ids.long(), positions[:, 0])
     # decode resumes where transformers' rope delta puts it
     assert row.tensor_inputs["mrope_advance"] == int(positions.max()) + 1
+    spans = out.metadata["kv_layout"][KV_CACHE]["main"].spans
+    assert sum(span.length for span in spans) == row.input_seq_len
+    assert sum(span.advance for span in spans) == row.tensor_inputs["mrope_advance"]
 
 
 def test_mp4_matches_processor(model, processor, tmp_path):
@@ -462,7 +476,7 @@ def test_mp4_matches_processor(model, processor, tmp_path):
     ).new_input_tensors
     ref = processor.video_processor(videos=[str(path)], return_tensors="pt")
     assert torch.equal(out["video_grid_thw"][0], ref["video_grid_thw"][0])
-    assert torch.equal(out["pixel_values_videos"][0], ref["pixel_values_videos"])
+    assert torch.equal(normalized(model, out["pixel_values_videos"][0]), ref["pixel_values_videos"])
 
 
 # ---------------------------------------------------------------------------
@@ -500,7 +514,7 @@ def _encoder(max_segments: int):
         patch_size=16, temporal_patch_size=2, spatial_merge_size=2,
         num_position_embeddings=16, out_hidden_size=64,
     )
-    encoder = VisionEncoderSubmodule(nn.Linear(1, 1), config)
+    encoder = VisionEncoderSubmodule(nn.Linear(1, 1), config, (torch.zeros(1), torch.ones(1)))
     encoder.node_resources = {VISION_ATTN: SimpleNamespace(max_segments_per_request=max_segments)}
     return encoder
 
@@ -522,6 +536,15 @@ def test_vision_block_loop_leases_only_what_a_replay_holds():
     assert config.lease_before_step
     assert config.can_lease([request(4)])
     assert not config.can_lease([request(5)])
+    # a batched step replays as one row, so its requests share the ceiling
+    assert config.one_row_per_step
+    assert config.can_lease([request(2), request(2)])
+    assert not config.can_lease([request(2), request(3)])
+
+
+def test_vision_encoder_refuses_patches_it_would_not_normalize():
+    with pytest.raises(ValueError, match="uint8"):
+        _encoder(max_segments=4)._normalize(torch.zeros(2, 3))
 
 
 def test_vision_block_loop_replays_exactly_when_leased():

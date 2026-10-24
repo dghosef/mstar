@@ -261,8 +261,10 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
        ``hf://<owner>/<repo>/<path>`` (a file in a model's HF repo); its modality
        comes from the extension, or give ``{path: ..., modality: ...}``.
        ``repeat: N`` sends ``text`` N times over, a long prompt for a path only
-       long prompts take (a long-context prefill). A malformed or failing warmup
-       is logged and skipped.
+       long prompts take (a long-context prefill). ``concurrency: N`` submits N
+       copies at once, so they batch, for a step that compiles per batch size; a
+       list (``concurrency: [1, 2, 4]``) runs the entry once per size, in order. A
+       malformed or failing warmup is logged and skipped.
    * - ``dist_timeout_s``
      - *(optional)* Timeout in seconds for the NCCL world group and its parallel
        subgroups during weight load and warmup; serving keeps PyTorch's default.
@@ -284,6 +286,14 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
      - *(optional)* Largest message, in KiB, the symmetric-memory path takes;
        larger ones go to NCCL. It is also the size of the buffer each group
        rendezvouses. Default 512.
+   * - ``api_switch_interval_s``
+     - *(optional)* GIL switch interval of the API server process, in seconds
+       (``sys.setswitchinterval``); unset keeps Python's 5 ms. Under streaming load
+       that process keeps three threads busy (event loop, message thread, data
+       worker), and a shorter interval hands the GIL between them sooner. The
+       Qwen3.5 configs set ``0.001``: Qwen3.5-0.8B text, c=64, +4 to +8% tok/s. A
+       model whose preprocessing runs long on the data-worker thread can lose from
+       it (Kokoro's G2P: about -3.6% at c=32), so it is per deployment.
    * - ``tp_async_sched``
      - *(optional)* Async scheduling for the parallel nodes: ``true``, ``false``
        (default) or a list of node names (see ``MSTAR_TP_ASYNC_SCHED``, which
@@ -302,7 +312,7 @@ them by that name:
    resources:
      kv_cache:
        max_num_pages: 1024      # also: page_size, max_seq_len, cpu_offload_pages,
-                                # prefix_cache, prefix_cache_salt
+                                # prefix_cache, prefix_cache_salt, prefix_cache_tp
      talker_attn:
        flashinfer_backend: fa2  # also: backend (flashinfer / dense)
      vit_attn:                  # a cacheless (ragged) attention resource
@@ -317,7 +327,11 @@ no longer read. It raises an error with a message describing the migration.
 ``prefix_cache: false`` turns cross-request prefix reuse off for that cache, and
 ``prefix_cache_salt`` keeps two otherwise identical deployments off each other's
 cached pages. A single request opts out by sending ``prefix_cache=False``, which
-travels with its other ``model_kwargs``.
+travels with its other ``model_kwargs``. Above one rank the cache stays off unless
+``prefix_cache_tp: true`` is set as well: rank 0 then decides each hit and the other
+ranks adopt it. ``prefix_cache_tp`` can't be combined with ``cpu_offload_pages``, and the
+cache's nodes must run on one TP group, with no replicas and no walks placed on other
+ranks. Loading fails otherwise.
 
 A cached prompt no longer reserves its pages, so the pool no longer limits how many
 requests are admitted. It has to hold the decode of every request allowed to run at once,
@@ -624,7 +638,7 @@ or ``increase()``.
   ``mstar_prefix_cache_hit_tokens_total{model_name, component}``: counters, prompt
   tokens looked up in the prefix cache (once per request, its whole keyed prompt) and
   tokens found there. Only models that key their prompts for prefix reuse (BAGEL and
-  Orpheus) count; the cache is off under tensor parallelism.
+  Orpheus) count, and above one rank only with ``prefix_cache_tp`` set.
 - ``mstar_component_pending_steps{model_name, component}``: gauge, requests whose next
   step on the node is ready (its inputs arrived) and not running: waiting for room in a
   step or for the worker to pick the node.

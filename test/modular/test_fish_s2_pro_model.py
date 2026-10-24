@@ -446,8 +446,8 @@ def test_check_stop_on_im_end_on_the_frame_limit_and_not_with_ignore_eos():
 
     def info(ignore_eos=False):
         return SimpleNamespace(
-            step_metadata={"ar_max_tokens": 3},
-            max_tokens=99,
+            step_metadata={},
+            max_tokens=3,
             resource_configs={AR_SAMPLER: SamplingReqConfig(ignore_eos=ignore_eos)},
         )
 
@@ -550,7 +550,13 @@ def test_preprocess_packs_the_tensors_the_per_row_device_copies_did():
     assert_same_tensor(packed["last_token_indices"], torch.tensor(seq_lens).cumsum(0) - 1)
     assert_same_tensor(packed["suppress_eos"], old_flags([True, True, True]))
 
-    (graph_config,) = ar.get_accelerator_graph_configs(torch.device("cpu"))
+    prefill_config, graph_config = ar.get_accelerator_graph_configs(torch.device("cpu"))
+    # Plain prefills replay packed captures; their padding rows suppress EOS.
+    assert prefill_config.capture_graph_walk == "ar_prefill"
+    # a voice clone's prefill is the same forward: it replays these captures too
+    assert prefill_config.replay_graph_walks == ["ar_prefill", "ar_prefill_clone"]
+    assert prefill_config.make_node_input(5).kwargs == {"suppress_eos": True}
+    assert graph_config.capture_graph_walk == "ar_decode"
     template = graph_config.single_request_inputs
     assert template.kwargs == {"suppress_eos": False} and not template.tensor_inputs
     padded = [decode_row(True), decode_row(False), *graph_config.get_node_inputs(2, 0)]
@@ -609,10 +615,12 @@ def test_process_prompt_lays_out_clones_and_validates_requests():
     ids, prefix_len = model.build_prompt("hi", "r", 21)
     assert list(out.new_input_tensors) == ["prompt_ids"]
     assert out.new_input_tensors["prompt_ids"][0].tolist() == ids
-    assert out.metadata == {"prompt_layout": [prefix_len, 21], "ref_clip_key": clip_digest(clip)}
+    assert {key: value for key, value in out.metadata.items() if key != "kv_layout"} == {
+        "prompt_layout": [prefix_len, 21], "ref_clip_key": clip_digest(clip),
+    }
 
     plain = model.process_prompt("hi", ["text"], ["audio"])
-    assert plain.metadata == {"prompt_layout": [0, 0]}
+    assert {key: value for key, value in plain.metadata.items() if key != "kv_layout"} == {"prompt_layout": [0, 0]}
     for prompt, inputs, outputs, tensors, match in [
         ("  ", ["text"], ["audio"], None, "non-empty"),
         ("hi", ["image"], ["audio"], None, "takes text input"),
@@ -623,9 +631,7 @@ def test_process_prompt_lays_out_clones_and_validates_requests():
         with pytest.raises(ValueError, match=match):
             model.process_prompt(prompt, inputs, outputs, tensors)
     with pytest.raises(ValueError, match="max_new_tokens must be in 1..4096"):
-        model.process_prompt("hi", ["text"], ["audio"], max_new_tokens=5000)
-    with pytest.raises(ValueError, match="exceeds the 32,768-token context"):
-        model.process_prompt("x" * 480, ["text"], ["audio"], max_new_tokens=64)
+        model.get_max_output_tokens(max_new_tokens=5000)
 
 
 # ---------------------------------------------------------------------------
@@ -663,7 +669,6 @@ def test_partition_state_machine_routes_clones_through_the_ref_encoder():
     }
     assert clone.step_metadata == {
         "is_prefill": True,
-        "ar_max_tokens": 7,
         "prompt_layout": [5, 21],
         "ref_clip_key": "k",
     }
