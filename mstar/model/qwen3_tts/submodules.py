@@ -85,11 +85,11 @@ from mstar.model.submodule_base import (
     ARNodeInputs,
     ARNodeSubmodule,
     BatchedModelOutput,
+    HostRows,
     InputMetadata,
     ModelInputsFromEngine,
     NodeInputs,
     NodeSubmodule,
-    TokenStop,
 )
 from mstar.streaming.stream_buffer import StreamChunkInfo
 from mstar.utils.h2d import PinnedStager
@@ -162,12 +162,6 @@ class TalkerSubmodule(ARNodeSubmodule):
         self.talker_config = config.talker
         self.cp_config = config.talker.code_predictor
         self.num_codes = config.talker.num_code_groups
-        # ``postprocess`` counts the frames, the prefill's included
-        self.token_stop = TokenStop(
-            loop="talker_decode_loop", buffer="layer0_codes",
-            stop_ids=frozenset({config.talker.codec_eos_token_id}),
-            sampler=TALKER_SAMPLER, generated_key="generated_frames",
-        )
         self._suppress_mask: torch.Tensor | None = None
         self._decode_last_token_indices: torch.Tensor | None = None
         self._flag_stager = PinnedStager(torch.bool, numel=self.MAX_BATCH_SIZE)
@@ -801,6 +795,60 @@ class TalkerSubmodule(ARNodeSubmodule):
             state.add(
                 "generated_frames", int(state.get("generated_frames", 0)) + 1
             )
+
+    def check_stop(
+        self,
+        request_id: str,
+        request_info: CurrentForwardPassInfo,
+        outputs: dict[str, list[torch.Tensor]],
+    ) -> set[str]:
+        """Stop the graph loop on codec EOS or the request frame limit.
+
+        This callback runs off the GPU execution thread, so reading the sampled
+        token with ``item`` is allowed here rather than in ``postprocess``.
+        """
+        if "layer0_codes" not in outputs:
+            return set()
+        token = int(outputs["layer0_codes"][0].item())
+        generated = int(
+            self.request_state(request_id).get("generated_frames", 0)
+        )
+        max_tokens = request_info.max_tokens
+        sampling_config = request_info.resource_configs.get(TALKER_SAMPLER)
+        ignore_eos = bool(getattr(sampling_config, "ignore_eos", False))
+        reached_eos = (
+            not ignore_eos and token == self.talker_config.codec_eos_token_id
+        )
+        if reached_eos or generated >= max_tokens:
+            logger.debug("talker %s: stop after %d frames (eos=%s)", request_id, generated, reached_eos)
+            return {"talker_decode_loop"}
+        return set()
+
+    def check_stop_batched(
+        self,
+        request_ids: list[str],
+        request_infos: dict[str, CurrentForwardPassInfo],
+        host_rows: HostRows,
+        step_walk: str | None = None,
+    ) -> dict[str, set[str]] | None:
+        """``check_stop`` for every row off one host copy of the group-0 codes."""
+        codes = host_rows.buffers.get("layer0_codes")
+        if not torch.is_tensor(codes) or codes.dim() == 0:
+            return None
+        values = codes.reshape(-1).tolist()
+        row_of = {rid: i for i, rid in enumerate(host_rows.request_ids)}
+        eos = self.talker_config.codec_eos_token_id
+        stops: dict[str, set[str]] = {}
+        for rid in request_ids:
+            i = row_of.get(rid)
+            if i is None or i >= len(values):
+                continue  # no row, no output: the per-request path skips it too
+            info = request_infos[rid]
+            generated = int(self.request_state(rid).get("generated_frames", 0))
+            ignore_eos = bool(getattr(info.resource_configs.get(TALKER_SAMPLER), "ignore_eos", False))
+            if (values[i] == eos and not ignore_eos) or generated >= info.max_tokens:
+                stops[rid] = {"talker_decode_loop"}
+        return stops
 
     def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
         """Admit compatible prefill/decode requests to continuous batching.

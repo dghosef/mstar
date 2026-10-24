@@ -69,10 +69,10 @@ from mstar.model.submodule_base import (
     ARNodeInputs,
     ARNodeSubmodule,
     BatchedModelOutput,
+    HostRows,
     ModelInputsFromEngine,
     NodeInputs,
     NodeSubmodule,
-    TokenStop,
     device_loopback_enabled,
 )
 from mstar.platforms.compile import with_inductor_overrides
@@ -154,11 +154,6 @@ class LLMSubmodule(ARNodeSubmodule):
         self.model = model
         self.config = config
         self.vision_config = vision_config
-        # only a decode row's token ends decode_loop; a prefill is not in it yet
-        self.token_stop = TokenStop(
-            loop="decode_loop", buffer="new_token", stop_ids=config.stop_token_ids,
-            sampler=SAMPLER, walk="decode",
-        )
         self._vision_sentinels: tuple[torch.Tensor, torch.Tensor] | None = None
 
     # ------------------------------------------------------------------
@@ -657,6 +652,24 @@ class LLMSubmodule(ARNodeSubmodule):
             "last_prefill", False,
         )
 
+    def check_stop(
+        self,
+        request_id: str,
+        request_info: CurrentForwardPassInfo,
+        outputs: dict[str, list[torch.Tensor]],
+    ) -> set[str]:
+        # only a decode row's stop can end decode_loop; a prefill is not in it yet
+        if request_info.graph_walk != "decode" or "new_token" not in outputs:
+            return set()
+        token = outputs["new_token"][0].item()
+        ignore_eos = request_info.resource_configs[SAMPLER].ignore_eos
+        hit_eos = not ignore_eos and token in self.config.stop_token_ids
+        out_of_budget = (
+            request_info.dynamic_loop_iter_counts.get("decode_loop", 0) + 1
+            >= request_info.max_tokens
+        )
+        return {"decode_loop"} if hit_eos or out_of_budget else set()
+
     def step_is_input_free(self, graph_walk: str) -> bool:
         # decode rows are one token each, like the template; the prefill walks
         # feed `prefill_tokens` from the inputs
@@ -667,6 +680,51 @@ class LLMSubmodule(ARNodeSubmodule):
         # check already has on the host; prefill's new_token edge is persisted
         return {"text_inputs": "new_token"} if graph_walk == "decode" else {}
 
+    def check_stop_batched(
+        self,
+        request_ids: list[str],
+        request_infos: dict[str, CurrentForwardPassInfo],
+        host_rows: HostRows,
+        step_walk: str | None = None,
+    ) -> dict[str, set[str]] | None:
+        """``check_stop`` for every request off one ``tolist``."""
+        if step_walk is not None and step_walk != "decode":
+            return {}  # as check_stop: only a decode row's stop ends decode_loop
+        tokens = host_rows.buffers.get("new_token")
+        if not torch.is_tensor(tokens) or tokens.dim() == 0:
+            return None
+        values = tokens.reshape(tokens.shape[0], -1)[:, 0].tolist()
+        rows = host_rows.request_ids
+        if len(rows) >= len(request_ids) and all(
+            a == b for a, b in zip(request_ids, rows, strict=False)
+        ):
+            # the common case: the batch in forward order, no row map needed
+            pairs = zip(request_ids, values, strict=False)
+        else:
+            row_of = {rid: i for i, rid in enumerate(rows)}
+            pairs = (
+                (rid, values[i]) for rid in request_ids
+                if (i := row_of.get(rid)) is not None and i < len(values)
+            )  # no row, no output: the per-request path skips it too
+        stop_ids = self.config.stop_token_ids
+        stops: dict[str, set[str]] = {}
+        mixed = step_walk is None
+        for rid, value in pairs:
+            info = request_infos[rid]
+            # a mixed step reads each row's walk; a decode step need not
+            if mixed and info.graph_walk != "decode":
+                continue
+            # the set test first: a stop id is rare, the config read behind it
+            # goes through the wrapper
+            if (
+                value in stop_ids
+                and not info.resource_configs[SAMPLER].ignore_eos
+            ) or (
+                info.dynamic_loop_iter_counts.get("decode_loop", 0) + 1
+                >= info.max_tokens
+            ):
+                stops[rid] = {"decode_loop"}
+        return stops
 
 
 # The vision tower's block loop, as a piecewise capture region
