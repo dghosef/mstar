@@ -320,7 +320,7 @@ class PiecewiseAcceleratorGraphConfig(ABC):
         if self.one_row_per_step and (
             self.get_config_type() is not PiecewiseConfigType.PACKED
             or not self.lease_before_step
-            or self.capture_batch_sizes != [1]
+            or list(self.capture_batch_sizes) != [1]
         ):
             raise ValueError(
                 "one_row_per_step needs a packed lease_before_step region "

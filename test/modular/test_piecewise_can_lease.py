@@ -94,6 +94,7 @@ def test_one_row_per_step_is_refused_where_it_means_nothing(batched, overrides):
         "lease_before_step": True, "one_row_per_step": True, "capture_batch_sizes": [1],
     }
     PiecewisePackedConfig(**kwargs, total_tokens=[8])  # the shape it is for
+    PiecewisePackedConfig(**{**kwargs, "capture_batch_sizes": (1,)}, total_tokens=[8])
     with pytest.raises(ValueError, match="one_row_per_step"):
         if batched:
             PiecewiseBatchedConfig(**kwargs, seq_len=8)
