@@ -328,9 +328,10 @@ def _combine_inputs(k: int, sat_out: tuple[str, ...], counter: int | None = None
         "num_timesteps", "timestep_shift", "cfg_text_scale", "cfg_img_scale",
         "cfg_interval", "cfg_renorm_type", "cfg_renorm_min",
     )})
-    latents = torch.randn(16, 8, generator=torch.Generator().manual_seed(0))
+    g = torch.Generator().manual_seed(0)
+    latents = torch.randn(16, 8, generator=g)
     inputs = {
-        name: [sat_out_velocity(latents) if name[2:] in sat_out else torch.randn(16, 8)]
+        name: [sat_out_velocity(latents) if name[2:] in sat_out else torch.randn(16, 8, generator=g)]
         for name in ("v_main", "v_cfg_text", "v_cfg_img")
     }
     inputs.update(latents=[latents], time_index=[torch.full((16,), float(k))])

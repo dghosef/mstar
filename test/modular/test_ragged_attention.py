@@ -371,6 +371,8 @@ def test_a_compiled_region_attends_through_a_rebuilt_resource():
     """The op names its manager by resource key: after the resource is rebuilt under
     the same key, a region compiled against the old one attends through the new one's
     plan, not the old one's."""
+    from mstar.engine.resources.convenience import RaggedAttentionCallable
+
     q, k, v = qkv(224)
 
     def region(fn, q, k, v):
@@ -380,11 +382,11 @@ def test_a_compiled_region_attends_through_a_rebuilt_resource():
     compiled = torch.compile(region)
     old = manager()
     old.plan(step(128, 96), ctx(["r0", "r1"]))
-    close(compiled(functools.partial(old.run, label="main"), q, k, v), ref(q, k, v, cu([128, 96])) + 1.0)
+    close(compiled(RaggedAttentionCallable(old, "main"), q, k, v), ref(q, k, v, cu([128, 96])) + 1.0)
 
     rebuilt = manager()
     rebuilt.plan(step(64, 160), ctx(["r0", "r1"]))
-    close(compiled(functools.partial(rebuilt.run, label="main"), q, k, v), ref(q, k, v, cu([64, 160])) + 1.0)
+    close(compiled(RaggedAttentionCallable(rebuilt, "main"), q, k, v), ref(q, k, v, cu([64, 160])) + 1.0)
 
 
 def test_plan_then_run_matches_reference():
