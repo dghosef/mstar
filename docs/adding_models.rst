@@ -742,7 +742,9 @@ encoder node only, and names no cache:
 
 A layer binds the key as it binds any other resource, then attends through the resource's
 ``run(q, k, v, label=None)``. There is no KV write to pair it with, so no
-``AttentionCallable`` is involved.
+``AttentionCallable`` is involved. Inside a ``torch.compile`` region, ``run`` is the
+``mstar::ragged_attention`` custom op, so the region keeps one graph across the attention
+instead of breaking per layer; an eager call goes straight to the kernel.
 
 The step is an ordinary ``AttentionStep``, and its ``segments`` are the entire layout.
 There is no cache to read the layout off, so a label that carries no segment in the

@@ -37,7 +37,9 @@ def _build_ragged(spec, info: EngineResourceInfo, manager_cls, **kwargs):
             "RaggedAttentionConfig.dtype on a node without a KV-backed attention "
             "(the engine has no KV dtype to fall back on)."
         )
-    return manager_cls(device=info.device, dtype=dtype, config=config, **kwargs)
+    return manager_cls(
+        device=info.device, dtype=dtype, config=config, key=spec.resource_key, **kwargs,
+    )
 
 
 class RaggedAttnManager(AttentionResource):

@@ -502,7 +502,7 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
             if self_attn is None:
                 return None
             self._attn_fns = Wan22AttentionFns(
-                self_attn=RaggedAttentionCallable(self_attn, self.VIDEO_SPAN, opaque=True), cross_attn=None,
+                self_attn=RaggedAttentionCallable(self_attn, self.VIDEO_SPAN), cross_attn=None,
             )
             logger.info("Wan2.2 DiT: self-attention through the engine's ragged attention resource")
         return self._attn_fns
