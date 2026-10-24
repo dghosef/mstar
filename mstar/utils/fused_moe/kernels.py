@@ -26,6 +26,8 @@ Triton-specific boilerplate out of the runner.
 from __future__ import annotations
 
 import functools
+import json
+from pathlib import Path
 from typing import Any, Dict
 
 import torch
@@ -620,50 +622,37 @@ def moe_sum_reduce_triton(
 # ---------------------------------------------------------------------------
 
 
-def _tile(bn: int, bk: int, warps: int, stages: int) -> Dict[str, int]:
-    return {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": bn, "BLOCK_SIZE_K": bk, "GROUP_SIZE_M": 1,
-            "num_warps": warps, "num_stages": stages}
+def config_path(E: int, N: int, K: int, device_name: str | None = None) -> Path:
+    """Where ``mstar.utils.fused_moe.tune`` writes configs for this shape and GPU."""
+    if device_name is None:
+        device_name = torch.cuda.get_device_name()
+    device_name = device_name.replace(" ", "_")
+    return Path(__file__).parent / "configs" / f"E={E},N={N},K={K},device_name={device_name}.json"
 
 
-# (E, N of the gate/up GEMM, K = hidden) -> rows of (max tokens, gate/up tile, down tile),
-# swept on an H200 with uniform random routing for Qwen3-Omni's Thinker
-# (128 experts, 2048 hidden, 768 inter, top-8) and Talker (1024 / 384, top-6).
-# Above the last row the default applies; at those batch sizes the GEMMs read most
-# experts and the default is within a few percent.
-_TUNED: Dict[tuple, tuple] = {
-    (128, 1536, 2048): (
-        (1, _tile(32, 128, 4, 4), _tile(64, 64, 4, 3)),
-        (2, _tile(64, 64, 4, 4), _tile(64, 64, 4, 4)),
-        (4, _tile(64, 64, 4, 3), _tile(64, 64, 4, 3)),
-        (8, _tile(64, 128, 4, 4), _tile(64, 128, 4, 3)),
-    ),
-    (128, 768, 1024): (
-        (1, _tile(64, 64, 4, 5), _tile(64, 64, 8, 3)),
-        (2, _tile(64, 64, 4, 3), _tile(32, 64, 4, 3)),
-        (4, _tile(64, 64, 4, 4), _tile(64, 64, 4, 3)),
-    ),
-}
-
-
-@functools.cache
-def _tuned_tiles_apply() -> bool:
-    """Only on the NVIDIA Hopper parts the table was swept on; every other GPU,
-    ROCm included, keeps the generic heuristics."""
-    from mstar.platforms import current_platform
-
-    return current_platform.is_cuda() and current_platform.cuda_capability() == (9, 0)
-
-
-def get_tuned_configs(M: int, E: int, N: int, K: int) -> tuple[Dict[str, int], Dict[str, int]] | None:
-    """Swept ``(gate/up, down)`` tiles for a known shape and batch size, else None.
-    Both share ``BLOCK_SIZE_M``: the token alignment is computed once for the two."""
-    rows = _TUNED.get((E, N, K))
-    if not rows or not _tuned_tiles_apply():
+@functools.lru_cache(maxsize=None)
+def _tuned_configs(E: int, N: int, K: int) -> dict[int, dict] | None:
+    path = config_path(E, N, K)
+    if not path.is_file():
         return None
-    for max_m, gate_up, down in rows:
-        if M <= max_m:
-            return dict(gate_up), dict(down)
-    return None
+    return {int(m): cfg for m, cfg in json.loads(path.read_text()).items()}
+
+
+def get_config(M: int, E: int, N: int, K: int, top_k: int) -> tuple[Dict[str, int], Dict[str, int]]:
+    """Tile configs for the gate/up GEMM and the down GEMM.
+
+    Uses the tuned table for this shape and GPU when present, taking the entry
+    for the nearest tuned batch size, else :func:`get_default_config` for both.
+    The two GEMMs share ``BLOCK_SIZE_M`` because they share one alignment.
+    """
+    tuned = _tuned_configs(E, N, K)
+    if tuned is None:
+        config = get_default_config(M, E, N, K, top_k)
+        return config, config
+    up = dict(tuned[min(tuned, key=lambda m: abs(m - M))])
+    down_overrides = up.pop("down", {})
+    down = {**up, **down_overrides, "BLOCK_SIZE_M": up["BLOCK_SIZE_M"]}
+    return up, down
 
 
 def get_default_config(M: int, E: int, N: int, K: int, top_k: int) -> Dict[str, int]:

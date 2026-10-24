@@ -64,25 +64,3 @@ def test_router_defaults_to_the_torch_ops():
         ref_w, ref_ids = torch.topk(probs, 8, dim=-1)
     assert torch.equal(ids, ref_ids)
     torch.testing.assert_close(w, ref_w / ref_w.sum(dim=-1, keepdim=True), rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("platform,applies", [
-    ("cuda_h", True), ("cuda_b", False), ("rocm", False),
-])
-def test_tuned_moe_tiles_apply_only_on_hopper(monkeypatch, platform, applies):
-    pytest.importorskip("triton")
-    from mstar import platforms
-    from mstar.platforms.interface import CudaPlatform, RocmPlatform
-    from mstar.utils.fused_moe import kernels
-
-    fake = {
-        "cuda_h": type("H", (CudaPlatform,), {"cuda_capability": lambda self, device=None: (9, 0)})(),
-        "cuda_b": type("B", (CudaPlatform,), {"cuda_capability": lambda self, device=None: (10, 0)})(),
-        "rocm": RocmPlatform(),
-    }[platform]
-    monkeypatch.setattr(platforms, "resolve_platform", lambda: fake)
-    kernels._tuned_tiles_apply.cache_clear()
-    try:
-        assert (kernels.get_tuned_configs(1, 128, 1536, 2048) is not None) is applies
-    finally:
-        kernels._tuned_tiles_apply.cache_clear()
