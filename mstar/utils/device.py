@@ -68,12 +68,3 @@ def to_device_nonblocking(t: torch.Tensor, device) -> torch.Tensor:
 def _device_capability(device: torch.device) -> DeviceCapability:
     return DeviceCapability(device)
 
-
-def to_device_nonblocking(t: torch.Tensor, device) -> torch.Tensor:
-    """``t`` on ``device`` without a stream sync: a host tensor is pinned, then
-    copied asynchronously. A tensor already on ``device`` comes back as is."""
-    if t.device == torch.device(device):
-        return t
-    if t.device.type == "cpu" and not t.is_pinned():
-        t = t.pin_memory()
-    return t.to(device, non_blocking=True)
