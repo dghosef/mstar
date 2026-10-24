@@ -7,11 +7,12 @@ Nothing is padded, so a batch mixing a 2-second and a 25-second utterance wastes
 nothing, and the head GEMM runs only at the positions whose logits are read.
 
 The per-step kernels are the reference's own fastest mode: ``apply_flashinfer``
-fuses QKV and gate/up, and the layer runs in ``(S, H, D)`` with flashinfer RoPE,
-RMSNorm and ``silu_and_mul``.  ``OmniVoiceBackbone.encode`` drives those fused
-weights with its own layer loop rather than through the patched ``llm``: it
-norms q and k straight off the fused QKV output (the reference copies each out
-first) and folds every residual add into the next RMSNorm.  At 16 requests a
+fuses QKV and gate/up, and the layer runs in ``(S, H, D)`` with flashinfer RoPE
+and ``silu_and_mul`` (its RMSNorms go through M*'s shared ones).
+``OmniVoiceBackbone.encode`` drives those fused weights with its own layer loop
+rather than through the patched ``llm``: it norms q and k straight off the fused
+QKV output (the reference copies each out first) and folds every residual add
+into the next RMSNorm.  At 16 requests a
 step those copies and adds were a tenth of the step's GPU time.
 
 What M* adds on top is what the reference cannot do from inside one
@@ -34,6 +35,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from mstar.engine.resources.rms_norm import run_rms_norm
+from mstar.model.components.norm import add_rms_norm
 from mstar.utils.h2d import to_device_nonblocking
 
 logger = logging.getLogger(__name__)
@@ -293,30 +296,26 @@ class OmniVoiceBackbone(nn.Module):
             norm = layer.input_layernorm
             if residual is None:
                 residual = hidden
-                x = flashinfer.norm.rmsnorm(hidden, norm.weight, eps=norm.variance_epsilon)
+                x = run_rms_norm(hidden, norm.weight, eps=norm.variance_epsilon)
             else:
-                # residual += hidden; hidden = norm(residual), in place. The kernel
-                # normalizes the sum before rounding it to half precision, where
-                # the reference rounds first: logits match it to that rounding,
-                # not bit for bit.
-                flashinfer.norm.fused_add_rmsnorm(hidden, residual, norm.weight, eps=norm.variance_epsilon)
-                x = hidden
+                # The fused add-norm normalizes the sum before rounding it to half
+                # precision, where the reference rounds first: logits match it to
+                # that rounding, not bit for bit.
+                x, residual = add_rms_norm(hidden, residual, norm.weight, norm.variance_epsilon)
             n, d = x.shape[0], sa.head_dim
             heads_q, heads_k, _ = (width // d for width in sa._fi_qkv_split)
             qkv = F.linear(x, sa._fi_w_qkv).view(n, -1, d)
             # the q/k norms read their heads straight off the fused output
-            q = flashinfer.norm.rmsnorm(qkv[:, :heads_q], sa.q_norm.weight, eps=sa.q_norm.variance_epsilon)
-            k = flashinfer.norm.rmsnorm(
-                qkv[:, heads_q:heads_q + heads_k], sa.k_norm.weight, eps=sa.k_norm.variance_epsilon,
-            )
+            q = run_rms_norm(qkv[:, :heads_q], sa.q_norm.weight, eps=sa.q_norm.variance_epsilon)
+            k = run_rms_norm(qkv[:, heads_q:heads_q + heads_k], sa.k_norm.weight, eps=sa.k_norm.variance_epsilon)
             flashinfer.rope.apply_rope_pos_ids_inplace(
                 q, k, pos_ids, rope_theta=sa._fi_rope_theta, interleave=False,
             )
             hidden = sa.o_proj(attn.run(q, k, qkv[:, heads_q + heads_k:]).reshape(n, -1))
             norm = layer.post_attention_layernorm
-            flashinfer.norm.fused_add_rmsnorm(hidden, residual, norm.weight, eps=norm.variance_epsilon)
-            hidden = mlp.down_proj(flashinfer.activation.silu_and_mul(F.linear(hidden, mlp._fi_w_gate_up)))
-        flashinfer.norm.fused_add_rmsnorm(hidden, residual, llm.norm.weight, eps=llm.norm.variance_epsilon)
+            x, residual = add_rms_norm(hidden, residual, norm.weight, norm.variance_epsilon)
+            hidden = mlp.down_proj(flashinfer.activation.silu_and_mul(F.linear(x, mlp._fi_w_gate_up)))
+        hidden, _ = add_rms_norm(hidden, residual, llm.norm.weight, llm.norm.variance_epsilon)
         return hidden
 
     def head(self, hidden: torch.Tensor, tgt_index: torch.Tensor) -> torch.Tensor:
