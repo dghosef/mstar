@@ -262,7 +262,8 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
        comes from the extension, or give ``{path: ..., modality: ...}``.
        ``repeat: N`` sends ``text`` N times over, a long prompt for a path only
        long prompts take (a long-context prefill). ``concurrency: N`` submits N
-       copies at once, so they batch, for a step that compiles per batch size. A
+       copies at once, so they batch, for a step that compiles per batch size; a
+       list (``concurrency: [1, 2, 4]``) runs the entry once per size, in order. A
        malformed or failing warmup is logged and skipped.
    * - ``dist_timeout_s``
      - *(optional)* Timeout in seconds for the NCCL world group and its parallel

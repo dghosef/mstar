@@ -171,8 +171,15 @@ def test_concurrency_runs_copies_together_for_batched_shapes() -> None:
     fake = _FakeServer()
     entrypoint._run_warmup_requests(fake, [{"text": "a", "concurrency": 3}], copies=2)
     assert [s["request_id"] for s in fake.submitted] == [f"warmup-0{s}" for s in ("", "-1", "-2", "-3", "-4", "-5")]
+    # a list runs one warmup per batch size, in order, each under its own ids
     fake = _FakeServer()
-    entrypoint._run_warmup_requests(fake, [{"text": "a", "concurrency": 0}, {"text": "b", "concurrency": True}])
+    entrypoint._run_warmup_requests(fake, [{"text": "a", "concurrency": [1, 2]}])
+    assert [s["request_id"] for s in fake.submitted] == ["warmup-0", "warmup-0.1", "warmup-0.1-1"]
+    fake = _FakeServer()
+    entrypoint._run_warmup_requests(fake, [
+        {"text": "a", "concurrency": 0}, {"text": "b", "concurrency": True},
+        {"text": "c", "concurrency": []}, {"text": "d", "concurrency": [2, 0]},
+    ])
     assert fake.submitted == []
 
 
