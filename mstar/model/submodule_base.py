@@ -608,19 +608,24 @@ class NodeSubmodule(torch.nn.Module, ABC):
         return state
 
     # Cached: prepare_inputs and preprocess ask per row per step, and finding
-    # a parameter walks the module tree. ``_apply`` (``.to()``, ``.cuda()``,
-    # ``to_empty()``) clears it.
+    # a parameter walks the module tree. Set by ``_apply`` (``.to()``,
+    # ``.cuda()``, ``to_empty()``), which the engine runs on every submodule at
+    # load, and never on read, so a compiled forward that asks doesn't see it
+    # change between calls. ``load_state_dict(assign=True)`` and reassigning a
+    # parameter don't update it; the engine's ``.to()`` after them does.
     _device_cache: torch.device | None = None
 
     def get_device(self):
         device = self._device_cache
         if device is None:
-            device = self._device_cache = next(self.parameters()).device
+            device = next(self.parameters()).device
         return device
 
     def _apply(self, fn, *args, **kwargs):
-        self._device_cache = None
-        return super()._apply(fn, *args, **kwargs)
+        module = super()._apply(fn, *args, **kwargs)
+        param = next(self.parameters(), None)
+        self._device_cache = None if param is None else param.device
+        return module
 
     @abstractmethod
     def prepare_inputs(
