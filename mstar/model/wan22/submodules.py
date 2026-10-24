@@ -17,6 +17,7 @@ itself — reference parity must not depend on what context wraps the call, and
 the v1 engine supplies neither the autocast nor the no-grad wrapper.
 """
 
+import functools
 import logging
 import os
 from contextlib import contextmanager
@@ -28,7 +29,6 @@ from torch import nn
 from mstar.communication.tensors import NameToTensorList
 from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.engine.resources import AttentionStep, Segment, SlotLease, SubmoduleStep
-from mstar.engine.resources.convenience import RaggedAttentionCallable
 from mstar.model.submodule_base import ModelInputsFromEngine, NodeInputs, NodeSubmodule
 from mstar.model.wan22.components.dit import Wan22AttentionFns
 from mstar.model.wan22.components.unipc import (
@@ -497,14 +497,13 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
         self._attn_fns = None  # the memoized callables hold the old resources
 
     def _attention_fns(self) -> Wan22AttentionFns | None:
-        """The ragged callables, built once per resource binding (the compiled
-        transformer guards on their identity), or None to run SDPA."""
+        """The ragged callables, built once per resource binding, or None to run SDPA."""
         if self._attn_fns is None:
             self_attn = self.node_resources.get(self.SELF_ATTN)
             if self_attn is None:
                 return None
             self._attn_fns = Wan22AttentionFns(
-                self_attn=RaggedAttentionCallable(self_attn, self.VIDEO_SPAN), cross_attn=None,
+                self_attn=functools.partial(self_attn.run, label=self.VIDEO_SPAN), cross_attn=None,
             )
             logger.info("Wan2.2 DiT: self-attention through the engine's ragged attention resource")
         return self._attn_fns

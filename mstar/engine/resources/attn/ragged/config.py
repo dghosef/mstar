@@ -159,7 +159,7 @@ class RaggedAttentionSpec(_RaggedSpecBase):
 class RaggedCrossAttentionSpec(_RaggedSpecBase):
     """Cacheless cross-attention between two spans of each request: a forward's
     ``(q_label, kv_label)`` pairs (``RaggedCrossAttentionStep``), each run through
-    ``RaggedAttentionCallable(resource, cross_label(q_label, kv_label))``.
+    ``resource.run(q, k, v, label=cross_label(q_label, kv_label))``.
 
     Separate from ``RaggedAttentionSpec`` so a resource is one kind of attention:
     a model with both declares one of each per head geometry.
