@@ -115,6 +115,7 @@ class StreamBufferManager:
         if waiting is not None:
             return waiting
         if not sbuf.has_chunk_ready():
+            sbuf.maybe_ready = False
             return None
         chunk = sbuf.pop_chunk()
         # The chunk's items as the buffer holds them: their tensor infos, or
@@ -137,10 +138,13 @@ class StreamBufferManager:
         return StreamingEdge(edge, chunk.info)
 
     def poll(self) -> list[tuple[int, StreamingEdge]]:
-        """Every request's ready chunks, popped."""
+        """Every request's ready chunks, popped. A buffer nothing has touched
+        since a poll found it empty is skipped (``StreamBuffer.maybe_ready``)."""
         polled: list[tuple[int, StreamingEdge]] = []
         for request_id, req_info in list(self._request_state.per_request_info.items()):
             for edge_name, sbuf in req_info.stream_buffers.items():
+                if not sbuf.maybe_ready:
+                    continue
                 streaming_edge = self.pop_edge(sbuf, edge_name, request_id)
                 if streaming_edge is not None:
                     polled.append((request_id, streaming_edge))
