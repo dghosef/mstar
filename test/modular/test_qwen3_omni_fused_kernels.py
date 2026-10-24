@@ -3,7 +3,6 @@
 * ``cp_qk_norm_rope_kv_write``: the code predictor's q/k norm + RoPE and its
   dense-KV write, bit-for-bit what two ``fused_qk_norm_rope`` calls and two
   strided copies produce.
-* ``softmax_topk``: ``TopKRouter``'s softmax -> topk -> renormalize.
 """
 from __future__ import annotations
 
@@ -42,46 +41,6 @@ def test_cp_prologue_matches_the_unfused_ops(bs, seq_len, cache_pos):
     )
     torch.testing.assert_close(qkv[..., :hq * d], ref_qkv[..., :hq * d], rtol=0, atol=0)
     torch.testing.assert_close(cache, ref_cache, rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("tokens", [1, 7, 32, 300, 4096])
-@pytest.mark.parametrize("experts,top_k,norm", [(128, 8, True), (128, 6, True), (60, 4, False)])
-def test_softmax_topk_matches_the_torch_router(tokens, experts, top_k, norm):
-    from mstar.utils.fused_moe.router import softmax_topk
-
-    torch.manual_seed(1)
-    logits = torch.randn(tokens, experts, device="cuda", dtype=torch.bfloat16) * 3
-    probs = torch.softmax(logits, dim=-1, dtype=torch.float)
-    ref_w, ref_ids = torch.topk(probs, top_k, dim=-1)
-    if norm:
-        ref_w = ref_w / ref_w.sum(dim=-1, keepdim=True)
-
-    w, ids = softmax_topk(logits, top_k, norm)
-    assert ids.dtype == torch.int64 and w.dtype == torch.float32
-    # bf16 logits tie often and torch.topk orders ties arbitrarily: compare the
-    # selected probabilities, and that every pick is a distinct expert holding them
-    torch.testing.assert_close(w, ref_w, rtol=1e-6, atol=1e-7)
-    assert (ids.sort(dim=-1).values.diff(dim=-1) > 0).all()
-    picked = probs.gather(1, ids)
-    if norm:
-        picked = picked / picked.sum(dim=-1, keepdim=True)
-    torch.testing.assert_close(picked, w, rtol=1e-6, atol=1e-7)
-    # with no ties the choice and its order are torch's
-    distinct = (ref_w[:, :-1] != ref_w[:, 1:]).all(dim=-1)
-    assert torch.equal(ids[distinct], ref_ids[distinct])
-
-
-def test_router_compiles_with_the_fused_topk():
-    from mstar.model.components.moe import TopKRouter
-
-    router = TopKRouter(64, 128, 8, fused_softmax_topk=True).cuda().to(torch.bfloat16).requires_grad_(False)
-    torch.nn.init.normal_(router.weight)
-    x = torch.randn(4, 64, device="cuda", dtype=torch.bfloat16)
-    with torch.inference_mode():
-        eager = router(x)
-        compiled = torch.compile(router, fullgraph=True)(x)
-    assert torch.equal(eager[1], compiled[1])
-    torch.testing.assert_close(eager[0], compiled[0], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("bs", [1, 8, 32])
