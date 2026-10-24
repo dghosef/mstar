@@ -110,21 +110,6 @@ def talker_text_mask(input_ids: torch.Tensor, config: Qwen3OmniModelConfig) -> t
 # ===================================================================
 
 
-
-class _CachedDeviceMixin:
-    """``get_device`` once: the base walks the module tree for a parameter on
-    every call, and prepare_inputs / preprocess call it per row per step
-    (~6% of the Talker GPU thread's held-GIL samples at c=32). These
-    submodules never move once loaded."""
-
-    _device: torch.device | None = None
-
-    def get_device(self):
-        if self._device is None:
-            self._device = super().get_device()
-        return self._device
-
-
 class AudioEncoderSubmodule(NodeSubmodule):
     """Thin wrapper around the HF Whisper-style audio encoder.
 
@@ -341,7 +326,7 @@ class VisionEncoderSubmodule(NodeSubmodule):
 # ===================================================================
 
 
-class ThinkerSubmodule(_CachedDeviceMixin, ARNodeSubmodule):
+class ThinkerSubmodule(ARNodeSubmodule):
     """Wraps the FlashInfer-based Thinker MoE transformer.
 
     Dispatches on graph_walk:
@@ -1178,7 +1163,7 @@ class ThinkerSubmodule(_CachedDeviceMixin, ARNodeSubmodule):
 # 4. TalkerSubmodule (ar engine) -- SECOND MOST COMPLEX
 # ===================================================================
 
-class TalkerSubmodule(_CachedDeviceMixin, ARNodeSubmodule):
+class TalkerSubmodule(ARNodeSubmodule):
     MAX_BATCH_SIZE = 32
 
     def __init__(

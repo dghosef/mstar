@@ -607,8 +607,20 @@ class NodeSubmodule(torch.nn.Module, ABC):
             state = self.request_states[request_id] = PerRequestState()
         return state
 
+    # Cached: prepare_inputs and preprocess ask per row per step, and finding
+    # a parameter walks the module tree. ``_apply`` (``.to()``, ``.cuda()``,
+    # ``to_empty()``) clears it.
+    _device_cache: torch.device | None = None
+
     def get_device(self):
-        return next(self.parameters()).device
+        device = self._device_cache
+        if device is None:
+            device = self._device_cache = next(self.parameters()).device
+        return device
+
+    def _apply(self, fn, *args, **kwargs):
+        self._device_cache = None
+        return super()._apply(fn, *args, **kwargs)
 
     @abstractmethod
     def prepare_inputs(
