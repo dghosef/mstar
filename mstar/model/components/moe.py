@@ -97,7 +97,7 @@ class TopKRouter(nn.Module):
         norm_topk_prob: if True, renormalize the top-k probabilities so
             they sum to 1.
         fused_softmax_topk: on CUDA, route through one Triton kernel
-            (``mstar::moe_router_topk``) instead of softmax, ``torch.topk``
+            (``mstar::moe_softmax_topk``) instead of softmax, ``torch.topk``
             and the renormalize. Equal probabilities go to the lower expert
             id, where ``torch.topk`` may pick another, so a model opts in
             once it has checked its outputs.
@@ -138,10 +138,10 @@ class TopKRouter(nn.Module):
         hidden_states = hidden_states.reshape(-1, hidden_states.shape[-1])
         router_logits = F.linear(hidden_states, self.weight)
         if self.fused_softmax_topk and router_logits.is_cuda:
-            from mstar.utils.fused_moe.decode import router_topk
+            from mstar.utils.fused_moe.router import softmax_topk
 
-            routing_weights, router_indices = router_topk(
-                router_logits, None, self.top_k, 1.0, self.norm_topk_prob, softmax=True,
+            routing_weights, router_indices = softmax_topk(
+                router_logits, self.top_k, self.norm_topk_prob,
             )
             return routing_weights, router_indices, None
         router_logits = F.softmax(router_logits, dtype=torch.float, dim=-1)

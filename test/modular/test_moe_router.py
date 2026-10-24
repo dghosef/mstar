@@ -1,4 +1,4 @@
-"""``TopKRouter``'s fused softmax -> top-k -> renormalize (``mstar::moe_router_topk``)
+"""``TopKRouter``'s fused softmax -> top-k -> renormalize (``mstar::moe_softmax_topk``)
 against the op sequence it replaces, and where the swept MoE tiles apply."""
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a C
 @pytest.mark.parametrize("tokens", [1, 7, 32, 300, 4096])
 @pytest.mark.parametrize("experts,top_k,norm", [(128, 8, True), (128, 6, True), (60, 4, False)])
 def test_softmax_topk_matches_the_torch_router(tokens, experts, top_k, norm):
-    from mstar.utils.fused_moe.decode import router_topk
+    from mstar.utils.fused_moe.router import softmax_topk
 
     torch.manual_seed(1)
     logits = torch.randn(tokens, experts, device="cuda", dtype=torch.bfloat16) * 3
@@ -21,7 +21,7 @@ def test_softmax_topk_matches_the_torch_router(tokens, experts, top_k, norm):
     if norm:
         ref_w = ref_w / ref_w.sum(dim=-1, keepdim=True)
 
-    w, ids = router_topk(logits, None, top_k, 1.0, norm, softmax=True)
+    w, ids = softmax_topk(logits, top_k, norm)
     assert ids.dtype == torch.int64 and w.dtype == torch.float32
     # bf16 logits tie often and torch.topk orders ties arbitrarily: compare the
     # selected probabilities, and that every pick is a distinct expert holding them
