@@ -431,12 +431,11 @@ class HiggsAudioModel(Model):
             post_ids += enc("<think>\n\n</think>\n\n")
 
         audio = sum(self.config.encoder_output_length(int(n)) for n in audio_feature_lens.tolist())
+        # One step writes the text around the audio and the audio together, so
+        # one span; it mixes text and audio, so nothing keys it.
+        prompt = len(pre_ids) + audio + len(post_ids)
         layout = LabelLayout(
-            spans=(
-                Span("ids", "prefill_text", len(pre_ids), len(pre_ids), "text_inputs"),
-                Span("digest", "prefill_audio", audio, audio, ("audio", 0)),
-                Span("ids", "prefill_text", len(post_ids), len(post_ids), "text_inputs"),
-            ),
+            spans=(Span("rows", "prefill_audio", prompt, prompt, "audio_features"),),
             growth=(("decode_loop", 1),),
         )
         return ProcessPromptOutput({

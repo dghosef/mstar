@@ -439,6 +439,23 @@ def test_higgs_caps_decode_where_its_stop_check_ends_it(max_tokens):
     ), "the cap and the stop check end decode on different iterations"
 
 
+def test_higgs_lays_out_the_prefill_steps_it_schedules():
+    from mstar.model.higgs_audio.config import KV_CACHE
+
+    model = _higgs()
+    output = model.process_prompt(
+        "transcribe", ["audio"], ["text"], tensors={"audio_inputs": [torch.zeros(16000 * 35)]},
+    )
+    [layout] = output.metadata["kv_layout"][KV_CACHE].values()
+    tensors = output.new_input_tensors
+    schedule = model._build_prefill_schedule({name: tensors[name] for name in tensors})
+
+    assert [span.walk for span in layout.spans] == [walk for walk, _ in schedule]
+    audio = sum(model.config.encoder_output_length(int(n)) for n in tensors["audio_feature_lens"][0].tolist())
+    text = sum(ids.numel() for ids in tensors["text_inputs"])
+    assert sum(span.length for span in layout.spans) == text + audio
+
+
 @pytest.mark.parametrize("max_tokens", [1, 64])
 def test_qwen3_5_caps_decode_where_its_stop_check_ends_it(max_tokens):
     from mstar.model.qwen3_5.qwen3_5_model import Qwen3_5DenseModel
