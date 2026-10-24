@@ -148,8 +148,8 @@ OUTPUT_FORMATS = ("png", "jpeg", "webp")
 
 def image_output_format(request_kwargs: dict | None) -> str:
     """The request's ``output_format`` (default ``png``; ``jpg`` means ``jpeg``), or ValueError
-    for one :func:`encode_image` cannot write. ``APIServer.submit_request`` calls it for every
-    image-output request, so a bad value fails before generation rather than after."""
+    for one :func:`encode_image` cannot write. A model calls it at intake too, so a bad value
+    fails the request before generation rather than after."""
     fmt = str((request_kwargs or {}).get("output_format") or "png").lower()
     if fmt == "jpg":
         fmt = "jpeg"
