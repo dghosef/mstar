@@ -34,6 +34,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from mstar.utils.device import to_device_nonblocking
+
 logger = logging.getLogger(__name__)
 
 # The private surface this integration rides on. Checked once at load: the
@@ -232,17 +234,12 @@ def build_packed_canvas(
         uncond_rows.append(torch.arange(cursor, cursor + t_len))
         cursor += t_len
 
-    def to_device(t: torch.Tensor) -> torch.Tensor:
-        if device.type == "cuda":
-            return t.pin_memory().to(device, non_blocking=True)
-        return t.to(device)
-
     return PackedCanvas(
         packed_ids=torch.cat(id_parts, dim=-1).unsqueeze(0),
         audio_mask=torch.cat(mask_parts).unsqueeze(0),
-        position_ids=to_device(torch.cat(positions).unsqueeze(0)),
+        position_ids=to_device_nonblocking(torch.cat(positions).unsqueeze(0), device),
         doc_lens=doc_lens,
-        tgt_index=to_device(torch.cat(cond_rows + uncond_rows)),
+        tgt_index=to_device_nonblocking(torch.cat(cond_rows + uncond_rows), device),
         flat_target_total=flat_cursor,
         flat_uncond_total=flat_u_cursor,
         items=items,
