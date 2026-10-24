@@ -177,6 +177,19 @@ def test_wan22_forwards_run_without_autograd():
     assert not torch.is_autocast_enabled()
 
 
+
+def test_wan22_dit_keeps_the_unfused_gelu_without_the_private_op(monkeypatch):
+    """The fused FFN GELU calls ``torch._addmm_activation``, which torch does not promise."""
+    from types import SimpleNamespace
+
+    from mstar.model.wan22.components.dit import Wan22DiT
+
+    monkeypatch.delattr(torch, "_addmm_activation", raising=False)
+    dit = SimpleNamespace(blocks=[SimpleNamespace(fuse_ffn_gelu=False)])
+    Wan22DiT.set_fuse_ffn_gelu(dit, True)
+    assert dit.blocks[0].fuse_ffn_gelu is False
+
+
 def test_wan22_encoder_walks_persist_embeddings():
     model = _make_model()
     walks = model.get_graph_walk_graphs()
