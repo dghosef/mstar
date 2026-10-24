@@ -196,6 +196,16 @@ def cfg_branch_skipped(label: str, n_branches: int | None) -> bool:
     return n_branches is not None and CFG_BRANCH_LABELS.index(label) >= n_branches
 
 
+def sat_out_velocity(latents: torch.Tensor) -> torch.Tensor:
+    """What a parallel-CFG node sends for a step it sits out: a zero-row velocity.
+
+    Each node counts the step's branches from its own worker's loop counter, so
+    ``combine_cfg`` checks this on the host rather than trusting the counts agree;
+    a placeholder of the velocity's shape would pass for a computed one.
+    """
+    return latents.new_empty((0, latents.shape[-1]))
+
+
 def combine_cfg_velocity(
     v_main: torch.Tensor,
     v_cfg_text: torch.Tensor,
@@ -1719,9 +1729,8 @@ class LLMSubmodule(ARNodeSubmodule):
             "LLM_cfg_img": "v_cfg_img",
         }.get(self.node_name, "v_main")
         if cfg_branch_skipped(self._NODE_TO_CFG_LABEL.get(self.node_name, "main"), n_branches):
-            # sits this step out: combine_cfg never reads the velocity (see `cfg_branches`),
-            # but the edge still has to carry a tensor of the right shape
-            return {output_name: [torch.zeros_like(latents)]}
+            # sits this step out (`cfg_branches`); the edge still carries a tensor
+            return {output_name: [sat_out_velocity(latents)]}
 
         # See _forward_image_gen: tie the separately-passed sequence dims so
         # torch.compile's dynamic shapes can prove the adds below line up.
@@ -2007,12 +2016,21 @@ class CombineCFGSubmodule(NodeSubmodule):
         # worker device without loading an otherwise-unused model component.
         device = inputs["v_main"][0].device
 
-        result = {
-            "v_main": inputs["v_main"][0],
-            "v_cfg_text": inputs["v_cfg_text"][0],
-            "v_cfg_img": inputs["v_cfg_img"][0],
-        }
-        if "latents" not in inputs or len(inputs["latents"]) == 0:
+        first_iter = "latents" not in inputs or not inputs["latents"]
+        n_branches = self._cfg_branches(fwd_info, first_iter)
+        # The branches this step's combine reads; None reads all three (device-side interval test)
+        reads = CFG_BRANCH_LABELS[:n_branches]
+        result = {"v_main": inputs["v_main"][0]}
+        for label in CFG_BRANCH_LABELS[1:]:
+            v = inputs[f"v_{label}"][0]
+            if v.shape[0] > 0:
+                result[f"v_{label}"] = v
+            elif label in reads:
+                raise ValueError(
+                    f"BAGEL parallel CFG: LLM_{label} sat out a step whose combine reads "
+                    f"{list(reads)}; the nodes' loop counters disagree"
+                )
+        if first_iter:
             H = fwd_info.step_metadata.get("height", 1024)
             W = fwd_info.step_metadata.get("width", 1024)
             result["latents"], result["time_index"] = _init_latents_and_time_index(
@@ -2025,7 +2043,6 @@ class CombineCFGSubmodule(NodeSubmodule):
                 **result,
             }
         kwargs = dict(fwd_info.step_metadata)
-        n_branches = self._cfg_branches(fwd_info, first_iter="latents" not in inputs or not inputs["latents"])
         if n_branches is not None:
             kwargs[CFG_BRANCHES] = n_branches
         return NodeInputs(tensor_inputs=result, kwargs=kwargs)
@@ -2053,10 +2070,10 @@ class CombineCFGSubmodule(NodeSubmodule):
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
         v_main: torch.Tensor,
-        v_cfg_text: torch.Tensor,
-        v_cfg_img: torch.Tensor,
         latents: torch.Tensor,
         time_index: torch.Tensor,
+        v_cfg_text: torch.Tensor | None = None,
+        v_cfg_img: torch.Tensor | None = None,
         cfg_text_scale: float = None,
         cfg_img_scale: float = None,
         cfg_renorm_type: str = None,
@@ -2085,8 +2102,9 @@ class CombineCFGSubmodule(NodeSubmodule):
         # below line up under dynamic shapes.
         n_latent = latents.shape[0]
         torch._check(v_main.shape[0] == n_latent)
-        torch._check(v_cfg_text.shape[0] == n_latent)
-        torch._check(v_cfg_img.shape[0] == n_latent)
+        for v in (v_cfg_text, v_cfg_img):  # None: that branch sat the step out
+            if v is not None:
+                torch._check(v.shape[0] == n_latent)
         torch._check(time_index.shape[0] == n_latent)
 
         # Compute timestep and step size
