@@ -76,6 +76,7 @@ from mstar.model.submodule_base import (
     device_loopback_enabled,
 )
 from mstar.platforms.compile import with_inductor_overrides
+from mstar.utils.device import DeviceCapability
 from mstar.utils.h2d import to_device_nonblocking
 from mstar.utils.profiler import PHASE_PERIOD, phase_record
 
@@ -437,17 +438,33 @@ class LLMSubmodule(ARNodeSubmodule):
             # last sampled token, read by slot (padding rows read slot 0)
             sampler: SamplerResource = engine_inputs.resources[SAMPLER]
             t0 = perf_counter() if PHASE_PERIOD else 0.0
+            ids = sampler.loopback_tokens(engine_inputs.request_ids)
+            # rows whose last step ran elsewhere brought their token
+            routed = [
+                i for i, inp in enumerate(inputs)
+                if inp.input_ids is not None and inp.input_seq_len
+            ]
             if graph_walk != "decode":
                 # a mixed step packs its decode rows' single tokens beside the
                 # prompts: each row takes its own ids, or its loop-back token
-                ids = sampler.loopback_tokens(engine_inputs.request_ids)
                 ids = torch.cat([
                     inp.input_ids.to(ids.dtype) if inp.input_ids is not None
                     else ids[i:i + 1]
                     for i, inp in enumerate(inputs)
                 ])
-            else:
-                ids = self.loopback_input_ids(sampler, engine_inputs.request_ids, inputs)
+            elif routed:
+                # Through pinned memory, non-blocking: a pageable
+                # ``torch.tensor(..., device=cuda)`` is a synchronous copy
+                # that waits for the queued step, and every request's first
+                # decode step after its prefill takes this path.
+                index = torch.tensor(
+                    routed, dtype=torch.long,
+                    pin_memory=DeviceCapability.of(ids.device).pin_memory,
+                ).to(ids.device, non_blocking=True)
+                ids.index_copy_(
+                    0, index,
+                    torch.cat([inputs[i].input_ids for i in routed]).to(ids.dtype),
+                )
             out["input_ids"] = ids
             if PHASE_PERIOD:
                 phase_record("engine.preprocess.loopback", perf_counter() - t0)
