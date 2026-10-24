@@ -13,7 +13,7 @@ import torch
 from mstar.communication.tensors import NameToTensorList
 from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.engine.resources import Resource, SlotLease, SubmoduleStep
-from mstar.utils.device import to_device_nonblocking
+from mstar.utils.h2d import to_device_nonblocking
 from mstar.utils.knobs import device_loopback_enabled  # noqa: F401  (re-export)
 
 

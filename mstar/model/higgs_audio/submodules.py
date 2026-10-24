@@ -43,7 +43,7 @@ from mstar.model.submodule_base import (
     TokenStop,
     device_loopback_enabled,
 )
-from mstar.utils.device import to_device_nonblocking
+from mstar.utils.h2d import to_device_nonblocking
 
 logger = logging.getLogger(__name__)
 

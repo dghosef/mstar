@@ -47,7 +47,7 @@ from mstar.model.submodule_base import (
     NodeSubmodule,
     StackingMethod,
 )
-from mstar.utils.device import to_device_nonblocking
+from mstar.utils.h2d import to_device_nonblocking
 
 logger = logging.getLogger(__name__)
 

@@ -54,16 +54,6 @@ class DeviceCapability:
         )
 
 
-def to_device_nonblocking(t: torch.Tensor, device) -> torch.Tensor:
-    """A host tensor onto ``device`` without blocking the host. A copy from
-    pageable memory waits for everything already queued on the stream; a
-    pinned non-blocking one does not."""
-    device = torch.device(device)
-    if t.device.type != "cpu" or not DeviceCapability.of(device).pin_memory:
-        return t.to(device)
-    return t.pin_memory().to(device, non_blocking=True)
-
-
 @lru_cache(maxsize=None)
 def _device_capability(device: torch.device) -> DeviceCapability:
     return DeviceCapability(device)

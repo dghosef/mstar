@@ -58,7 +58,7 @@ from mstar.engine.resources.convenience import RaggedAttentionCallable
 from mstar.model.components.diffusion.flow_match import FlowMatchSchedule
 from mstar.model.components.diffusion.noise import NoiseStager
 from mstar.model.submodule_base import ModelInputsFromEngine, NodeInputs, NodeSubmodule
-from mstar.utils.device import to_device_nonblocking
+from mstar.utils.h2d import to_device_nonblocking
 
 logger = logging.getLogger(__name__)
 

@@ -34,7 +34,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from mstar.utils.device import to_device_nonblocking
+from mstar.utils.h2d import to_device_nonblocking
 
 logger = logging.getLogger(__name__)
 

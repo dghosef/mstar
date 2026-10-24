@@ -76,7 +76,7 @@ from mstar.model.submodule_base import (
     device_loopback_enabled,
 )
 from mstar.platforms.compile import with_inductor_overrides
-from mstar.utils.device import to_device_nonblocking
+from mstar.utils.h2d import to_device_nonblocking
 from mstar.utils.profiler import PHASE_PERIOD, phase_record
 
 logger = logging.getLogger(__name__)
