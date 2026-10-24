@@ -50,7 +50,7 @@ Every attention in the DiT should go through a ragged resource, so the model get
 
 - The engine's blanket compile is off for the node (`disable_torch_compile = True`); the model compiles its transformer region with `compile_utils.compile_transformer_forward`, which keeps the exact-op exclusions that preserve eager rounding. Compiling the DiT mostly buys the memory-bound elementwise work (modulation, fp32 norms, RoPE, gating), which on LTX-2.5 was ~45% of an eager step.
 - `capture_buckets` lists `(graph_walk, bucket_key)` pairs to capture; `capture_request_inputs` supplies one placeholder row per bucket. A bucket is captured per batch size in `capture_batch_sizes`, and each one costs startup, so capture the shapes you serve, not every shape you accept. `replay_walks` lets another walk reuse a captured bucket.
-- The captured graph removes the gaps the per-layer attention graph breaks leave in a compiled-but-eager step; measure both before deciding a model doesn't need capture.
+- The captured graph removes the launch gaps of a compiled-but-eager step. Ragged attention does not break that compiled graph (the resource's `run` traces as the `mstar::ragged_attention` custom op), so measure both before deciding a model needs capture.
 
 ## The overshoot veto
 
