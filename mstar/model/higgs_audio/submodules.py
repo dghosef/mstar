@@ -390,15 +390,9 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
                 return {"input_ids": torch.cat([inp.input_ids for inp in inputs])}
             # device loop-back: each row's last sampled token, read by slot;
             # rows whose previous step was the prefill brought theirs
-            sampler: SamplerResource = engine_inputs.resources[SAMPLER]
-            ids = sampler.loopback_tokens(engine_inputs.request_ids)
-            routed = [i for i, inp in enumerate(inputs) if inp.input_ids is not None]
-            if routed:
-                ids.index_copy_(
-                    0, to_device_nonblocking(torch.tensor(routed), ids.device),
-                    torch.cat([inputs[i].input_ids for i in routed]).to(ids.dtype),
-                )
-            return {"input_ids": ids}
+            return {"input_ids": self.loopback_input_ids(
+                engine_inputs.resources[SAMPLER], engine_inputs.request_ids, inputs,
+            )}
         return {
             "input_embeds": torch.cat(
                 [inp.input_embeds for inp in inputs], dim=0
