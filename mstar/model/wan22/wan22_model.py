@@ -144,7 +144,7 @@ class Wan22Model(Model):
                     head_dim=cfg.attention_head_dim,
                     # one segment per guidance branch
                     max_segments_per_request=2,
-                    # the dit's sp ranks split guidance branches, not heads
+                    # CFG-parallel: the dit's two ranks split guidance branches, not heads
                     shard_heads=False,
                     dtype=torch.bfloat16,
                 ),
@@ -152,9 +152,10 @@ class Wan22Model(Model):
         ]
 
     def get_default_sharding_config(self) -> ShardingConfig:
-        # The dit accepts an sp group: with guidance on, each of two ranks runs one
-        # CFG branch and they all-gather the two noise predictions (see
-        # Wan22DitSubmodule). Signals stay replicated, so no shard_dim entries.
+        # CFG-parallel, through the sp slot: the dit's lockstep group (sp_size) is
+        # used for guidance, each of two ranks running one CFG branch and
+        # all-gathering the two noise predictions (see Wan22DitSubmodule). Nothing
+        # splits the sequence, and signals stay replicated: no shard_dim entries.
         return ShardingConfig(
             groups=[], tp_enabled_nodes=set(), shard_dim={}, sp_enabled_nodes={"dit"},
         )

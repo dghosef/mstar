@@ -340,8 +340,8 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
     """Dense 5B video DiT with the UniPC step run inline.
 
     One loop iteration is one batch-2 transformer forward (the positive and
-    negative prompt embeddings stacked on the batch axis; on a two-rank sp
-    instance, one branch per rank) plus one UniPC predictor/corrector update
+    negative prompt embeddings stacked on the batch axis; CFG-parallel on a
+    two-rank instance, one branch per rank) plus one UniPC predictor/corrector update
     from ``components/unipc.py``.
 
     Loop-carried edges, all float32 over the latent grid:
@@ -385,16 +385,18 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
         super().__init__()
         self.transformer = transformer
         self.config = config
-        # Two ranks split the CFG batch: each runs one branch at batch 1 and the
-        # predictions are all-gathered, so the step costs one branch's forward plus a
-        # latent-sized gather. Every rank then runs the same combine and UniPC step on
-        # replicated latents. Any other shape (guidance off, more ranks) computes the
-        # whole batch on every rank, which is correct but no faster.
+        # CFG parallelism: the node's lockstep group arrives as its sp group, but
+        # nothing splits the sequence. Two ranks split the CFG batch, each running
+        # one branch at batch 1, and the predictions are all-gathered, so the step
+        # costs one branch's forward plus a latent-sized gather. Every rank then runs
+        # the same combine and UniPC step on replicated latents. Any other shape
+        # (guidance off, more ranks) computes the whole batch on every rank, which is
+        # correct but no faster.
         self.sp_group = sp_group if sp_group is not None and sp_group.world_size > 1 else None
         if self.sp_group is not None and self.sp_group.world_size != 2:
             logger.warning(
-                "Wan2.2 dit: sp_size=%d; only 2 ranks split the CFG batch, so every rank "
-                "computes the whole step.", self.sp_group.world_size,
+                "Wan2.2 dit: sp_size=%d; CFG parallelism needs exactly 2 ranks, so every "
+                "rank computes the whole step.", self.sp_group.world_size,
             )
         self._attn_fns: Wan22AttentionFns | None = None
         self._record_fp32_islands()

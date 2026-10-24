@@ -73,11 +73,11 @@ class RaggedAttentionConfig:
     backend: RaggedAttnBackend = RaggedAttnBackend.AUTO
     flashinfer_backend: str = "auto"
 
-    # Whether the node's lockstep instance splits the attention heads across its
-    # ranks (tensor parallelism, Ulysses sequence parallelism), so each rank's
-    # resource attends its slice. A node that parallelizes over something else --
-    # each rank attending whole requests or guidance branches -- sets False and
-    # keeps every head on every rank.
+    # Whether the node's ranks split the attention heads. True (tensor
+    # parallelism, Ulysses sequence parallelism): each rank's resource is sized
+    # for its slice of the heads. False: every rank attends with all the heads,
+    # for a node whose ranks divide other work -- Wan2.2's CFG parallelism, one
+    # guidance branch per rank, is the one user.
     shard_heads: bool = True
 
     # Activation dtype of the q / k / v the node hands the kernel (and of its
