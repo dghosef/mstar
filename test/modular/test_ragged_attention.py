@@ -12,7 +12,6 @@ CPU-only head-dimension validation lives in ``test_ragged_attention_cpu.py``.
 
 from __future__ import annotations
 
-import functools
 import sys
 
 sys.path.insert(0, ".")
@@ -326,11 +325,13 @@ def test_shards_head_counts_at_build():
 def test_compiled_caller_keeps_attention_in_its_graph():
     """Traced by ``torch.compile``, the resource's ``run`` is one custom op: the
     region keeps one graph around it (no break) and computes what eager does."""
+    from mstar.engine.resources.convenience import RaggedAttentionCallable
+
     mgr = manager()
     spans = [128, 96]
     mgr.plan(step(*spans), ctx(["r0", "r1"]))
     q, k, v = qkv(sum(spans))
-    fn = functools.partial(mgr.run, label="main")
+    fn = RaggedAttentionCallable(mgr, "main")
 
     def region(q, k, v):
         return fn(q * 1.0, k, v) + 1.0
@@ -345,16 +346,18 @@ def test_compiled_caller_keeps_attention_in_its_graph():
 def test_callable_built_inside_a_compiled_region():
     """A node that builds its callables lazily on first forward does so inside
     the compiled region; later calls still reach the resource."""
+    from mstar.engine.resources.convenience import RaggedAttentionCallable
+
     mgr = manager()
     spans = [128, 96]
     mgr.plan(step(*spans), ctx(["r0", "r1"]))
     q, k, v = qkv(sum(spans))
-    fns: dict[int, functools.partial] = {}
+    fns: dict[int, RaggedAttentionCallable] = {}
 
     def region(q, k, v):
         fn = fns.get(id(mgr))
         if fn is None:
-            fn = fns[id(mgr)] = functools.partial(mgr.run, label="main")
+            fn = fns[id(mgr)] = RaggedAttentionCallable(mgr, "main")
         return fn(q, k, v) + 1.0
 
     torch._dynamo.reset()

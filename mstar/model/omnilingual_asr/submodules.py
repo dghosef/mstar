@@ -19,8 +19,7 @@ a long one, and the budget bounds a forward's memory.
 
 from __future__ import annotations
 
-import functools
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from contextlib import contextmanager
 from typing import Any
 
@@ -36,6 +35,7 @@ from mstar.engine.accelerator_graph_config import (
 )
 from mstar.engine.engine import ExecutingBatch
 from mstar.engine.resources.attn.config import AttentionStep
+from mstar.engine.resources.convenience import RaggedAttentionCallable
 from mstar.engine.resources.step import Segment, SlotLease, SubmoduleStep
 from mstar.model.omnilingual_asr.components.wav2vec2 import Wav2Vec2CTC
 from mstar.model.omnilingual_asr.config import ENCODER_ATTN, SAMPLE_RATE, TOKEN_IDS, WAVEFORM
@@ -92,7 +92,7 @@ class OmniASRCTCSubmodule(NodeSubmodule):
         self._compiled_features = with_inductor_overrides(
             torch.compile(model.encoder_frontend.feature_extractor, dynamic=True)
         )
-        self._attn_fns: dict[int, Callable] = {}
+        self._attn_fns: dict[int, RaggedAttentionCallable] = {}
 
     def warm_compile(self, device: str) -> None:
         """Compile the feature extractor at load rather than on a live request:
@@ -179,12 +179,12 @@ class OmniASRCTCSubmodule(NodeSubmodule):
         attn = self._attn_fn(inp.resources[ENCODER_ATTN])
         return {"ids": self.model.encode_packed(inp.static_inputs["hidden"], attn).argmax(dim=-1)}
 
-    def _attn_fn(self, resource) -> Callable:
+    def _attn_fn(self, resource) -> RaggedAttentionCallable:
         """The resource's attention over the step's segments, one callable per
         bound resource."""
         fn = self._attn_fns.get(id(resource))
         if fn is None:
-            fn = self._attn_fns[id(resource)] = functools.partial(resource.run, label="main")
+            fn = self._attn_fns[id(resource)] = RaggedAttentionCallable(resource, "main")
         return fn
 
     def max_batch_size(self, graph_walk: str) -> int:
