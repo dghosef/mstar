@@ -138,8 +138,10 @@ IMAGE_GEN_LOOP = "image_gen_loop"
 # Absent means the old behaviour, all three whenever guidance is on.
 CFG_BRANCHES = "cfg_branches"
 
-# Output sizes whose image_gen shape inputs an LLM node keeps on the device
-_IMAGE_GEN_SHAPES_CACHED = 8
+# Output sizes whose image_gen shape inputs an LLM node keeps on the device: above
+# the shipped configs' concurrency (16), so concurrent sizes don't evict each other.
+# An entry is the size's position ids and indexes, tens of KB at 1024x1024.
+_IMAGE_GEN_SHAPES_CACHED = 64
 
 
 def _f32(x: float) -> float:
@@ -947,8 +949,8 @@ class LLMSubmodule(ARNodeSubmodule):
         self, seq_len: int, device: str
     ):
         tensor_inputs = {}
-        tensor_inputs["text_indexes"] = torch.tensor(
-            [0, seq_len-1], dtype=torch.long, device=device
+        tensor_inputs["text_indexes"] = to_device_nonblocking(
+            torch.tensor([0, seq_len-1], dtype=torch.long), device
         )
         tensor_inputs["vae_token_indexes"] = torch.arange(
             1, seq_len-1,
@@ -1131,7 +1133,8 @@ class LLMSubmodule(ARNodeSubmodule):
         if cached is None:
             pos = get_flattened_position_ids_extrapolate(
                 H, W, self.config.latent_downsample, max_num_patches_per_side=self.config.max_latent_size,
-            ).to(device)
+                device=device,
+            )
             cached = {
                 "vae_position_ids": pos,
                 **self._get_text_vae_idxs(pos.shape[0] + IMAGE_SENTINELS, device),
