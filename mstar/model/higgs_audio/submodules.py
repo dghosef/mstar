@@ -37,10 +37,10 @@ from mstar.model.submodule_base import (
     ARNodeInputs,
     ARNodeSubmodule,
     BatchedModelOutput,
-    HostRows,
     ModelInputsFromEngine,
     NodeInputs,
     NodeSubmodule,
+    TokenStop,
     device_loopback_enabled,
 )
 from mstar.utils.h2d import to_device_nonblocking
@@ -269,6 +269,10 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
         super().__init__()
         self.model = llm
         self.config = config
+        self.token_stop = TokenStop(
+            loop="decode_loop", buffer="new_token", stop_ids=frozenset(config.stop_token_ids),
+            sampler=SAMPLER, walk="decode",
+        )
 
     def get_accelerator_graph_configs(
         self, device: torch.device, tp_world_size: int = 1,
@@ -483,22 +487,6 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
             return
         outputs["text_inputs"] = outputs["new_token"]
 
-    def check_stop(
-        self,
-        request_id: str,
-        request_info: CurrentForwardPassInfo,
-        outputs: dict[str, list[torch.Tensor]],
-    ) -> set[str]:
-        if "new_token" not in outputs or request_info.graph_walk != "decode":
-            return set()
-        token = outputs["new_token"][0].item()
-        ignore_eos = request_info.resource_configs[SAMPLER].ignore_eos
-        decoded_tokens = request_info.dynamic_loop_iter_counts.get("decode_loop", 0) + 1
-        if (not ignore_eos and token in self.config.stop_token_ids) or \
-                decoded_tokens >= request_info.max_tokens:
-            return {"decode_loop"}
-        return set()
-
     def step_is_input_free(self, graph_walk: str) -> bool:
         # a decode row is one token, like the capture template's
         return graph_walk == "decode"
@@ -507,34 +495,3 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
         # the decode loop's client edge carries the token the stop check
         # already has on the host; prefill's client edge is persisted
         return {"text_inputs": "new_token"} if graph_walk == "decode" else {}
-
-    def check_stop_batched(
-        self,
-        request_ids: list[str],
-        request_infos: dict[str, CurrentForwardPassInfo],
-        host_rows: HostRows,
-        step_walk: str | None = None,
-    ) -> dict[str, set[str]] | None:
-        """``check_stop`` for the whole batch off one ``tolist``."""
-        if step_walk is not None and step_walk != "decode":
-            return {}
-        tokens = host_rows.buffers.get("new_token")
-        if not torch.is_tensor(tokens) or tokens.dim() == 0:
-            return None
-        values = tokens.reshape(tokens.shape[0], -1)[:, 0].tolist()
-        row_of = {rid: i for i, rid in enumerate(host_rows.request_ids)}
-        stop_ids = self.config.stop_token_ids
-        stops: dict[str, set[str]] = {}
-        for rid in request_ids:
-            i = row_of.get(rid)
-            if i is None or i >= len(values):
-                continue  # no row, no output: the per-request path skips it too
-            info = request_infos[rid]
-            if step_walk is None and info.graph_walk != "decode":
-                continue
-            if (
-                values[i] in stop_ids
-                and not info.resource_configs[SAMPLER].ignore_eos
-            ) or info.dynamic_loop_iter_counts.get("decode_loop", 0) + 1 >= info.max_tokens:
-                stops[rid] = {"decode_loop"}
-        return stops
