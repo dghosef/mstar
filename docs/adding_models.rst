@@ -772,7 +772,7 @@ step names the ``(q_label, kv_label)`` pairs:
 
 Each pair is planned as its own layout, pairing each request's ``q_label`` span with that
 request's ``kv_label`` span; cross-attention is never causal. A layer attends through
-``RaggedAttentionCallable(resource, cross_label(q_label, kv_label))``, passing the key
+``resource.run(q, k, v, label=cross_label(q_label, kv_label))``, passing the key
 span's tokens as ``k`` and ``v``. One resource has one head geometry, so a model whose
 attentions differ in head count or head dim declares one spec per (kind, geometry).
 LTX-2.5 is the reference (``mstar/model/ltx2_5/submodules.py``).
