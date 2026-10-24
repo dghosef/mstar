@@ -785,11 +785,12 @@ class VisionEncoderSubmodule(NodeSubmodule):
         self, device: torch.device, autocast_dtype: torch.dtype,
         tp_world_size: int = 1, **kwargs,
     ) -> dict[str, PiecewiseAcceleratorGraphConfig]:
-        """The block loop, one prompt per replay, by patch-count bucket.
+        """The block loop, one replay per step, by patch-count bucket.
 
         Patch embed, position resample and rope run eagerly before it, the
         merger after (it quarters the row count, which a region's output view
-        cannot express). Batch size 1: one replay is one prompt's segments.
+        cannot express). Batch size 1: a replay is the whole step as one row,
+        every request's segments in it.
         """
         hidden, head_dim = self.config.hidden_size, self.config.head_dim
 
@@ -850,7 +851,7 @@ class VisionEncoderSubmodule(NodeSubmodule):
         sin: torch.Tensor,
         seq_lengths: tuple[int, ...],
     ) -> torch.Tensor | None:
-        """The block loop replayed once per prompt, or None if not leased.
+        """The block loop replayed once for the whole step, or None if not leased.
 
         A leased step declares nothing of its own (`declare_step`), so
         ``engine_inputs.step`` is None; a bucket that fits is not enough, as
