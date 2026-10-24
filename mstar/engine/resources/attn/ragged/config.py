@@ -80,6 +80,13 @@ class RaggedAttentionConfig:
     # guidance branch per rank, is the one user.
     shard_heads: bool = True
 
+    # Whether a compiled caller keeps the attention in its graph, as the
+    # ``mstar::ragged_attention`` op, rather than breaking there per layer. On for
+    # a compiled, uncaptured region whose fusions around attention pay (Wan2.2's
+    # DiT); off by default, since tracing a whole transformer as one graph per
+    # capture bucket costs startup time and capture memory (Z-Image: +2.6 GiB).
+    compile_op: bool = False
+
     # Activation dtype of the q / k / v the node hands the kernel (and of its
     # output). A cacheless attention doesn't need to adhere to the dtype of its
     # KV cache, so it is free to declare a separate dtype here; when None, the

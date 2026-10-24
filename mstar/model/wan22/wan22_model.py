@@ -146,6 +146,8 @@ class Wan22Model(Model):
                     max_segments_per_request=2,
                     # CFG-parallel: the dit's two ranks split guidance branches, not heads
                     shard_heads=False,
+                    # the DiT is compiled, not captured: keep attention in its graph
+                    compile_op=True,
                     dtype=torch.bfloat16,
                 ),
             ),

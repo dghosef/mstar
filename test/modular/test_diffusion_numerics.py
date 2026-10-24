@@ -88,6 +88,9 @@ def test_qwen3_encoder_builds_one_rotary_table_across_prompt_lengths(monkeypatch
         head_dim=8, rms_norm_eps=1e-6, rope_theta=10_000.0, tap_layers=(1,),
     )
     encoder = qwen3_encoder.Qwen3HiddenStateEncoder(**dims, max_positions=16).eval()
+    with torch.no_grad():
+        for p in encoder.parameters():  # some layers allocate with torch.empty
+            p.normal_(std=0.1)
     builds = []
     build = qwen3_encoder.qwen3_rotary_tables
     monkeypatch.setattr(qwen3_encoder, "qwen3_rotary_tables", lambda *a: builds.append(a) or build(*a))

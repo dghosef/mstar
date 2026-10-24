@@ -252,14 +252,17 @@ class _FlashInferRaggedBase:
     ) -> torch.Tensor:
         """One layer's attention through the plan for ``label``.
 
-        Traced by ``torch.compile``, this is the ``mstar::ragged_attention`` op:
-        the region keeps one graph, and Inductor fuses the pointwise work on
-        either side of the attention instead of breaking per layer. Called
-        eagerly, including in a captured region that is not compiled, it is the
-        plain kernel call, with no op dispatch.
+        Traced by ``torch.compile`` with ``config.compile_op``, this is the
+        ``mstar::ragged_attention`` op: the region keeps one graph, and Inductor
+        fuses the pointwise work on either side of the attention. Otherwise a
+        compiled caller breaks here, and an eager one calls the kernel directly.
         """
-        if torch.compiler.is_compiling():
+        if self._config.compile_op and torch.compiler.is_compiling():
             return ragged_attention(q, k, v, self._key, label)
+        return self._run(q, k, v, label)
+
+    @torch.compiler.disable
+    def _run(self, q, k, v, label):
         return self._wrapper(label).run(q, k, v)
 
 
