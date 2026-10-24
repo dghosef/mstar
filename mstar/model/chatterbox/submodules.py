@@ -60,6 +60,7 @@ from mstar.model.submodule_base import (
     ModelInputsFromEngine,
     NodeInputs,
     NodeSubmodule,
+    TokenStop,
 )
 
 logger = logging.getLogger(__name__)
@@ -220,6 +221,10 @@ class T3Submodule(ARNodeSubmodule):
         self.t3 = config.t3
         self.builtin_voice = builtin_voice
         self.supports_cfg = not config.is_turbo
+        self.token_stop = TokenStop(
+            loop=DECODE_LOOP, buffer=SPEECH_TOKENS, stop_ids=frozenset({config.t3.stop_speech_token}),
+            sampler=T3_SAMPLER, generated_key="generated",
+        )
 
     # -- request knobs -------------------------------------------------------
 
@@ -440,21 +445,6 @@ class T3Submodule(ARNodeSubmodule):
         outputs[PREV_TOKEN] = outputs[SPEECH_TOKENS]
         state = self.request_state(request_id)
         state.add("generated", int(state.get("generated", 0)) + 1)
-
-    def check_stop(
-        self, request_id: str, request_info: CurrentForwardPassInfo,
-        outputs: dict[str, list[torch.Tensor]],
-    ) -> set[str]:
-        if SPEECH_TOKENS not in outputs:
-            return set()
-        token = int(outputs[SPEECH_TOKENS][0].reshape(-1)[0].item())
-        generated = int(self.request_state(request_id).get("generated", 0))
-        max_new = request_info.max_tokens
-        sampling = request_info.resource_configs.get(T3_SAMPLER)
-        ignore_eos = bool(getattr(sampling, "ignore_eos", False))
-        if (not ignore_eos and token == self.t3.stop_speech_token) or generated >= max_new:
-            return {DECODE_LOOP}
-        return set()
 
     # -- batching and capture ---------------------------------------------------
 
