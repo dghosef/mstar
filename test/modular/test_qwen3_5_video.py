@@ -514,7 +514,7 @@ def _encoder(max_segments: int):
         patch_size=16, temporal_patch_size=2, spatial_merge_size=2,
         num_position_embeddings=16, out_hidden_size=64,
     )
-    encoder = VisionEncoderSubmodule(nn.Linear(1, 1), config)
+    encoder = VisionEncoderSubmodule(nn.Linear(1, 1), config, (torch.zeros(1), torch.ones(1)))
     encoder.node_resources = {VISION_ATTN: SimpleNamespace(max_segments_per_request=max_segments)}
     return encoder
 
@@ -540,6 +540,11 @@ def test_vision_block_loop_leases_only_what_a_replay_holds():
     assert config.one_row_per_step
     assert config.can_lease([request(2), request(2)])
     assert not config.can_lease([request(2), request(3)])
+
+
+def test_vision_encoder_refuses_patches_it_would_not_normalize():
+    with pytest.raises(ValueError, match="uint8"):
+        _encoder(max_segments=4)._normalize(torch.zeros(2, 3))
 
 
 def test_vision_block_loop_replays_exactly_when_leased():

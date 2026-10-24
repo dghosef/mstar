@@ -708,7 +708,7 @@ class VisionEncoderSubmodule(NodeSubmodule):
 
     def __init__(
         self, model: Qwen3_5VisionModel, config: Qwen3_5VisionConfig,
-        pixel_normalizer: tuple[torch.Tensor, torch.Tensor] | None = None,
+        pixel_normalizer: tuple[torch.Tensor, torch.Tensor],
     ):
         super().__init__()
         self.model = model
@@ -905,7 +905,8 @@ class VisionEncoderSubmodule(NodeSubmodule):
         compiled embed, so the arithmetic (a subtract, a true divide) is the
         processors' exactly."""
         if pixel_values.dtype != torch.uint8:
-            return pixel_values
+            # `process_prompt` ships bytes; anything else would skip normalization
+            raise ValueError(f"vision patches must be uint8, got {pixel_values.dtype}")
         mean, std = self._pixel_normalizer
         if mean.device != pixel_values.device:
             mean, std = mean.to(pixel_values.device), std.to(pixel_values.device)
