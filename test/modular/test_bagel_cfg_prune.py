@@ -217,6 +217,24 @@ def test_preprocess_hands_the_forward_the_declared_count(n_branches):
     assert out["requires_cfg"] is True
 
 
+def test_image_gen_shape_inputs_stay_bounded_across_output_sizes():
+    """The output size is the client's, so the per-size device inputs are an LRU, not a dict
+    that grows with every size requested."""
+    from mstar.model.bagel.submodules import _IMAGE_GEN_SHAPES_CACHED
+
+    stub = _stub(
+        config=types.SimpleNamespace(latent_downsample=16, max_latent_size=64),
+        _image_gen_shape_cache={},
+        _get_text_vae_idxs=lambda n, device: LLMSubmodule._get_text_vae_idxs(None, n, device),
+    )
+    first = LLMSubmodule._image_gen_shape_inputs(stub, 256, 256, "cpu")
+    for i in range(3 * _IMAGE_GEN_SHAPES_CACHED):
+        LLMSubmodule._image_gen_shape_inputs(stub, 256, 256 + 16 * (i + 1), "cpu")
+        # the size in use stays cached while others come and go
+        assert LLMSubmodule._image_gen_shape_inputs(stub, 256, 256, "cpu") is first
+    assert len(stub._image_gen_shape_cache) == _IMAGE_GEN_SHAPES_CACHED
+
+
 def _request(k, first_iter, prune=True, **meta):
     cfg = types.SimpleNamespace(
         num_timesteps=N, timestep_shift=SHIFT,

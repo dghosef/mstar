@@ -47,6 +47,7 @@ from mstar.model.submodule_base import (
     NodeSubmodule,
     StackingMethod,
 )
+from mstar.utils.device import to_device_nonblocking
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +137,9 @@ IMAGE_GEN_LOOP = "image_gen_loop"
 # the forward: how many CFG branches (1, 2 or 3) this image_gen step runs.
 # Absent means the old behaviour, all three whenever guidance is on.
 CFG_BRANCHES = "cfg_branches"
+
+# Output sizes whose image_gen shape inputs an LLM node keeps on the device
+_IMAGE_GEN_SHAPES_CACHED = 8
 
 
 def _f32(x: float) -> float:
@@ -316,7 +320,6 @@ class ViTEncoderSubmodule(NodeSubmodule):
         # request, so the segment ceiling is the batch size. Raise only if that
         # changes — and raise the resource's `max_segments_per_request` with it.
         self._max_images_per_request = 1
-        self._cu_seqlens: dict[tuple, torch.Tensor] = {}
 
     def prepare_inputs(
         self,
@@ -360,13 +363,9 @@ class ViTEncoderSubmodule(NodeSubmodule):
             "not the count `vit_patches` gives a layout to key it by"
         )
 
-        # built once per (length, device): `torch.tensor(..., device=)` syncs the stream, which
-        # held this request's prepare until the in-flight decode steps of others had finished
-        cu_seqlens = self._cu_seqlens.get((num_tokens, device))
-        if cu_seqlens is None:
-            cu_seqlens = self._cu_seqlens[(num_tokens, device)] = torch.tensor(
-                [0, num_tokens], dtype=torch.int32, device=device
-            )
+        # not `torch.tensor(..., device=)`: that syncs the stream, which held this request's
+        # prepare until the in-flight decode steps of others had finished
+        cu_seqlens = to_device_nonblocking(torch.tensor([0, num_tokens], dtype=torch.int32), device)
 
         return NodeInputs(
             tensor_inputs={
@@ -888,6 +887,7 @@ class LLMSubmodule(ARNodeSubmodule):
         self.eos_token_id = eos_token_id
         # image_gen runs only the CFG branches a step needs (`cfg_branches`)
         self._cfg_prune = config.cfg_prune
+        # least recently used first; bounded, since the output size is the client's
         self._image_gen_shape_cache: dict[tuple, dict[str, torch.Tensor]] = {}
         self._sentinel_ids: dict[torch.device, tuple[torch.Tensor, torch.Tensor]] = {}
         self._warned_loop_counter = False
@@ -1126,15 +1126,19 @@ class LLMSubmodule(ARNodeSubmodule):
         step's ``prepare_inputs`` until the current step had finished. Read-only downstream.
         """
         key = (H, W, str(device))
-        cached = self._image_gen_shape_cache.get(key)
+        cache = self._image_gen_shape_cache
+        cached = cache.pop(key, None)
         if cached is None:
             pos = get_flattened_position_ids_extrapolate(
                 H, W, self.config.latent_downsample, max_num_patches_per_side=self.config.max_latent_size,
             ).to(device)
-            cached = self._image_gen_shape_cache[key] = {
+            cached = {
                 "vae_position_ids": pos,
                 **self._get_text_vae_idxs(pos.shape[0] + IMAGE_SENTINELS, device),
             }
+        cache[key] = cached
+        if len(cache) > _IMAGE_GEN_SHAPES_CACHED:
+            del cache[next(iter(cache))]
         return cached
 
     def declare_step(
