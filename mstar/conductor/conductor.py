@@ -7,7 +7,7 @@ import signal
 import socket
 import threading
 import time
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -394,6 +394,9 @@ class Conductor:
         status_interval_s: float | None = None,
     ):
         self.requests: dict[str, RequestData] = {}
+        # worker id -> requests in self.requests it serves, for the DP replica
+        # pick; kept by _register_request / _drop_request
+        self._worker_load: Counter[str] = Counter()
         # Requests in teardown: kept in self.requests (so they still count toward
         # concurrency until their GPU state is freed) with barrier state here.
         self.draining: dict[str, DrainingRequest] = {}
@@ -857,23 +860,14 @@ class Conductor:
         """
         # _group_id -> chosen DP-replica index within that group's ranks
         group_id_to_replica_idx: dict[int, int] = {}
-        # worker id -> requests it currently serves; built only when a group
-        # actually has more than one replica to choose from
-        load: dict[str, int] | None = None
 
         def pick(replicas: list[list[int]]) -> int:
             """The least-loaded replica (by live requests on its workers), ties at
             random. A random pick alone puts two of two concurrent requests on one
             replica half the time, leaving the other idle."""
-            nonlocal load
             if len(replicas) == 1:
                 return 0
-            if load is None:
-                load = defaultdict(int)
-                for request_data in self.requests.values():
-                    for worker_id in self._request_workers(request_data):
-                        load[worker_id] += 1
-            loads = [sum(load[f"worker_{r}"] for r in ranks) for ranks in replicas]
+            loads = [sum(self._worker_load[f"worker_{r}"] for r in ranks) for ranks in replicas]
             least = min(loads)
             return int(np.random.choice([i for i, n in enumerate(loads) if n == least]))
 
@@ -1118,7 +1112,7 @@ class Conductor:
         except Exception as exc:  # noqa: BLE001
             request_data = self.requests.get(body.request_id)
             if request_data is None or not request_data.dispatched:
-                self.requests.pop(body.request_id, None)
+                self._drop_request(body.request_id)
                 if isinstance(exc, ValueError):
                     self._reject_request(body.request_id, str(exc), status=400)
                     return
@@ -1223,7 +1217,7 @@ class Conductor:
             conductor_ingest_time=ingest_time,
             conductor_arrival_time=arrival_time,
         )
-        self.requests[body.request_id] = request_data
+        self._register_request(body.request_id, request_data)
 
         # Kick off all partitions by calling get_initial_forward_pass_args per partition
         partition_fwd_args: dict[str, ForwardPassArgs] = {}
@@ -1366,6 +1360,16 @@ class Conductor:
             for worker_id in worker_ids
         }
 
+    def _register_request(self, request_id: str, request_data: RequestData) -> None:
+        self.requests[request_id] = request_data
+        self._worker_load.update(self._request_workers(request_data))
+
+    def _drop_request(self, request_id: str) -> None:
+        """The one way a request leaves ``self.requests``, so ``_worker_load`` cannot leak."""
+        request_data = self.requests.pop(request_id, None)
+        if request_data is not None:
+            self._worker_load.subtract(self._request_workers(request_data))
+
     def _register_draining(
         self, request_id: str, expected_acks: set[str], participants: set[str],
         failure_error: str | None = None, failure_status: int = 500,
@@ -1436,7 +1440,7 @@ class Conductor:
                     ),
                 ),
             )
-        self.requests.pop(request_id, None)
+        self._drop_request(request_id)
         logger.info("Tore down request %s; freed worker resources", request_id)
         self._try_admit_waiting()
 
