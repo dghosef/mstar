@@ -95,7 +95,7 @@ from mstar.model.base import (
     Span,
     prompt_spans,
 )
-from mstar.model.components.diffusion.image_io import encode_image
+from mstar.model.components.diffusion.image_io import encode_image, image_output_format
 from mstar.model.loader import iter_safetensors_file, load_hf_weights
 from mstar.model.loader.base import LLAMA_STACKED_PARAMS, StackedParamRule
 from mstar.model.multimodal import (
@@ -633,6 +633,8 @@ class BagelModel(Model):
 
         Given the tensors, it also returns a ``kv_layout`` for each label the request may open.
         """
+        if "image" in output_modalities:
+            image_output_format(kwargs)  # fail a bad output_format now, not after the denoise
         result: NameToTensorList = {}
 
         if prompt is not None:
