@@ -49,7 +49,8 @@ def test_orpheus_caps_decode_where_its_stop_check_ends_it(max_tokens):
 
     model = _orpheus()
     llm = OrpheusLLMSubmodule(
-        language_model=SimpleNamespace(model=SimpleNamespace(embed_tokens=None), lm_head=None), config=model.config,
+        language_model=SimpleNamespace(model=SimpleNamespace(embed_tokens=None), lm_head=SimpleNamespace(tp_size=1)),
+        config=model.config,
     )
 
     cap = model.get_loop_caps(max_output_tokens=max_tokens)["decode_loop"]
@@ -523,7 +524,7 @@ def test_qwen3_tts_caps_decode_where_its_stop_check_ends_it(max_tokens):
     talker = _tiny_qwen3_tts_talker()
     outputs = {"new_token": [torch.tensor(NOT_EOS)]}
     talker.request_state("r").add_all(generated_frames=0)
-    talker.postprocess("r", None, outputs)
+    talker.postprocess("r", SimpleNamespace(graph_walk="talker_prefill"), outputs)
 
     def check_stop(request_id, request_info, outputs):
         talker.postprocess(request_id, request_info, outputs)
