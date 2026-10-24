@@ -318,9 +318,10 @@ def test_parallel_combine_reduces_to_the_old_combine():
         torch.testing.assert_close(new, old, rtol=0, atol=1e-6)
 
 
-def _combine_inputs(k: int, sat_out: tuple[str, ...]):
+def _combine_inputs(k: int, sat_out: tuple[str, ...], counter: int | None = None):
     """combine_cfg's prepare_inputs at step ``k`` of a t2i request, with the named
-    branch nodes having sat the step out."""
+    branch nodes having sat the step out and the combine's loop counter reading
+    ``counter`` (default ``k``)."""
     from mstar.model.bagel.submodules import CombineCFGSubmodule, sat_out_velocity
 
     cfg = types.SimpleNamespace(cfg_prune=True, **{k_: _DEFAULTS[k_] for k_ in (
@@ -335,7 +336,7 @@ def _combine_inputs(k: int, sat_out: tuple[str, ...]):
     inputs.update(latents=[latents], time_index=[torch.full((16,), float(k))])
     info = types.SimpleNamespace(
         step_metadata={"requires_cfg": True},
-        dynamic_loop_iter_counts={IMAGE_GEN_LOOP: k},
+        dynamic_loop_iter_counts={IMAGE_GEN_LOOP: k if counter is None else counter},
     )
     node = CombineCFGSubmodule(cfg)
     return node, node.prepare_inputs("image_gen_cfg", info, inputs)
@@ -358,6 +359,15 @@ def test_combine_never_reads_a_branch_that_sat_the_step_out():
     assert "v_cfg_img" not in prepared.tensor_inputs
     with pytest.raises(ValueError, match="cfg_text sat out"):
         _combine_inputs(k_in, sat_out=("cfg_text", "cfg_img"))
+
+    # The combine's own counter isn't tracking the loop (reads 0 on a later step): it takes
+    # the count from the branches that ran instead of failing the request.
+    node, prepared = _combine_inputs(k_in, sat_out=("cfg_img",), counter=0)
+    assert prepared.kwargs["cfg_branches"] == 2
+    out = node.forward("image_gen_cfg", None, **prepared.tensor_inputs, **prepared.kwargs)
+    _, reference = _combine_inputs(k_in, sat_out=("cfg_img",))
+    expected = node.forward("image_gen_cfg", None, **reference.tensor_inputs, **reference.kwargs)
+    torch.testing.assert_close(out["latents"][0], expected["latents"][0])
 
 
 def test_image_gen_cfg_walk_names_the_loop_too():

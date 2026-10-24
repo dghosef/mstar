@@ -2022,18 +2022,25 @@ class CombineCFGSubmodule(NodeSubmodule):
 
         first_iter = "latents" not in inputs or not inputs["latents"]
         n_branches = self._cfg_branches(fwd_info, first_iter)
-        # The branches this step's combine reads; None reads all three (device-side interval test)
-        reads = CFG_BRANCH_LABELS[:n_branches]
-        result = {"v_main": inputs["v_main"][0]}
-        for label in CFG_BRANCH_LABELS[1:]:
-            v = inputs[f"v_{label}"][0]
-            if v.shape[0] > 0:
-                result[f"v_{label}"] = v
-            elif label in reads:
-                raise ValueError(
-                    f"BAGEL parallel CFG: LLM_{label} sat out a step whose combine reads "
-                    f"{list(reads)}; the nodes' loop counters disagree"
-                )
+        # Branches run as a prefix of CFG_BRANCH_LABELS, so the leading non-empty ones ran
+        n_arrived = next(
+            (i for i, label in enumerate(CFG_BRANCH_LABELS) if inputs[f"v_{label}"][0].shape[0] == 0),
+            len(CFG_BRANCH_LABELS),
+        )
+        if n_branches is None:
+            if n_arrived < len(CFG_BRANCH_LABELS):
+                # this node's counter isn't tracking the loop; the branch nodes counted from theirs
+                n_branches = n_arrived
+        elif n_branches > n_arrived:
+            raise ValueError(
+                f"BAGEL parallel CFG: LLM_{CFG_BRANCH_LABELS[n_arrived]} sat out a step whose "
+                f"combine reads {list(CFG_BRANCH_LABELS[:n_branches])}; the nodes' loop counters disagree"
+            )
+        result = {
+            f"v_{label}": inputs[f"v_{label}"][0]
+            for label in CFG_BRANCH_LABELS
+            if inputs[f"v_{label}"][0].shape[0] > 0
+        }
         if first_iter:
             H = fwd_info.step_metadata.get("height", 1024)
             W = fwd_info.step_metadata.get("width", 1024)
