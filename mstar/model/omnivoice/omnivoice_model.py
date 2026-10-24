@@ -40,7 +40,7 @@ from mstar.graph.base import (
     TensorPointerInfo,
 )
 from mstar.graph.special_destinations import EMIT_TO_CLIENT, EMPTY_DESTINATION
-from mstar.model.base import ForwardPassArgs, Model
+from mstar.model.base import ForwardPassArgs, Model, ProcessPromptOutput
 from mstar.model.omnivoice.components.backbone import (
     OmniVoiceBackbone,
     assert_flashinfer_api,
@@ -55,6 +55,7 @@ from mstar.model.omnivoice.components.text import (
 from mstar.model.omnivoice.config import OmniVoiceConfig
 from mstar.model.omnivoice.submodules import (
     BACKBONE_ATTN,
+    TARGET_LEN,
     UNMASK_LOOP_NAME,
     OmniVoiceBackboneSubmodule,
     OmniVoiceCode2WavSubmodule,
@@ -73,6 +74,9 @@ class OmniVoiceModel(Model):
     SPEECH_GEN_CLONE_WALK = "speech_gen_clone"
 
     UNMASK_LOOP_NAME = UNMASK_LOOP_NAME
+    # The canvas length process_prompt settles (it needs the tokenizer and the
+    # duration estimator); it reaches the backbone as step metadata.
+    INTERNAL_KWARGS = (TARGET_LEN,)
 
     def __init__(
         self,
@@ -166,7 +170,6 @@ class OmniVoiceModel(Model):
         backbone_inputs = [
             "prefix_ids",
             "prefix_audio_mask",
-            "initial_canvas",
             "audio_tokens",
             "step_index",
         ]
@@ -317,7 +320,7 @@ class OmniVoiceModel(Model):
         output_modalities: list[str],
         tensors: NameToTensorList | None = None,
         **kwargs,
-    ) -> NameToTensorList:
+    ) -> ProcessPromptOutput:
         """Validate, then build the canvas prefix on the data worker.
 
         Every malformed-request check lives here rather than in
@@ -407,12 +410,6 @@ class OmniVoiceModel(Model):
         out: NameToTensorList = {
             "prefix_ids": [prefix_ids],
             "prefix_audio_mask": [prefix_audio_mask],
-            # the all-MASK canvas the unmask loop starts from: its shape carries
-            # the target length, so the backbone sizes the request without a
-            # host read of a device value
-            "initial_canvas": [
-                torch.full((self.config.num_audio_codebook, target_len), self.config.audio_mask_id, dtype=torch.long)
-            ],
         }
         if ref_audio:
             out["ref_audio_inputs"] = [ref_waveform]
@@ -420,7 +417,7 @@ class OmniVoiceModel(Model):
             # _prepare_reference: post_process uses it to put the clone back at
             # the source's loudness, so a quiet reference yields quiet speech.
             out["ref_rms"] = [torch.tensor([ref_rms], dtype=torch.float32)]
-        return out
+        return ProcessPromptOutput(out, {TARGET_LEN: target_len})
 
     def _prepare_reference(
         self, waveform: torch.Tensor, ref_text: str | None
@@ -494,8 +491,8 @@ class OmniVoiceModel(Model):
         # Backstops. process_prompt already rejected each of these on the data
         # worker where a ValueError becomes a 400; a raise here runs at the
         # conductor, whose loop swallows it and leaves the client hanging.
-        if not input_signals.get("prefix_ids"):
-            raise ValueError("OmniVoice requires a processed prompt (prefix_ids)")
+        if not input_signals.get("prefix_ids") or TARGET_LEN not in model_kwargs:
+            raise ValueError("OmniVoice requires a processed prompt (prefix_ids, target_len)")
         target_output = output_modalities[0] if output_modalities else "audio"
         if target_output != "audio":
             raise ValueError(
@@ -522,9 +519,8 @@ class OmniVoiceModel(Model):
         kwargs = {
             "walk_schedule": schedule,
             "walk_step": 0,
-            # target_len is NOT here: it is computed on the data worker (it
-            # needs the tokenizer and the duration estimator) and rides to the
-            # backbone as the initial canvas's shape.
+            # from process_prompt, which settles it on the data worker
+            TARGET_LEN: int(model_kwargs[TARGET_LEN]),
             "num_step": num_step,
             "guidance_scale": float(
                 model_kwargs.get("guidance_scale", defaults.guidance_scale)
@@ -576,6 +572,7 @@ class OmniVoiceModel(Model):
         kw = metadata.kwargs
         return {
             "is_prefill": metadata.is_prefill,
+            TARGET_LEN: kw[TARGET_LEN],
             "num_step": kw["num_step"],
             "guidance_scale": kw["guidance_scale"],
             "t_shift": kw["t_shift"],
@@ -596,7 +593,7 @@ class OmniVoiceModel(Model):
         step counter at iteration 0.
         """
         inputs: list[GraphEdge] = []
-        for name in ("prefix_ids", "prefix_audio_mask", "initial_canvas"):
+        for name in ("prefix_ids", "prefix_audio_mask"):
             edge = GraphEdge(next_node="backbone", name=name)
             edge.tensor_info = persist_signals.get(name, [])
             inputs.append(edge)

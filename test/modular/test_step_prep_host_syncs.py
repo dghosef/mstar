@@ -134,9 +134,9 @@ def _omnivoice():
     return sub, cfg
 
 
-def _omnivoice_meta(steps):
+def _omnivoice_meta(steps, target_len=6):
     return {
-        "num_step": steps, "t_shift": 0.1, "guidance_scale": 2.0, "class_temperature": 0.0,
+        "target_len": target_len, "num_step": steps, "t_shift": 0.1, "guidance_scale": 2.0, "class_temperature": 0.0,
         "layer_penalty_factor": 5.0, "position_temperature": 5.0,
     }
 
@@ -148,7 +148,6 @@ def _omnivoice_inputs(cfg, k, target_len=6, clone=False):
     inputs = {
         "prefix_ids": [torch.arange(c * 5).view(c, 5)],
         "prefix_audio_mask": [torch.zeros(5, dtype=torch.bool)],
-        "initial_canvas": [torch.full((c, target_len), cfg.audio_mask_id)],
         "audio_tokens": [tokens],
         "step_index": [torch.tensor([k], dtype=torch.int64)],
     }
@@ -173,13 +172,22 @@ def test_omnivoice_step_prep_reads_no_tensor(clone):
 
 
 def test_omnivoice_first_step_prep_reads_no_tensor():
-    # iteration 0 starts from the data worker's all-MASK canvas: its shape is
-    # the target length, so nothing is read on the host
+    # iteration 0 builds the all-MASK canvas on the device from the target
+    # length process_prompt settled, carried as step metadata, so nothing is
+    # read on the host
+    from mstar.model.omnivoice.omnivoice_model import OmniVoiceModel
+
     sub, cfg = _omnivoice()
+    model = OmniVoiceModel.__new__(OmniVoiceModel)
+    model.config = cfg
+    first = model.get_initial_forward_pass_args(
+        "default", ["text"], ["audio"], {"prefix_ids": [None]}, model_kwargs={"target_len": 6},
+    )
+    assert {edge.name for edge in first.inputs} == {"prefix_ids", "prefix_audio_mask", "audio_tokens", "step_index"}
     inputs = _omnivoice_inputs(cfg, 0)
     del inputs["audio_tokens"], inputs["step_index"]
     with _HostReads() as reads:
-        ni = sub.prepare_inputs("speech_gen", _fwd("r", "speech_gen", _omnivoice_meta(4)), inputs)
+        ni = sub.prepare_inputs("speech_gen", _fwd("r", "speech_gen", first.step_metadata), inputs)
     assert reads.reads == [], reads.reads
     assert ni.tensor_inputs["audio_tokens"].shape == (cfg.num_audio_codebook, 6)
     assert (ni.tensor_inputs["audio_tokens"] == cfg.audio_mask_id).all()
