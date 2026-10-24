@@ -76,7 +76,7 @@ from mstar.model.submodule_base import (
     device_loopback_enabled,
 )
 from mstar.platforms.compile import with_inductor_overrides
-from mstar.utils.device import DeviceCapability
+from mstar.utils.device import DeviceCapability, to_device_nonblocking
 from mstar.utils.profiler import PHASE_PERIOD, phase_record
 
 logger = logging.getLogger(__name__)
@@ -95,14 +95,6 @@ def _host_grids(
         (int(t), int(h), int(w))
         for g in device_grids for t, h, w in g.reshape(-1, 3).tolist()
     ]
-
-
-def _to_device(t: torch.Tensor, device: torch.device) -> torch.Tensor:
-    """A host-built tensor onto the device without blocking the host: a copy
-    from pageable memory waits for the stream to drain."""
-    if device.type == "cpu":
-        return t
-    return t.pin_memory().to(device, non_blocking=True)
 
 
 class LLMSubmodule(ARNodeSubmodule):
@@ -321,7 +313,7 @@ class LLMSubmodule(ARNodeSubmodule):
         return ARNodeInputs(
             input_seq_len=input_embeds.shape[0],
             input_embeds=input_embeds,
-            custom_pos_ids=_to_device(torch.cat(pos_ids, dim=1), device),
+            custom_pos_ids=to_device_nonblocking(torch.cat(pos_ids, dim=1), device),
             tensor_inputs={
                 "mrope_advance": pos - start_pos,
                 # Ids cannot ride `input_ids` — that is what `preprocess` keys
@@ -822,9 +814,9 @@ class VisionEncoderSubmodule(NodeSubmodule):
             input_seq_len=num_patches,
             tensor_inputs={
                 "pixel_values": torch.cat(inputs["pixel_values"], dim=0),
-                "indices": _to_device(indices, device),
-                "weights": _to_device(weights, device),
-                "position_ids": _to_device(
+                "indices": to_device_nonblocking(indices, device),
+                "weights": to_device_nonblocking(weights, device),
+                "position_ids": to_device_nonblocking(
                     vision_grid_position_ids(grid, merge, torch.device("cpu")), device,
                 ),
                 # not forward args: `declare_step` makes segments of the

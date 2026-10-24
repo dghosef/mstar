@@ -43,6 +43,7 @@ from mstar.model.submodule_base import (
     NodeSubmodule,
     device_loopback_enabled,
 )
+from mstar.utils.device import to_device_nonblocking
 
 logger = logging.getLogger(__name__)
 
@@ -150,10 +151,9 @@ class HiggsAudioEncoderSubmodule(NodeSubmodule):
             "valid_lengths": [inp.kwargs["valid_lengths"] for inp in inputs],
         }
         if padded:
-            frames = torch.tensor(widths, dtype=torch.long)
-            if out["audio_features"].is_cuda:
-                frames = frames.pin_memory()
-            out["valid_frames"] = frames.to(self.get_device(), non_blocking=True)
+            out["valid_frames"] = to_device_nonblocking(
+                torch.tensor(widths, dtype=torch.long), self.get_device(),
+            )
         return out
 
     def _encode(self, features: torch.Tensor, valid_frames: torch.Tensor | None = None) -> torch.Tensor:
