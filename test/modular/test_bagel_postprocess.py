@@ -23,6 +23,13 @@ def test_image_png_decodes_to_the_truncated_pixels():
 
 
 def test_unsupported_output_format_fails_at_intake():
-    model = BagelModel.__new__(BagelModel)
+    """Every image-output request passes the API server's submit, so a format the shared
+    writer can't produce fails there, for BAGEL and the DiT image models alike."""
+    from mstar.api_server.entrypoint import APIServer
+
+    server = APIServer.__new__(APIServer)
     with pytest.raises(ValueError, match="output_format"):
-        model.process_prompt(None, [], ["image"], output_format="gif")
+        server.submit_request(
+            text="a cat", input_modalities=["text"], output_modalities=["image"],
+            model_kwargs={"output_format": "gif"}, streaming=False,
+        )

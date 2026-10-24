@@ -38,6 +38,7 @@ from mstar.api_server.body_limit import BodyLimitMiddleware
 from mstar.api_server.data_worker import PreprocessWorker
 from mstar.api_server.request_types import APIServerMessage, PreprocessInput, ResultChunk
 from mstar.communication.communicator import CommProtocol, make_communicator
+from mstar.model.components.diffusion.image_io import image_output_format
 from mstar.model.multimodal import PromptPart
 from mstar.model.registry import model_init_kwargs
 from mstar.observability.catalog import STATUS_INTERVAL_S
@@ -572,6 +573,8 @@ class APIServer:
                 f"Output modality {names} requires streaming=True; raw frame "
                 "chunks cannot be returned as an aggregated response."
             )
+        if "image" in output_modalities:
+            image_output_format(model_kwargs)  # fail a format the writer can't produce now, not after generation
 
         # Register pending request
         with self.request_lock:
