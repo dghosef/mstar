@@ -64,6 +64,7 @@ from mstar.model.submodule_base import (
     ModelInputsFromEngine,
     NodeInputs,
     NodeSubmodule,
+    TokenStop,
 )
 
 logger = logging.getLogger(__name__)
@@ -351,6 +352,11 @@ class ThinkerSubmodule(ARNodeSubmodule):
         super().__init__()
         self.model = thinker_model  # Qwen3OmniThinkerModel
         self.config = config
+        # only a decode row's token ends the loop; a prefill is not in it yet
+        self.token_stop = TokenStop(
+            loop="thinker_decode_loop", buffer="new_token", stop_ids=frozenset({config.im_end_token_id}),
+            sampler=THINKER_SAMPLER, walk="thinker_decode",
+        )
 
         # Pre-compute inverse frequencies for 3D MRoPE
         self._inv_freq: torch.Tensor | None = None
@@ -1142,21 +1148,6 @@ class ThinkerSubmodule(ARNodeSubmodule):
         if "new_token" not in outputs:
             return
         outputs["text_inputs"] = outputs["new_token"]
-
-    def check_stop(
-        self, request_id: str,
-        request_info: CurrentForwardPassInfo,
-        outputs: dict[str, list[torch.Tensor]],
-    ) -> set[str]:
-        if "new_token" not in outputs or request_info.graph_walk != "thinker_decode":
-            return set()
-        token = outputs["new_token"][0].item()
-        ignore_eos= request_info.resource_configs[THINKER_SAMPLER].ignore_eos
-        eos_token_id = self.config.im_end_token_id
-        if (not ignore_eos and eos_token_id == token) or \
-                (request_info.dynamic_loop_iter_counts.get("thinker_decode_loop", 0) + 1 >= request_info.max_tokens):
-            return {"thinker_decode_loop"}
-        return set()
 
 
 # ===================================================================
