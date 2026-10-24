@@ -1,4 +1,5 @@
-"""Denoise step prep reads no tensor on the host (Cosmos3, Wan 2.2, OmniVoice).
+"""Denoise step prep reads no tensor on the host (Cosmos3, Wan 2.2, OmniVoice),
+and AR decode prep copies no pageable host data to the device (Higgs Audio).
 
 The loop-carried step counter (``time_index`` / ``step_index``) is the
 previous step's device output, so an ``.item()`` on it in ``prepare_inputs``
@@ -336,3 +337,51 @@ def test_cosmos3_cfg_active_uses_host_timesteps():
         assert reads.reads == []
         want = k < len(sched.timesteps) and 400.0 <= float(sched.timesteps[k].item()) <= 1000.0
         assert active == want
+
+
+# ---------------------------------------------------------------- Higgs Audio
+
+
+class _PageableH2D(TorchFunctionMode):
+    """Records every copy of host data to another device that isn't a non-blocking
+    one (from pinned memory): each waits for the stream's queued work."""
+
+    def __init__(self):
+        super().__init__()
+        self.copies: list[str] = []
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        device = kwargs.get("device")
+        if func in (torch.tensor, torch.as_tensor) and device is not None and torch.device(device).type != "cpu":
+            self.copies.append(func.__name__)
+        if func is _T.to and args[0].device.type == "cpu" and not kwargs.get("non_blocking"):
+            target = next((a for a in (*args[1:], device) if isinstance(a, (str, torch.device))), None)
+            if target is not None and torch.device(target).type != "cpu":
+                self.copies.append("to")
+        return func(*args, **kwargs)
+
+
+def test_higgs_loopback_decode_prep_copies_no_pageable_index(monkeypatch):
+    """A device loop-back decode step whose rows include one fresh off its prefill overlays
+    that row's token by index: the index goes up through pinned memory, not a blocking copy
+    (every request's first decode step takes this path). The meta device stands in for the
+    accelerator."""
+    from mstar.model.higgs_audio.config import SAMPLER, HiggsAudioModelConfig
+    from mstar.model.higgs_audio.submodules import HiggsAudioLLMSubmodule
+    from mstar.model.submodule_base import ARNodeInputs
+    from mstar.utils import h2d
+
+    monkeypatch.setattr(h2d.DeviceCapability, "of", staticmethod(lambda device: SimpleNamespace(pin_memory=True)))
+    monkeypatch.setattr(_T, "pin_memory", lambda self: self)
+    sub = HiggsAudioLLMSubmodule(None, HiggsAudioModelConfig())
+    sampler = SimpleNamespace(loopback_tokens=lambda rids: torch.zeros(len(rids), dtype=torch.long, device="meta"))
+    engine_inputs = SimpleNamespace(resources={SAMPLER: sampler}, request_ids=["fresh", "looped"])
+    inputs = [
+        ARNodeInputs(input_ids=torch.zeros(1, dtype=torch.long, device="meta"), input_seq_len=1),
+        ARNodeInputs(input_seq_len=1),
+    ]
+    with _PageableH2D() as h2d_copies:
+        out = sub.preprocess("decode", engine_inputs, inputs)
+    assert h2d_copies.copies == []
+    assert out["input_ids"].shape == (2,)
