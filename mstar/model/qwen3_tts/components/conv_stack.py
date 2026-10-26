@@ -18,6 +18,50 @@ def conv_stack(decoder: nn.Module) -> list[nn.Module]:
     return [block for blocks in decoder.upsample for block in blocks] + list(decoder.decoder)
 
 
+def flat_conv_stack(decoder: nn.Module) -> list[nn.Module]:
+    """``conv_stack`` with each upsampling block opened into its modules, so a
+    caller can act between them (each block raises the sample rate)."""
+    flat = []
+    for module in conv_stack(decoder):
+        if type(module).__name__.endswith("DecoderDecoderBlock"):
+            flat.extend(module.block)
+        else:
+            flat.append(module)
+    return flat
+
+
+def _stride(module: nn.Module) -> int:
+    """Output samples per input sample (1 for everything but a transposed conv)."""
+    if type(module).__name__.endswith("CausalTransConvNet"):
+        return module.conv.stride[0]
+    return 1
+
+
+def leading_cuts(modules: list[nn.Module], first_output: int) -> tuple[list[int], int]:
+    """Leading input samples each module can skip when only outputs from
+    ``first_output`` on are wanted, for an input that starts at frame 0.
+
+    Returns the cut before each module and the cut of the final output. Each
+    module's input is cut at the earliest sample its first wanted output reads
+    (``_earliest_input``, walked back from the end), so every wanted output
+    sample is computed from the same inputs as without the cuts; the samples a
+    module computes before that point read its zero padding and are cut by the
+    next module.
+    """
+    wanted = [0] * len(modules)
+    index = first_output
+    for i in range(len(modules) - 1, -1, -1):
+        wanted[i] = index   # first output of module i that a later one reads
+        index = _earliest_input(modules[i], index)
+    cuts, origin = [], 0
+    for module, out_start in zip(modules, wanted, strict=True):
+        start = _earliest_input(module, out_start)
+        cut = max(start - origin, 0)
+        cuts.append(cut)
+        origin = (origin + cut) * _stride(module)
+    return cuts, first_output - origin
+
+
 def _earliest_input(module: nn.Module, out_index: int) -> int:
     """First input position that output position ``out_index`` of ``module`` depends on.
 
