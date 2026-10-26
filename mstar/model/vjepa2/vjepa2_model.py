@@ -1117,6 +1117,10 @@ class VJepa2ACModel(VJepa2Model):
         "num_attention_heads": 22,
         "mlp_ratio": 48 / 11,
     }
+    # a rollout decodes 8 frames: ViT-L's 8 workers x 16 threads measured
+    # 2-5% slower here than 4 workers on torch's default pool
+    PREPROCESS_WORKERS = 4
+    PREPROCESS_TORCH_THREADS = None
 
     def __init__(
         self,
