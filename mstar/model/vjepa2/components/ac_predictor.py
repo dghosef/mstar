@@ -24,7 +24,11 @@ import torch.nn.functional as F
 from torch import nn
 
 from mstar.engine.resources.convenience import AttentionCallable
-from mstar.model.vjepa2.components.rope_utils import rotate_queries_or_keys, rotate_queries_or_keys_BNHD
+from mstar.model.vjepa2.components.rope_utils import (
+    apply_rope_BNHD,
+    rope_tables_BNHD,
+    rotate_queries_or_keys,
+)
 from mstar.model.vjepa2.config import VJepa2ACPredictorConfig
 
 
@@ -224,6 +228,27 @@ class ACRoPEAttention(nn.Module):
         x = x.transpose(1, 2).reshape(b, n, c)
         return self.proj(x)
 
+    def _spatial_rope_tables(
+        self, d_pos: torch.Tensor, h_pos: torch.Tensor, w_pos: torch.Tensor,
+        dtype: torch.dtype, device: torch.device, rope_tables: dict | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """``(sin, cos)`` of shape ``[1, N, 1, head_dim]``: the d/h/w tables side
+        by side, cos 1 / sin 0 on the unrotated tail. Memoized in
+        ``rope_tables``: every block of a step uses the same."""
+        key = ("spatial", id(d_pos), id(h_pos), id(w_pos), dtype)
+        if rope_tables is not None and key in rope_tables:
+            return rope_tables[key]
+        parts = [
+            rope_tables_BNHD(pos, dim, dtype, device)
+            for pos, dim in ((d_pos, self.d_dim), (h_pos, self.h_dim), (w_pos, self.w_dim))
+        ]
+        tail = (1, d_pos.numel(), 1, self.head_dim - self.d_dim - self.h_dim - self.w_dim)
+        sin = torch.cat([p[0] for p in parts] + [torch.zeros(tail, dtype=dtype, device=device)], dim=-1)
+        cos = torch.cat([p[1] for p in parts] + [torch.ones(tail, dtype=dtype, device=device)], dim=-1)
+        if rope_tables is not None:
+            rope_tables[key] = (sin, cos)
+        return sin, cos
+
     def forward_cached(
         self,
         x: torch.Tensor,                   # [B, L, C]
@@ -232,7 +257,7 @@ class ACRoPEAttention(nn.Module):
         w_pos: torch.Tensor,               # [H*W]  — width positions
         time_pos: torch.Tensor | None,     # [action_tokens] or None
         action_tokens: int,
-        rope_tables: dict | None = None,   # see rotate_queries_or_keys_BNHD
+        rope_tables: dict | None = None,   # see _spatial_rope_tables
     ) -> torch.Tensor:
         """Single-frame cached attention with pre-computed position tensors.
 
@@ -251,45 +276,32 @@ class ACRoPEAttention(nn.Module):
         qkv: torch.Tensor = self.qkv(x).view(b, n, 3, self.num_heads, hd)
         q, k, v = qkv.unbind(dim=2)
 
-        if action_tokens > 0:
-            q_action = q[:, :action_tokens]
-            k_action = k[:, :action_tokens]
-            v_action = v[:, :action_tokens]
-            q_spatial = q[:, action_tokens:]
-            k_spatial = k[:, action_tokens:]
-            v_spatial = v[:, action_tokens:]
-        else:
-            q_spatial, k_spatial, v_spatial = q, k, v
-
-        # 3-axis RoPE for spatial tokens
-        s = 0
-        qd = rotate_queries_or_keys_BNHD(q_spatial[..., s:s + self.d_dim], d_pos, rope_tables)
-        kd = rotate_queries_or_keys_BNHD(k_spatial[..., s:s + self.d_dim], d_pos, rope_tables)
-        s += self.d_dim
-        qh = rotate_queries_or_keys_BNHD(q_spatial[..., s:s + self.h_dim], h_pos, rope_tables)
-        kh = rotate_queries_or_keys_BNHD(k_spatial[..., s:s + self.h_dim], h_pos, rope_tables)
-        s += self.h_dim
-        qw = rotate_queries_or_keys_BNHD(q_spatial[..., s:s + self.w_dim], w_pos, rope_tables)
-        kw = rotate_queries_or_keys_BNHD(k_spatial[..., s:s + self.w_dim], w_pos, rope_tables)
-        s += self.w_dim
-        if s < hd:
-            q_spatial = torch.cat([qd, qh, qw, q_spatial[..., s:]], dim=-1)
-            k_spatial = torch.cat([kd, kh, kw, k_spatial[..., s:]], dim=-1)
-        else:
-            q_spatial = torch.cat([qd, qh, qw], dim=-1)
-            k_spatial = torch.cat([kd, kh, kw], dim=-1)
+        # 3-axis RoPE for spatial tokens, as one rotation over the whole head
+        # dim: each element sees exactly the arithmetic of the per-axis
+        # rotation (pairs never straddle two axes), in a third of the kernels
+        emb_sin, emb_cos = self._spatial_rope_tables(d_pos, h_pos, w_pos, q.dtype, q.device, rope_tables)
+        q_spatial = apply_rope_BNHD(q[:, action_tokens:], emb_sin, emb_cos)
+        k_spatial = apply_rope_BNHD(k[:, action_tokens:], emb_sin, emb_cos)
 
         # Temporal RoPE for action tokens
-        if action_tokens > 0 and time_pos is not None:
-            qd = rotate_queries_or_keys_BNHD(q_action[..., :self.d_dim], time_pos, rope_tables)
-            kd = rotate_queries_or_keys_BNHD(k_action[..., :self.d_dim], time_pos, rope_tables)
-            q_action = torch.cat([qd, q_action[..., self.d_dim:]], dim=-1)
-            k_action = torch.cat([kd, k_action[..., self.d_dim:]], dim=-1)
-            q = torch.cat([q_action, q_spatial], dim=1)
-            k = torch.cat([k_action, k_spatial], dim=1)
-            v = torch.cat([v_action, v_spatial], dim=1)
+        if action_tokens > 0:
+            if time_pos is None:
+                raise ValueError("action tokens need time_pos")
+            key = ("time", id(time_pos), q.dtype)
+            tables = rope_tables.get(key) if rope_tables is not None else None
+            if tables is None:
+                tables = rope_tables_BNHD(time_pos, self.d_dim, q.dtype, q.device)
+                if rope_tables is not None:
+                    rope_tables[key] = tables
+            t_sin, t_cos = tables
+            q_action, k_action = q[:, :action_tokens], k[:, :action_tokens]
+            qd = apply_rope_BNHD(q_action[..., :self.d_dim], t_sin, t_cos)
+            kd = apply_rope_BNHD(k_action[..., :self.d_dim], t_sin, t_cos)
+            q = torch.cat([torch.cat([qd, q_action[..., self.d_dim:]], dim=-1), q_spatial], dim=1)
+            k = torch.cat([torch.cat([kd, k_action[..., self.d_dim:]], dim=-1), k_spatial], dim=1)
         else:
-            q, k, v = q_spatial, k_spatial, v_spatial
+            q, k = q_spatial, k_spatial
+        v = v.contiguous()
 
         # [B, L, H, D] -> [B*L, H, D] for FlashInfer
         q = q.reshape(b * n, self.num_heads, hd)

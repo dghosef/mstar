@@ -45,9 +45,8 @@ def rotate_queries_or_keys(x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
 def rope_tables_BNHD(
     pos: torch.Tensor, dim: int, dtype: torch.dtype, device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``(sin, cos)`` for ``rotate_queries_or_keys_BNHD`` over the last ``dim`` dims,
-    computed exactly as it computes them, so callers can build them once per step
-    and reuse them across heads, q/k and layers."""
+    """``(sin, cos)`` for ``apply_rope_BNHD`` over the last ``dim`` dims, so callers
+    can build them once per step and reuse them across heads, q/k and layers."""
     omega = torch.arange(dim // 2, dtype=dtype, device=device)
     omega /= dim / 2.0
     omega = 1.0 / 10000**omega
@@ -67,18 +66,3 @@ def apply_rope_BNHD(x: torch.Tensor, emb_sin: torch.Tensor, emb_cos: torch.Tenso
     y1, y2 = y.unbind(dim=-1)
     y = torch.stack((-y2, y1), dim=-1).flatten(-2)
     return (x * emb_cos) + (y * emb_sin)
-
-
-def rotate_queries_or_keys_BNHD(
-    x: torch.Tensor, pos: torch.Tensor, tables: dict | None = None,
-) -> torch.Tensor:
-    """``tables`` memoizes the sin/cos per (position tensor, dim, dtype) for the
-    caller's step: every layer of a rollout step rotates by the same positions."""
-    _, _, _, D = x.size()
-    if tables is None:
-        return apply_rope_BNHD(x, *rope_tables_BNHD(pos, D, x.dtype, x.device))
-    key = (id(pos), D, x.dtype)
-    cached = tables.get(key)
-    if cached is None:
-        cached = tables[key] = rope_tables_BNHD(pos, D, x.dtype, x.device)
-    return apply_rope_BNHD(x, *cached)
