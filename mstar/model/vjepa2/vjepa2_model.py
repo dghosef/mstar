@@ -94,6 +94,9 @@ from mstar.model.vjepa2.weight_loader import (
 logger = logging.getLogger(__name__)
 
 
+# frames converted to float and resized at a time
+_PREPROCESS_CHUNK = 4
+
 # load_video's metadata key for the file process_prompt decodes
 _VIDEO_PATH = "path"
 
@@ -634,10 +637,6 @@ class VJepa2Model(Model):
         metadata[_VIDEO_PATH] = filepath
         return TensorAndMetadata(data=torch.empty(0, dtype=torch.uint8), metadata=metadata)
 
-    @staticmethod
-    def _decode_frames(filepath: str, indices: list[int]) -> torch.Tensor:
-        """``[len(indices), C, H, W]`` float in ``[0, 1]``."""
-        return decode_frames_at(filepath, indices).float().div_(255.0)
 
     def process_prompt(
         self,
@@ -682,10 +681,15 @@ class VJepa2Model(Model):
                 # Cell 5): matched FLOPs to upstream's inference path. The other
                 # sampled frames are never decoded.
                 keep = keep[:AC_ROLLOUT_NUM_FRAMES]
-            frames = self._decode_frames(meta.pop(_VIDEO_PATH), [sampled[i] for i in keep])
+            frames = decode_frames_at(meta.pop(_VIDEO_PATH), [sampled[i] for i in keep])
             # resize, crop and normalize act per frame, so preprocessing only
-            # the kept frames is exact
-            processed = _preprocess_video(frames, crop_size=self.config.crop_size, target_frames=len(keep))
+            # the kept frames, a few at a time, is exact; the chunks keep the
+            # full-size float frames (~11 MB each at 720p) cache-sized
+            processed = torch.cat([
+                _preprocess_video(chunk.float().div_(255.0), crop_size=self.config.crop_size,
+                                  target_frames=chunk.size(0))
+                for chunk in frames.split(_PREPROCESS_CHUNK)
+            ])
             out["video_frames"] = [processed]
             # the encoder reads ``video_frames``; don't ship the raw input
             out["video_inputs"] = []
