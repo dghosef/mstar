@@ -86,23 +86,24 @@ def _accepts_kwarg(fn: Any, name: str) -> bool:
 
 def talker_text_mask(input_ids: torch.Tensor, config: Qwen3OmniModelConfig) -> torch.Tensor:
     """
-    Cut system prompt and previous assistant parts out of the talker input
-    """
-    im_start_indexes = (
-        input_ids == config.im_start_token_id
-    ).nonzero(as_tuple=True)[0]
-    mask = torch.ones(input_ids.shape, dtype=torch.bool, device=input_ids.device)
+    Cut system prompt and previous assistant parts out of the talker input.
 
-    for i in range(len(im_start_indexes) - 1):
-        im_start_index = im_start_indexes[i]
-        segment_end_index = im_start_indexes[i + 1]
-        role_token = input_ids[im_start_index + 1]
-        # Talker should ignore thinker system prompt
-        if role_token == config.system_token_id:
-            mask[im_start_index:segment_end_index] = 0
-        elif role_token == config.assistant_token_id:
-            mask[im_start_index:segment_end_index] = 0
-    return mask
+    Each ``<|im_start|>`` opens a turn whose role is the token after it. A system or
+    assistant turn is cut up to the next ``<|im_start|>``; the span's last turn is
+    kept whatever its role. Device ops only, so a prefill on the GPU thread never
+    waits for the host.
+    """
+    if input_ids.numel() == 0:
+        return torch.ones(input_ids.shape, dtype=torch.bool, device=input_ids.device)
+    is_start = input_ids == config.im_start_token_id
+    turn = torch.cumsum(is_start, 0)  # 0 before the first turn
+    # each turn's role token, scattered to its turn number (the wrapped-around last
+    # entry can only be the last turn's, which is kept anyway)
+    roles = torch.zeros(input_ids.shape[0] + 1, dtype=input_ids.dtype, device=input_ids.device)
+    roles.scatter_reduce_(0, turn * is_start, torch.roll(input_ids, -1) * is_start, "amax")
+    role = roles[turn]
+    cut = (role == config.system_token_id) | (role == config.assistant_token_id)
+    return ~(cut & (turn > 0) & (turn < turn[-1]))
 
 
 # ===================================================================
