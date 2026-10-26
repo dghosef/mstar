@@ -31,6 +31,25 @@ from mstar.utils.causal_conv1d import PAD_SLOT_ID
 
 logger = logging.getLogger(__name__)
 
+
+def _l2norm(t: torch.Tensor) -> torch.Tensor:
+    return torch.nn.functional.normalize(t.float(), dim=-1).to(t.dtype)
+
+
+# Eager, the normalize is four full-size passes per tensor (fp32 copy, norm,
+# divide, cast); compiled, one. Built on first use, once the device is known.
+_L2NORM = None
+
+
+def _l2norm_compiled(t: torch.Tensor) -> torch.Tensor:
+    global _L2NORM
+    if _L2NORM is None:
+        from mstar.platforms.compile import with_inductor_overrides
+
+        _L2NORM = with_inductor_overrides(torch.compile(_l2norm, dynamic=True))
+    return _L2NORM(t)
+
+
 # What each arch's chunked prefill kernel will read as its packed state.
 # SM90 is fp32 only; Blackwell takes the narrower ones, so a bf16 pool is not
 # forced through an fp32 round trip there.
@@ -304,8 +323,7 @@ class GDNManager(LinearAttnManager):
         """
         plan = self.current_plan(label)
         if self.config.qk_l2norm and not plan.qk_l2norm_in_kernel:
-            q = torch.nn.functional.normalize(q.float(), dim=-1).to(q.dtype)
-            k = torch.nn.functional.normalize(k.float(), dim=-1).to(k.dtype)
+            q, k = _l2norm_compiled(q), _l2norm_compiled(k)
         # a split projection gives column views; copy only for a kernel that
         # needs them contiguous
         if not plan.takes_strided_inputs:
