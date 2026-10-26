@@ -7,6 +7,7 @@
 //! usable as a plain Rust library (rlib) by Rust-side consumers.
 //! Build: `maturin develop --release` in rust/.
 
+pub mod batch_builder;
 pub mod communicator;
 pub mod graph;
 pub mod shm;
