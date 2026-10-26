@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 from mstar.model.components.diffusion.compile_utils import EXACT_OP_TYPES, exact_op_types, exclude_from_compile
+from mstar.model.components.diffusion.exact_norm import exact_rms_norm
 from mstar.model.flux2_klein.components.transformer import Flux2DiT
 from mstar.model.flux2_klein.config import Flux2TransformerConfig
 from mstar.model.z_image.components.transformer import ScaledRMSNorm
@@ -79,6 +80,19 @@ def test_exact_op_classes_can_be_chosen():
     # a marked norm (ScaledRMSNorm) counts as a norm, not as an activation
     assert exclude_from_compile(nn.Sequential(ScaledRMSNorm(4, 1e-5)), exact_op_types(["activations"])) == 0
     assert exclude_from_compile(nn.Sequential(ScaledRMSNorm(4, 1e-5)), exact_op_types(["norms"])) == 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@pytest.mark.parametrize("scale", [0.01, 1.0, 30.0])
+def test_exact_rms_norm_matches_torch_bit_for_bit(scale):
+    torch.manual_seed(0)
+    # a klein q view: a strided chunk of the fused qkv projection, [B, L, H, 128]
+    qkv = (torch.randn(2, 777, 3 * 6 * 128, device="cuda") * scale).to(torch.bfloat16)
+    q = qkv.chunk(3, dim=-1)[1].unflatten(-1, (-1, 128))
+    w = (1 + 0.3 * torch.randn(128, device="cuda")).to(torch.bfloat16)
+    for x in (q, q.contiguous(), q[0], q.reshape(-1, 128)[:999]):
+        assert torch.equal(exact_rms_norm(x, w, 1e-6), torch.nn.functional.rms_norm(x, (128,), w, 1e-6))
+    assert torch.equal(exact_rms_norm(q, w, None), torch.nn.functional.rms_norm(q, (128,), w, None))
 
 
 def test_knob_reaches_both_models():
