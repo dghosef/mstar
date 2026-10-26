@@ -7,6 +7,8 @@ import os
 import queue
 import threading
 import time
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import torch
@@ -532,6 +534,14 @@ class PreprocessWorkerThread:
         # with a bare communicator).
         self.wakeup = wakeup
         self.idle_wait_ms = 20
+        # Media load + process_prompt for several requests at once, for models
+        # that declare it; requests then wait here instead of in in_queue.
+        workers = getattr(model, "PREPROCESS_WORKERS", 1) if model is not None else 1
+        self._prep_workers = workers
+        self._prep_pool = (
+            ThreadPoolExecutor(workers, thread_name_prefix="preprocess") if workers > 1 else None
+        )
+        self._preparing: deque[tuple[PreprocessInput, DataWorkerProfile | None, Future]] = deque()
 
     def _cleanup_request_state(self, request_id: str, *, force: bool = False) -> None:
         """Release transport and postprocessing state owned by this thread.
@@ -564,12 +574,25 @@ class PreprocessWorkerThread:
 
     def _process_input(
         self, input: PreprocessInput, profile: DataWorkerProfile | None = None,
+        prepared: Future | None = None,
     ):
+        """Hand one request to the conductor. ``prepared``: its
+        ``_prepare_input`` already run on the preprocess pool."""
+        self._live_requests[input.request_id] = self._live_requests.get(input.request_id, 0) + 1
+        self.in_flight_requests.add(input.request_id)
+        tensors, input_metadata, model_kwargs = (
+            prepared.result() if prepared is not None else self._prepare_input(input)
+        )
+        self._store_and_send(input, tensors, input_metadata, model_kwargs, profile)
+
+    def _prepare_input(
+        self, input: PreprocessInput,
+    ) -> tuple[NameToTensorList, dict, dict]:
+        """Load the request's media and run the model's ``process_prompt``.
+        Reads no state this thread mutates, so it may run on the preprocess pool."""
         tensors: NameToTensorList = {}
         input_metadata = {}
         file_states: dict[str, list[tuple[int, int, int]]] = {}
-        self._live_requests[input.request_id] = self._live_requests.get(input.request_id, 0) + 1
-        self.in_flight_requests.add(input.request_id)
 
         # First, load raw modality tensors from file_paths (images, audio, video)
         # so they can be passed to process_prompt() below.
@@ -656,7 +679,12 @@ class PreprocessWorkerThread:
             tensors["text_inputs"] = [torch.tensor(
                 list(byte_data), dtype=torch.uint8, device=self.device
             )]
+        return tensors, input_metadata, model_kwargs
 
+    def _store_and_send(
+        self, input: PreprocessInput, tensors: NameToTensorList, input_metadata: dict,
+        model_kwargs: dict, profile: DataWorkerProfile | None,
+    ) -> None:
         initial_signals = self.tensor_manager.store_and_return_tensor_info(
             request_id=input.request_id,
             tensors=tensors # dict(modality_input: list[tensors])
@@ -1270,6 +1298,55 @@ class PreprocessWorkerThread:
         idle_ms = getattr(self, "idle_wait_ms", 20)
         return lambda: wait(idle_ms)
 
+    def _take_input(
+        self, pre_input: PreprocessInput, profile: DataWorkerProfile | None,
+        prepared: Future | None = None,
+    ) -> None:
+        # again here: a request submitted after the event was set
+        # sees it set, so the conductor gets ENABLE_METRICS first
+        self._send_enable_metrics_if_requested()
+        # Releases queued before this request was submitted belong
+        # to an earlier request under its id: apply them first.
+        self._process_releases()
+        try:
+            self._process_input(pre_input, profile, prepared)
+        except Exception as exc:  # noqa: BLE001 — any failure must reach the client
+            if profile is not None:
+                profile.failed = True
+                self.profile_queue.put(profile)
+            # A request whose media load or prompt processing fails
+            # never reaches the conductor, so nothing downstream
+            # would ever complete it; surface the failure as an
+            # error chunk instead of leaving the client to hit the
+            # server timeout.
+            self._fail_request(
+                pre_input.request_id, exc, "preprocessing", abort=False,
+            )
+            # Never reached the conductor, so there are no remote
+            # readers to race: hard-drop the (possibly persisted)
+            # input signals directly.
+            self._cleanup_request_state(pre_input.request_id, force=True)
+            self._removed(pre_input.request_id)
+
+    def _pump_preprocess_pool(self, pool: ThreadPoolExecutor) -> bool:
+        """Prepare up to ``PREPROCESS_WORKERS`` requests at once on ``pool``
+        and hand them on in arrival order. Until handed on, a request is in
+        the state of one still in ``in_queue``: nothing here tracks it yet."""
+        did_work = False
+        preparing = self._preparing
+        while len(preparing) < self._prep_workers and not self.in_queue.empty():
+            did_work = True
+            pre_input = self.in_queue.get()
+            profile = self._start_profile(pre_input) if self.timing_requested.is_set() else None
+            future = pool.submit(self._prepare_input, pre_input)
+            if self.wakeup is not None:
+                self.wakeup.register_future(future)
+            preparing.append((pre_input, profile, future))
+        while preparing and preparing[0][2].done():
+            did_work = True
+            self._take_input(*preparing.popleft())
+        return did_work
+
     def run(self):
         # A thread told to stop before it starts (teardown tests build one with
         # only its queues) has nothing to warm up.
@@ -1323,37 +1400,16 @@ class PreprocessWorkerThread:
                 # Reads may have just resolved; ACK any drains now free of them.
                 for rid in list(self._draining_rids):
                     self._complete_drain_if_ready(rid)
-                if not self.in_queue.empty():
+                pool = getattr(self, "_prep_pool", None)
+                if pool is not None:
+                    did_work = self._pump_preprocess_pool(pool) or did_work
+                elif not self.in_queue.empty():
                     did_work = True
                     pre_input = self.in_queue.get()
-                    # again here: a request submitted after the event was set
-                    # sees it set, so the conductor gets ENABLE_METRICS first
-                    self._send_enable_metrics_if_requested()
-                    # Releases queued before this request was submitted belong
-                    # to an earlier request under its id: apply them first.
-                    self._process_releases()
                     profile = None
-                    try:
-                        if self.timing_requested.is_set():
-                            profile = self._start_profile(pre_input)
-                        self._process_input(pre_input, profile)
-                    except Exception as exc:  # noqa: BLE001 — any failure must reach the client
-                        if profile is not None:
-                            profile.failed = True
-                            self.profile_queue.put(profile)
-                        # A request whose media load or prompt processing fails
-                        # never reaches the conductor, so nothing downstream
-                        # would ever complete it; surface the failure as an
-                        # error chunk instead of leaving the client to hit the
-                        # server timeout.
-                        self._fail_request(
-                            pre_input.request_id, exc, "preprocessing", abort=False,
-                        )
-                        # Never reached the conductor, so there are no remote
-                        # readers to race: hard-drop the (possibly persisted)
-                        # input signals directly.
-                        self._cleanup_request_state(pre_input.request_id, force=True)
-                        self._removed(pre_input.request_id)
+                    if self.timing_requested.is_set():
+                        profile = self._start_profile(pre_input)
+                    self._take_input(pre_input, profile)
             except Exception:
                 logger.exception("PreprocessWorkerThread error")
 
@@ -1364,6 +1420,9 @@ class PreprocessWorkerThread:
             if not did_work:
                 idle_wait()
 
+        pool = getattr(self, "_prep_pool", None)
+        if pool is not None:
+            pool.shutdown(wait=False, cancel_futures=True)
         # Stopping, and nothing will send the RemoveRequest for what is still
         # tracked (the conductor is gone or going), so drop it here rather than
         # leave the input signals of in-flight requests in /dev/shm.

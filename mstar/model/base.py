@@ -433,6 +433,11 @@ class Model(ABC):
     # config.yaml overrides either. See ``entrypoint._set_preprocess_threads``.
     PREPROCESS_TORCH_THREADS: int | None = None
 
+    # Requests whose media load and ``process_prompt`` the API server runs at
+    # once, on a thread pool. 1 runs them inline on the data worker thread, one
+    # at a time. Above 1, ``load_*`` and ``process_prompt`` must be thread-safe.
+    PREPROCESS_WORKERS: int = 1
+
     def _get_worker_graphs_for_graph_walk(
         self,
         graph_walk: str,
