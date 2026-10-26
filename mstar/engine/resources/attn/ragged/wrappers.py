@@ -201,6 +201,9 @@ class _RaggedPrefillBase(ABC):
         read back zero. An oversized static buffer replays fine, but the caller
         must still slice — the padding rows are not a valid result.
         """
+        # q/k/v padded by the caller come back padded (see
+        # `_FlashInferRaggedBase.run`)
+        padded_in = q.shape[-1] == self.padded_head_dim
         qp, kp, vp = (self._pad_head_dim(t.to(self.q_data_type)) for t in (q, k, v))
         if self._out_buf is None:
             out = self.attn_wrapper.run(qp, kp, vp)
@@ -211,7 +214,7 @@ class _RaggedPrefillBase(ABC):
                 f"{self.max_total_tokens} this graph-mode wrapper was built for"
             )
             out = self.attn_wrapper.run(qp, kp, vp, out=self._out_buf[:n])
-        if self.padded_head_dim != self.head_dim:
+        if self.padded_head_dim != self.head_dim and not padded_in:
             return out[..., : self.head_dim].contiguous()
         # `out` is the shared buffer the next call overwrites; the padded
         # branch above already returns a copy

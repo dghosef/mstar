@@ -21,6 +21,7 @@ from mstar.engine.resources.attn.ragged.wrappers import (
     RaggedCrossPrefillWrapper,
     RaggedPrefillWrapper,
     _RaggedPrefillBase,
+    padded_head_dim,
 )
 from mstar.engine.resources.base import CGSlotKey
 from mstar.engine.resources.step import Segment, SlotLease, StepContext
@@ -258,7 +259,16 @@ class _FlashInferRaggedBase:
         compiled caller breaks here, and an eager one calls the kernel directly.
         """
         if self._config.compile_op and torch.compiler.is_compiling():
-            return ragged_attention(q, k, v, self._key, label)
+            # A head dim the kernels lack is padded here, in the traced graph,
+            # where the pad fuses into whatever produced q/k/v and the slice
+            # into whatever reads the output; inside the op both are
+            # full-size copies per layer.
+            d = q.shape[-1]
+            padded = padded_head_dim(d)
+            if padded == d:
+                return ragged_attention(q, k, v, self._key, label)
+            q, k, v = (torch.nn.functional.pad(t, (0, padded - d)) for t in (q, k, v))
+            return ragged_attention(q, k, v, self._key, label)[..., :d]
         return self._run(q, k, v, label)
 
     @torch.compiler.disable
