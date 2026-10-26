@@ -179,8 +179,11 @@ class VJepa2Model(Model):
         "actions", "states", "extrinsics", "context_mask", "target_mask", "goal_hidden",
     )
     LENGTH_KWARGS = ("max_output_tokens", "rollout_horizon")
-    # a request's video decode is most of its wall time and holds no GIL
-    PREPROCESS_WORKERS = 4
+    # a request's video decode is most of its wall time and holds no GIL;
+    # fewer intra-op threads each keep 8 concurrent preprocesses from
+    # oversubscribing the host
+    PREPROCESS_WORKERS = 8
+    PREPROCESS_TORCH_THREADS = 16
 
     PREFILL_VIDEO = "prefill_video"
     PREFILL_VIDEO_ENCODER_ONLY = "prefill_video_encoder_only"
