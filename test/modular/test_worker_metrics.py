@@ -542,7 +542,7 @@ def test_the_data_worker_sends_enable_metrics_before_any_later_request(tmp_path)
         profile_queue=queue.Queue(), cleanup_request_queue=queue.Queue(),
         abort_request_queue=queue.Queue(), reads_done_queue=queue.Queue(),
         discard_tensor_queue=queue.Queue(), stop_event=stop,
-        communicator=SimpleNamespace(get_all_new_messages=lambda: [],
+        communicator=SimpleNamespace(poll_for_messages=lambda timeout_ms=1: False, get_all_new_messages=lambda: [],
                                      send=lambda entity, msg: sent.append((entity, msg))),
         tensor_manager=_StubTensorManager(), model=_Model(),
         worker_metrics_requested=facade.worker_metrics_requested,

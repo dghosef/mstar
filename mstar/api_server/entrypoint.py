@@ -932,7 +932,9 @@ class APIServer:
                 if self.running:
                     logger.exception("Error in message processing loop")
                     time.sleep(0.01)
-            time.sleep(0.001)
+            # wakes at once for a conductor or worker message; the data
+            # worker's chunks are picked up within the 1 ms timeout as before
+            self.communicator.poll_for_messages(timeout_ms=1)
 
     # ----------------------------------------------------------
     # Streaming helper

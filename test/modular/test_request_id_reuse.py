@@ -66,6 +66,11 @@ class _Socket:
         self.polls = 0
         self.cond = threading.Condition()
 
+    def poll_for_messages(self, timeout_ms=1):
+
+        return False
+
+
     def get_all_new_messages(self):
         msgs = []
         while not self.inbox.empty():
@@ -373,7 +378,8 @@ def _run_message_thread(s, pw, chunks=(), messages=(), until=lambda: True):
     pw.get_profile_updates = lambda: []
     pw.finished_reading = lambda rid, drained: None
     s.communicator = SimpleNamespace(
-        get_all_new_messages=lambda: [messages.pop(0)] if messages else [],
+        poll_for_messages=lambda timeout_ms=1: False,
+            get_all_new_messages=lambda: [messages.pop(0)] if messages else [],
     )
     s.conductor_proc = None
     s._liveness_interval_s = 0.5

@@ -254,6 +254,11 @@ class _ScriptedApiComm:
         self.server, self.batches, self.req = server, list(batches), req
         self.released_before = []
 
+    def poll_for_messages(self, timeout_ms=1):
+
+        return False
+
+
     def get_all_new_messages(self):
         self.released_before.append(self.req.event.is_set())
         if not self.batches:
