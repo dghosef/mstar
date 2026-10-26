@@ -892,6 +892,9 @@ class APIServer:
                         if req.profile.timing.first_chunk_time is None:
                             req.profile.timing.first_chunk_time = now
                         req.profile.timing.last_chunk_time = now
+                        if result_chunk.read_time is not None:
+                            req.profile.timing.last_output_read_time = result_chunk.read_time
+                            req.profile.timing.output_postprocess_s += result_chunk.postprocess_s
                         if metrics is not None and result_chunk.modality != "error":
                             req.first_chunk_times.setdefault(result_chunk.modality, now)
                         if req.request_id is not None:

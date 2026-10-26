@@ -451,6 +451,8 @@ class PreprocessWorkerThread:
     _next_transfer_publish = 0.0
     # class-level so a thread built without __init__ never sends ENABLE_METRICS
     worker_metrics_requested: threading.Event | None = None
+    # class-level so a thread built without __init__ stamps no profile
+    enable_prof = False
 
     def __init__(
         self,
@@ -1095,6 +1097,7 @@ class PreprocessWorkerThread:
                         )
                         if self.enable_nvtx:
                             profiler.range_push(f"dataworker.get_tensor.{modality}")
+                        read_time = time.perf_counter() if self.enable_prof else None
                         tensor = self.tensor_manager.get_tensor(tensor_info.uuid)
                         if self.enable_nvtx:
                             profiler.range_pop()
@@ -1102,6 +1105,9 @@ class PreprocessWorkerThread:
                         postprocessed = self.model.postprocess(
                             tensor, modality,
                             request_kwargs=self.request_model_kwargs.get(request_id),
+                        )
+                        postprocess_s = (
+                            time.perf_counter() - read_time if read_time is not None else 0.0
                         )
                         if self.enable_nvtx:
                             profiler.range_pop()
@@ -1155,6 +1161,8 @@ class PreprocessWorkerThread:
                                 modality=modality,
                                 data=postprocessed,
                                 metadata=chunk_metadata,
+                                read_time=read_time,
+                                postprocess_s=postprocess_s,
                             ),
                         )
                         if self.enable_nvtx:
