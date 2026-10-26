@@ -329,6 +329,11 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             )
             # One graph per batch size: dynamo unrolls the per-request loop, so
             # the first batch of each size compiles (seconds with a warm cache).
+            # Left eager, a cross-request batch runs slower per row than the
+            # compiled single-request step, and batching loses to serial.
+            self.transformer.denoise_step_batched = torch.compile(
+                self.transformer.denoise_step_batched, fullgraph=False, dynamic=False,
+            )
             self.transformer.denoise_step_action_batched = torch.compile(
                 self.transformer.denoise_step_action_batched, fullgraph=False, dynamic=False,
             )
