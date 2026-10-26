@@ -233,6 +233,42 @@ class TestPrefixGather:
             manager.run(torch.zeros(1, 1, 1), "main", _layer_tensor())
 
 
+class TestRun:
+    @pytest.mark.skipif(
+        not torch.cuda.is_available() or _fa3_unavailable_reason() is not None,
+        reason="needs CUDA and the fa3-fwd wheel",
+    )
+    def test_each_segment_attends_to_its_own_prefix_and_tokens(self):
+        """Two segments with different prefix lengths: each one's queries see
+        only [its prefix | its fresh tokens], in the plan's packed order."""
+        heads, kv_heads, dim, page = 8, 2, 128, 16
+        config = PagedKVConfig(
+            num_layers=1, num_kv_heads=kv_heads, head_dim=dim,
+            max_seq_len=256, max_num_pages=8, page_size=page,
+        )
+        manager = DenseAttentionManager(
+            kv_cache="kv", device=torch.device("cuda"), dtype=torch.bfloat16, kv_config=config,
+        )
+        views = [_view("r0", [0, 1], prefix=20, fresh=40), _view("r1", [2, 3], prefix=30, fresh=24)]
+        manager.plan(AttentionStep(causal=False), _ctx(views))
+        gen = torch.Generator(device="cuda").manual_seed(0)
+        layer = torch.randn(8, 2, page, kv_heads, dim, device="cuda", dtype=torch.bfloat16, generator=gen)
+        q = torch.randn(64, heads, dim, device="cuda", dtype=torch.bfloat16, generator=gen)
+        k, v = (torch.randn(64, kv_heads, dim, device="cuda", dtype=torch.bfloat16, generator=gen) for _ in "kv")
+
+        out = manager.run(q, "main", layer, k=k, v=v, layer_idx=0)
+
+        expected = []
+        for (pages, prefix), rows in zip((([0, 1], 20), ([2, 3], 30)), (slice(0, 40), slice(40, 64)), strict=True):
+            kk = torch.cat([layer[pages][:, 0].reshape(-1, kv_heads, dim)[:prefix], k[rows]])
+            vv = torch.cat([layer[pages][:, 1].reshape(-1, kv_heads, dim)[:prefix], v[rows]])
+            expected.append(torch.nn.functional.scaled_dot_product_attention(
+                q[rows].transpose(0, 1).float(), kk.transpose(0, 1).float(), vv.transpose(0, 1).float(),
+                enable_gqa=True,
+            ).transpose(0, 1))
+        torch.testing.assert_close(out.float(), torch.cat(expected), atol=2e-2, rtol=2e-2)
+
+
 class TestBackendSelection:
     def test_dense_spec_builds_dense_when_fa3_is_there(self):
         """...and degrades to the paged backend when it is not: the two are

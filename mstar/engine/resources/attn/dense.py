@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 
 # imported here, not per `run`: the wheel may be absent, so keep the failure
 try:
-    from fa3_fwd_interface import flash_attn_varlen_func
+    from fa3_fwd_interface import flash_attn_func, flash_attn_varlen_func
 except Exception as _fa3_exc:  # noqa: BLE001
-    flash_attn_varlen_func = None
+    flash_attn_func = flash_attn_varlen_func = None
     _VARLEN_IMPORT_ERROR: str | None = f"{type(_fa3_exc).__name__}: {_fa3_exc}"
 else:
     _VARLEN_IMPORT_ERROR = None
@@ -275,6 +275,25 @@ class DenseAttentionManager(AttentionManager):
         )
         plan = self._current_plans[label]
 
+        if flash_attn_func is not None:
+            # FA3's dense kernel, one call per segment, is faster than its
+            # varlen kernel over the packed segments (Cosmos3 denoise shapes)
+            # and gives the same result
+            outs = []
+            offset = 0
+            for segment in plan.segments:
+                k_seg, v_seg = k[offset:offset + segment.q_len], v[offset:offset + segment.q_len]
+                if segment.prefix_len:
+                    k_pref, v_pref = self._prefix_kv(segment, layer_idx, kv_cache_layer)
+                    k_seg, v_seg = torch.cat([k_pref, k_seg]), torch.cat([v_pref, v_seg])
+                o = flash_attn_func(
+                    q[None, offset:offset + segment.q_len], k_seg[None], v_seg[None], causal=plan.causal,
+                )
+                outs.append((o[0] if isinstance(o, tuple) else o)[0])
+                offset += segment.q_len
+            return outs[0] if len(outs) == 1 else torch.cat(outs)
+
+        # AITER on ROCm: one varlen pass over the packed segments
         k_parts: list[torch.Tensor] = []
         v_parts: list[torch.Tensor] = []
         offset = 0
