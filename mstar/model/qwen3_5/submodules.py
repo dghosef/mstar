@@ -700,10 +700,10 @@ class VisionEncoderSubmodule(NodeSubmodule):
     # The engine would compile `forward_batched` whole, and its per-step
     # bookkeeping (each request's slice of the output, the segment lengths)
     # guards on the batch size: every new size recompiled (~0.6 s, on a live
-    # request). The tensor stages around the captured block loop are compiled
-    # here instead, dynamic in the patch count from the first call. A step
-    # past the top capture bucket runs the blocks eagerly: compiling that rare
-    # path stalled its first request for seconds.
+    # request). The tensor stages are compiled here instead, dynamic in the
+    # patch count, so one graph serves every capture bucket and the eager
+    # steps past the top one. Uncompiled, the blocks' fp32 rope, norms and
+    # activations were over half the tower's GPU time on long videos.
     disable_torch_compile = True
 
     def __init__(
@@ -838,10 +838,23 @@ class VisionEncoderSubmodule(NodeSubmodule):
         # the whole step replays as one row (`one_row_per_step`)
         return segments <= per_request
 
+    def _compiled_stages(self) -> tuple:
+        """Embed, block loop and merger, each compiled once, dynamic in the
+        patch count; the block loop keeps the ragged attention in its graph
+        (``compile_op``), so the norms, rope and activations fuse around it."""
+        if self._compiled is None:
+            # under the platform's inductor settings, as the engine's compiles are
+            self._compiled = tuple(
+                with_inductor_overrides(torch.compile(fn, dynamic=True))
+                for fn in (self.model.embed, self.model.encode, self.model.merger)
+            )
+        return self._compiled
+
     def _capture_block_loop(self, inp: PiecewiseCallInputs) -> dict[str, torch.Tensor]:
         """The captured region: reads the runner's buffers, never rebinds."""
         s = inp.static_inputs
-        return {"hidden": self.model.encode(s["hidden"], s["cos"], s["sin"])}
+        encode = self._compiled_stages()[1]
+        return {"hidden": encode(s["hidden"], s["cos"], s["sin"])}
 
     def _replay_block_loop(
         self,
@@ -937,17 +950,11 @@ class VisionEncoderSubmodule(NodeSubmodule):
     ) -> dict[str, NameToTensorList]:
         # One call for every image; the ragged kernel's per-frame segments
         # keep them apart.
-        if self._compiled is None:
-            # under the platform's inductor settings, as the engine's compiles are
-            self._compiled = (
-                with_inductor_overrides(torch.compile(self.model.embed, dynamic=True)),
-                with_inductor_overrides(torch.compile(self.model.merger, dynamic=True)),
-            )
-        embed, merger = self._compiled
+        embed, encode, merger = self._compiled_stages()
         hidden, cos, sin = embed(pixel_values, indices, weights, position_ids)
         encoded = self._replay_block_loop(engine_inputs, hidden, cos, sin, seq_lengths)
         if encoded is None:
-            encoded = self.model.encode(hidden, cos, sin)
+            encoded = encode(hidden, cos, sin)
         embeds = merger(encoded)
         return self._split_rows(engine_inputs.request_ids, embeds, row_tokens)
 
