@@ -7,7 +7,7 @@ import threading
 import time
 import time as _time
 from collections import defaultdict, deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -330,6 +330,91 @@ class _LazyPerRid:
 
     def values(self):
         return self._dict().values()
+
+
+class _LazyHostOutputs:
+    """Per-rid host copies of a step's outputs, copied one output name at a time
+    on first read (``copy_name(name) -> {rid: host value}``).
+
+    The stop check reads at most the sampled token, and a loop that stops on
+    its iteration count reads nothing, so copying every output down each step
+    paid for transfers nobody read. Outputs that leave by a host transport are
+    copied by the send instead; ``landed`` hands it what was copied here.
+    """
+
+    __slots__ = ("_source", "_copy_name", "_landed")
+
+    def __init__(self, source: dict, copy_name: Callable[[str], dict]):
+        self._source = source
+        self._copy_name = copy_name
+        self._landed: dict[str, dict] = {}
+
+    def _host(self, name: str) -> dict:
+        landed = self._landed.get(name)
+        if landed is None:
+            landed = self._landed[name] = self._copy_name(name)
+        return landed
+
+    def landed(self) -> dict[int, NameToTensorList]:
+        out: dict[int, NameToTensorList] = {}
+        for name, by_rid in self._landed.items():
+            for rid, value in by_rid.items():
+                out.setdefault(rid, {})[name] = value
+        return out
+
+    def get(self, rid, default=None):
+        row = self._source.get(rid)
+        if row is None:
+            return default
+        return _LazyHostRow(self, rid, row) if isinstance(row, dict) else row
+
+    def __getitem__(self, rid):
+        row = self._source[rid]
+        return _LazyHostRow(self, rid, row) if isinstance(row, dict) else row
+
+    def __contains__(self, rid) -> bool:
+        return rid in self._source
+
+    def __iter__(self):
+        return iter(self._source)
+
+    def __len__(self) -> int:
+        return len(self._source)
+
+    def __bool__(self) -> bool:
+        return bool(self._source)
+
+    def keys(self):
+        return self._source.keys()
+
+    def items(self):
+        return ((rid, self[rid]) for rid in self._source)
+
+    def values(self):
+        return (self[rid] for rid in self._source)
+
+
+class _LazyHostRow(Mapping):
+    """One request's view of ``_LazyHostOutputs``: reading a name copies it."""
+
+    __slots__ = ("_parent", "_rid", "_row")
+
+    def __init__(self, parent: _LazyHostOutputs, rid, row: dict):
+        self._parent, self._rid, self._row = parent, rid, row
+
+    def __getitem__(self, name):
+        value = self._row[name]
+        # only a list of tensors has anything to copy
+        return self._parent._host(name)[self._rid] if isinstance(value, list) else value
+
+    def __contains__(self, name) -> bool:
+        return name in self._row
+
+    def __iter__(self):
+        return iter(self._row)
+
+    def __len__(self) -> int:
+        return len(self._row)
 
 
 class Worker:
@@ -3437,7 +3522,10 @@ class Worker:
                     node_name=batch_N.node_name,
                     graph_walk=graph_walk,
                     skip_cuda_sync=True,
-                    cpu_tensors=cpu_outputs,
+                    cpu_tensors=(
+                        cpu_outputs.landed()
+                        if isinstance(cpu_outputs, _LazyHostOutputs) else cpu_outputs
+                    ),
                     ready_event=batch_N.node_batch.completion_event,
                 )
             return stored
@@ -3895,17 +3983,19 @@ class Worker:
                 HostRows(tuple(row_rids), host),
             )
 
-        cpu_per_rid: dict = {}
+        # Shared by every name copied this step, so two names never land in
+        # one pinned buffer.
         buffer_indices: dict[tuple[str, torch.dtype, int], int] = defaultdict(int)
-        with side:
-            for rid, name_to_list in source.items():
-                if not isinstance(name_to_list, dict):
-                    cpu_per_rid[rid] = name_to_list
-                    continue
-                cpu_per_rid[rid] = {}
-                for name, tensors in name_to_list.items():
+
+        def copy_name(name: str) -> dict:
+            host: dict = {}
+            with side:
+                for rid, name_to_list in source.items():
+                    if not isinstance(name_to_list, dict) or name not in name_to_list:
+                        continue
+                    tensors = name_to_list[name]
                     if not isinstance(tensors, list):
-                        cpu_per_rid[rid][name] = tensors
+                        host[rid] = tensors
                         continue
                     new_list = []
                     for t in tensors:
@@ -3921,10 +4011,11 @@ class Worker:
                             new_list.append(cpu_t)
                         else:
                             new_list.append(t)
-                    cpu_per_rid[rid][name] = new_list
-        side.synchronize()
+                    host[rid] = new_list
+            side.synchronize()
+            return host
 
-        return cpu_per_rid, None
+        return _LazyHostOutputs(source, copy_name), None
 
     def _removal_step_reached(self, body: RemoveRequest) -> bool:
         """Whether this rank has consumed the step rank 0 released these pages
