@@ -250,6 +250,13 @@ class AudioEncoderSubmodule(NodeSubmodule):
         padded = nn.utils.rnn.pad_sequence(
             features.T.split(layout.chunk_lengths, dim=0), batch_first=True,
         ).transpose(1, 2).unsqueeze(1).to(enc.conv2d1.weight.dtype)
+        # Zero chunks up to a power of two: cuDNN builds a plan for each new conv
+        # shape (tens of ms of host time), and the chunk count of a step varies.
+        # The kept frames index only the real chunks.
+        chunks = padded.shape[0]
+        bucket = max(8, 1 << (chunks - 1).bit_length())
+        if bucket > chunks:
+            padded = torch.cat([padded, padded.new_zeros((bucket - chunks, *padded.shape[1:]))])
         embeds = []
         for chunk in padded.split(enc.conv_chunksize, dim=0):
             x = torch.nn.functional.gelu(enc.conv2d1(chunk))
