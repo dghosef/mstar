@@ -83,6 +83,8 @@ class StreamBuffer:
     # it. The signal comes through the conductor and the items come straight
     # from the producer, so the signal can arrive first.
     _num_items_expected = 0
+    # when the ready chunk a ``ChunkBatchHold`` is holding was first seen ready
+    _held_since: float | None = None
 
     def prime_context(self, context_items: int) -> None:
         """The first ``context_items`` items the producer sends are context only
@@ -147,6 +149,21 @@ class StreamBuffer:
             or not self._final_chunk_emitted
         )
 
+    def holdable_since(self, now: float) -> float | None:
+        """When a ready chunk a ``ChunkBatchHold`` may hold became ready, or
+        None if no chunk is ready or the ready one is never held (the
+        stream's first, one past the producer's end, or a refused one)."""
+        if (
+            self._waiting_graph_edges
+            or self._chunks_popped == 0
+            or self.producer_done
+            or not self.has_chunk_ready()
+        ):
+            return None
+        if self._held_since is None:
+            self._held_since = now
+        return self._held_since
+
     def pop_chunk(self) -> StreamChunk:
         """Pop the next chunk. Only call when has_chunk_ready() is True.
 
@@ -173,6 +190,7 @@ class StreamBuffer:
             self._buffer = self._buffer[stride:]
             self._consumed += stride
         self.policy.register_chunk(stride)
+        self._held_since = None
 
         is_final = self._producer_done_and_all_read() and len(self._buffer) == 0
         # When continue_after_producer_done, never mark as final — the

@@ -57,6 +57,7 @@ from mstar.model.base import Model, WorkerGraph
 from mstar.model.submodule_base import BatchedModelOutput, HostRows, InputMetadata
 from mstar.profile.worker import WorkerProfileInfo
 from mstar.streaming.stream_buffer import StreamBuffer, StreamChunkInfo, StreamingEdge
+from mstar.streaming.topology import ChunkBatchHold
 from mstar.utils.containers import ParallelList, RecentSet
 from mstar.utils.device import DeviceCapability
 from mstar.utils.ipc_format import (
@@ -672,6 +673,14 @@ class Worker:
         # edge_name -> partition the stream feeds
         self._stream_partition: dict[str, str] = {
             conn.edge_name: conn.to_partition for conn in self._my_consumer_connections
+        }
+        # edge_name -> how long its ready chunks may wait to batch. Not for a
+        # lockstep-parallel consumer: a hold decided on this rank's clock would
+        # let its ranks ingest the same chunk at different steps.
+        self._stream_holds: dict[str, ChunkBatchHold] = {
+            conn.edge_name: conn.batch_hold for conn in self._my_consumer_connections
+            if conn.batch_hold is not None
+            and self._consumer_node_cache.get(conn.edge_name) not in self.parallel_nodes
         }
 
         # (graph_walk, node) -> innermost enclosing loop, for ending a
@@ -1352,13 +1361,35 @@ class Worker:
         }
         return chunks or None
 
-    def _poll_stream_buffers(self) -> None:
-        """Check all active StreamBuffers; when a chunk is ready, feed it as a normal input."""
+    def _poll_stream_buffers(self, idle: bool = True) -> None:
+        """Check all active StreamBuffers; when a chunk is ready, feed it as a normal input.
+
+        A connection with a ``ChunkBatchHold`` keeps its holdable chunks back
+        until enough are ready or the oldest has waited long enough, so they
+        reach the consumer as one batch; ``idle`` (nothing in flight) releases
+        them at once, since holding then only delays the work.
+        """
         # Every ready chunk is popped first and ingested in one call (and one
         # Python <> Rust roundtrip)
         polled: list[tuple[int, StreamingEdge]] = []
+        holds = self._stream_holds if not idle else None
+        held: dict[str, list[tuple[int, StreamBuffer, float]]] = {}
+        now = _time.monotonic()
         for request_id, req_info in list(self.request_state.per_request_info.items()):
             for edge_name, sbuf in req_info.stream_buffers.items():
+                if holds and edge_name in holds:
+                    since = sbuf.holdable_since(now)
+                    if since is not None:
+                        held.setdefault(edge_name, []).append((request_id, sbuf, since))
+                        continue
+                streaming_edge = self._pop_streaming_edge(sbuf, edge_name, request_id)
+                if streaming_edge is not None:
+                    polled.append((request_id, streaming_edge))
+        for edge_name, chunks in held.items():
+            hold = holds[edge_name]
+            if len(chunks) < hold.min_chunks and min(c[2] for c in chunks) > now - hold.max_wait_s:
+                continue
+            for request_id, sbuf, _ in chunks:
                 streaming_edge = self._pop_streaming_edge(sbuf, edge_name, request_id)
                 if streaming_edge is not None:
                     polled.append((request_id, streaming_edge))
@@ -4415,7 +4446,7 @@ class Worker:
 
                 if self.enable_nvtx:
                     range_push("worker.poll_stream_buffers", synchronize=False)
-                self._poll_stream_buffers()
+                self._poll_stream_buffers(idle=pending is None)
                 if self.enable_nvtx:
                     range_pop(synchronize=False)
 

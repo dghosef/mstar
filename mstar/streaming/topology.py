@@ -20,6 +20,21 @@ class StreamingGraphEdge(GraphEdge):
         self.is_streaming = True
 
 
+@dataclass(frozen=True)
+class ChunkBatchHold:
+    """How long a consumer may hold ready chunks back to batch them.
+
+    For a consumer whose step costs far more than each extra row (a
+    streaming vocoder): a ready chunk waits until ``min_chunks`` chunks of
+    the connection are ready across requests, or the oldest has waited
+    ``max_wait_s``. A stream's first chunk (time to first output), a chunk
+    after the producer is done (end of the request) and any chunk while the
+    worker has nothing in flight are never held.
+    """
+    max_wait_s: float
+    min_chunks: int
+
+
 @dataclass
 class Connection:
     """Defines a streaming connection between two partitions."""
@@ -27,6 +42,8 @@ class Connection:
     to_partition: str
     edge_name: str
     chunk_policy_factory: Callable[[], ChunkPolicy]
+    # None: hand each chunk to the consumer as soon as it is ready
+    batch_hold: ChunkBatchHold | None = None
 
 
 @dataclass

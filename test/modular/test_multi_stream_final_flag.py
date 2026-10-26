@@ -198,3 +198,60 @@ def test_stream_polls_are_skipped_only_when_no_request_owns_a_buffer():
     assert not Worker._streams_possible(worker)
     worker._stream_buffer_rids.add(7)
     assert Worker._streams_possible(worker)
+
+
+def test_a_batch_hold_keeps_later_chunks_back_until_enough_are_ready():
+    """``ChunkBatchHold``: a stream's first chunk goes at once; later ones wait
+    until ``min_chunks`` are ready across requests, and nothing waits while the
+    worker is idle."""
+    import torch
+
+    from mstar.streaming.topology import ChunkBatchHold
+
+    rids = ["a", "b", "c"]
+    buffers = {
+        rid: StreamBuffer(request_id=rid, edge_name="codes", from_partition="LLM",
+                          policy=FixedChunkPolicy(chunk_size=1))
+        for rid in rids
+    }
+    ingested = []
+    worker = SimpleNamespace(
+        request_state=SimpleNamespace(per_request_info={
+            rid: SimpleNamespace(stream_buffers={"codes": buf}) for rid, buf in buffers.items()
+        }),
+        _stream_holds={"codes": ChunkBatchHold(max_wait_s=60.0, min_chunks=3)},
+        _consumer_node_cache={"codes": "vocoder"},
+        tensor_manager=SimpleNamespace(store_and_return_tensor_info=lambda rid, d, **k: {"codes": []}),
+        _graph_runtime=SimpleNamespace(ingest_inputs_batch=lambda block, **k: []),
+        _edge_block=list,
+        _mark_stream_ingested=lambda rid, edge: ingested.append(rid),
+    )
+    worker._pop_streaming_edge = lambda *a: Worker._pop_streaming_edge(worker, *a)
+
+    uids = iter(range(1000))
+
+    def push(rid, n):
+        for _ in range(n):
+            uid = f"t{next(uids)}"
+            buffers[rid].pre_read_register(uid)
+            buffers[rid].put(uid, torch.zeros(1))
+
+    push("a", 1)
+    Worker._poll_stream_buffers(worker, idle=False)
+    assert ingested == ["a"], "a stream's first chunk is never held"
+    push("a", 1)
+    push("b", 1)
+    Worker._poll_stream_buffers(worker, idle=False)
+    assert ingested == ["a", "b"], "a's second chunk waits; b's first does not"
+    push("b", 1)
+    Worker._poll_stream_buffers(worker, idle=False)
+    assert ingested == ["a", "b"]
+    Worker._poll_stream_buffers(worker, idle=True)
+    assert sorted(ingested[2:]) == ["a", "b"], "an idle worker releases what it held"
+    for rid in rids:
+        push(rid, 2)
+    Worker._poll_stream_buffers(worker, idle=False)
+    assert sorted(ingested[4:]) == ["c"]
+    push("c", 1)
+    Worker._poll_stream_buffers(worker, idle=False)
+    assert sorted(ingested[5:]) == ["a", "b", "c"], "min_chunks ready across requests releases them all"
