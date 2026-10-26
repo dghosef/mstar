@@ -488,10 +488,15 @@ Qwen3-TTS notes
   user-level CUDA MPS daemon (``nvidia-cuda-mps-control -d`` before
   ``mstar serve``) the two workers' kernels also overlap, which raised c=32
   throughput by about a fifth on an H100.
-- The codec decoder runs in float32 by default, reproducing the reference
-  decoder bit for bit. ``model_kwargs: {codec_dtype: bfloat16}`` in the
-  deployment YAML halves its GPU time when throughput matters more than
-  bit-exactness (the Talker is bf16 either way).
+- The codec decoder runs in float32 by default. Its capture is compiled
+  (Inductor, ~55-60 dB SNR against the eager reference decoder), its full
+  windows share one capture bucket, and its conv stack skips the context
+  samples no new frame's audio reads. ``model_kwargs: {codec_dtype: bfloat16}``
+  runs it in bfloat16 (measured within noise of float32 on an H200).
+- Under load a codec window other than a stream's first waits up to 40 ms for
+  windows of other requests to batch with (``model_kwargs:
+  {codec_batch_hold_ms: 40}``, 0 turns it off): a codec step costs several
+  times its cost per row.
 - Opt-in AudioSeal watermark on the codec's output (off by default; install
   ``pip install -e '.[audioseal]'``). Turn it on in the deployment YAML::
 

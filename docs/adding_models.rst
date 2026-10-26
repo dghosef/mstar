@@ -2037,7 +2037,13 @@ Override these methods:
 
 - ``get_partition_topology()`` declares the partitions and the streaming ``Connection``
   objects between them, including a ``chunk_policy_factory`` such as
-  ``SlidingWindowChunkPolicy(window=..., stride=...)``.
+  ``SlidingWindowChunkPolicy(window=..., stride=...)``. A consumer whose step costs
+  far more than each extra row (a streaming vocoder) can also set
+  ``batch_hold=ChunkBatchHold(max_wait_s=..., min_chunks=...)``: the consumer worker
+  then keeps a ready chunk back until ``min_chunks`` of the connection are ready across
+  requests or the oldest has waited ``max_wait_s``, so they run as one batch. A stream's
+  first chunk, chunks after the producer is done, and anything while the worker has
+  nothing in flight are never held (Qwen3-TTS's codec holds up to 40 ms).
 - ``get_partitions()`` declares each ``PartitionDefinition``: its walks, its initial walk,
   and the partitions that produce data into it. Every walk belongs to exactly one
   partition.
