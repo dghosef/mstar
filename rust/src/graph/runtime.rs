@@ -1954,7 +1954,7 @@ impl GraphRuntime {
     #[allow(clippy::type_complexity)]
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
-        target, exclude_target, pre_existing, capture_group_of, waiting, failed, scan_exclude,
+        target, exclude_target, pre_existing, capture_group_of, waiting, failed,
     ))]
     fn sched_begin(
         &mut self,
@@ -1964,11 +1964,10 @@ impl GraphRuntime {
         capture_group_of: Option<u32>,
         waiting: Vec<u32>,
         failed: Vec<u32>,
-        scan_exclude: Vec<u32>,
     ) -> PyResult<(bool, Option<sched::CheckOut>, Option<sched::BatchOut>)> {
         self.sched_begin_impl(sched::Begin {
             target, exclude_target, pre: pre_existing, anchor: capture_group_of,
-            waiting, failed, scan_exclude,
+            waiting, failed,
         })
     }
 
@@ -1992,6 +1991,13 @@ impl GraphRuntime {
         waiting: Vec<u32>, failed: Vec<u32>,
     ) -> bool {
         self.sched_backlog_has_schedulable_impl(exclude_key, exclude_walk, waiting, failed)
+    }
+
+    /// `key`'s backlogged rows that are not waiting or failed, in order.
+    fn sched_live_backlog(
+        &self, node: &str, label: &str, waiting: Vec<u32>, failed: Vec<u32>,
+    ) -> Vec<u32> {
+        self.sched_live_backlog_impl(node, label, waiting, failed)
     }
 
     fn sched_backlog_rows(&self, exclude: Vec<u32>) -> Vec<(String, u32)> {
