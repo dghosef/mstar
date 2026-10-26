@@ -274,33 +274,33 @@ class ACRoPEAttention(nn.Module):
         hd = self.head_dim
 
         qkv: torch.Tensor = self.qkv(x).view(b, n, 3, self.num_heads, hd)
-        q, k, v = qkv.unbind(dim=2)
+        # q and k rotate together ([B, L, 2, H, D]); v is untouched
+        qk, v = qkv[:, :, :2], qkv[:, :, 2]
 
         # 3-axis RoPE for spatial tokens, as one rotation over the whole head
         # dim: each element sees exactly the arithmetic of the per-axis
-        # rotation (pairs never straddle two axes), in a third of the kernels
-        emb_sin, emb_cos = self._spatial_rope_tables(d_pos, h_pos, w_pos, q.dtype, q.device, rope_tables)
-        q_spatial = apply_rope_BNHD(q[:, action_tokens:], emb_sin, emb_cos)
-        k_spatial = apply_rope_BNHD(k[:, action_tokens:], emb_sin, emb_cos)
+        # rotation (pairs never straddle two axes), in a fraction of the kernels
+        emb_sin, emb_cos = self._spatial_rope_tables(d_pos, h_pos, w_pos, qk.dtype, qk.device, rope_tables)
+        qk_spatial = apply_rope_BNHD(qk[:, action_tokens:], emb_sin.unsqueeze(2), emb_cos.unsqueeze(2))
 
         # Temporal RoPE for action tokens
         if action_tokens > 0:
             if time_pos is None:
                 raise ValueError("action tokens need time_pos")
-            key = ("time", id(time_pos), q.dtype)
+            key = ("time", id(time_pos), qk.dtype)
             tables = rope_tables.get(key) if rope_tables is not None else None
             if tables is None:
-                tables = rope_tables_BNHD(time_pos, self.d_dim, q.dtype, q.device)
+                tables = rope_tables_BNHD(time_pos, self.d_dim, qk.dtype, qk.device)
                 if rope_tables is not None:
                     rope_tables[key] = tables
             t_sin, t_cos = tables
-            q_action, k_action = q[:, :action_tokens], k[:, :action_tokens]
-            qd = apply_rope_BNHD(q_action[..., :self.d_dim], t_sin, t_cos)
-            kd = apply_rope_BNHD(k_action[..., :self.d_dim], t_sin, t_cos)
-            q = torch.cat([torch.cat([qd, q_action[..., self.d_dim:]], dim=-1), q_spatial], dim=1)
-            k = torch.cat([torch.cat([kd, k_action[..., self.d_dim:]], dim=-1), k_spatial], dim=1)
+            qk_action = qk[:, :action_tokens]
+            qkd = apply_rope_BNHD(qk_action[..., :self.d_dim], t_sin.unsqueeze(2), t_cos.unsqueeze(2))
+            qk = torch.cat([torch.cat([qkd, qk_action[..., self.d_dim:]], dim=-1), qk_spatial], dim=1)
         else:
-            q, k = q_spatial, k_spatial
+            qk = qk_spatial
+        q = qk[:, :, 0].contiguous()
+        k = qk[:, :, 1].contiguous()
         v = v.contiguous()
 
         # [B, L, H, D] -> [B*L, H, D] for FlashInfer
