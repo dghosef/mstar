@@ -114,11 +114,9 @@ def talker_text_mask(input_ids: torch.Tensor, config: Qwen3OmniModelConfig) -> t
 class AudioEncoderSubmodule(NodeSubmodule):
     """Thin wrapper around the HF Whisper-style audio encoder.
 
-    Extracts mel spectrograms from raw audio inputs, pads for batching,
-    and runs the encoder to produce audio embeddings that the Thinker
-    will splice into its input sequence.
-
-    Runs once per request (not batched across requests).
+    Runs the encoder over the request's mel features (``process_prompt`` made
+    them) to produce audio embeddings that the Thinker splices into its input
+    sequence. Batches clips across requests.
     """
 
     # The HF encoder splits its input by host-side chunk lengths (``.tolist()``),
@@ -151,6 +149,43 @@ class AudioEncoderSubmodule(NodeSubmodule):
             }
         )
 
+    def _layout(self, frames: list[int], device: torch.device) -> dict[str, Any]:
+        """What the HF encoder reads off ``feature_lens`` (chunking, the frames kept
+        after its convs, the attention windows), from the clips' host-known
+        lengths. Read off the device tensor, each is a host sync on the GPU
+        thread, which waits out the step in flight before the encoder can queue."""
+        from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+            _get_feat_extract_output_lengths,
+        )
+
+        enc = self.audio_encoder
+        chunk = enc.n_window * 2
+        chunk_lengths = []
+        for n in frames:
+            full, rest = divmod(n, chunk)
+            chunk_lengths += [chunk] * full + ([rest] if rest else [])
+        after = [_get_feat_extract_output_lengths(n, enc.n_window) for n in chunk_lengths]
+        width = max(after)
+        valid = [i * width + j for i, n in enumerate(after) for j in range(n)]
+        window = width * (enc.n_window_infer // chunk)
+        bounds = [0]
+        for n in frames:
+            n = _get_feat_extract_output_lengths(n, enc.n_window)
+            for size in [window] * (n // window) + ([n % window] if n % window else []):
+                bounds.append(bounds[-1] + size)
+
+        def to_device(values: list[int], dtype: torch.dtype) -> torch.Tensor:
+            pinned = torch.tensor(values, dtype=dtype, pin_memory=device.type == "cuda")
+            return pinned.to(device, non_blocking=True)
+
+        return {
+            "chunk_lengths": chunk_lengths,
+            "valid_indices": to_device(valid, torch.long),
+            "cu_seqlens": to_device(bounds, torch.int32),
+            "max_seqlen": max(b - a for a, b in zip(bounds, bounds[1:], strict=False)),
+            "counts": [_get_feat_extract_output_lengths(n, enc.n_window) for n in frames],
+        }
+
     def forward(
         self,
         graph_walk: str,
@@ -159,28 +194,35 @@ class AudioEncoderSubmodule(NodeSubmodule):
         audio_seqlens: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> NameToTensorList:
-        """Run the audio encoder and return embeddings.
+        """Run the audio encoder over one clip.
 
         Returns:
             {"audio_embeds": [tensor of shape (audio_tokens, hidden_size)]}
         """
-        logger.debug(
-            "Running AudioEncoder with audio_features shape=%s",
-            audio_features.shape,
-        )
+        layout = self._layout([audio_features.shape[-1]], audio_features.device)
+        return {"audio_embeds": [self._encode(audio_features, audio_seqlens, layout)]}
+
+    def _encode(self, audio_features: torch.Tensor, audio_seqlens: torch.Tensor, layout: dict[str, Any]):
+        # the encoder's own chunking, with the chunk lengths on the host
+        padded = nn.utils.rnn.pad_sequence(
+            audio_features.T.split(layout["chunk_lengths"], dim=0), batch_first=True,
+        ).transpose(1, 2)
         extra_kwargs = {"return_dict": True} if self._encoder_takes_return_dict else {}
         audio_out = self.audio_encoder(
             audio_features,
             feature_lens=audio_seqlens,
+            padded_feature=padded,
+            chunk_lengths=layout["chunk_lengths"],
+            valid_indices=layout["valid_indices"],
+            cu_seqlens=layout["cu_seqlens"],
+            max_seqlen=layout["max_seqlen"],
             **extra_kwargs,
         )
         audio_embeds = getattr(audio_out, "last_hidden_state", audio_out)
-
         # Flatten to (num_audio_tokens, hidden_size) if needed
         if audio_embeds.dim() == 3:
             audio_embeds = audio_embeds.squeeze(0)
-
-        return {"audio_embeds": [audio_embeds]}
+        return audio_embeds
 
     def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
         return True
@@ -193,10 +235,13 @@ class AudioEncoderSubmodule(NodeSubmodule):
     ) -> dict[str, torch.Tensor | Any]:
         # The encoder packs clips along time and windows its attention within
         # each clip (``feature_lens``), so a batch is one call over the
-        # concatenated mel frames.
+        # concatenated mel frames. Each clip's frame count is its features'
+        # width, so the layout comes from shapes, never from device values.
+        features = [inp.tensor_inputs["audio_features"] for inp in inputs]
         return {
-            "audio_features": torch.cat([inp.tensor_inputs["audio_features"] for inp in inputs], dim=-1),
+            "audio_features": torch.cat(features, dim=-1),
             "audio_seqlens": torch.cat([inp.tensor_inputs["audio_seqlens"].reshape(-1) for inp in inputs]),
+            "layout": self._layout([f.shape[-1] for f in features], features[0].device),
         }
 
     def forward_batched(
@@ -205,21 +250,16 @@ class AudioEncoderSubmodule(NodeSubmodule):
         engine_inputs: ModelInputsFromEngine,
         audio_features: torch.Tensor,
         audio_seqlens: torch.Tensor,
+        layout: dict[str, Any],
         **kwargs,
     ) -> dict[str, NameToTensorList]:
         """Encode several requests' clips in one call (each ~10 ms on an H200,
         mostly launches, whatever the clip length) and split the packed
         embeddings back by each clip's output length."""
-        from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
-            _get_feat_extract_output_lengths,
-        )
-
-        embeds = self.forward(graph_walk, engine_inputs, audio_features, audio_seqlens)["audio_embeds"][0]
-        # the encoder already reads its chunk lengths on the host
-        counts = _get_feat_extract_output_lengths(audio_seqlens).tolist()
+        embeds = self._encode(audio_features, audio_seqlens, layout)
         return {
             rid: {"audio_embeds": [part]}
-            for rid, part in zip(engine_inputs.request_ids, embeds.split(counts), strict=True)
+            for rid, part in zip(engine_inputs.request_ids, embeds.split(layout["counts"]), strict=True)
         }
 
 
