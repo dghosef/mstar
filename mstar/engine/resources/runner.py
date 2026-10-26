@@ -64,6 +64,7 @@ class StepRunner:
         self, resources: Mapping[str, Resource],
         node_resources: Mapping[str, Collection[str]] | None = None,
         enable_nvtx: bool = False,
+        declared_by: Mapping[str, Collection[str]] | None = None,
     ):
         # Per-resource NVTX. `engine.plan.promoted` only reports that the sweep
         # was slow; these say WHICH resource ate it. Gated because range_push
@@ -105,9 +106,13 @@ class StepRunner:
             key for key in self._order if self._resources[key].page_trail() is not None
         ]
         self._node_trail_order = self._per_node(node_resources, self._trail_order)
-        # publisher key -> the nodes that declare it
+        # publisher key -> every node of the deployment that declares it
+        # (``declared_by``): a replica on another worker, under another node
+        # name, reads what this one publishes. This runner's own nodes when
+        # not given.
+        declared_by = declared_by or {}
         self._publisher_nodes: dict[str, frozenset[str]] = {
-            key: frozenset(
+            key: frozenset(declared_by[key]) if key in declared_by else frozenset(
                 node for node, keys in (node_resources or {}).items() if key in keys
             )
             for key in self._publish_order
@@ -351,7 +356,7 @@ class StepRunner:
 
     @property
     def publisher_nodes(self) -> Mapping[str, frozenset[str]]:
-        """Each publishing resource's declaring nodes."""
+        """Each publishing resource's declaring nodes, across the deployment."""
         return self._publisher_nodes
 
     def skip_publish(self, rid, keys) -> None:
