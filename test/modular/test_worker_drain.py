@@ -37,6 +37,7 @@ def _worker(
     w = Worker.__new__(Worker)
     w.worker_id = "w0"
     w._phase_period = 0
+    w._stop_token_signal = {}  # no declared stop policies: check_stop decides
     w.is_tp_follower = is_follower
     w.sent = []
     w.cleared = []
