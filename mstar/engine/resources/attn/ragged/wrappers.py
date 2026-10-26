@@ -78,23 +78,12 @@ class _RaggedPrefillBase(ABC):
                 kv_indptr_buf=self._kv_indptr_buf,
                 backend=backend,
             )
-            # Own the output: the kernel writes only the planned rows, and it
-            # reads KV past cu_seqlens[-1] to the last segment's tile boundary,
-            # masking additively. A NaN/Inf left in that tail by another
-            # graph's freed pool block survives the mask and poisons the last
-            # segment. ``plan`` keeps the window finite.
-            self._out_buf = torch.zeros(
-                max_total_tokens, num_qo_heads, self.padded_head_dim,
-                dtype=q_data_type, device=device,
-            )
             # FlashInfer latches max rows on the FIRST plan; prime at the
             # bucket ceiling so a small first plan can't cap it.
             self._prime()
         else:
             self._qo_indptr_buf = None
             self._kv_indptr_buf = None
-            # eager callers pass exact-size q/k/v; no tail to read
-            self._out_buf = None
             self.attn_wrapper = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
                 workspace_buffer, kv_layout, backend=backend
             )
@@ -176,14 +165,12 @@ class _RaggedPrefillBase(ABC):
             sm_scale=self.sm_scale,
             q_data_type=self.q_data_type,
         )
-        if self._out_buf is not None:
-            # rows this layout leaves unwritten, zeroed outside the graph where
-            # the real token count is known; see __init__
-            self._out_buf[total_tokens:].zero_()
 
     def _pad_head_dim(self, t: torch.Tensor) -> torch.Tensor:
         if t.shape[-1] == self.padded_head_dim:
-            return t.contiguous()
+            # FlashInfer reads rows by stride: a strided view (q / k / v sliced out
+            # of a fused projection) needs no copy as long as each row's heads are dense
+            return t if t.stride(-1) == 1 and t.stride(-2) == t.shape[-1] else t.contiguous()
         return torch.nn.functional.pad(t, (0, self.padded_head_dim - t.shape[-1]))
 
     @torch.compiler.disable
@@ -205,7 +192,7 @@ class _RaggedPrefillBase(ABC):
         # `_FlashInferRaggedBase.run`)
         padded_in = q.shape[-1] == self.padded_head_dim
         qp, kp, vp = (self._pad_head_dim(t.to(self.q_data_type)) for t in (q, k, v))
-        if self._out_buf is None:
+        if not self.accelerator_graph:
             out = self.attn_wrapper.run(qp, kp, vp)
         else:
             n = qp.shape[0]
@@ -213,12 +200,14 @@ class _RaggedPrefillBase(ABC):
                 f"{type(self).__name__}: {n} rows exceeds the "
                 f"{self.max_total_tokens} this graph-mode wrapper was built for"
             )
-            out = self.attn_wrapper.run(qp, kp, vp, out=self._out_buf[:n])
+            # Zeroed in the graph on every replay: the kernel writes only the
+            # planned rows, and the next layer's KV built from this output is read
+            # past cu_seqlens[-1] to the last segment's tile boundary under an
+            # additive mask, which a NaN/Inf left in the tail would survive.
+            out = self.attn_wrapper.run(qp, kp, vp, out=torch.zeros_like(qp, memory_format=torch.contiguous_format))
         if self.padded_head_dim != self.head_dim and not padded_in:
             return out[..., : self.head_dim].contiguous()
-        # `out` is the shared buffer the next call overwrites; the padded
-        # branch above already returns a copy
-        return out.clone() if self._out_buf is not None else out
+        return out
 
 
 class RaggedPrefillWrapper(_RaggedPrefillBase):
