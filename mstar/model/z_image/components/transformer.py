@@ -27,6 +27,8 @@ from torch import nn
 
 from mstar.model.components.diffusion.attention import RaggedAttentionFn, joint_attention
 from mstar.model.components.linear import FusedColumnLinear
+from mstar.model.z_image.components.qk_norm_rope import fits as qk_norm_rope_fits
+from mstar.model.z_image.components.qk_norm_rope import qk_norm_rope
 from mstar.model.z_image.config import ZImageTransformerConfig
 
 # Sinusoidal timestep feature width (diffusers ``TimestepEmbedder.frequency_embedding_size``).
@@ -63,9 +65,10 @@ def timestep_features(t: torch.Tensor, dim: int, max_period: float = 10000.0) ->
 
 
 class ZImageRoPE:
-    """3-axis rotary tables as complex64 ``[S, head_dim / 2]`` (diffusers ``RopeEmbedder``):
-    per axis ``polar(1, outer(arange(axis_len), 1 / theta^(arange(0, d, 2) / d)))`` with fp64
-    frequencies cast to fp32, gathered by the integer ids and concatenated over the axes."""
+    """3-axis rotary tables (diffusers ``RopeEmbedder``): per axis
+    ``polar(1, outer(arange(axis_len), 1 / theta^(arange(0, d, 2) / d)))`` with fp64 frequencies
+    cast to fp32, gathered by the integer ids and concatenated over the axes. Returned as the
+    complex64 table's ``view_as_real``, fp32 ``[S, head_dim / 2, 2]`` (cos, sin)."""
 
     def __init__(self, theta: float, axes_dims: tuple[int, ...], axes_lens: tuple[int, ...]):
         self.tables = []
@@ -75,15 +78,15 @@ class ZImageRoPE:
             self.tables.append(torch.polar(torch.ones_like(freqs), freqs).to(torch.complex64))
 
     def __call__(self, ids: torch.Tensor) -> torch.Tensor:
-        return torch.cat([table[ids[:, i].cpu()] for i, table in enumerate(self.tables)], dim=-1)
+        return torch.view_as_real(torch.cat([table[ids[:, i].cpu()] for i, table in enumerate(self.tables)], dim=-1))
 
 
 def apply_rotary_complex(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
-    """``x [B, S, H, D]`` rotated by complex tables ``[S, D/2]``, in fp32, cast back (diffusers
-    ``ZSingleStreamAttnProcessor.apply_rotary_emb``)."""
-    x_c = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
-    out = torch.view_as_real(x_c * freqs_cis[None, :, None, :]).flatten(3)
-    return out.type_as(x)
+    """``x [B, S, H, D]`` rotated by the tables ``[S, D/2, 2]`` (``ZImageRoPE``) as a complex
+    product in fp32, cast back (diffusers ``ZSingleStreamAttnProcessor.apply_rotary_emb``)."""
+    pairs = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
+    product = pairs * torch.view_as_complex(freqs_cis)[None, :, None, :]
+    return torch.view_as_real(product).flatten(3).type_as(x)
 
 
 class ZImageAttention(nn.Module):
@@ -97,11 +100,16 @@ class ZImageAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, ragged: RaggedAttentionFn | None) -> torch.Tensor:
         q, k, v = (t.unflatten(-1, (-1, self.head_dim)) for t in self.qkv(x).chunk(3, dim=-1))
-        if self.q_norm is not None:
-            q, k = self.q_norm(q), self.k_norm(k)
         dtype = q.dtype
-        q = apply_rotary_complex(q, freqs_cis).to(dtype)
-        k = apply_rotary_complex(k, freqs_cis).to(dtype)
+        # compile_exact_ops [norms] keeps the norms eager (an instance forward): no fusion then
+        if (torch.compiler.is_compiling() and self.q_norm is not None and "forward" not in vars(self.q_norm)
+                and qk_norm_rope_fits(q, k, self.q_norm.weight) and self.k_norm.eps == self.q_norm.eps):
+            q, k = qk_norm_rope(q, k, self.q_norm.weight, self.k_norm.weight, freqs_cis, self.q_norm.eps)
+        else:
+            if self.q_norm is not None:
+                q, k = self.q_norm(q), self.k_norm(k)
+            q = apply_rotary_complex(q, freqs_cis).to(dtype)
+            k = apply_rotary_complex(k, freqs_cis).to(dtype)
         out = joint_attention(q, k, v, ragged).flatten(2, 3).to(dtype)
         return self.out(out)
 
@@ -209,7 +217,7 @@ class ZImageDiT(nn.Module):
     ) -> torch.Tensor:
         """``image_tokens [B, Lx, patch_dim]`` (padded to a multiple of 32), ``caption [B, Lc,
         cap_feat_dim]`` (padded likewise), boolean pad masks ``[B, Lx]`` / ``[B, Lc]`` (True at
-        pad positions), ``t [B]`` fp32, complex rotary tables ``[Lx, D/2]`` / ``[Lc, D/2]``.
+        pad positions), ``t [B]`` fp32, rotary tables ``[Lx, D/2, 2]`` / ``[Lc, D/2, 2]`` (:class:`ZImageRoPE`).
         ``ragged``: one attention kernel per span in :data:`ATTENTION_SPANS`, or None for SDPA
         throughout. Returns the velocity for the image tokens ``[B, Lx, patch_dim]`` (pads
         included)."""
