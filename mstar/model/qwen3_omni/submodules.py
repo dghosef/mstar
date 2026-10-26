@@ -403,6 +403,10 @@ class ThinkerSubmodule(ARNodeSubmodule):
             self._decode_talker_mm_mask = torch.zeros(1, dtype=torch.bool, device=device)
         return self._decode_talker_mm_mask
 
+    def _text_talker_masks(self, text_ids: torch.Tensor) -> torch.Tensor:
+        """A text span's ``(multimodal, text inclusion)`` masks for the Talker."""
+        return torch.stack([torch.zeros_like(text_ids, dtype=torch.bool), talker_text_mask(text_ids, self.config)])
+
     def _wrap_audio_input(self, audio_embeds: torch.Tensor):
         # Wrap the audio span in ``<|audio_bos|>`` / ``<|audio_eos|>``
         # sentinel token embeddings so the Thinker sees the same
@@ -459,6 +463,8 @@ class ThinkerSubmodule(ARNodeSubmodule):
         start_pos = self.node_resources[THINKER_POS].position(
             rid=fwd_info.rid_handle, label="main"
         )
+        # only the Talker reads the masks, and building a text span's syncs the host
+        audio_output = fwd_info.step_metadata.get("audio_output", True)
         if graph_walk == "thinker_decode":
             # Get previous token ID from text_inputs
             token_id = inputs["text_inputs"][0].to(device)  # (1,) or scalar
@@ -497,18 +503,14 @@ class ThinkerSubmodule(ARNodeSubmodule):
             # carried forward across walks by the stream's position counter
             # (advanced by the runner's commit of each declared step).
             pos_ids = get_rope_index_text(seq_len, start_pos, device)
-            masks_for_talker = torch.stack([
-                torch.zeros(text_ids.shape, dtype=torch.bool, device=device), # multimodal
-                talker_text_mask(text_ids, self.config) # text inclusion
-            ])
             return ARNodeInputs(
                 input_seq_len=seq_len,
                 input_embeds=embeds,
                 input_ids=text_ids,
                 custom_pos_ids=pos_ids,
                 tensor_inputs={
-                    "masks_for_talker": masks_for_talker
-                }
+                    "masks_for_talker": self._text_talker_masks(text_ids),
+                } if audio_output else {},
             )
 
         if graph_walk == "prefill_audio":
@@ -519,10 +521,6 @@ class ThinkerSubmodule(ARNodeSubmodule):
             after = [t.to(device) for t in inputs.get("text_after", [])]
             n_before = sum(t.shape[0] for t in before)
             n_after = sum(t.shape[0] for t in after)
-
-            mm_mask = torch.ones(audio_len + 2, dtype=torch.bool, device=device)
-            mm_mask[0] = False
-            mm_mask[-1] = False
 
             # Position IDs:
             #   - audio_start_token: text-like position after the text before it
@@ -544,14 +542,17 @@ class ThinkerSubmodule(ARNodeSubmodule):
             embeds = [self.model.model.embed_tokens(t) for t in before]
             embeds += [self._wrap_audio_input(audio_embeds)]
             embeds += [self.model.model.embed_tokens(t) for t in after]
-            def text_masks(ids: torch.Tensor) -> torch.Tensor:
-                return torch.stack([torch.zeros_like(ids, dtype=torch.bool), talker_text_mask(ids, self.config)])
-
-            masks_for_talker = torch.cat(
-                [text_masks(t) for t in before] + [torch.stack([mm_mask, ~mm_mask])] + [text_masks(t) for t in after],
-                dim=1,
-            )
-            tensor_inputs = {"masks_for_talker": masks_for_talker}
+            tensor_inputs = {}
+            if audio_output:
+                mm_mask = torch.ones(audio_len + 2, dtype=torch.bool, device=device)
+                mm_mask[0] = False
+                mm_mask[-1] = False
+                tensor_inputs["masks_for_talker"] = torch.cat(
+                    [self._text_talker_masks(t) for t in before]
+                    + [torch.stack([mm_mask, ~mm_mask])]
+                    + [self._text_talker_masks(t) for t in after],
+                    dim=1,
+                )
             if before or after:
                 tensor_inputs["prompt_ids"] = torch.cat(before + after)
             return ARNodeInputs(
