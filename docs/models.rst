@@ -294,8 +294,14 @@ default, which lowers the token count of short clips. Notes:
 - The vision encoder attends within each image and each video frame group
   separately, and its captured CUDA graphs hold up to 16384 patches and 64 such
   segments per prompt. A prompt over either limit runs the encoder without the
-  graph: a long video at ordinary resolution exceeds the patches, and one over
-  ~64 s with frames resized below ~256x256 pixels exceeds the segments.
+  graph (still compiled, so only the launches are extra): a long video at
+  ordinary resolution exceeds the patches, and one over ~64 s with frames
+  resized below ~256x256 pixels exceeds the segments.
+- On two GPUs, ``configs/qwen3_5_9b_dp2.yaml`` (a whole replica per GPU)
+  serves image and video traffic faster than ``configs/qwen3_5_9b_tp2.yaml``,
+  whose vision encoder runs on one rank while the other waits for it in the
+  lockstep LLM: 9B on 2xH200, video_60s c32 1520 vs ~900-1000 output tok/s,
+  MMMU c32 4457 vs ~3100.
 - A long video is one wide prefill: one 1-3 minute video is ~11-12k tokens,
   beyond the largest captured ``prefill_vision`` bucket (4096), so it runs
   eagerly.
