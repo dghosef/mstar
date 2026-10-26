@@ -93,6 +93,9 @@ from mstar.model.vjepa2.weight_loader import (
 logger = logging.getLogger(__name__)
 
 
+# load_video's metadata key for the file process_prompt decodes
+_VIDEO_PATH = "path"
+
 # ImageNet normalization constants (match HF ``IMAGENET_DEFAULT_MEAN``/``STD``).
 _IMAGENET_MEAN = (0.485, 0.456, 0.406)
 _IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -576,28 +579,21 @@ class VJepa2Model(Model):
     # ------------------------------------------------------------------
 
     def load_video(self, filepath: str, device: str) -> TensorAndMetadata:
-        """Decode a video file into ``[frames_per_clip, C, H, W]`` float in ``[0, 1]``.
+        """Read the video's header and choose the ``frames_per_clip`` sample indices; decode nothing.
 
-        Mirrors HuggingFace ``BaseVideoProcessor`` Path 2
-        (``video_processing_utils.py:294``): read metadata, compute the
-        uniform sample indices, and hand those indices to the decoder so
-        only the sampled frames are materialized.  For long clips this is
-        the difference between decoding 64 frames and decoding thousands
-        (= seconds, not minutes).
-
-        Device handling mirrors HF too: we don't pass a device to the
-        decoder (HF's decode path doesn't either; device placement happens
-        downstream in ``_prepare_input_videos``).  The ``device`` argument
-        here is kept for signature-compatibility with ``Model.load_video``
-        but is intentionally ignored — decode stays on CPU, later steps
-        move tensors to GPU as needed.
+        Sampling mirrors HuggingFace ``BaseVideoProcessor.sample_frames``
+        (``video_processing_utils.py:253``): ``arange(0, total, total / n)``.
+        The decode is deferred to :meth:`process_prompt`, which knows how many
+        of the sampled frames the request's walk reads (an AC rollout encodes
+        only the first ``AC_ROLLOUT_NUM_FRAMES``), so the data worker decodes
+        8 frames rather than 64 for it. The returned tensor is empty; the
+        indices and the file path travel in the metadata. ``device`` is
+        ignored: decode and preprocessing stay on the host.
         """
         from torchcodec.decoders import VideoDecoder
 
         target_frames = self.config.frames_per_clip
-        logger.info("load_video: opening %s", filepath)
         decoder = VideoDecoder(filepath, num_ffmpeg_threads=VIDEO_DECODE_THREADS)
-        logger.info("load_video: decoder opened; reading metadata")
 
         metadata_obj = getattr(decoder, "metadata", None)
         total = None
@@ -610,47 +606,20 @@ class VJepa2Model(Model):
         # ``frames_per_clip`` is an architectural config (also feeds
         # ``grid_depth`` for the predictor's attention mask) and must stay
         # at the trained value (64). For AC rollout requests the input
-        # video may be much shorter — DROIDDataset sends 8-frame clips per
-        # the F-8 workload aligned to upstream's droid-256px-8f.yaml. Clamp
-        # the decode target to whatever frames are actually present;
-        # process_prompt's AC-rollout branch will trim further to
-        # AC_ROLLOUT_NUM_FRAMES (=8). A truly empty video still errors.
+        # video may be much shorter (DROIDDataset sends 8-frame clips), so
+        # clamp the target to whatever frames are present.
         if total <= 0:
             raise ValueError(f"Video has no decodable frames: {filepath}")
         target_frames = min(target_frames, total)
-        logger.info("load_video: total_frames=%d, target=%d", total, target_frames)
-
-        # HF-parity uniform sampling (``BaseVideoProcessor.sample_frames``
-        # at video_processing_utils.py:253):
-        #     indices = torch.arange(0, total, total / num_frames).int()
-        # Truncated to ``num_frames`` to handle float-accumulation overshoot.
         step = total / target_frames
         indices = torch.arange(0, total, step).to(torch.int64)[:target_frames].tolist()
-        logger.info(
-            "load_video: sampling indices=%s...%s (step=%.2f)",
-            indices[:3],
-            indices[-3:],
-            step,
-        )
 
         height = getattr(metadata_obj, "height", None)
         width = getattr(metadata_obj, "width", None)
         if not (height and width):
             height, width = decoder[indices[0]].shape[-2:]
+        # charged for every sampled frame, though a rollout decodes fewer
         VideoBudget().add(height, width, len(indices))
-        get_at = getattr(decoder, "get_frames_at", None)
-        if get_at is not None:
-            logger.info("load_video: calling get_frames_at(%d indices)", len(indices))
-            frame_batch = get_at(indices=indices)
-            frames = getattr(frame_batch, "data", frame_batch)
-        else:
-            # Older torchcodec: no batched sampled-decode API, per-index
-            # lookup still avoids materializing the whole video.
-            logger.info("load_video: per-index lookup (no get_frames_at)")
-            frames = torch.stack([decoder[i] for i in indices])
-        logger.info("load_video: decoded frames shape=%s", tuple(frames.shape))
-
-        video = frames.float().div_(255.0)
 
         try:
             metadata = video_metadata_dict(metadata_obj) if metadata_obj is not None else {}
@@ -658,7 +627,23 @@ class VJepa2Model(Model):
             metadata = {}
         metadata["sampled_indices"] = indices
         metadata["original_num_frames"] = total
-        return TensorAndMetadata(data=video, metadata=metadata)
+        metadata[_VIDEO_PATH] = filepath
+        return TensorAndMetadata(data=torch.empty(0, dtype=torch.uint8), metadata=metadata)
+
+    @staticmethod
+    def _decode_frames(filepath: str, indices: list[int]) -> torch.Tensor:
+        """``[len(indices), C, H, W]`` float in ``[0, 1]``."""
+        from torchcodec.decoders import VideoDecoder
+
+        decoder = VideoDecoder(filepath, num_ffmpeg_threads=VIDEO_DECODE_THREADS)
+        get_at = getattr(decoder, "get_frames_at", None)
+        if get_at is not None:
+            frame_batch = get_at(indices=indices)
+            frames = getattr(frame_batch, "data", frame_batch)
+        else:
+            # Older torchcodec: no batched sampled-decode API.
+            frames = torch.stack([decoder[i] for i in indices])
+        return frames.float().div_(255.0)
 
     def process_prompt(
         self,
@@ -680,25 +665,36 @@ class VJepa2Model(Model):
         """
         out: NameToTensorList = {}
 
-        if tensors and "video_inputs" in tensors and len(tensors["video_inputs"]) > 0:
-            logger.info("process_prompt: preprocessing video")
-            raw = tensors["video_inputs"][0]
+        video_meta = (kwargs.get("input_metadata") or {}).get("video_inputs") or []
+        if tensors and "video_inputs" in tensors and len(tensors["video_inputs"]) > 0 and video_meta:
+            meta = video_meta[0]
+            sampled = meta["sampled_indices"]
             # Per-request override of the frame budget (e.g. to experiment
             # with longer clips on larger GPUs); defaults to the model's
-            # pretraining frames_per_clip. Clamped to whatever frames are
-            # actually present (load_video may have decoded fewer than
-            # frames_per_clip if the source video was short — e.g. AC
-            # rollout requests with the F-8 / droid-256px-8f workload
-            # ship 8-frame clips).
+            # pretraining frames_per_clip. Clamped to whatever frames were
+            # sampled (fewer than frames_per_clip if the source video was
+            # short — e.g. AC rollout requests with the F-8 /
+            # droid-256px-8f workload ship 8-frame clips).
             target_frames = int(kwargs.get("num_frames", self.config.frames_per_clip))
-            target_frames = min(target_frames, int(raw.size(0)))
-            processed = _preprocess_video(
-                raw.to(torch.float32),
-                crop_size=self.config.crop_size,
-                target_frames=target_frames,
-            )
+            target_frames = min(target_frames, len(sampled))
+            keep = _sample_frames_uniform(torch.arange(len(sampled)), target_frames).tolist()
+            if self.config.predictor_kind == "ac" and int(kwargs.get("rollout_horizon", 0) or 0) > 1:
+                # AC rollout encoder context: AC_ROLLOUT_NUM_FRAMES frames, as
+                # upstream's DROID training config (droid-256px-8f.yaml,
+                # `dataset_fpcs: 8`). Each is encoded on its own via the
+                # self-tubelet trick (VJepa2EncoderSubmodule._encode_self_tubelet,
+                # upstream app/vjepa_droid/train.py:408-415) and only the first
+                # frame's tokens seed the rollout (notebook energy_landscape
+                # Cell 5): matched FLOPs to upstream's inference path. The other
+                # sampled frames are never decoded.
+                keep = keep[:AC_ROLLOUT_NUM_FRAMES]
+            frames = self._decode_frames(meta.pop(_VIDEO_PATH), [sampled[i] for i in keep])
+            # resize, crop and normalize act per frame, so preprocessing only
+            # the kept frames is exact
+            processed = _preprocess_video(frames, crop_size=self.config.crop_size, target_frames=len(keep))
             out["video_frames"] = [processed]
-            logger.info("process_prompt: video_frames shape=%s", tuple(processed.shape))
+            # the encoder reads ``video_frames``; don't ship the raw input
+            out["video_inputs"] = []
 
         if self.config.predictor_kind == "ac":
             actions = kwargs.get("actions")
@@ -735,20 +731,6 @@ class VJepa2Model(Model):
                         f"{t_ctx} + {rollout_horizon} - 1 = {required}; got {t_total}."
                     )
 
-                # AC rollout encoder context: trim video to AC_ROLLOUT_NUM_FRAMES
-                # frames per request to match upstream's published DROID training
-                # configuration (configs/train/vitg16/droid-256px-8f.yaml has
-                # `dataset_fpcs: 8`).  Each frame is then independently encoded
-                # via the self-tubelet replication trick inside
-                # VJepa2EncoderSubmodule._encode_self_tubelet — mirroring
-                # `forward_target` in app/vjepa_droid/train.py:408-415 and
-                # notebooks/energy_landscape_example.ipynb Cell 5.  Only the
-                # first frame's tokens are used as the rollout starting context
-                # (per notebook Cell 5: z_hat = z[:, :tokens_per_frame]); the
-                # other 7 frames' tokens are computed and discarded — matched
-                # FLOPs to upstream's reference inference path.
-                if "video_frames" in out:
-                    out["video_frames"] = [frames[:AC_ROLLOUT_NUM_FRAMES] for frames in out["video_frames"]]
 
 
             # MPC walk requires a pre-encoded goal latent.  When
