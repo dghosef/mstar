@@ -94,6 +94,7 @@ def _make_model() -> Qwen3TTSModel:
     model.config = Qwen3TTSModelConfig()
     model.tokenizer = _TokenizerStub()
     model._submodule_cache = {}
+    model.codec_batch_hold_ms = 40.0
     return model
 
 
@@ -1654,9 +1655,10 @@ def test_qwen3_tts_codec_without_watermark_emits_the_same_bytes_through_the_engi
                 for rid in rids
             ]
             finals += sum(item.kwargs["is_final"] for item in items)
-            out = submodule.forward_batched(
+            rows = submodule.forward_batched(
                 "codec_chunk", engine_inputs, **submodule.preprocess("codec_chunk", engine_inputs, items),
-            )
+            ).row_outputs["audio_chunk"]
+            out = {rid: {"audio_chunk": [rows[i]]} for i, rid in enumerate(rids)}   # the engine's row views
             alone = {rid: {"audio_chunk": [out[rid]["audio_chunk"][0].clone()]} for rid in rids}
             for rid, item in zip(rids, items, strict=True):
                 submodule.postprocess(rid, None, alone[rid], inputs=item)
@@ -1816,7 +1818,8 @@ def test_qwen3_tts_codec_conv_stack_decodes_only_the_new_frames_tail():
     packed = submodule.preprocess("codec_chunk", engine_inputs, prepared)
     assert packed["conv_start"].tolist() == [12, 0]
     with torch.no_grad():
-        outputs = submodule.forward_batched("codec_chunk", engine_inputs, **packed)
+        rows = submodule.forward_batched("codec_chunk", engine_inputs, **packed).row_outputs["audio_chunk"]
+        outputs = {rid: {"audio_chunk": [rows[i]]} for i, rid in enumerate(windows)}
         for item, (rid, (context, frames)) in zip(prepared, windows.items(), strict=True):
             submodule.postprocess(rid, None, outputs[rid], inputs=item)
             upsample = submodule.total_upsample
@@ -1869,8 +1872,9 @@ def test_qwen3_tts_streamed_codec_audio_matches_each_window_decoded_whole():
                                             input_metadata=InputMetadata(stream_chunks={"codec_tokens": chunk.info}))
             width = item.tensor_inputs["codec_tokens"].shape[-1]
             unsliced_with_offset |= item.kwargs["conv_start"] > 0 and submodule.conv_frames(width) >= width
-            out = submodule.forward_batched("codec_chunk", engine_inputs,
-                                            **submodule.preprocess("codec_chunk", engine_inputs, [item]))
+            rows = submodule.forward_batched("codec_chunk", engine_inputs,
+                                             **submodule.preprocess("codec_chunk", engine_inputs, [item]))
+            out = {"r": {"audio_chunk": [rows.row_outputs["audio_chunk"][0]]}}
             submodule.postprocess("r", None, out["r"], inputs=item)
             whole = reference(window.t()[None]).clamp(-1, 1)[0, 0]
             expected = (whole[chunk.context_items * upsample:window.shape[0] * upsample] * 32767).to(torch.int16)
