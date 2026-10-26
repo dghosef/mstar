@@ -12,13 +12,41 @@ name: Publish to PyPI
 # one release run at a time: publish with the engine's pending publisher,
 # add the next alias's pending publisher, re-run the failed job, repeat.
 # Uploads skip files that already exist, so re-runs are safe.
+#
+# mstar-ai ships an sdist, a pure-Python wheel, and Linux wheels per CPython
+# version and architecture that also carry the mstar_rust extension (setup.py
+# compiles rust/ only under cibuildwheel). pip prefers the Linux wheel where
+# one matches and falls back to the pure one elsewhere, which then runs on the
+# Python transport and graph runtime.
 
 on:
   release:
     types: [published]
 
 jobs:
+  wheels:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pypa/cibuildwheel@v4.2.1
+        env:
+          # Version-specific rather than abi3, matching the extension that
+          # `maturin develop` builds and the tests exercise.
+          CIBW_BUILD: "cp312-manylinux_* cp313-manylinux_*"
+          CIBW_BEFORE_ALL_LINUX: curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          CIBW_ENVIRONMENT_LINUX: PATH="$HOME/.cargo/bin:$PATH"
+        with:
+          output-dir: wheelhouse
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
   pypi:
+    needs: wheels
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -39,6 +67,11 @@ jobs:
       - run: pip install build
       - name: Build mstar-ai
         run: python -m build
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
       - name: Build the alias packages
         run: |
           for alias in packaging/aliases/*/; do

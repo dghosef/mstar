@@ -478,8 +478,11 @@ runs on the pure-Python paths as before. Migrated so far (see
   wherever that holds, so on a machine with the extension built, installing
   it is what moves a worker onto the Rust runtime.
 
-Build the extension into your environment with `maturin
-<https://www.maturin.rs>`_ (needs a Rust toolchain; ``rustup`` works):
+The PyPI wheels for Linux (x86_64 and aarch64, CPython 3.12 and 3.13) already
+carry the extension, so ``pip install mstar-ai`` there needs nothing more. Other
+platforms get the pure-Python wheel. In a source checkout, build the extension into
+your environment with `maturin <https://www.maturin.rs>`_ (needs a Rust toolchain;
+``rustup`` works):
 
 .. code-block:: bash
 
