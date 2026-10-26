@@ -31,7 +31,7 @@ from mstar.model.qwen3_tts.config import (
     Qwen3TTSModelConfig,
     Qwen3TTSTalkerConfig,
 )
-from mstar.utils.attention import apply_rope_pos_ids, decode_attn_nhd
+from mstar.utils.attention import depth_decode_attention
 
 # ---------------------------------------------------------------------------
 # Talker backbone: autoregression across audio frames
@@ -286,11 +286,10 @@ class Qwen3TTSCodePredictor(nn.Module):
     def forward_depth_unrolled(
         self,
         inputs_embeds: torch.Tensor,
-        position_ids: torch.Tensor,
         kv_cache: torch.Tensor,
         cache_pos: int,
     ) -> torch.Tensor:
-        """Run all CodePredictor layers for one depth token.
+        """Run all CodePredictor layers for one depth token, at depth ``cache_pos``.
 
         ``kv_cache`` layout is ``[layers, batch, K/V, groups, kv_heads,
         head_dim]``. Unlike Talker cache, it is frame-local scratch space:
@@ -303,8 +302,6 @@ class Qwen3TTSCodePredictor(nn.Module):
         batch_size, seq_len, _ = hidden_states.shape
         if seq_len != 1:
             raise ValueError("CodePredictor decode expects exactly one token")
-        end = cache_pos + seq_len
-        flat_position_ids = position_ids.reshape(-1).to(torch.int32)
 
         # Residual adds are deferred into the next norm, as in the Talker;
         # the residual stream is updated in place over this position's input,
@@ -317,39 +314,19 @@ class Qwen3TTSCodePredictor(nn.Module):
             else:
                 hidden_states, residual = layer.input_layernorm.forward_residual(hidden_states, residual)
             attn = layer.self_attn
-            qkv = attn.qkv_proj(hidden_states)
+            qkv = attn.qkv_proj(hidden_states).view(batch_size, -1)
             q_size = attn.num_heads * attn.head_dim
             kv_size = attn.num_kv_heads * attn.head_dim
             q, k, v = qkv.split((q_size, kv_size, kv_size), dim=-1)
-            q = q.view(batch_size, seq_len, attn.num_heads, attn.head_dim)
-            k = k.view(batch_size, seq_len, attn.num_kv_heads, attn.head_dim)
-            v = v.view(batch_size, seq_len, attn.num_kv_heads, attn.head_dim)
-            q, k = attn._apply_qk_norm(q, k)
-            # A stride-aware Triton kernel fuses both half rotations. The
-            # previous tensor expression launched multiple elementwise and
-            # concatenation kernels in every one of the 5 layers × 16 groups.
-            q, k = apply_rope_pos_ids(
-                q.reshape(batch_size * seq_len, attn.num_heads, attn.head_dim),
-                k.reshape(
-                    batch_size * seq_len,
-                    attn.num_kv_heads,
-                    attn.head_dim,
-                ),
-                flat_position_ids,
-                float(attn.rope_theta),
-            )
-            q = q.view(batch_size, seq_len, attn.num_heads, attn.head_dim)
-            k = k.view(batch_size, seq_len, attn.num_kv_heads, attn.head_dim)
-
-            # Append this depth position, then attend over the prefix already
-            # generated within the same codec frame.
-            kv_cache[layer_idx, :, 0, cache_pos:end].copy_(k)
-            kv_cache[layer_idx, :, 1, cache_pos:end].copy_(v)
-            attn_output = decode_attn_nhd(
-                q,
-                kv_cache[layer_idx, :, 0],
-                kv_cache[layer_idx, :, 1],
-                end,
+            # q/k norm, RoPE at the depth position, this position's K/V into
+            # the frame cache, and attention over the frame so far: one kernel
+            # (80 layer passes a frame make this loop launch-bound).
+            attn_output = depth_decode_attention(
+                q.view(batch_size, attn.num_heads, attn.head_dim),
+                k.view(batch_size, attn.num_kv_heads, attn.head_dim),
+                v.view(batch_size, attn.num_kv_heads, attn.head_dim),
+                attn.q_norm.weight, attn.k_norm.weight, attn.q_norm.variance_epsilon,
+                float(attn.rope_theta), kv_cache[layer_idx, :, 0], kv_cache[layer_idx, :, 1], cache_pos,
             )
             attn_output = attn_output.reshape(batch_size, seq_len, -1)
             hidden_states, residual = layer.post_attention_layernorm.forward_residual(
