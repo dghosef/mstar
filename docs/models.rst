@@ -319,6 +319,14 @@ not the 256-slot default. The state defaults to the checkpoint's
 ``gdn_state.state_dtype: bfloat16`` halves state traffic at some precision and
 needs FlashInfer's fused bf16 decode kernel (K = V = 128).
 
+Text prefill and mixed steps replay captured graphs by total tokens, on the
+ladder ``32 ... 8192`` (powers of two); a step pads to its bucket and a longer
+one runs eagerly. ``model_kwargs: prefill_token_buckets: [...]`` sets a
+deployment's own ladder: ``configs/qwen3_5_9b*.yaml`` add 3072, 5120, 6144 and
+7168, which cut the padding of compute-bound long prefills (+2% output tok/s
+on 9B, random 1024/256 at c=64/128, H200); the same ladder was not a win on
+0.8B, whose prefill is launch-bound. Each bucket adds captures and startup time.
+
 A captured decode step builds its rotary tables inside the graph from the
 planned positions, rather than staging tables built eagerly before the replay
 (that build sat on the per-step critical path: +13% output tok/s at c=32 on

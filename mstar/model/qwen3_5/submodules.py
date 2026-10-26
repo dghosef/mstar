@@ -101,17 +101,14 @@ class LLMSubmodule(ARNodeSubmodule):
     # the decode walk reads its input ids off the sampler's slot masters
     reads_device_loopback = True
 
-    # Total tokens of a packed text-prefill step, one captured graph per
-    # (bucket, batch size). A prompt past the top bucket prefills eagerly, and
-    # an eager 8k prefill is launch-bound (~1,100 kernel launches, the GPU
-    # idle half the time: 78 ms of wall for 36 ms of kernels on 0.8B), so the
-    # ladder runs to 8192. MSTAR_QWEN35_PREFILL_TOKEN_BUCKETS narrows or
-    # extends it (static buffers are sized by the largest bucket).
-    PREFILL_TOKEN_BUCKETS = [
-        int(x) for x in os.environ.get(
-            "MSTAR_QWEN35_PREFILL_TOKEN_BUCKETS", "32,64,128,256,512,1024,2048,4096,8192",
-        ).split(",")
-    ]
+    # Total tokens of a packed text-prefill (and mixed) step, one captured
+    # graph per (bucket, batch size). A prompt past the top bucket prefills
+    # eagerly, and an eager 8k prefill is launch-bound (~1,100 kernel
+    # launches, the GPU idle half the time: 78 ms of wall for 36 ms of kernels
+    # on 0.8B), so the ladder runs to 8192. A deployment sets its own with
+    # `model_kwargs.prefill_token_buckets` (static buffers are sized by the
+    # largest bucket).
+    PREFILL_TOKEN_BUCKETS = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
     PREFILL_CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16]
     # A mixed step carries the decode batch beside its prompt rows, so its
     # captures run to the decode batch: one capped below it splits the batch.
@@ -149,11 +146,14 @@ class LLMSubmodule(ARNodeSubmodule):
         model: Qwen3_5ForCausalLM,
         config: Qwen3_5Config,
         vision_config: Qwen3_5VisionConfig | None = None,
+        prefill_token_buckets: list[int] | None = None,
     ):
         super().__init__()
         self.model = model
         self.config = config
         self.vision_config = vision_config
+        if prefill_token_buckets:
+            self.PREFILL_TOKEN_BUCKETS = sorted(int(n) for n in prefill_token_buckets)
         # only a decode row's token ends decode_loop; a prefill is not in it yet
         self.token_stop = TokenStop(
             loop="decode_loop", buffer="new_token", stop_ids=config.stop_token_ids,
