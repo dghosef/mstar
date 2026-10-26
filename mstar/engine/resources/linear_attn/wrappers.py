@@ -109,6 +109,35 @@ def _with_room(t: torch.Tensor, rows: int) -> torch.Tensor:
     return torch.cat((t, t.new_zeros((rows, *t.shape[1:]))), dim=0)
 
 
+# The chunked path's elementwise work around its kernels, compiled into one
+# kernel each: run eagerly (the wrappers sit outside the engine's compiled
+# forward), it was a dozen launches per layer and about a third of a long
+# prefill's GPU time on Qwen3.5-0.8B. Pointwise only, so dynamic=True costs
+# nothing here (unlike a reduction over a symbolic head dim).
+
+
+@torch.compile(dynamic=True)
+def _masked_rows(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """``x`` with its rows where ``mask`` is 0 zeroed, by select (they can hold inf)."""
+    return torch.where(mask[: x.shape[0], None].bool(), x, torch.zeros((), dtype=x.dtype, device=x.device))
+
+
+@torch.compile(dynamic=True)
+def _chunked_gates(
+    a: torch.Tensor, b: torch.Tensor,
+    a_log: torch.Tensor, dt_bias: torch.Tensor, mask: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The decay (exponentiated, as FlashInfer takes it) and the learning
+    rate the chunked kernel reads, from the raw gate projections. The decode
+    kernel forms them from the same two weights, so the formula lives here
+    and there alike. Masked tokens get decay 1 and rate 0."""
+    keep = mask[: a.shape[0], None].bool()
+    zero = torch.zeros((), dtype=torch.float32, device=a.device)
+    g = -torch.exp(a_log.float()) * torch.nn.functional.softplus(a.float() + dt_bias.float())
+    beta = torch.sigmoid(b.float())
+    return torch.exp(torch.where(keep, g, zero)), torch.where(keep, beta, zero)
+
+
 class GDNPrefillWrapper(GDNWrapper):
     def __init__(
         self,
@@ -319,23 +348,10 @@ class GDNPrefillWrapper(GDNWrapper):
         # The kernel allocates its output with `empty_like` and writes only the
         # `cu_seqlens` range, so a capture bucket's padded tail keeps whatever
         # the previous replay left in that memory.
-        # Select rather than multiply because the tail can hold inf.
-        return torch.where(
-            self._plan_state.token_mask[: out.shape[0], None].bool(),
-            out,
-            torch.zeros((), dtype=out.dtype, device=out.device),
-        )
+        return _masked_rows(out, self._plan_state.token_mask)
 
     def run(self, q, k, v, a, b, state, a_log, dt_bias):
         from flashinfer.gdn_prefill import chunk_gated_delta_rule
-
-        # The chunked kernel takes the decay and the learning rate already
-        # formed, where the decode kernel takes `a`/`b` raw and forms them from
-        # the same two weights. Keep the formula here so the paths agree.
-        g = -torch.exp(a_log.float()) * torch.nn.functional.softplus(
-            a.float() + dt_bias.float()
-        )
-        beta = torch.sigmoid(b.float())
 
         slots = self._plan_state.slots.to(torch.int64)
 
@@ -374,26 +390,15 @@ class GDNPrefillWrapper(GDNWrapper):
             self._plan_state.num_rows if self._accelerator_graph else self._plan_borrowed
         )
         if rows:
-            q, k, v, g, beta = (
-                _with_room(t, rows) for t in (q, k, v, g, beta)
-            )
+            q, k, v, a, b = (_with_room(t, rows) for t in (q, k, v, a, b))
 
-        if not self._unpadded():
-            # zero the padded tail so inf there can't poison the result
-            keep = self._plan_state.token_mask[: q.shape[0], None, None].bool()
-            def blank(t, shape):
-                return torch.where(
-                    keep.view(shape), t, torch.zeros((), dtype=t.dtype, device=t.device),
-                )
-
-            v = blank(v, (-1, 1, 1))
-            g = blank(g, (-1, 1))
-            beta = blank(beta, (-1, 1))
+        # The padded tail is zeroed so inf there can't poison the result: q, k
+        # and v by `run_conv`, whose output they are, the gates here.
+        g, beta = _chunked_gates(a, b, a_log, dt_bias, self._plan_state.token_mask)
 
         out, final = chunk_gated_delta_rule(
             q=q, k=k, v=v,
-            # FlashInfer wants the decay exponentiated; FLA's takes log space
-            g=torch.exp(g),
+            g=g,
             beta=beta,
             scale=self._sm_scale,
             initial_state=initial,
