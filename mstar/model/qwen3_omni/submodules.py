@@ -507,25 +507,15 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # only the Talker reads the masks, and building a text span's syncs the host
         audio_output = fwd_info.step_metadata.get("audio_output", True)
         if graph_walk == "thinker_decode":
-            # Get previous token ID from text_inputs
-            token_id = inputs["text_inputs"][0].to(device)  # (1,) or scalar
-            if token_id.dim() == 0:
-                token_id = token_id.unsqueeze(0)
-            embeds = self.model.model.embed_tokens(token_id)
-
-            # Next MRoPE position for all 3 components: read from the
-            # stream's position counter (advanced by the runner's commit
-            # of each declared step).
-            # Fill kernel, not ``torch.tensor(..., device=cuda)``: a pageable H2D
-            # syncs the stream, stalling prepare(N+1) until step N drains.
-            pos_ids = torch.full(
-                (3, 1), float(start_pos), dtype=torch.float, device=device,
-            )  # (3, 1)
-
+            # The previous token, embedded with the step's other decode rows in
+            # `preprocess`; its MRoPE position (the same for all 3 components)
+            # is the stream's position counter, advanced by the runner's commit
+            # of each declared step.
+            token_id = inputs["text_inputs"][0].to(device).reshape(1)
             return ARNodeInputs(
                 input_seq_len=1,
-                input_embeds=embeds,
-                custom_pos_ids=pos_ids,
+                input_ids=token_id,
+                kwargs={"position": start_pos},
                 tensor_inputs={
                     "masks_for_talker": self._get_decode_thinker_mask(device)
                 }  # no additional tensors for decode step
@@ -734,13 +724,31 @@ class ThinkerSubmodule(ARNodeSubmodule):
         inputs: list[ARNodeInputs],
     ) -> dict[str, torch.Tensor | Any]: # input name to tensor
         device = self.get_device()
-        # Concatenate across requests
-        input_embeds = torch.cat([
-            inp.input_embeds for inp in inputs
-        ], dim=0)
-        position_ids_3d = torch.cat([
-            inp.custom_pos_ids for inp in inputs
-        ], dim=1)  # (3, total_tokens)
+        # Concatenate across requests. Decode rows carry a token and a host
+        # position: one embedding and one host-to-device copy for all of them,
+        # rather than a kernel or two per row ahead of the step's graph.
+        decode = [i for i, inp in enumerate(inputs) if inp.input_embeds is None]
+        if decode:
+            ids = torch.cat([inputs[i].input_ids for i in decode])
+            decode_embeds = self.model.model.embed_tokens(ids)
+            positions = torch.tensor(
+                [float(inputs[i].kwargs["position"]) for i in decode],
+                dtype=torch.float, pin_memory=device.type == "cuda",
+            ).to(device, non_blocking=True).expand(3, -1)
+        if len(decode) == len(inputs):
+            input_embeds, position_ids_3d = decode_embeds, positions
+        else:
+            embeds, pos_ids = [], []
+            for i, inp in enumerate(inputs):
+                if inp.input_embeds is None:
+                    k = decode.index(i)
+                    embeds.append(decode_embeds[k:k + 1])
+                    pos_ids.append(positions[:, k:k + 1])
+                else:
+                    embeds.append(inp.input_embeds)
+                    pos_ids.append(inp.custom_pos_ids)
+            input_embeds = torch.cat(embeds, dim=0)
+            position_ids_3d = torch.cat(pos_ids, dim=1)  # (3, total_tokens)
         seq_lens = [
             inp.input_seq_len for inp in inputs
         ]
@@ -925,15 +933,8 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 capture_graph_walk="thinker_decode",
                 single_request_inputs=ARNodeInputs(
                     input_seq_len=1,
-                    input_embeds=torch.zeros(
-                        (1, self.config.thinker_hidden_size),
-                        device=device, dtype=torch.bfloat16
-                    ),
-                    custom_pos_ids=torch.tensor(
-                        [[0], [0], [0]],
-                        dtype=torch.float,
-                        device=device,
-                    ),
+                    input_ids=torch.zeros((1,), dtype=torch.long, device=device),
+                    kwargs={"position": 0},
                     tensor_inputs={
                         "masks_for_talker": self._get_decode_thinker_mask(device)
                     }
