@@ -280,6 +280,12 @@ class GDNPrefillWrapper(GDNWrapper):
             token_mask=self._mask,
         )
 
+    def _unpadded(self) -> bool:
+        """An eager step with no padding row: every token is real, so the
+        token mask is all ones and selecting by it is a full-size no-op copy
+        (~0.3 ms a layer on a 26k-token prefill)."""
+        return not self._accelerator_graph and not self._plan_borrowed
+
     def run_conv(
         self,
         x: torch.Tensor,
@@ -307,6 +313,8 @@ class GDNPrefillWrapper(GDNWrapper):
         )
 
         out = out.transpose(0, 1)
+        if self._unpadded():
+            return out
 
         # The kernel allocates its output with `empty_like` and writes only the
         # `cu_seqlens` range, so a capture bucket's padded tail keeps whatever
@@ -370,16 +378,17 @@ class GDNPrefillWrapper(GDNWrapper):
                 _with_room(t, rows) for t in (q, k, v, g, beta)
             )
 
-        # zero the padded tail so inf there can't poison the result
-        keep = self._plan_state.token_mask[: q.shape[0], None, None].bool()
-        def blank(t, shape):
-            return torch.where(
-                keep.view(shape), t, torch.zeros((), dtype=t.dtype, device=t.device),
-            )
+        if not self._unpadded():
+            # zero the padded tail so inf there can't poison the result
+            keep = self._plan_state.token_mask[: q.shape[0], None, None].bool()
+            def blank(t, shape):
+                return torch.where(
+                    keep.view(shape), t, torch.zeros((), dtype=t.dtype, device=t.device),
+                )
 
-        v = blank(v, (-1, 1, 1))
-        g = blank(g, (-1, 1))
-        beta = blank(beta, (-1, 1))
+            v = blank(v, (-1, 1, 1))
+            g = blank(g, (-1, 1))
+            beta = blank(beta, (-1, 1))
 
         out, final = chunk_gated_delta_rule(
             q=q, k=k, v=v,
