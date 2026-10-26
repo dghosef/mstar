@@ -104,20 +104,19 @@ class Qwen3OmniTalkerLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        # ---------- self-attention with pre-norm ----------
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+        residual: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns (this layer's MLP output, the residual stream before it): the
+        residual adds are deferred into the next norm (FlashInfer's fused add +
+        RMSNorm, in place). ``residual`` None means ``hidden_states`` is the input."""
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm.forward_residual(hidden_states, residual)
         hidden_states = self.self_attn(hidden_states=hidden_states)
-        hidden_states = residual + hidden_states
-
-        # ---------- MoE FFN with pre-norm ----------
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-
-        return hidden_states
+        hidden_states, residual = self.post_attention_layernorm.forward_residual(hidden_states, residual)
+        return self.mlp(hidden_states), residual
 
 
 # ---------------------------------------------------------------------------
@@ -160,11 +159,12 @@ class Qwen3OmniTalkerLanguageModel(nn.Module):
         # the label once, advance the index per layer. Passing them as
         # arguments instead would make inductor specialize on the int.
         self.layers[0].self_attn.attend.bind_step(label)
+        residual = None
         for layer_idx, decoder_layer in enumerate(self.layers):
             decoder_layer.self_attn.attend.set_layer_idx(layer_idx)
-            hidden_states = decoder_layer(hidden_states=hidden_states)
+            hidden_states, residual = decoder_layer(hidden_states, residual)
 
-        hidden_states = self.norm(hidden_states)
+        hidden_states, _ = self.norm.forward_residual(hidden_states, residual)
         return hidden_states
 
 
