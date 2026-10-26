@@ -1018,9 +1018,11 @@ class PreprocessWorkerThread:
         sequence = state.next_sequence
         state.next_sequence += 1
         try:
-            tensor = torch.tensor([item.value], dtype=torch.int64)
+            # A list, not a tensor: every torch call releases and retakes the
+            # GIL, which costs up to a switch interval per token while the
+            # event loop is busy (see `NodeSubmodule.inline_client_signals`).
             postprocessed = self.model.postprocess(
-                tensor, item.modality,
+                [item.value], item.modality,
                 request_kwargs=self.request_model_kwargs.get(request_id),
             )
             self._queue_completed_output(

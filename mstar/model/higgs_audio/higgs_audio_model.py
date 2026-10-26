@@ -453,12 +453,13 @@ class HiggsAudioModel(Model):
 
     def postprocess(
         self,
-        output: torch.Tensor,
+        output: torch.Tensor | list[int],
         modality: str,
         **kwargs,
     ) -> bytes:
         if modality == "text":
-            return self._detokenizer.to_bytes(output.reshape(-1).tolist())
+            ids = output if isinstance(output, list) else output.reshape(-1).tolist()
+            return self._detokenizer.to_bytes(ids)
         raise ValueError(f"Unsupported modality for Higgs-Audio: {modality!r}")
 
     # -------------------------------------------------------------------

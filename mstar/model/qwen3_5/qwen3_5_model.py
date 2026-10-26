@@ -649,7 +649,7 @@ class Qwen3_5DenseModel(Model):
 
     def postprocess(
             self,
-            output: torch.Tensor,
+            output: torch.Tensor | list[int],
             modality: str,
             request_kwargs: dict | None = None,
         ) -> bytes:
