@@ -62,6 +62,7 @@ from mstar.model.base import (
     TensorAndMetadata,
     video_metadata_dict,
 )
+from mstar.model.components.video_decode import decode_frames_at
 from mstar.model.media_limits import VIDEO_DECODE_THREADS, VideoBudget
 from mstar.model.submodule_base import NodeSubmodule
 from mstar.model.vjepa2.components.ac_predictor import VisionTransformerPredictorAC
@@ -633,17 +634,7 @@ class VJepa2Model(Model):
     @staticmethod
     def _decode_frames(filepath: str, indices: list[int]) -> torch.Tensor:
         """``[len(indices), C, H, W]`` float in ``[0, 1]``."""
-        from torchcodec.decoders import VideoDecoder
-
-        decoder = VideoDecoder(filepath, num_ffmpeg_threads=VIDEO_DECODE_THREADS)
-        get_at = getattr(decoder, "get_frames_at", None)
-        if get_at is not None:
-            frame_batch = get_at(indices=indices)
-            frames = getattr(frame_batch, "data", frame_batch)
-        else:
-            # Older torchcodec: no batched sampled-decode API.
-            frames = torch.stack([decoder[i] for i in indices])
-        return frames.float().div_(255.0)
+        return decode_frames_at(filepath, indices).float().div_(255.0)
 
     def process_prompt(
         self,
