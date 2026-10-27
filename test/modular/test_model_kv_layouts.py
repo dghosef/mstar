@@ -467,7 +467,7 @@ def test_higgs_lays_out_the_prefill_steps_it_schedules():
     schedule = model._build_prefill_schedule({name: tensors[name] for name in tensors})
 
     assert [span.walk for span in layout.spans] == [walk for walk, _ in schedule]
-    audio = sum(output.metadata["audio_valid_lengths"])
+    audio = sum(model.config.encoder_output_length(n) for n in output.metadata["audio_feature_lens"])
     text = sum(ids.numel() for ids in tensors["text_inputs"])
     assert sum(span.length for span in layout.spans) == text + audio
 

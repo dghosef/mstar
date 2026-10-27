@@ -408,7 +408,7 @@ def test_higgs_encoder_prep_reads_no_tensor():
     sub = HiggsAudioEncoderSubmodule(None, None, config)
     features = torch.zeros(len(lens), config.audio_num_mel_bins, 400)
     with _HostReads() as reads:
-        row = sub.prepare_inputs("prefill_audio", _fwd("r", "prefill_audio", {key: valid}), {
+        row = sub.prepare_inputs("prefill_audio", _fwd("r", "prefill_audio", {key: lens}), {
             "audio_features": [features],
         })
     assert reads.reads == []

@@ -52,7 +52,7 @@ from mstar.graph.special_destinations import EMIT_TO_CLIENT
 from mstar.model.base import ForwardPassArgs, KVLabel, LabelLayout, Model, ProcessPromptOutput, Span
 from mstar.model.higgs_audio.config import (
     ATTN,
-    AUDIO_VALID_LENGTHS_KEY,
+    AUDIO_FEATURE_LENS_KEY,
     KV_CACHE,
     ROPE,
     SAMPLER,
@@ -81,7 +81,7 @@ def _resolve_local_hf_snapshot(repo_id: str, cache_dir: str | None = None) -> st
 class HiggsAudioModel(Model):
     """Higgs-Audio STT: audio_tower + projector + dense Qwen3 LLM."""
 
-    INTERNAL_KWARGS = (AUDIO_VALID_LENGTHS_KEY,)
+    INTERNAL_KWARGS = (AUDIO_FEATURE_LENS_KEY,)
 
     # The reference pipeline extracts mel features with the
     # whisper-large-v3 processor (not from the higgs checkpoint).
@@ -317,7 +317,7 @@ class HiggsAudioModel(Model):
             step_metadata={
                 "is_prefill": True,
                 "is_last_prefill": len(schedule) == 1,
-                AUDIO_VALID_LENGTHS_KEY: (model_kwargs or {}).get(AUDIO_VALID_LENGTHS_KEY),
+                AUDIO_FEATURE_LENS_KEY: (model_kwargs or {}).get(AUDIO_FEATURE_LENS_KEY),
             },
         )
 
@@ -438,8 +438,8 @@ class HiggsAudioModel(Model):
         if not kwargs.get("enable_thinking", False):
             post_ids += enc("<think>\n\n</think>\n\n")
 
-        valid_lengths = [self.config.encoder_output_length(int(n)) for n in audio_feature_lens.tolist()]
-        audio = sum(valid_lengths)
+        feature_lens = audio_feature_lens.tolist()
+        audio = sum(self.config.encoder_output_length(n) for n in feature_lens)
         # One step writes the text around the audio and the audio together, so
         # one span; it mixes text and audio, so nothing keys it.
         prompt = len(pre_ids) + audio + len(post_ids)
@@ -453,7 +453,7 @@ class HiggsAudioModel(Model):
                 torch.tensor(post_ids, dtype=torch.long),
             ],
             "audio_features": [audio_features],
-        }, {"kv_layout": {KV_CACHE: {"main": layout}}, AUDIO_VALID_LENGTHS_KEY: valid_lengths})
+        }, {"kv_layout": {KV_CACHE: {"main": layout}}, AUDIO_FEATURE_LENS_KEY: feature_lens})
 
     # -------------------------------------------------------------------
     # Model ABC: postprocess

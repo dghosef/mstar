@@ -34,7 +34,7 @@ from mstar.engine.resources.attn.base import AttentionManager
 from mstar.engine.resources.sampler.resource import SamplerResource
 from mstar.model.higgs_audio.config import (
     ATTN,
-    AUDIO_VALID_LENGTHS_KEY,
+    AUDIO_FEATURE_LENS_KEY,
     KV_CACHE,
     ROPE,
     SAMPLER,
@@ -114,11 +114,14 @@ class HiggsAudioEncoderSubmodule(NodeSubmodule):
         features = inputs["audio_features"][0]
         if features.dim() == 2:
             features = features.unsqueeze(0)  # (1, num_mel_bins, T)
-        # the valid embeddings of each chunk, known on the host since process_prompt
-        valid = list(fwd_info.step_metadata[AUDIO_VALID_LENGTHS_KEY])
+        # each chunk's valid mel frames, known on the host since process_prompt
+        frames = list(fwd_info.step_metadata[AUDIO_FEATURE_LENS_KEY])
         return NodeInputs(
             tensor_inputs={"audio_features": features},
-            kwargs={"valid_lengths": valid},
+            kwargs={
+                "frames": frames,
+                "valid_lengths": [self.config.encoder_output_length(n) for n in frames],
+            },
             input_seq_len=features.shape[0],
         )
 
@@ -155,8 +158,10 @@ class HiggsAudioEncoderSubmodule(NodeSubmodule):
             "valid_lengths": [inp.kwargs["valid_lengths"] for inp in inputs],
         }
         if padded:
+            # a short clip is one chunk; its mask sum can be one past its mel
+            # width, and the slice below counts from the mask sum too
             out["valid_frames"] = to_device_nonblocking(
-                torch.tensor(widths, dtype=torch.long), self.get_device(),
+                torch.tensor([inp.kwargs["frames"][0] for inp in inputs], dtype=torch.long), self.get_device(),
             )
         return out
 

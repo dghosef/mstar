@@ -18,10 +18,12 @@ KV_CACHE = "kv_cache"
 ATTN = "attn"
 ROPE = "rope"
 SAMPLER = "sampler"
-# Each audio chunk's encoder output length, from ``process_prompt`` to the
-# encoder's step metadata: known on the host there, so the encoder node never
-# reads it back from a tensor.
-AUDIO_VALID_LENGTHS_KEY = "audio_valid_lengths"
+# Each audio chunk's mel frame count (the feature extractor's attention-mask
+# sum), from ``process_prompt`` to the encoder's step metadata: known on the
+# host there, so the encoder node never reads it back from a tensor. The
+# prompt's audio placeholders and the encoder's masking and slicing all count
+# from it.
+AUDIO_FEATURE_LENS_KEY = "audio_feature_lens"
 
 
 @dataclass
