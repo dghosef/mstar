@@ -422,9 +422,8 @@ def test_llm_check_stop_batched_agrees_with_per_request():
         "prefill": info(PREFILL_WALK, 0),
     }
     check = list(reversed(row_rids))  # not forward order
-    # called as Engine.check_stop_for_batch calls it (step_walk=None: a mixed step)
     host_rows = HostRows(row_rids, {"new_token": tokens})
-    batched = sub.check_stop_batched(check, infos, host_rows, step_walk=None)
+    batched = sub.check_stop_batched(check, infos, host_rows)
     per_request = {}
     for i, rid in enumerate(row_rids):
         got = sub.check_stop(rid, infos[rid], {"new_token": [tokens[i:i + 1]]})
@@ -436,10 +435,9 @@ def test_llm_check_stop_batched_agrees_with_per_request():
     assert sub.check_stop_batched(["word"], infos, HostRows(("word",), {})) is None
 
 
-@pytest.mark.parametrize("step_walk", [DECODE_WALK, None])
-def test_engine_stop_check_takes_the_batched_path(step_walk):
-    """The engine passes ``step_walk``; a signature without it raised, and the
-    engine silently fell back to one ``check_stop`` per row."""
+def test_engine_stop_check_takes_the_batched_path():
+    """The engine's stop check reaches the batched path rather than falling
+    back to one ``check_stop`` per row."""
     from types import SimpleNamespace
 
     from mstar.engine.engine import Engine
@@ -462,10 +460,6 @@ def test_engine_stop_check_takes_the_batched_path(step_walk):
     batch = SimpleNamespace(
         node_name="llm", request_ids=["end", "word"], per_request_info_wrapped=infos,
         register_failure=failures.setdefault,
-        step_context=SimpleNamespace(
-            graph_walk=DECODE_WALK,
-            request_walks=None if step_walk else {"end": DECODE_WALK, "word": DECODE_WALK},
-        ),
     )
     engine = SimpleNamespace(_submodules={"llm": SimpleNamespace(submodule=sub)})
     tokens = torch.tensor([[IM_END], [1234]])

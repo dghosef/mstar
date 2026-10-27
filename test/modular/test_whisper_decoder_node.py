@@ -82,7 +82,6 @@ def test_batched_stop_check_answers_decode_steps_only():
     }
     rows = HostRows(request_ids=("go", "limit", "eos", "prefill_eos"),
                     buffers={"new_token": torch.tensor([[7], [7], [3], [3]])})
-    # step_walk=None: the engine's call for a step that mixes walks
-    assert node.check_stop_batched(["eos", "limit", "go", "prefill_eos"], infos, rows, step_walk=None) == {
+    assert node.check_stop_batched(["eos", "limit", "go", "prefill_eos"], infos, rows) == {
         "eos": {"decode_loop"}, "limit": {"decode_loop"},
     }
