@@ -31,6 +31,8 @@ model_kwargs:
   # different steps, one or two outside the dit) that padding cost more than batching saved.
   # H200, 1024^2, 8 steps, 2 rounds: c=4 1.05-1.08 -> 1.22 images/s, c=8 1.12-1.14 -> 1.21-1.22,
   # c=16 1.17-1.19 -> 1.23, c=1 unchanged, same peak VRAM; ~100 s more warm startup (32 graphs).
+  # The text encoder is captured at the same batch sizes (one graph each, any caption length);
+  # larger encoder batches run eager.
   capture_caption_lengths: [32, 64, 96, 128]
   capture_batch_sizes: [1, 2, 3, 4, 5, 6, 7, 8]
   max_batch_size: 8
