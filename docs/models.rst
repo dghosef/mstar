@@ -197,7 +197,7 @@ OmniVoice notes
   and each residual add folds into the next RMSNorm (flashinfer
   ``fused_add_rmsnorm``), so logits match the reference to half-precision
   rounding rather than bit for bit. ``model_kwargs: {backbone_graphs: false}``
-  keeps the reference's eager packed path.
+  runs the same layer loop eagerly.
 - ``configs/omnivoice_split.yaml`` runs code2wav (codec decode and the
   host-side silence trim) on a second worker sharing GPU 0, so the unmask loop
   no longer stops for each finished request. With a CUDA MPS daemon it raised
