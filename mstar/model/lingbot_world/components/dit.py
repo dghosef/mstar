@@ -226,7 +226,7 @@ class _WritePlan:
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, dim: int, num_heads: int, eps: float):
+    def __init__(self, dim: int, num_heads: int, eps: float, fa4: bool = False):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -236,7 +236,7 @@ class CausalSelfAttention(nn.Module):
         self.o = nn.Linear(dim, dim)
         self.norm_q = WanRMSNorm(dim, eps=eps)
         self.norm_k = WanRMSNorm(dim, eps=eps)
-        self.fa4 = False
+        self.fa4 = fa4
 
     def forward(
         self, x: torch.Tensor, grid: tuple[int, int, int], freqs: torch.Tensor,
@@ -260,7 +260,7 @@ class CrossAttention(nn.Module):
     """Cross-attention to the 512-token text stream. The text K/V are computed
     on a request's first forward and reused for the rest of its rollout."""
 
-    def __init__(self, dim: int, num_heads: int, eps: float):
+    def __init__(self, dim: int, num_heads: int, eps: float, fa4: bool = False):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -270,7 +270,7 @@ class CrossAttention(nn.Module):
         self.o = nn.Linear(dim, dim)
         self.norm_q = WanRMSNorm(dim, eps=eps)
         self.norm_k = WanRMSNorm(dim, eps=eps)
-        self.fa4 = False
+        self.fa4 = fa4
 
     def text_kv(self, context: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         b, n, d = context.size(0), self.num_heads, self.head_dim
@@ -286,12 +286,12 @@ class CrossAttention(nn.Module):
 
 
 class CausalBlock(nn.Module):
-    def __init__(self, dim: int, ffn_dim: int, num_heads: int, eps: float):
+    def __init__(self, dim: int, ffn_dim: int, num_heads: int, eps: float, fa4: bool = False):
         super().__init__()
         self.norm1 = WanLayerNorm(dim, eps)
-        self.self_attn = CausalSelfAttention(dim, num_heads, eps)
+        self.self_attn = CausalSelfAttention(dim, num_heads, eps, fa4)
         self.norm3 = WanLayerNorm(dim, eps, elementwise_affine=True)
-        self.cross_attn = CrossAttention(dim, num_heads, eps)
+        self.cross_attn = CrossAttention(dim, num_heads, eps, fa4)
         self.norm2 = WanLayerNorm(dim, eps)
         self.ffn = nn.Sequential(nn.Linear(dim, ffn_dim), nn.GELU(approximate="tanh"), nn.Linear(ffn_dim, dim))
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
@@ -361,8 +361,10 @@ class LingBotCausalDiT(nn.Module):
             nn.Linear(config.text_dim, dim), nn.GELU(approximate="tanh"), nn.Linear(dim, dim))
         self.time_embedding = nn.Sequential(nn.Linear(config.freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
         self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
+        # flash-attn-4 off reference numerics (see LingBotWorldConfig.reference_numerics)
         self.blocks = nn.ModuleList(
-            CausalBlock(dim, config.ffn_dim, config.num_heads, config.eps) for _ in range(config.num_layers)
+            CausalBlock(dim, config.ffn_dim, config.num_heads, config.eps, fa4=not config.reference_numerics)
+            for _ in range(config.num_layers)
         )
         self.head = CausalHead(dim, config.out_dim, patch, config.eps)
         # Derived complex128 tables, not checkpoint state: kept off the module
@@ -378,18 +380,17 @@ class LingBotCausalDiT(nn.Module):
             self._fast_numerics()
 
     def _fast_numerics(self) -> None:
-        """Trade bit-parity with the reference for speed: flash-attn-4
-        attention, and each block's pointwise chains (modulation, norms, FFN
-        activation, gated residuals) compiled around the GEMMs. Attention, RoPE
-        and the cache writes stay eager: they take the chunk's Python-int
-        cache indices, which would recompile per chunk."""
+        """Trade bit-parity with the reference for speed: each block's
+        pointwise chains (modulation, norms, FFN activation, gated residuals)
+        compiled around the GEMMs. Attention, RoPE and the cache writes stay
+        eager: they take the chunk's Python-int cache indices, which would
+        recompile per chunk."""
         from mstar.model.components.diffusion.compile_utils import with_inductor_rounding
 
         def compiled(fn):
             return with_inductor_rounding(torch.compile(fn, dynamic=False), eager_rounding=True)
 
         for block in self.blocks:
-            block.self_attn.fa4 = block.cross_attn.fa4 = True
             for name in ("_pre", "_post_self", "_norm3", "_ffn"):
                 setattr(block, name, compiled(getattr(block, name)))
             block.self_attn._qkv = compiled(block.self_attn._qkv)
