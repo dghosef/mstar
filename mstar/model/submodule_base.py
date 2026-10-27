@@ -13,7 +13,6 @@ import torch
 from mstar.communication.tensors import NameToTensorList
 from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.engine.resources import Resource, SlotLease, SubmoduleStep
-from mstar.utils.h2d import to_device_nonblocking
 from mstar.utils.knobs import device_loopback_enabled  # noqa: F401  (re-export)
 
 
@@ -54,7 +53,6 @@ if TYPE_CHECKING:
     from mstar.engine.accelerator_graph_config import AcceleratorGraphConfig, PiecewiseAcceleratorGraphConfig
     from mstar.engine.accelerator_graph_runner import PiecewiseAcceleratorGraphRunner
     from mstar.engine.engine import ExecutingBatch
-    from mstar.engine.resources.sampler.resource import SamplerResource
     from mstar.streaming.stream_buffer import StreamChunkInfo
 
 
@@ -1169,24 +1167,3 @@ class ARNodeSubmodule(NodeSubmodule):
         inputs: list[ARNodeInputs],
     ) -> dict[str, torch.Tensor | Any]: # input name to tensor
         pass
-
-    @staticmethod
-    def loopback_input_ids(
-        sampler: SamplerResource, request_ids: list[str], inputs: Sequence[ARNodeInputs],
-    ) -> torch.Tensor:
-        """A device loop-back decode step's input ids: each row's last sampled
-        token, read off the sampler on the device, except where a row brought
-        its own (its previous step ran elsewhere, e.g. the prefill)."""
-        ids = sampler.loopback_tokens(request_ids)
-        routed = [
-            i for i, inp in enumerate(inputs)
-            if inp.input_ids is not None and inp.input_seq_len
-        ]
-        if routed:
-            # every request's first decode step after its prefill comes here,
-            # so the row index goes up without a blocking copy
-            ids.index_copy_(
-                0, to_device_nonblocking(torch.tensor(routed, dtype=torch.long), ids.device),
-                torch.cat([inputs[i].input_ids for i in routed]).to(ids.dtype),
-            )
-        return ids
