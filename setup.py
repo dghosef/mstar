@@ -1,6 +1,7 @@
 """Build shim: copy the repo-root configs/ into mstar/default_configs/ so the
 default deployment YAMLs ship inside the wheel under the mstar namespace, and
-compile the ``mstar_rust`` extension into the published Linux wheels.
+compile the ``mstar_rust`` extension and the ``mstar-server`` binary into the
+published Linux wheels.
 
 Project metadata lives in pyproject.toml; this file exists only for those two
 build steps. configs/ stays the single source of truth (unchanged for checkouts
@@ -35,15 +36,20 @@ class build_py_with_configs(build_py):
             shutil.copy2(y, dst / y.name)
 
 
-# Only the release's cibuildwheel jobs compile rust/; every other build is the
-# pure-Python package, and a checkout builds the extension with maturin
+# Only the release's cibuildwheel jobs compile rust/: the mstar_rust extension
+# and the mstar-server binary (--rust-frontend), which installs into the
+# environment's scripts directory. Every other build is the pure-Python
+# package, and a checkout builds both with cargo/maturin
 # (docs/installation.rst). setuptools' editable finder cannot import a
 # top-level extension built in place, and compiling it would slow every
 # `pip install -e .`.
 rust_extensions = []
 if os.environ.get("CIBUILDWHEEL") == "1":
-    from setuptools_rust import Binding, RustExtension
+    from setuptools_rust import Binding, RustBin, RustExtension
 
-    rust_extensions.append(RustExtension("mstar_rust", path="rust/Cargo.toml", binding=Binding.PyO3))
+    rust_extensions += [
+        RustExtension("mstar_rust", path="rust/Cargo.toml", binding=Binding.PyO3),
+        RustBin("mstar-server", path="rust/server/Cargo.toml"),
+    ]
 
 setup(cmdclass={"build_py": build_py_with_configs}, rust_extensions=rust_extensions)

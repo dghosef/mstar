@@ -318,7 +318,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--rust-frontend-bin", default=None,
         help="path to the mstar-server binary (default: MSTAR_SERVER_BIN, "
-             "$PATH, then rust/server/target/release)",
+             "$PATH, the environment's scripts dir, then "
+             "rust/server/target/release)",
     )
     serve.set_defaults(func=_serve)
     return parser

@@ -66,9 +66,13 @@ use serving::{
 
 #[tokio::main]
 async fn main() {
-    let model_name = std::env::args()
-        .nth(1)
-        .expect("usage: mstar-server <model_name> [port] [conductor_socket_dir] [upload_dir]");
+    const USAGE: &str =
+        "usage: mstar-server <model_name> [port] [conductor_socket_dir] [upload_dir]";
+    let model_name = std::env::args().nth(1).expect(USAGE);
+    if model_name == "-h" || model_name == "--help" {
+        println!("{USAGE}");
+        return;
+    }
     let port: u16 = std::env::args()
         .nth(2)
         .and_then(|p| p.parse().ok())

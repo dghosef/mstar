@@ -519,16 +519,18 @@ Optional: the Rust HTTP frontend
 
 ``mstar-server`` (``rust/server/``) serves the HTTP surface — routes, OpenAI
 translation, SSE streaming, uploads — from Rust, with the Python process
-keeping preprocessing and the conductor protocol. Build and opt in:
+keeping preprocessing and the conductor protocol. The Linux wheels on PyPI
+install the binary next to ``mstar-serve``; in a source checkout, build it.
+Then opt in:
 
 .. code-block:: bash
 
-   cargo build --release --manifest-path rust/server/Cargo.toml
+   cargo build --release --manifest-path rust/server/Cargo.toml  # checkout only
    mstar serve qwen3_omni --rust-frontend
    # or, with an explicit config: mstar-serve --config <model.yaml> --rust-frontend
 
 The binary is resolved via ``--rust-frontend-bin`` / ``MSTAR_SERVER_BIN`` /
-``$PATH`` / the in-repo build. Its knobs are listed in
+``$PATH`` / the environment's scripts directory / the in-repo build. Its knobs are listed in
 :doc:`environment_variables`.
 
 The OpenAI routes take the model's adapter from the same registry as the Python
