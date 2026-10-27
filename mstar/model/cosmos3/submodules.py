@@ -2736,7 +2736,8 @@ class Cosmos3VAEDecoderSubmodule(NodeSubmodule):
         self._decode_dtype()
         if fast:
             # Cast before the layout switch and the compile trace, so both see the
-            # weights the decode runs with (this instance is the node's own).
+            # weights the decode runs with (the decoder-only VAE both decoder
+            # nodes share, never the encoder's; see Cosmos3Model).
             self.vae = vae = vae.to(self._decode_dtype())
             _wan_vae().to_channels_last(vae)
             self._channels_last = True
@@ -2872,8 +2873,8 @@ class Cosmos3VAEDecoderARSubmodule(Cosmos3VAEDecoderSubmodule):
         self._sessions = SessionStore(
             config.session_store_size, config.session_timeout_s, config.session_timeout_max_s,
         )
-        # Before any compile traces the decode; only this node's VAE instance
-        # is converted (see Cosmos3Model).
+        # Before any compile traces the decode; only the decoder-only VAE the
+        # decoder nodes share is converted, never the encoder's (see Cosmos3Model).
         if vae is not None and config.vae_decode_channels_last:
             _wan_vae().to_channels_last(vae)
             self._channels_last = True

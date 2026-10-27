@@ -212,6 +212,7 @@ class Cosmos3Model(Model):
         # and the decoder submodule, so build it once. The transformer is
         # shared between the DiT and reasoner nodes likewise.
         self._vae = None
+        self._decoder_vae = None
         self._transformer = None
 
     # ------------------------------------------------------------------
@@ -1833,9 +1834,12 @@ class Cosmos3Model(Model):
             return Cosmos3VAEEncoderSubmodule(
                 vae=self._build_encode_vae(device), config=self.config
             )
+        # A decoder that runs channels-last (the whole-clip one with
+        # vae_decode_fast, the streaming one with vae_decode_channels_last)
+        # converts its VAE in place, so it takes the decoder-only copy, which the
+        # two share; otherwise a decoder shares the default-layout instance.
+        # Only the streaming chunk state and the compile wrappers are per node.
         if node_name == VAE_DECODER_NODE:
-            # The fast decode converts its VAE to channels-last in place, so it
-            # takes a decoder-only copy rather than the shared instance.
             vae = (
                 self._build_decoder_only_vae(device)
                 if self.config.vae_decode_fast
@@ -1843,9 +1847,6 @@ class Cosmos3Model(Model):
             )
             return Cosmos3VAEDecoderSubmodule(vae=vae, config=self.config)
         if node_name == VAE_DECODER_AR_NODE:
-            # Shares the decoder VAE weights unless it decodes channels-last,
-            # which converts the VAE in place; only the streaming chunk state
-            # and compile wrapper are per-node.
             vae = (
                 self._build_decoder_only_vae(device)
                 if self.config.vae_decode_channels_last
@@ -1937,15 +1938,20 @@ class Cosmos3Model(Model):
         return self._vae
 
     def _build_decoder_only_vae(self, device: str):
-        # A separate instance (the decode needs no encoder), so converting it
-        # leaves the instance the whole-clip decoder uses untouched.
+        # Separate from _build_vae's instance (and without the encoder), so
+        # converting it to channels-last leaves that one untouched. Built once:
+        # both decoder nodes convert it the same way and cast it to the same
+        # decode dtype (Cosmos3VAEDecoderSubmodule._decode_dtype).
         if self.skip_weight_loading:
             return None
+        if self._decoder_vae is not None:
+            return self._decoder_vae
         from diffusers import AutoencoderKLWan
 
         vae = AutoencoderKLWan.from_pretrained(str(self._ensure_repo() / "vae"))
         vae.encoder = None
-        return vae.to(device).eval()
+        self._decoder_vae = vae.to(device).eval()
+        return self._decoder_vae
 
     def _build_encode_vae(self, device: str):
         # The encoder node keeps its own fp32 instance instead of sharing the
