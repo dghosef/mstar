@@ -542,7 +542,7 @@ Worker scheduling
        master and the next step reads its input ids from it, so the worker
        routes the signal with no tensor (no per-request store, hold or
        cleanup per step). Only nodes that declare the read
-       (``reads_device_loopback``: Qwen3.5 decode) and only when the sampler
+       (``TokenStop.loopback_signal``: Qwen3.5 and Higgs Audio decode) and only when the sampler
        has graph buffers; the sampler keeps the masters for those nodes
        alone, so a node that takes its tokens on the host (Whisper's
        decoder) no longer pays the eager-step master write, a small

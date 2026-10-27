@@ -33,7 +33,9 @@ class TokenStop(NamedTuple):
     the request has generated ``max_tokens`` tokens.
 
     Declared as ``ARNodeSubmodule.token_stop``; ``check_stop`` and
-    ``check_stop_batched`` follow from it.
+    ``check_stop_batched`` follow from it, and with ``loopback_signal`` the
+    loop-back hooks (``uniform_row_inputs``, ``device_loopback_signals``,
+    ``step_is_input_free``, ``inline_client_signals``) too.
     """
 
     loop: str
@@ -47,6 +49,14 @@ class TokenStop(NamedTuple):
     # request-state key counting the tokens generated so far; None counts
     # the loop's iterations, plus the token this step sampled
     generated_key: str | None = None
+    # the input signal ``walk``'s token loops back to. Its rows then read it
+    # off the sampler's slot masters instead of a routed tensor
+    # (``MSTAR_DEVICE_LOOPBACK``), and the client edge carries ``buffer``
+    # inline. The sampler keeps the masters only for a node that sets this:
+    # their eager step write is a small synchronous host-to-device copy per
+    # step, which a node that reads its tokens on the host would pay for
+    # nothing.
+    loopback_signal: str | None = None
 
 
 if TYPE_CHECKING:
@@ -547,14 +557,6 @@ class NodeSubmodule(torch.nn.Module, ABC):
     # steps keep the process setting, so a new eager shape never searches.
     capture_cudnn_benchmark: bool = False
 
-    # Set True on a submodule whose decode walk may read its last sampled
-    # tokens back off the sampler's slot masters (``device_loopback_signals``).
-    # The sampler keeps the masters only for a node that says so: the eager
-    # step write behind them is a small synchronous host-to-device copy per
-    # step, which a node that reads its tokens on the host (Whisper's decoder)
-    # would pay for nothing.
-    reads_device_loopback: bool = False
-
     def __init__(self):
         super().__init__()
         # Per-request state store. prepare_inputs-time code (no engine inputs
@@ -1042,8 +1044,46 @@ class NodeSubmodule(torch.nn.Module, ABC):
 
 class ARNodeSubmodule(NodeSubmodule):
     # Set (in ``__init__``, where the stop ids are known) by a submodule whose
-    # sampled token ends a dynamic loop; the stop checks below follow from it.
+    # sampled token ends a dynamic loop; the stop checks and loop-back hooks
+    # below follow from it.
     token_stop: TokenStop | None = None
+
+    def _loops_back(self, graph_walk: str) -> bool:
+        """Whether this walk's token loops back on the device: ``token_stop``'s
+        walk, declared with a ``loopback_signal``."""
+        stop = self.token_stop
+        return stop is not None and stop.loopback_signal is not None and graph_walk == stop.walk
+
+    def _reads_loopback(self, graph_walk: str) -> bool:
+        """Whether this walk's rows read their token off the slot masters: a
+        loop-back walk, the knob on, and a sampler that keeps masters."""
+        return (
+            self._loops_back(graph_walk) and device_loopback_enabled()
+            and self.node_resources[self.token_stop.sampler].has_slot_masters
+        )
+
+    def uniform_row_inputs(
+        self, graph_walk: str, has_loopback: bool = False,
+    ) -> "NodeInputs | None":
+        # the loop-back decode row: one token, read in ``preprocess``
+        if has_loopback and self._reads_loopback(graph_walk):
+            return ARNodeInputs(input_seq_len=1)
+        return super().uniform_row_inputs(graph_walk, has_loopback)
+
+    def device_loopback_signals(self, graph_walk: str) -> frozenset[str]:
+        if self._reads_loopback(graph_walk):
+            return frozenset({self.token_stop.loopback_signal})
+        return super().device_loopback_signals(graph_walk)
+
+    def step_is_input_free(self, graph_walk: str) -> bool:
+        # decode rows are one token each, like the capture template's
+        return self._loops_back(graph_walk) or super().step_is_input_free(graph_walk)
+
+    def inline_client_signals(self, graph_walk: str) -> dict[str, str]:
+        # the client's copy of the token the stop check already has on the host
+        if self._loops_back(graph_walk):
+            return {self.token_stop.loopback_signal: self.token_stop.buffer}
+        return super().inline_client_signals(graph_walk)
 
     def check_stop(
         self, request_id: str,

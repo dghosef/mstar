@@ -73,7 +73,6 @@ from mstar.model.submodule_base import (
     NodeInputs,
     NodeSubmodule,
     TokenStop,
-    device_loopback_enabled,
 )
 from mstar.platforms.compile import with_inductor_overrides
 from mstar.utils.h2d import to_device_nonblocking
@@ -90,9 +89,6 @@ def _host_grids(fwd_info: CurrentForwardPassInfo) -> list[tuple[int, int, int]]:
 
 
 class LLMSubmodule(ARNodeSubmodule):
-    # the decode walk reads its input ids off the sampler's slot masters
-    reads_device_loopback = True
-
     # Total tokens of a packed text-prefill step, one captured graph per
     # (bucket, batch size). A prompt past the top bucket prefills eagerly, and
     # an eager 8k prefill is launch-bound (~1,100 kernel launches, the GPU
@@ -146,10 +142,11 @@ class LLMSubmodule(ARNodeSubmodule):
         self.model = model
         self.config = config
         self.vision_config = vision_config
-        # only a decode row's token ends decode_loop; a prefill is not in it yet
+        # only a decode row's token ends decode_loop; a prefill is not in it
+        # yet. Decode reads its input ids off the sampler's slot masters.
         self.token_stop = TokenStop(
             loop="decode_loop", buffer="new_token", stop_ids=config.stop_token_ids,
-            sampler=SAMPLER, walk="decode",
+            sampler=SAMPLER, walk="decode", loopback_signal="text_inputs",
         )
         self._vision_sentinels: tuple[torch.Tensor, torch.Tensor] | None = None
 
@@ -334,31 +331,12 @@ class LLMSubmodule(ARNodeSubmodule):
         if graph_walk == "prefill_vision":
             return self._vision_inputs(fwd_info, inputs)
 
-        if graph_walk == "decode" and has_loopback and self._device_loopback():
+        if (row := self.uniform_row_inputs(graph_walk, has_loopback)) is not None:
             # one token per row, read off the sampler's slot master in
             # `preprocess`; the routed signal is empty (or ignored) here
-            return ARNodeInputs(input_seq_len=1)
+            return row
         input_ids = inputs["text_inputs"][0]
         return ARNodeInputs(input_seq_len=input_ids.shape[0], input_ids=input_ids)
-
-    def uniform_row_inputs(
-        self, graph_walk: str, has_loopback: bool = False,
-    ) -> ARNodeInputs | None:
-        # the loop-back decode row above, built once for the step's rows
-        if graph_walk == "decode" and has_loopback and self._device_loopback():
-            return ARNodeInputs(input_seq_len=1)
-        return None
-
-    def _device_loopback(self) -> bool:
-        return (
-            device_loopback_enabled()
-            and self.node_resources[SAMPLER].has_slot_masters
-        )
-
-    def device_loopback_signals(self, graph_walk: str) -> frozenset[str]:
-        if graph_walk == "decode" and self._device_loopback():
-            return frozenset({"text_inputs"})
-        return frozenset()
 
     @staticmethod
     def _captured_decode(engine_inputs: ModelInputsFromEngine, graph_walk: str) -> bool:
@@ -652,16 +630,6 @@ class LLMSubmodule(ARNodeSubmodule):
         return request_info.graph_walk == "decode" or request_info.step_metadata.get(
             "last_prefill", False,
         )
-
-    def step_is_input_free(self, graph_walk: str) -> bool:
-        # decode rows are one token each, like the template; the prefill walks
-        # feed `prefill_tokens` from the inputs
-        return graph_walk == "decode"
-
-    def inline_client_signals(self, graph_walk: str) -> dict[str, str]:
-        # the decode loop's client edge carries the sampled token the stop
-        # check already has on the host; prefill's new_token edge is persisted
-        return {"text_inputs": "new_token"} if graph_walk == "decode" else {}
 
 
 

@@ -1016,7 +1016,13 @@ methods are:
    terminates. An AR submodule whose loop ends on a stop token or the token budget sets
    ``self.token_stop = TokenStop(...)`` in ``__init__`` instead of writing one; that also
    gives it ``check_stop_batched``, which checks a whole step off one host copy of its
-   tokens. Qwen3.5's ``LLMSubmodule`` is an example.
+   tokens. Qwen3.5's ``LLMSubmodule`` is an example. A decode walk that feeds each row
+   its last sampled token can keep that token on the device instead of routing it: give
+   its ``TokenStop`` a ``walk`` and the ``loopback_signal`` the token feeds back to,
+   and read the row's token with the sampler's ``loopback_input_ids`` in ``preprocess``
+   (``prepare_inputs`` returns ``self.uniform_row_inputs(...)`` for such a row); the
+   loop-back hooks and the client's inline copy of the token follow from it
+   (``MSTAR_DEVICE_LOOPBACK``). Qwen3.5 and Higgs Audio declare it.
 
 ``cleanup_request(self, request_id)`` (optional)
    Free per-request state held inside the submodule when a request finishes: buffers,

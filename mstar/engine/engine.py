@@ -49,6 +49,7 @@ from mstar.model.base import keyed_labels
 from mstar.model.submodule_base import (
     EMPTY_INPUT_METADATA,
     ARNodeInputs,
+    ARNodeSubmodule,
     BatchedModelOutput,
     HostRows,
     InputMetadata,
@@ -600,13 +601,15 @@ class Engine:
                 fp32_precision=node_fp32_precision(node_name, submodule),
             )
             submodule.bind_node_resources(resources)
-            if getattr(submodule, "reads_device_loopback", False):
+            stop = submodule.token_stop if isinstance(submodule, ARNodeSubmodule) else None
+            if stop is not None and stop.loopback_signal is not None:
+                if stop.walk is None:
+                    raise ValueError(
+                        f"{node_name}: TokenStop.loopback_signal needs the walk whose token loops back"
+                    )
                 # the sampler keeps its slot masters only for a node that
-                # reads them back on the device (see NodeSubmodule)
-                for resource in resources.values():
-                    enable = getattr(resource, "enable_device_loopback_reader", None)
-                    if enable is not None:
-                        enable()
+                # reads them back on the device (see TokenStop)
+                resources[stop.sampler].enable_device_loopback_reader()
 
     def paged_kv_caches(self) -> list[PagedKVCache]:
         """Every paged KV cache this engine built, with the nodes that use it."""

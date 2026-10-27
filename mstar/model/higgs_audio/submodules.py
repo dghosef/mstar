@@ -48,7 +48,6 @@ from mstar.model.submodule_base import (
     NodeInputs,
     NodeSubmodule,
     TokenStop,
-    device_loopback_enabled,
 )
 from mstar.utils.h2d import to_device_nonblocking
 
@@ -263,9 +262,6 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
     embeds inside the graph.
     """
 
-    # the decode walk reads its input ids off the sampler's slot masters
-    reads_device_loopback = True
-
     PREFILL_TOKEN_BUCKETS = [64, 128, 256, 512, 1024, 2048]
     PREFILL_CAPTURE_BATCH_SIZES = [1, 2, 4, 8]
     DECODE_CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16, 32]
@@ -274,9 +270,10 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
         super().__init__()
         self.model = llm
         self.config = config
+        # decode reads its input ids off the sampler's slot masters
         self.token_stop = TokenStop(
             loop="decode_loop", buffer="new_token", stop_ids=frozenset(config.stop_token_ids),
-            sampler=SAMPLER, walk="decode",
+            sampler=SAMPLER, walk="decode", loopback_signal="text_inputs",
         )
 
     def get_accelerator_graph_configs(
@@ -319,9 +316,9 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
     ) -> ARNodeInputs:
         device = self.get_device()
 
-        if graph_walk == "decode" and has_loopback and self._device_loopback():
+        if (row := self.uniform_row_inputs(graph_walk, has_loopback)) is not None:
             # the token is read off the sampler's slot master in `preprocess`
-            return ARNodeInputs(input_seq_len=1)
+            return row
 
         if graph_walk == "prefill_audio":
             # the audio between the ChatML text around it, prefilled as one span
@@ -342,21 +339,6 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
         # is one id, so staging it costs 8 bytes instead of a hidden vector
         token_ids = inputs["text_inputs"][0].to(device).reshape(-1)
         return ARNodeInputs(input_seq_len=1, input_ids=token_ids)
-
-    def uniform_row_inputs(
-        self, graph_walk: str, has_loopback: bool = False,
-    ) -> ARNodeInputs | None:
-        if graph_walk == "decode" and has_loopback and self._device_loopback():
-            return ARNodeInputs(input_seq_len=1)
-        return None
-
-    def _device_loopback(self) -> bool:
-        return device_loopback_enabled() and self.node_resources[SAMPLER].has_slot_masters
-
-    def device_loopback_signals(self, graph_walk: str) -> frozenset[str]:
-        if graph_walk == "decode" and self._device_loopback():
-            return frozenset({"text_inputs"})
-        return frozenset()
 
     def declare_step(
         self,
@@ -495,11 +477,3 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
             return
         outputs["text_inputs"] = outputs["new_token"]
 
-    def step_is_input_free(self, graph_walk: str) -> bool:
-        # a decode row is one token, like the capture template's
-        return graph_walk == "decode"
-
-    def inline_client_signals(self, graph_walk: str) -> dict[str, str]:
-        # the decode loop's client edge carries the token the stop check
-        # already has on the host; prefill's client edge is persisted
-        return {"text_inputs": "new_token"} if graph_walk == "decode" else {}
