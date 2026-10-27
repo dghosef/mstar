@@ -20,7 +20,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from mstar.distributed.communication import CommGroup
-from mstar.model.components import ParallelSparseMoeBlockWithSharedExpert, RMSNorm
+from mstar.model.components import ParallelSparseMoeBlockWithSharedExpert, RMSNorm, TopKRouter
 from mstar.model.components.code_predictor_kernels import cp_attention, cp_qk_norm_rope_kv_write
 from mstar.model.components.distributed import ParallelGatedMLP
 from mstar.model.qwen3_omni.components.attention import Qwen3OmniAttention
@@ -98,7 +98,10 @@ class Qwen3OmniTalkerLayer(nn.Module):
                 comm_group=comm_group,
             ),
             comm_group=comm_group,
-            fused_softmax_topk=True,
+            router=TopKRouter(
+                hidden_size, config.num_experts, config.num_experts_per_tok,
+                norm_topk_prob=config.norm_topk_prob, fused_softmax_topk=True,
+            ),
         )
 
     def forward(

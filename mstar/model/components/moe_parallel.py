@@ -67,7 +67,6 @@ def instantiate_moe_block(
     router: nn.Module | None = None,
     comm_group: CommGroup | None = None,
     moe_parallel: MoeParallelConfig | None = None,
-    fused_softmax_topk: bool = False,
 ) -> ParallelSparseMoeBlock | ExpertParallelSparseMoeBlock:
     """The routed-expert block ``moe_parallel`` asks for; TP when None.
 
@@ -83,7 +82,6 @@ def instantiate_moe_block(
             norm_topk_prob=norm_topk_prob,
             router=router,
             comm_group=comm_group,
-            fused_softmax_topk=fused_softmax_topk,
         )
     ep_group = moe_parallel.resolve_ep_group(comm_group)
     return ExpertParallelSparseMoeBlock(
@@ -94,7 +92,6 @@ def instantiate_moe_block(
         norm_topk_prob=norm_topk_prob,
         router=router,
         comm_group=ep_group,
-        fused_softmax_topk=fused_softmax_topk,
         # Counts are identical on every rank, so only rank 0 keeps them.
         track_expert_load=(
             moe_parallel.log_expert_load_every > 0
