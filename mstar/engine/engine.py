@@ -528,14 +528,19 @@ class Engine:
             # different workers (for example BAGEL's three CFG branches).
             # This Engine constructs only the local instance, whose consumers
             # validate_deployment checked share one parallel group.
-            joint_comm_group = parallel_groups.get_joint_group_for_node(
-                next(iter(relevant_nodes))
-            )
+            node = next(iter(relevant_nodes))
+            joint_comm_group = parallel_groups.get_joint_group_for_node(node)
             self._resources[spec.resource_key] = build_resource(
                 spec,
                 EngineResourceInfo(
                     device=device,
                     joint_comm_group=joint_comm_group,
+                    head_shards=(
+                        joint_comm_group.world_size
+                        if joint_comm_group is not None
+                        and getattr(submodules[node], "splits_heads", True)
+                        else 1
+                    ),
                     transfer_engine_info=transfer_engine_info,
                     kv_dtype=kv_cache_type,
                     needs_remote_transfer=(

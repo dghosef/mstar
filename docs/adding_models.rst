@@ -547,13 +547,10 @@ The spec types are:
        default, ``RaggedAttnBackend.FLASHINFER``, or ``RaggedAttnBackend.DENSE``),
        ``flashinfer_backend``, the
        two CUDA-graph ceilings ``max_segments_per_request`` and
-       ``max_tokens_per_request``, ``shard_heads`` and ``compile_op``.
-       ``shard_heads`` (default ``True``) sizes each rank's resource for its slice of the
-       heads under TP or SP; ``False`` keeps every head on every rank, for a node whose
-       ranks split other work, such as one guidance branch per rank. ``compile_op`` is
-       described under `Cacheless attention (encoder towers)`_. Both are the model's
-       declaration; the serving config's ``resources:`` overrides take only the backends and
-       the two ceilings. ``DENSE`` runs FA3 ``flash_attn_varlen`` (AITER on ROCm)
+       ``max_tokens_per_request``, and ``compile_op``, described under `Cacheless
+       attention (encoder towers)`_. ``compile_op`` is the model's declaration; the
+       serving config's ``resources:`` overrides take only the backends and the two
+       ceilings. ``DENSE`` runs FA3 ``flash_attn_varlen`` (AITER on ROCm)
        and falls back to FlashInfer if that kernel is missing. See `Cacheless attention (encoder towers)`_.
    * - ``RaggedCrossAttentionSpec(config=RaggedAttentionConfig(...))``
      - The cross-attention counterpart: one span of each request attends another
@@ -1008,6 +1005,11 @@ methods are:
    the precision it was captured with. The setting covers ``forward`` and
    ``forward_batched`` only, not ``preprocess`` or ``postprocess``. It can also be set
    per instance in ``__init__``, for example only when the model loads in fp32.
+
+   Under TP or SP the engine sizes every resource it builds for a node (KV, attention,
+   recurrent state) for one rank's slice of the heads. A node whose ranks split other
+   work instead, such as one guidance branch per rank, sets ``splits_heads = False``,
+   and every rank keeps all the heads.
 
 ``postprocess(...)`` (optional)
    Metadata-only fixups that run on the GPU thread. This method must not read tensor

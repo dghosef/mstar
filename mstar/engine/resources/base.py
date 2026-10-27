@@ -58,6 +58,10 @@ class EngineResourceInfo:
     """
     device: torch.device
     joint_comm_group: JointGroups | None = None
+    # how many ways the node's ranks split its attention heads: the lockstep
+    # instance's size, or 1 where they split other work
+    # (``NodeSubmodule.splits_heads``). Each builder sizes head counts by it.
+    head_shards: int = 1
     transfer_engine_info: "TransferEngineInfo | None" = None
     kv_dtype: torch.dtype = torch.bfloat16
     # Whether this logical resource has consumers in another worker instance.

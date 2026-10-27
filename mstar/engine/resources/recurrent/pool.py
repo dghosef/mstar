@@ -74,8 +74,7 @@ class RecurrentStatePool(Resource):
         cls, spec: RecurrentStateSpec, info: EngineResourceInfo,
     ) -> "RecurrentStatePool":
         config = spec.config
-        if info.joint_comm_group is not None:
-            config.shard(info.joint_comm_group.world_size)
+        config.shard(info.head_shards)
         # resolved here, not written back: the config is the model's, shared by its specs
         return cls(device=info.device, config=config, name=spec.resource_key, kv_dtype=info.kv_dtype)
 
