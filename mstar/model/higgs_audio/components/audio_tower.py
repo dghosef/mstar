@@ -23,6 +23,7 @@ from torch import nn
 from transformers import WhisperConfig
 from transformers.models.whisper.modeling_whisper import WhisperEncoderLayer
 
+from mstar.model.components.masking import length_mask
 from mstar.model.higgs_audio.config import HiggsAudioModelConfig
 
 # transformers 4 requires a positional layer_head_mask; transformers 5 dropped it.
@@ -71,13 +72,13 @@ class HiggsAudioTower(nn.Module):
         if valid_frames is not None:
             # conv2 reads one frame past an odd-length prefix: it must be the zero
             # the unpadded conv pads with
-            hidden = hidden * _prefix_mask(valid_frames, hidden.shape[-1])[:, None, :]
+            hidden = hidden * length_mask(valid_frames, hidden.shape[-1])[:, None, :]
         hidden = F.gelu(self.conv2(hidden))
         hidden = hidden.permute(0, 2, 1)  # (B, T, D)
         hidden = hidden + self.embed_positions.weight[: hidden.shape[1]]
         attn_mask = None
         if valid_frames is not None:
-            keys = _prefix_mask((valid_frames - 1) // 2 + 1, hidden.shape[1])
+            keys = length_mask((valid_frames - 1) // 2 + 1, hidden.shape[1])
             attn_mask = torch.zeros(keys.shape, dtype=hidden.dtype, device=hidden.device).masked_fill(
                 ~keys, torch.finfo(hidden.dtype).min
             )[:, None, None, :]
@@ -89,13 +90,8 @@ class HiggsAudioTower(nn.Module):
         if valid_frames is not None:
             # the projector's stride-2 conv reads one step past an odd-length row
             pooled = ((valid_frames - 1) // 2 + 1) // 2
-            hidden = hidden * _prefix_mask(pooled, hidden.shape[1])[:, :, None]
+            hidden = hidden * length_mask(pooled, hidden.shape[1])[:, :, None]
         return hidden
-
-
-def _prefix_mask(lengths: torch.Tensor, size: int) -> torch.Tensor:
-    """``[B, size]`` bool, True where ``t < lengths[b]``."""
-    return torch.arange(size, device=lengths.device)[None, :] < lengths[:, None]
 
 
 class HiggsAudioFeatureProjector(nn.Module):

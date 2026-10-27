@@ -30,6 +30,7 @@ from torch import nn
 
 from mstar.model.components.audio_features import sinusoid_positions
 from mstar.model.components.linear import FusedColumnLinear
+from mstar.model.components.masking import length_mask
 
 
 @dataclass
@@ -283,7 +284,7 @@ class AuTEncoder(nn.Module):
         n, c, f, t = x.shape
         x = self.conv_out(x.permute(0, 3, 1, 2).reshape(n, t, c * f))
         x = x + self.positional_embedding[:t].to(x.dtype)
-        keep = torch.arange(t, device=x.device)[None, :] < torch.tensor(valid, device=x.device)[:, None]
+        keep = length_mask(torch.tensor(valid, device=x.device), t)
         return x[keep]
 
     def encode(self, hidden_states: torch.Tensor, cu_seqlens) -> torch.Tensor:

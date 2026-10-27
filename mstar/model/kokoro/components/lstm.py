@@ -13,7 +13,8 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from mstar.model.kokoro.components.masking import length_mask, mask_features, reverse_padded
+from mstar.model.components.masking import length_mask
+from mstar.model.kokoro.components.masking import mask_features, reverse_padded
 
 
 class MaskedBiLSTM(nn.Module):

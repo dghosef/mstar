@@ -41,6 +41,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from mstar.model.components.masking import length_mask
 from mstar.utils.h2d import to_device_nonblocking
 
 _ATTENTION_BACKENDS = [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]
@@ -259,7 +260,7 @@ class Wav2Vec2CTC(nn.Module):
         frame_mask = None
         if any(f < t for f in frame_lens):
             lens = to_device_nonblocking(torch.tensor(frame_lens), x.device)
-            frame_mask = torch.arange(t, device=x.device)[None, :] < lens[:, None]
+            frame_mask = length_mask(lens, t)
         x = front.model_dim_proj(front.post_extract_layer_norm(x))
         return front.pos_encoder(x, frame_mask), frame_lens, frame_mask
 
