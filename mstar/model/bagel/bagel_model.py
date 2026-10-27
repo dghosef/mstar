@@ -631,10 +631,8 @@ class BagelModel(Model):
             image_output_format(kwargs)  # fail a bad output knob now, not after the denoise
             for key in ("width", "height"):
                 value = kwargs.get(key)
-                # under 16 pixels a side (the VAE's 8x times the 2x2 patch) the
-                # image has no latent patch, and the loop would fail mid-request
-                if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 16):
-                    raise ValueError(f"BAGEL image {key} must be an integer of at least 16 pixels, got {value!r}")
+                if key in kwargs and (isinstance(value, bool) or not isinstance(value, int)):
+                    raise ValueError(f"BAGEL image {key} must be an integer, got {value!r}")
         result: NameToTensorList = {}
 
         if prompt is not None:
@@ -713,11 +711,18 @@ class BagelModel(Model):
                 for img in tensors["image_inputs"]
             ]
 
+        images = result.get("image_inputs") or (tensors or {}).get("image_inputs", [])
+        if "image" in output_modalities:
+            # an edit's output takes its (resized) input's size, a generation the requested one;
+            # under 16 pixels a side (the VAE's 8x times the 2x2 patch) it has no latent patch,
+            # and the loop would fail mid-request
+            sides = images[0].shape[-2:] if images else [kwargs[k] for k in ("height", "width") if k in kwargs]
+            if any(side < 16 for side in sides):
+                raise ValueError(f"BAGEL's output image must be at least 16 pixels a side, got {list(sides)} (h, w)")
         if tensors is None:
             return result
         if prompt is None:
             parts, segments = parts_from_modalities(input_modalities), []
-        images = result.get("image_inputs") or tensors.get("image_inputs", [])
         params = self._request_params(input_modalities, output_modalities, kwargs)
         layout = self._kv_layout(parts, segments, images, output_modalities, params)
         return ProcessPromptOutput(result, {"kv_layout": {"kv": layout}})

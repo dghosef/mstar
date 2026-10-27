@@ -33,6 +33,16 @@ def test_an_image_under_one_latent_patch_fails_at_intake(size):
     """Under 16 pixels a side, the image is no latent patch at all, and the
     request would otherwise fail deep in the denoise loop."""
     model = BagelModel.__new__(BagelModel)
-    with pytest.raises(ValueError, match="width|height"):
+    with pytest.raises(ValueError, match="width|height|16 pixels"):
         model.process_prompt(None, [], ["image"], **size)
     model.process_prompt(None, [], ["image"], width=16, height=512)
+
+
+@pytest.mark.parametrize("hw, size", [((50, 5000), {}), ((512, 512), {"width": 8})])
+def test_an_edit_whose_output_is_under_one_latent_patch_fails_at_intake(hw, size):
+    """An edit's output takes its input's size after the fit to 1024 (and to any
+    width/height), so an aspect the cap squeezes under 16 pixels (5000x50 ->
+    1024x10) is refused like a tiny requested size."""
+    model = BagelModel.__new__(BagelModel)
+    with pytest.raises(ValueError, match="16 pixels"):
+        model.process_prompt(None, ["image"], ["image"], tensors={"image_inputs": [torch.zeros(3, *hw)]}, **size)
