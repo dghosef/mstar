@@ -113,11 +113,9 @@ def talker_text_mask(input_ids: torch.Tensor, config: Qwen3OmniModelConfig) -> t
 class AudioEncoderSubmodule(NodeSubmodule):
     """Thin wrapper around the HF Whisper-style audio encoder.
 
-    Extracts mel spectrograms from raw audio inputs, pads for batching,
-    and runs the encoder to produce audio embeddings that the Thinker
-    will splice into its input sequence.
-
-    Runs once per request (not batched across requests).
+    Runs the encoder over a step's mel spectrograms to produce the audio
+    embeddings the Thinker splices into its input sequence. A step's clips
+    are packed along time into one call (``forward_batched``).
     """
 
     # The HF encoder splits its input by host-side chunk lengths (``.tolist()``),
@@ -967,10 +965,10 @@ class ThinkerSubmodule(ARNodeSubmodule):
         """Batched Thinker forward shared between ``thinker_decode`` and the prefill walks.
 
         Decode path (1 token per request, ``hidden`` shape ``(bs, hidden)``):
-        Always packs ``thinker_states`` + ``thinker_mask`` in every per-rid
-        output dict so the captured CUDA graph has a static output shape
-        regardless of request metadata. Per-rid filtering happens in
-        ``unpack_packed_output``.
+        always emits ``thinker_states`` and ``thinker_mask`` as row outputs so
+        the captured CUDA graph's outputs are fixed whatever the request
+        metadata; ``postprocess`` drops them for a text-only request.
+        Prefill packs ``thinker_states`` for ``unpack_packed_outputs``.
         """
 
         is_prefill = graph_walk in (
@@ -1593,8 +1591,9 @@ class TalkerSubmodule(ARNodeSubmodule):
 
         Decode path (1 token per request, ``hidden`` shape ``(bs, hidden)``):
           Runs the full LLM + codec_head + suppress_mask via _forward_decode_like,
-          samples inline through the injected samplers, and emits per-rid
-          {talker_input_embeds, codec_tokens, new_token} entries.
+          samples inline through the injected samplers, and emits
+          ``talker_input_embeds``, ``codec_tokens`` and ``layer0_codes`` as row
+          outputs.
 
         Prefill path (``talker_prefill``; multi-token-per-request, ``hidden``
         shape ``(total_tokens, hidden)``): Runs only the LLM backbone, and
