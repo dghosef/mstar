@@ -1,13 +1,13 @@
 """BAGEL image_gen runs only the CFG branches a step needs.
 
-Guidance on, the old step always ran main, cfg_text and cfg_img as one
-batched forward, though the combine never reads ``v_cfg_img`` when the image
-scale is <= 1 (the text-to-image default), and outside the CFG interval it
-reduces to ``v_main``. ``cfg_branches`` decides 1/2/3 on the host from the
-loop counter; ``declare_step`` plans that many labels and the forward runs
-that many. These pin the decision table, its agreement with the old
-device-side interval test, the combine reducing to what the old one computed,
-and the declaration matching the branch count. CPU only.
+Guidance on, the step used to run main, cfg_text and cfg_img as one batched
+forward, though the combine never reads ``v_cfg_img`` when the image scale is
+<= 1 (the text-to-image default), and outside the CFG interval it reduces to
+``v_main``. ``cfg_branches`` decides 1/2/3 on the host from the loop counter;
+``declare_step`` plans that many labels and the forward runs that many. These
+pin the decision table, its agreement with the device-side interval test the
+step used to run, the combine reducing to what the always-three-branch one
+computed, and the declaration matching the branch count. CPU only.
 """
 
 from __future__ import annotations
@@ -25,8 +25,10 @@ from mstar.model.bagel.submodules import (
     IMAGE_GEN_LOOP,
     LLMSubmodule,
     active_labels,
+    apply_timestep_shift,
     cfg_branches,
     combine_cfg_velocity,
+    image_gen_step_branches,
     image_gen_timestep,
 )
 from mstar.model.submodule_base import ARNodeInputs
@@ -47,7 +49,7 @@ def _device_timestep(k: int) -> torch.Tensor:
     """What `_forward_image_gen` computes from its time_index input."""
     time_index = torch.full((8,), float(k), dtype=torch.float32)
     t_uniform = 1.0 - time_index / (N - 1)
-    return LLMSubmodule._apply_timestep_shift(t=t_uniform, shift=SHIFT)
+    return apply_timestep_shift(t=t_uniform, shift=SHIFT)
 
 
 def _old_in_interval(k: int, interval) -> bool:
@@ -164,20 +166,18 @@ def _stub(**overrides):
     )
 
 
-def _image_gen_row(n_branches: int | None, span: int = 6) -> ARNodeInputs:
+def _image_gen_row(n_branches: int, span: int = 6) -> ARNodeInputs:
     row = ARNodeInputs(input_seq_len=span)
     row.resource_step_info = True  # requires_cfg
     row.custom_pos_ids = {
         label: torch.full((span,), 10 + i, dtype=torch.int32)
         for i, label in enumerate(("main", "cfg_text", "cfg_img"))
     }
-    if n_branches is not None:
-        row.kwargs[CFG_BRANCHES] = n_branches
+    row.kwargs[CFG_BRANCHES] = n_branches
     return row
 
 
 @pytest.mark.parametrize("n_branches,labels", [
-    (None, ("main", "cfg_text", "cfg_img")),  # pruning off / unstamped
     (3, ("main", "cfg_text", "cfg_img")),
     (2, ("main", "cfg_text")),
     (1, ("main",)),
@@ -202,7 +202,7 @@ def test_declared_step_plans_exactly_the_branches_run(n_branches, labels):
     assert step.steps["attn"].causal is False
 
 
-@pytest.mark.parametrize("n_branches", [None, 1, 2, 3])
+@pytest.mark.parametrize("n_branches", [1, 2, 3])
 def test_preprocess_hands_the_forward_the_declared_count(n_branches):
     row = _image_gen_row(n_branches)
     out = LLMSubmodule.preprocess(
@@ -213,7 +213,7 @@ def test_preprocess_hands_the_forward_the_declared_count(n_branches):
         inputs=[row],
     )
     assert "kwargs" not in out
-    assert out.get(CFG_BRANCHES) == n_branches
+    assert out[CFG_BRANCHES] == n_branches
     assert out["requires_cfg"] is True
 
 
@@ -235,19 +235,18 @@ def test_image_gen_shape_inputs_stay_bounded_across_output_sizes():
     assert len(stub._image_gen_shape_cache) == _IMAGE_GEN_SHAPES_CACHED
 
 
-def _request(k, first_iter, prune=True, **meta):
+def _request(k, first_iter, **meta):
     cfg = types.SimpleNamespace(
         num_timesteps=N, timestep_shift=SHIFT,
         cfg_interval=_DEFAULTS["cfg_interval"],
         cfg_text_scale=_DEFAULTS["cfg_text_scale"],
         cfg_img_scale=_DEFAULTS["cfg_img_scale"],
     )
-    stub = _stub(config=cfg, _cfg_prune=prune, _warned_loop_counter=False)
     info = types.SimpleNamespace(
         step_metadata={"requires_cfg": True, **meta},
         dynamic_loop_iter_counts={} if k is None else {IMAGE_GEN_LOOP: k},
     )
-    return LLMSubmodule._image_gen_cfg_branches(stub, info, first_iter)
+    return image_gen_step_branches(cfg, info, first_iter)
 
 
 def test_branch_count_follows_the_loop_counter_and_request_kwargs():
@@ -259,11 +258,15 @@ def test_branch_count_follows_the_loop_counter_and_request_kwargs():
     assert _request(0, True, cfg_img_scale=2.0, cfg_interval=[0.0, 1.0]) == 3
 
 
-def test_falls_back_to_all_branches_when_off_or_counter_is_not_tracking():
-    assert _request(5, False, prune=False) is None
-    assert _request(None, False) is None  # loop counter missing on a later step
-    assert _request(3, True) is None      # seeded latents but counter says step 3
-    assert _request(0, True, requires_cfg=False) is None
+def test_guidance_off_runs_main_alone_and_a_counter_not_tracking_the_loop_fails():
+    """Every step is stamped; a counter that disagrees with whether the latents were
+    seeded would pick another step's branches, so it fails rather than guessing."""
+    assert _request(0, True, requires_cfg=False) == 1
+    assert _request(None, False, requires_cfg=False) == 1
+    with pytest.raises(ValueError, match="loop counter"):
+        _request(None, False)  # loop counter missing on a later step
+    with pytest.raises(ValueError, match="loop counter"):
+        _request(3, True)      # seeded latents but counter says step 3
 
 
 def test_image_gen_walk_names_the_loop_the_counter_is_read_from():
@@ -291,31 +294,6 @@ def test_parallel_branch_nodes_sit_out_the_branches_a_step_does_not_read():
     assert [cfg_branch_skipped("main", n) for n in (1, 2, 3)] == [False, False, False]
     assert [cfg_branch_skipped("cfg_text", n) for n in (1, 2, 3)] == [True, False, False]
     assert [cfg_branch_skipped("cfg_img", n) for n in (1, 2, 3)] == [True, True, False]
-    # no count stamped (pruning off): every branch runs
-    assert not any(cfg_branch_skipped(label, None) for label in ("main", "cfg_text", "cfg_img"))
-
-
-def test_parallel_combine_reduces_to_the_old_combine():
-    """combine_cfg with a host branch count gives what the device-side interval test gave."""
-    from mstar.model.bagel.submodules import CombineCFGSubmodule
-
-    cfg = types.SimpleNamespace(**{k: _DEFAULTS[k] for k in (
-        "num_timesteps", "timestep_shift", "cfg_text_scale", "cfg_img_scale",
-        "cfg_interval", "cfg_renorm_type", "cfg_renorm_min",
-    )})
-    node = CombineCFGSubmodule(cfg)
-    g = torch.Generator().manual_seed(0)
-    v = [torch.randn(16, 8, generator=g) for _ in range(3)]
-    latents = torch.randn(16, 8, generator=g)
-    for k in (0, N - 2):
-        time_index = torch.full((16,), float(k))
-        n = _branches(k, **T2I)
-        tensors = dict(
-            v_main=v[0], v_cfg_text=v[1], v_cfg_img=v[2], latents=latents, time_index=time_index,
-        )
-        old = node.forward("image_gen_cfg", None, **tensors)["latents"][0]
-        new = node.forward("image_gen_cfg", None, **tensors, cfg_branches=n)["latents"][0]
-        torch.testing.assert_close(new, old, rtol=0, atol=1e-6)
 
 
 def _combine_inputs(k: int, sat_out: tuple[str, ...], counter: int | None = None):
@@ -324,7 +302,7 @@ def _combine_inputs(k: int, sat_out: tuple[str, ...], counter: int | None = None
     ``counter`` (default ``k``)."""
     from mstar.model.bagel.submodules import CombineCFGSubmodule, sat_out_velocity
 
-    cfg = types.SimpleNamespace(cfg_prune=True, **{k_: _DEFAULTS[k_] for k_ in (
+    cfg = types.SimpleNamespace(**{k_: _DEFAULTS[k_] for k_ in (
         "num_timesteps", "timestep_shift", "cfg_text_scale", "cfg_img_scale",
         "cfg_interval", "cfg_renorm_type", "cfg_renorm_min",
     )})
@@ -361,14 +339,9 @@ def test_combine_never_reads_a_branch_that_sat_the_step_out():
     with pytest.raises(ValueError, match="cfg_text sat out"):
         _combine_inputs(k_in, sat_out=("cfg_text", "cfg_img"))
 
-    # The combine's own counter isn't tracking the loop (reads 0 on a later step): it takes
-    # the count from the branches that ran instead of failing the request.
-    node, prepared = _combine_inputs(k_in, sat_out=("cfg_img",), counter=0)
-    assert prepared.kwargs["cfg_branches"] == 2
-    out = node.forward("image_gen_cfg", None, **prepared.tensor_inputs, **prepared.kwargs)
-    _, reference = _combine_inputs(k_in, sat_out=("cfg_img",))
-    expected = node.forward("image_gen_cfg", None, **reference.tensor_inputs, **reference.kwargs)
-    torch.testing.assert_close(out["latents"][0], expected["latents"][0])
+    # the combine's own counter isn't tracking the loop (reads 0 on a later step)
+    with pytest.raises(ValueError, match="loop counter"):
+        _combine_inputs(k_in, sat_out=("cfg_img",), counter=0)
 
 
 def test_image_gen_cfg_walk_names_the_loop_too():

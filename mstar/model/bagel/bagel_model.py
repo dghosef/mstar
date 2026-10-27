@@ -280,13 +280,10 @@ class BagelModel(Model):
         model_path_hf: str,
         cache_dir: str | None = None,
         accelerator_graph: bool | None = None,
-        cfg_prune: bool | None = None,
         **kwargs
     ):
         if accelerator_graph is not None and not isinstance(accelerator_graph, bool):
             raise ValueError("accelerator_graph must be a boolean")
-        if cfg_prune is not None and not isinstance(cfg_prune, bool):
-            raise ValueError("cfg_prune must be a boolean")
         self.cache_dir = cache_dir
 
         config_path = hf_hub_download(
@@ -297,8 +294,6 @@ class BagelModel(Model):
             self.config = load_bagel_config(json.load(f))
         if accelerator_graph is not None:
             self.config.accelerator_graph = accelerator_graph
-        if cfg_prune is not None:
-            self.config.cfg_prune = cfg_prune
 
         self.model_path_hf = model_path_hf
 

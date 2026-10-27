@@ -306,14 +306,12 @@ FastConformer ASR (``canary``, ``canary_qwen``) notes
 BAGEL notes
 ~~~~~~~~~~~
 
-- Text-to-image runs only the CFG branches a denoising step reads
-  (``cfg_prune``, on by default): two with image guidance off, and the main
-  branch alone outside ``cfg_interval``, about -37% latency at 1024² on an
-  H200. Outside the interval the step now returns the main branch's velocity
-  where it used to recombine all three and renormalize, which is equal only up
-  to rounding, so images move slightly (median 41 dB PSNR against the previous
-  output). ``model_kwargs: {cfg_prune: false}`` in the serving config restores
-  the always-three-branch math.
+- Text-to-image runs only the CFG branches a denoising step reads: two with
+  image guidance off, and the main branch alone outside ``cfg_interval``, about
+  -37% latency at 1024² on an H200. Outside the interval the step returns the
+  main branch's velocity where it used to recombine all three and renormalize,
+  which is equal only up to rounding, so images move slightly (median 41 dB
+  PSNR against the previous output).
 
 Qwen3.5 / Qwen3.8 (``qwen3_5_*``, ``qwen3_8_27b``)
 --------------------------------------------------
