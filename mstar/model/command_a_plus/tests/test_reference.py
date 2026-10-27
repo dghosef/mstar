@@ -150,7 +150,6 @@ class ReferenceTests(unittest.TestCase):
             device=torch.device("cuda"), kv_dtype=torch.bfloat16,
             transfer_engine_info=transfer,
             joint_comm_group=JointGroups(group, CommGroup.trivial()) if group else None,
-            head_shards=group.world_size if group else 1,
             dependencies={dependency: specs[dependency] for dependency in spec.depends_on()},
         )) for key, spec in specs.items()}
         runner = StepRunner(resources)

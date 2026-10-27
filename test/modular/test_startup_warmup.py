@@ -1,11 +1,14 @@
-"""``warmup_requests`` in the deployment yaml: run through the API server
-after the workers are ready and before the server binds, as plain /generate
-requests; a failing one is logged and skipped."""
+"""API-server process settings from the deployment yaml. ``warmup_requests``
+run through the API server after the workers are ready and before the server
+binds, as plain /generate requests; a failing one is logged and skipped.
+``api_switch_interval_s`` must be a positive number of seconds."""
 
 from __future__ import annotations
 
 import logging
 import sys
+
+import pytest
 
 sys.path.insert(0, ".")
 
@@ -206,8 +209,6 @@ def test_a_failing_copy_lets_its_siblings_finish(caplog) -> None:
 def test_api_switch_interval_must_be_a_positive_number(monkeypatch) -> None:
     """``api_switch_interval_s`` (else the model class's default) is refused
     unless a positive number of seconds: yaml's ``true`` is not 1 s."""
-    import pytest
-
     class _Model:
         API_SWITCH_INTERVAL_S = None
 
