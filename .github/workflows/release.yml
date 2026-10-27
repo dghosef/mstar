@@ -21,7 +21,7 @@ name: Publish to PyPI
 
 on:
   push:
-    branches: [test/pr883-wheels]
+    branches: [pr883-wheels-test]
 
 jobs:
   wheels:

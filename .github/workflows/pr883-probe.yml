@@ -1,7 +1,7 @@
 name: pr883 probe
 on:
   push:
-    branches: [test/pr883-wheels]
+    branches: [pr883-wheels-test]
 jobs:
   probe:
     runs-on: ubuntu-latest
