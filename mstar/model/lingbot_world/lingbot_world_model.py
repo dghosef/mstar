@@ -66,10 +66,15 @@ class LingBotWorldModel(Model):
     ):
         if variant != LINGBOT_VARIANT_1_3B:
             raise NotImplementedError(f"LingBot-World variant {variant!r} is not implemented yet.")
+        # a yaml "false" is truthy: refuse it rather than read it as on
+        if not isinstance(reference_numerics, bool):
+            raise ValueError(f"LingBot-World reference_numerics must be true or false, got {reference_numerics!r}.")
         self.config = LINGBOT_CONFIGS[variant]()
-        self.config.reference_numerics = bool(reference_numerics)
+        self.config.reference_numerics = reference_numerics
         if not reference_numerics:
             self.config.vae_decode_fp32 = False
+            self.config.vae_decode_channels_last = True
+            self.config.vae_decode_compile = True
             self.config.vae_decode_cudnn_benchmark = True
         self.model_path_hf = model_path_hf or LINGBOT_HF_REPOS[variant]
         self.cache_dir = cache_dir

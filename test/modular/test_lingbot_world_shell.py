@@ -244,6 +244,13 @@ def test_one_chunk_needs_thirteen_poses(model, monkeypatch):
     assert out["camera_poses"][0].shape[0] == 4  # one chunk of latent frames
 
 
+@pytest.mark.parametrize("value", ["false", 0, None])
+def test_reference_numerics_must_be_a_bool(value):
+    """A yaml "false" is truthy; read as on it would serve the opposite numerics."""
+    with pytest.raises(ValueError, match="reference_numerics"):
+        LingBotWorldModel(skip_weight_loading=True, reference_numerics=value)
+
+
 def test_mstar_serve_knows_the_model():
     from pathlib import Path
 
