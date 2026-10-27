@@ -678,7 +678,6 @@ def test_a_batched_stop_check_that_raises_partway_records_each_token_once():
     batch = SimpleNamespace(
         node_name="decoder", request_ids=["a", "b"], per_request_info_wrapped=_RaisesOnce(infos),
         register_failure=failures.setdefault,
-        step_context=SimpleNamespace(graph_walk=DECODE_WALK, request_walks=None),
     )
     engine = SimpleNamespace(_submodules={"decoder": SimpleNamespace(submodule=sub)})
     tokens = torch.tensor([1234, 99])
