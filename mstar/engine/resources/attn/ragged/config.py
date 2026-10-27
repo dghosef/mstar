@@ -78,15 +78,15 @@ class RaggedAttentionConfig:
     # Whether the node's ranks split the attention heads. True (tensor
     # parallelism, Ulysses sequence parallelism): each rank's resource is sized
     # for its slice of the heads. False: every rank attends with all the heads,
-    # for a node whose ranks divide other work -- Wan2.2's CFG parallelism, one
-    # guidance branch per rank, is the one user.
+    # for a node whose ranks divide other work, e.g. one guidance branch per
+    # rank.
     shard_heads: bool = True
 
     # Whether a compiled caller keeps the attention in its graph, as the
-    # ``mstar::ragged_attention`` op, rather than breaking there per layer. On for
-    # a compiled, uncaptured region whose fusions around attention pay (Wan2.2's
-    # DiT); off by default, since tracing a whole transformer as one graph per
-    # capture bucket costs startup time and capture memory (Z-Image: +2.6 GiB).
+    # ``mstar::ragged_attention`` op, rather than breaking there per layer. For
+    # a compiled, uncaptured region whose fusions around attention pay; off by
+    # default, since tracing a whole transformer as one graph per capture
+    # bucket costs startup time and capture memory (Z-Image: +2.6 GiB).
     compile_op: bool = False
 
     # Activation dtype of the q / k / v the node hands the kernel (and of its

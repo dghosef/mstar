@@ -539,9 +539,15 @@ The spec types are:
        ``head_dim`` (all pre-sharding, as in ``KVConfig``), an ``sm_scale`` that
        defaults to ``head_dim ** -0.5``, ``backend`` (``RaggedAttnBackend.AUTO``, the
        default, ``RaggedAttnBackend.FLASHINFER``, or ``RaggedAttnBackend.DENSE``),
-       ``flashinfer_backend``, and the
+       ``flashinfer_backend``, the
        two CUDA-graph ceilings ``max_segments_per_request`` and
-       ``max_tokens_per_request``. ``DENSE`` runs FA3 ``flash_attn_varlen`` (AITER on ROCm)
+       ``max_tokens_per_request``, ``shard_heads`` and ``compile_op``.
+       ``shard_heads`` (default ``True``) sizes each rank's resource for its slice of the
+       heads under TP or SP; ``False`` keeps every head on every rank, for a node whose
+       ranks split other work, such as one guidance branch per rank. ``compile_op`` is
+       described under `Cacheless attention (encoder towers)`_. Both are the model's
+       declaration; the serving config's ``resources:`` overrides take only the backends and
+       the two ceilings. ``DENSE`` runs FA3 ``flash_attn_varlen`` (AITER on ROCm)
        and falls back to FlashInfer if that kernel is missing. See `Cacheless attention (encoder towers)`_.
    * - ``RaggedCrossAttentionSpec(config=RaggedAttentionConfig(...))``
      - The cross-attention counterpart: one span of each request attends another
@@ -776,7 +782,7 @@ encoder node only, and names no cache:
 A layer binds the key as it binds any other resource, then attends through the resource's
 ``run(q, k, v, label=None)``. There is no KV write to pair it with, so no
 ``AttentionCallable`` is involved. A compiled caller breaks at ``run``; with
-``compile_op=True`` in the config, ``run`` traces as the ``mstar::ragged_attention``
+``RaggedAttentionConfig(compile_op=True)``, ``run`` traces as the ``mstar::ragged_attention``
 custom op instead, so the region keeps one graph across the attention (worth it for a
 compiled, uncaptured region; it costs startup time and capture memory where the region
 is also captured). An eager call goes straight to the kernel.
@@ -1455,6 +1461,12 @@ Both types share the base ``PiecewiseCudaGraphConfig`` fields:
   when the region was leased, for example when the outer step is ``None``, and not
   whenever ``runner.can_run`` is true: a refused batch can still fit a bucket, and
   replaying it would declare the region's resources twice.
+- ``one_row_per_step`` makes the runner lease, check (``can_run``) and replay the region as
+  one row, whatever the step's batch size, under the step's first request. It is for a
+  packed region that runs every request's segments as one ragged batch, such as a vision
+  tower, and needs ``lease_before_step`` and ``capture_batch_sizes=[1]``. The whole step's
+  segments then count against the ragged resource's ``max_segments_per_request``, so pair
+  it with a ``can_lease`` that refuses a step with more.
 - ``capture_batch_sizes`` lists the batch sizes to record. ``None`` uses the runner
   default.
 - ``compile`` runs ``torch.compile`` on ``capture_fn`` before capture. The default is
