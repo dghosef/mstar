@@ -1542,6 +1542,12 @@ class WarmupMedia:
         return cls(path=path, modality=modality)
 
 
+def _positive_int(name: str, value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+    return value
+
+
 @dataclass
 class WarmupRequest:
     """One entry of the deployment's ``warmup_requests``: a ``/generate``
@@ -1566,15 +1572,14 @@ class WarmupRequest:
         text = spec.get("text")
         if text is not None and not isinstance(text, str):
             raise ValueError("text must be a string")
-        repeat = spec.get("repeat", 1)
-        if isinstance(repeat, bool) or not isinstance(repeat, int) or repeat < 1:
-            raise ValueError(f"repeat must be a positive integer, got {repeat!r}")
+        repeat = _positive_int("repeat", spec.get("repeat", 1))
         if repeat > 1 and not text:
             raise ValueError("repeat needs text")
         concurrency = spec.get("concurrency", 1)
         levels = concurrency if isinstance(concurrency, list) else [concurrency]
-        if not levels or any(isinstance(n, bool) or not isinstance(n, int) or n < 1 for n in levels):
-            raise ValueError(f"concurrency must be a positive integer or a list of them, got {concurrency!r}")
+        if not levels:
+            raise ValueError("concurrency must be a positive integer or a non-empty list of them")
+        levels = [_positive_int("concurrency", n) for n in levels]
         out_mods = spec.get("output_modalities") or ["text"]
         if isinstance(out_mods, str):
             out_mods = [m.strip() for m in out_mods.split(",") if m.strip()]
