@@ -31,6 +31,34 @@ sdist so a wheel built from the sdist copies them too. Nothing is duplicated
 in git. The CLI resolves via `importlib.resources.files("mstar.default_configs")`
 for a pip install and falls back to the repo `configs/` for checkouts.
 
+## Rust extension and frontend in the Linux wheels
+
+Besides the sdist and a pure-Python `py3-none-any` wheel, each release builds
+a manylinux wheel per CPython version (3.12, 3.13, 3.14) and architecture
+(x86_64, aarch64) with cibuildwheel. Those wheels also carry the `mstar_rust`
+extension (`rust/`) and the `mstar-server` HTTP frontend binary
+(`rust/server/`, installed into the environment's `bin/`). `setup.py` compiles
+both with setuptools-rust only when `CIBUILDWHEEL=1`; every other build,
+including `pip install -e .`, is pure Python, and a checkout builds the Rust
+parts with maturin and cargo (docs/installation.rst). pip picks the matching
+manylinux wheel and falls back to the pure one elsewhere, which runs on the
+Python transport and graph runtime.
+
+- **Compiler.** `rust-toolchain.toml` at the repo root pins the Rust version
+  for CI, the release wheels and local builds. Bump it there.
+- **Third-party licenses.** Before building, the workflow runs
+  [cargo-about](https://github.com/EmbarkStudios/cargo-about) with
+  `rust/about.toml` over `rust/server` (whose dependency tree contains
+  `rust/`'s) and writes `LICENSES-THIRD-PARTY.txt`, which ships in each Rust
+  wheel's `dist-info/licenses/`. A crate under a license not in `accepted`
+  fails the release. The C/C++ that crates vendor is declared there by hand
+  (libzmq via zeromq-src, Oniguruma via onig_sys, esaxx via esaxx-rs); check
+  those entries when bumping those crates.
+- **Checks.** Each wheel is installed without dependencies into a clean venv
+  outside the build container and must import `mstar_rust`, run
+  `mstar-server --help` and list the license file. A failure there stops the
+  release before anything is published.
+
 ## Cutting a release
 
 Version lives in `pyproject.toml` (`[project] version`), and the alias
@@ -40,8 +68,8 @@ release:
 1. Bump the version in all three pyproject files and land it on `main`.
 2. Publish a GitHub Release with a matching tag (e.g. `v0.2.1`). The workflow
    refuses a tag that does not match the version.
-3. The `Publish to PyPI` workflow builds the engine and the alias packages and
-   uploads them over Trusted Publishing (OIDC, no token stored in the repo).
+3. The `Publish to PyPI` workflow builds the engine (including the Linux Rust
+   wheels above) and the alias packages and uploads them over Trusted Publishing (OIDC, no token stored in the repo).
    The `pypi` environment asks one of its reviewers to approve the run first.
 
 One-time PyPI setup: each project needs a pending Trusted Publisher (owner
@@ -67,3 +95,7 @@ twine upload --repository testpypi dist/*              # optional TestPyPI dry r
 
 The alias packages are published by the release workflow together with the
 engine, so they need no separate upload.
+
+`python -m build` makes only the pure-Python wheel. The Linux Rust wheels need
+cibuildwheel (Docker) with the workflow's `CIBW_*` settings; to try the
+workflow without publishing, run its `wheels` job on a fork branch.
