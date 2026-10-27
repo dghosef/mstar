@@ -390,6 +390,8 @@ class APIServer:
             push_ids=["conductor"],
             ipc_socket_path_prefix=socket_path_prefix,
         )
+        # the message thread's poll also wakes for the data worker's chunks
+        self.communicator.register_event_for_poll(self.preprocess_worker.output_ready)
 
         # Background thread that drains results from the conductor. Started by
         # finalize_setup() once the workers report ready — before that there's
@@ -932,8 +934,8 @@ class APIServer:
                 if self.running:
                     logger.exception("Error in message processing loop")
                     time.sleep(0.01)
-            # wakes at once for a conductor or worker message; the data
-            # worker's chunks are picked up within the 1 ms timeout as before
+            # wakes at once for a conductor or worker message, or a chunk
+            # from the data worker (PreprocessWorker.output_ready)
             self.communicator.poll_for_messages(timeout_ms=1)
 
     # ----------------------------------------------------------

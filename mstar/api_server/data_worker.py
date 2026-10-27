@@ -170,6 +170,9 @@ class PreprocessWorker:
         self.stop_event = threading.Event()
         # Wakes the thread's idle wait: every producer below signals it.
         self.wakeup = EventWakeup()
+        # The other direction: the thread signals it when output_queue gets a
+        # chunk, so the API server's message thread polls on it.
+        self.output_ready = EventWakeup()
 
         self.per_request_reading_tensors = {}
         # request id -> output name -> chunks received, for received_final_chunks
@@ -208,6 +211,7 @@ class PreprocessWorker:
                 discard_tensor_queue=self.discard_tensor_queue,
                 stop_event=self.stop_event,
                 wakeup=self.wakeup,
+                output_ready=self.output_ready,
                 communicator=self.communicator,
                 tensor_manager=self.tensor_manager,
                 model=model,
@@ -453,6 +457,7 @@ class PreprocessWorkerThread:
     worker_metrics_requested: threading.Event | None = None
     # class-level so a thread built without __init__ stamps no profile
     enable_prof = False
+    output_ready: EventWakeup | None = None
 
     def __init__(
         self,
@@ -473,6 +478,7 @@ class PreprocessWorkerThread:
         model_config: dict | None = None,
         enable_nvtx: bool=False,
         wakeup: EventWakeup | None = None,
+        output_ready: EventWakeup | None = None,
         timing_requested: threading.Event | None = None,
         worker_metrics_requested: threading.Event | None = None,
     ):
@@ -535,6 +541,7 @@ class PreprocessWorkerThread:
         # sleeping and sweeping the queues. None keeps the sleep (tests built
         # with a bare communicator).
         self.wakeup = wakeup
+        self.output_ready = output_ready
         self.idle_wait_ms = 20
         # Media load + process_prompt for several requests at once, for models
         # that declare it; requests then wait here instead of in in_queue.
@@ -946,7 +953,7 @@ class PreprocessWorkerThread:
         if sequence is not None and self._sequence_unanswered(request_id, sequence):
             self._queue_completed_output(request_id, sequence, chunks.pop())
         for chunk in chunks:
-            self.out_queue.put(chunk)
+            self._put_output(chunk)
         if abort:
             self._abort_failed_request(request_id)
 
@@ -1059,8 +1066,16 @@ class PreprocessWorkerThread:
             if ready.modality == "video_frame":
                 ready.metadata["frame_index"] = state.frame_index
                 state.frame_index += ready.metadata["frame_count"]
-            self.out_queue.put(ready)
+            self._put_output(ready)
             state.next_emit += 1
+
+    def _put_output(self, chunk: ResultChunk) -> None:
+        """Hand a chunk to the API server's message thread, waking its poll when
+        the queue was empty (a non-empty queue is drained on the pass already due)."""
+        was_empty = self.out_queue.empty()
+        self.out_queue.put(chunk)
+        if was_empty and self.output_ready is not None:
+            self.output_ready.signal()
 
     def _discard_result_tensor(
         self, result: ResultTensors
