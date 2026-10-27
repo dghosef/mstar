@@ -44,7 +44,7 @@ from mstar.model.flux2_klein.submodules import (  # noqa: E402
     KleinVaeDecoderSubmodule,
     KleinVaeEncoderSubmodule,
 )
-from mstar.model.submodule_base import ModelInputsFromEngine  # noqa: E402
+from mstar.model.submodule_base import ModelInputsFromEngine, NodeInputs  # noqa: E402
 from mstar.utils.hf_snapshot import resolve_snapshot_dir  # noqa: E402
 
 MODEL_REPO = os.environ.get("FLUX2_KLEIN_REPO", "black-forest-labs/FLUX.2-klein-4B")
@@ -122,11 +122,19 @@ def _engine_inputs() -> ModelInputsFromEngine:
     return ModelInputsFromEngine(request_ids=["oracle"], per_request_info={})
 
 
+def _encode_rows(text: Qwen3TextEncoderSubmodule, walk: str, rows: list[NodeInputs]) -> list[torch.Tensor]:
+    """Each prepared row's ``text_embeds`` from one batched call, the node's only output
+    path (Z-Image's encoder tests share it)."""
+    rids = [f"r{i}" for i in range(len(rows))]
+    engine_inputs = ModelInputsFromEngine(request_ids=rids, per_request_info={})
+    out = text.forward_batched(walk, engine_inputs, **text.preprocess(walk, engine_inputs, rows))
+    unpacked = text.unpack_packed_outputs(out, rids, [], rows, {})
+    return [unpacked[rid][TEXT_EMBEDS][0] for rid in rids]
+
+
 def _text_embeds(text: Qwen3TextEncoderSubmodule, walk: str, ids: torch.Tensor) -> torch.Tensor:
     """One prompt's ``text_embeds`` through the node's own padding and forward."""
-    row = text.prepare_inputs(walk, None, {TEXT_INPUTS: [ids]})
-    out = text.forward_batched(walk, _engine_inputs(), **text.preprocess(walk, _engine_inputs(), [row]))
-    return text.unpack_packed_outputs(out, ["oracle"], [row.input_seq_len], [row], {})["oracle"][TEXT_EMBEDS][0]
+    return _encode_rows(text, walk, [text.prepare_inputs(walk, None, {TEXT_INPUTS: [ids]})])[0]
 
 
 def _psnr(a: torch.Tensor, b: torch.Tensor) -> float:

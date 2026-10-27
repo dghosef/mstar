@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from test_flux2_klein_reference_equivalence import _encode_rows
 
 from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.model.components.diffusion.qwen3.submodule import TEXT_INPUTS
@@ -119,15 +120,10 @@ def _encode(model, subs, batched: bool) -> list[torch.Tensor]:
     """Per-prompt ``[1, 512, joint_dim]`` embeddings, from one stacked call or one call per prompt."""
     text = subs["text_encoder"]
     rows = [text.prepare_inputs(IMAGE_GEN_WALK, None, {TEXT_INPUTS: [model.tokenize(p)]}) for p in PROMPTS]
-    rids = [f"b{i}" for i in range(len(PROMPTS))]
     with torch.inference_mode():
         if batched:
-            kwargs = text.preprocess(IMAGE_GEN_WALK, _eng(rids), rows)
-            packed = text.forward_batched(IMAGE_GEN_WALK, _eng(rids), **kwargs)
-            out = text.unpack_packed_outputs(packed, rids, [], rows, {})
-            return [out[rid][TEXT_EMBEDS][0] for rid in rids]
-        return [text.forward(IMAGE_GEN_WALK, _eng([f"s{i}"]), **text.preprocess(IMAGE_GEN_WALK, _eng([f"s{i}"]), [row]))
-                [TEXT_EMBEDS][0] for i, row in enumerate(rows)]
+            return _encode_rows(text, IMAGE_GEN_WALK, rows)
+        return [_encode_rows(text, IMAGE_GEN_WALK, [row])[0] for row in rows]
 
 
 def _trajectory(subs, embeds: list[torch.Tensor], prefix: str, batched: bool, seeds=SEEDS,
