@@ -185,6 +185,21 @@ def test_a_node_whose_ranks_split_other_work_keeps_every_head(kind, splits_heads
         assert spec.config.blocks["state"].shape == (heads, 8)
 
 
+def test_resource_info_built_without_head_shards_shards_over_its_group():
+    """Built outside the engine (a reference test, the checkpoint validator),
+    an ``EngineResourceInfo`` over a two-rank group gives one rank's heads."""
+    from mstar.engine.resources import RaggedAttentionConfig, RaggedAttentionSpec
+    from mstar.engine.resources.base import EngineResourceInfo, build_resource
+
+    spec = RaggedAttentionSpec(
+        resource_key="by_hand", nodes={"encoder"},
+        config=RaggedAttentionConfig(num_qo_heads=4, num_kv_heads=4, head_dim=64),
+    )
+    mgr = build_resource(spec, EngineResourceInfo(
+        device=torch.device("cpu"), kv_dtype=torch.bfloat16, joint_comm_group=SimpleNamespace(world_size=2),
+    ))
+    assert mgr._kwargs["num_qo_heads"] == 2
+
 def test_a_dropped_manager_leaves_the_op_registry():
     """The custom op finds a manager by key; the registry must not keep one
     alive past the engine that built it."""
