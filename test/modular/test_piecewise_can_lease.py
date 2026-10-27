@@ -10,13 +10,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from mstar.engine.accelerator_graph_runner import PiecewiseAcceleratorGraphRunner
+from mstar.engine.accelerator_graph_config import PiecewiseConfigType
+from mstar.engine.accelerator_graph_runner import PiecewiseAcceleratorGraphRunner, PiecewiseGraphKey
 from mstar.engine.engine import Engine
 
 
 class _Runner:
-    one_row_per_step = False
-
     def __init__(self, lease_before_step=True, accepts=True):
         self.lease_before_step = lease_before_step
         self._accepts = accepts
@@ -61,24 +60,45 @@ def test_runner_defers_to_the_configs_predicate():
     assert not PiecewiseAcceleratorGraphRunner.can_lease(runner(lambda inputs: len(inputs) < 2), [1, 2])
 
 
-def test_a_one_row_per_step_region_leases_the_whole_step_as_one_row():
-    """A region that replays the whole step as one row (a packed encoder) is
-    leased at batch size 1 for every token of the step, through the real
-    runner; a per-row region beside it is leased at the step's batch size."""
-    def real_runner(one_row):
-        runner = PiecewiseAcceleratorGraphRunner.__new__(PiecewiseAcceleratorGraphRunner)
-        runner._config = SimpleNamespace(lease_before_step=True, can_lease=None, one_row_per_step=one_row)
-        runner._current_slot = 0
-        runner.resolved = []
-        runner._resolve = lambda bs, total: runner.resolved.append((bs, total)) or SimpleNamespace(bucket=(bs, total))
-        return runner
+def _packed_runner(one_row):
+    """A real runner over three captured packed buckets, (1, 256), (2, 256) and
+    (4, 256), with the capture and the step lifecycle stubbed out."""
+    runner = PiecewiseAcceleratorGraphRunner.__new__(PiecewiseAcceleratorGraphRunner)
+    runner._config = SimpleNamespace(
+        lease_before_step=True, can_lease=None, one_row_per_step=one_row,
+        get_config_type=lambda: PiecewiseConfigType.PACKED,
+        replay_seq_lens=lambda shape, seq_lens, real_bs: list(seq_lens),
+    )
+    runner._label, runner._current_slot, runner._capture_batch_sizes = "region", 0, [1, 2, 4]
+    runner._graphs = {
+        PiecewiseGraphKey(bs=bs, seq_len=256, slot=0): SimpleNamespace(
+            bucket=(bs, 256), shape=SimpleNamespace(bs=bs), dummy_rids=list(range(bs)),
+            static_inputs={}, static_outputs={}, graph=SimpleNamespace(replay=lambda: None),
+        )
+        for bs in (1, 2, 4)
+    }
+    runner.declared = []
+    runner._declare = lambda ids, seq_lens, bucket, **kw: runner.declared.append((ids, bucket, kw["real_bs"]))
+    runner._plan = lambda step, shape: None
+    runner._step_runner = SimpleNamespace(commit=lambda step: None)
+    runner._dummy_rows = SimpleNamespace(reset=lambda rids: None)
+    return runner
 
-    packed, per_row = real_runner(True), real_runner(False)
+
+def test_a_one_row_per_step_region_leases_and_replays_the_whole_step_as_one_row():
+    """A region that replays the whole step as one row (a packed encoder) is
+    leased and replayed at batch size 1 for every token of the step, without
+    the caller saying so; a per-row region beside it is leased at the step's
+    batch size."""
+    packed, per_row = _packed_runner(True), _packed_runner(False)
     inputs = [SimpleNamespace(input_seq_len=n) for n in (100, 30, 7)]
     leases = _lease({"packed": packed, "per_row": per_row}, inputs)
-    assert packed.resolved == [(1, 137)] and per_row.resolved == [(3, 137)]
-    assert leases["packed"].bucket == (1, 137) and leases["packed"].slot == 0
-    assert leases["per_row"].bucket == (3, 137)
+    assert leases["packed"].bucket == (1, 256) and leases["packed"].slot == 0
+    assert leases["per_row"].bucket == (4, 256)
+    assert packed.can_run(3, 137)
+    # the replay a lease promised: every segment, one row named by the first request
+    packed.run({}, request_ids=[7, 8, 9], seq_lens=[100, 30, 7])
+    assert packed.declared == [([7], (1, 256), 1)]
 
 
 @pytest.mark.parametrize("batched, overrides", [

@@ -301,8 +301,9 @@ class PiecewiseAcceleratorGraphConfig(ABC):
     can_lease: Callable[[list[NodeInputs]], bool] | None = None
     # The region replays a whole step as ONE row, however many requests the
     # step carries (a vision tower packing every request's images as segments
-    # of one ragged batch), so its slot is leased at batch size 1. Only for a
-    # packed `lease_before_step` region captured at batch size 1 alone.
+    # of one ragged batch), so the runner leases, checks and replays it at batch
+    # size 1, under the step's first request. Only for a packed
+    # `lease_before_step` region captured at batch size 1 alone.
     one_row_per_step: bool = False
     # static kwargs threaded into capture_fn (e.g. cond_tokens, is_causal)
     forward_kwargs: dict[str, Any] = field(default_factory=dict)
