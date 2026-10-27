@@ -360,14 +360,6 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # Pre-compute inverse frequencies for 3D MRoPE
         self._inv_freq: torch.Tensor | None = None
 
-        # Lazily-cached constant mask used by ``_preprocess_decode`` for the
-        # Talker partition.  Every decode-step mask is the same constant
-        # ``[[0], [1]]`` so we allocate it once per device instead of per
-        # request per step.  Helps keep the captured graph's output-dict
-        # contents self-evidently constant, too.
-        self._decode_thinker_mask: torch.Tensor | None = None
-        self._decode_talker_mm_mask: torch.Tensor | None = None
-
         self._audio_bos_embed: torch.Tensor | None = None
         self._audio_eos_embed: torch.Tensor | None = None
 
@@ -383,25 +375,6 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 device=device,
             )
         return self._inv_freq
-
-    def _get_decode_thinker_mask(self, device: torch.device) -> torch.Tensor:
-        """Return the constant ``[[0], [1]]`` decode mask (multimodal row =
-        0, text-inclusion row = 1), lazily allocated per device."""
-        if (
-            self._decode_thinker_mask is None
-            or self._decode_thinker_mask.device != device
-        ):
-            self._decode_thinker_mask = torch.tensor(
-                [[0], [1]], dtype=torch.bool, device=device,
-            )
-        return self._decode_thinker_mask
-
-    def _get_decode_talker_mm_mask(self, device: torch.device) -> torch.Tensor:
-        """The 1D multimodal mask ``postprocess`` emits for a decode token:
-        ``[False]``, lazily allocated per device. Never written after."""
-        if self._decode_talker_mm_mask is None or self._decode_talker_mm_mask.device != device:
-            self._decode_talker_mm_mask = torch.zeros(1, dtype=torch.bool, device=device)
-        return self._decode_talker_mm_mask
 
     def _wrap_audio_input(self, audio_embeds: torch.Tensor):
         # Wrap the audio span in ``<|audio_bos|>`` / ``<|audio_eos|>``
@@ -479,9 +452,6 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 input_seq_len=1,
                 input_embeds=embeds,
                 custom_pos_ids=pos_ids,
-                tensor_inputs={
-                    "masks_for_talker": self._get_decode_thinker_mask(device)
-                }  # no additional tensors for decode step
             )
 
         if graph_walk == "prefill_text":
@@ -857,8 +827,13 @@ class ThinkerSubmodule(ARNodeSubmodule):
                     [layer_0_embed, layer_0_embed], dim=-1,
                 )
             result["thinker_states"] = [thinker_states]
-            result["thinker_mask"] = [next(iter(masks_for_talker.values()))] \
-                if masks_for_talker else []
+            if graph_walk == "thinker_decode":
+                # a decode token is text: ``[False]``, fresh each step (see
+                # ``forward_batched``)
+                result["thinker_mask"] = [torch.zeros(1, dtype=torch.bool, device=hidden.device)]
+            else:
+                result["thinker_mask"] = [next(iter(masks_for_talker.values()))] \
+                    if masks_for_talker else []
         return result
 
     # ---- batching ----
@@ -894,9 +869,6 @@ class ThinkerSubmodule(ARNodeSubmodule):
                         dtype=torch.float,
                         device=device,
                     ),
-                    tensor_inputs={
-                        "masks_for_talker": self._get_decode_thinker_mask(device)
-                    }
                 ),
                 capture_batch_sizes=[1, 2, 4, 8, 16, 32],
             ),
@@ -1060,10 +1032,16 @@ class ThinkerSubmodule(ARNodeSubmodule):
             )
 
         # Row i is request i: one clone per output and one host copy of the
-        # tokens per step. A decode row's Talker mask is the constant one,
-        # which postprocess attaches.
+        # tokens per step. A decode token is text, so its Talker mask is
+        # ``[False]``; a row view of the step's clone, never one tensor shared
+        # by every row, which the RDMA/TCP store would register once per row
+        # at the same address.
         return BatchedModelOutput(
-            row_outputs={"thinker_states": thinker_states, "new_token": new_tokens},
+            row_outputs={
+                "thinker_states": thinker_states,
+                "new_token": new_tokens,
+                "thinker_mask": torch.zeros_like(new_tokens, dtype=torch.bool),
+            },
             check_stop_buffers={"new_token": new_tokens},
         )
 
@@ -1089,6 +1067,9 @@ class ThinkerSubmodule(ARNodeSubmodule):
             return {}
 
         out: dict[str, dict[str, list[torch.Tensor]]] = {}
+        # a decode row's ``[False]``, as in ``forward_batched``: a row view of
+        # one step tensor, not the cached mask every decode row's inputs share
+        decode_masks = torch.zeros(len(request_ids), dtype=torch.bool, device=packed_states.device)
         cum = 0
         for i, rid in enumerate(request_ids):
             sl = real_seq_lens[i]
@@ -1104,7 +1085,9 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 "thinker_states": [ts_slice],
             }
             mask = inputs[i].tensor_inputs.get("masks_for_talker")
-            if mask is not None:
+            if inputs[i].graph_walk == "thinker_decode":
+                rid_out["thinker_mask"] = [decode_masks[i:i + 1]]
+            elif mask is not None:
                 rid_out["thinker_mask"] = [mask]
             out[rid] = rid_out
         return out
@@ -1133,13 +1116,12 @@ class ThinkerSubmodule(ARNodeSubmodule):
             ts_list = outputs.get("thinker_states")
             mask_list = outputs.get("thinker_mask")
             if ts_list and request_info.graph_walk == "thinker_decode":
-                # A decode token is text the Talker keeps (``prepare_inputs``
-                # gives it the constant ``[[0], [1]]`` mask), so it is layer 0
-                # as is. The boolean indexing below would sync the host on
-                # every row of every decode step.
+                # A decode token is text the Talker keeps, so it is layer 0
+                # as is, and its 1D mask is already a row of its own. The
+                # boolean indexing below would sync the host on every row of
+                # every decode step.
                 thinker_hidden = self.config.thinker_hidden_size
                 outputs["thinker_states"] = [ts_list[0][..., :thinker_hidden]]
-                outputs["thinker_mask"] = [self._get_decode_talker_mm_mask(ts_list[0].device)]
             elif ts_list and mask_list:
                 ts = ts_list[0]                # (seq_len, 2*hidden)
                 mask = mask_list[0]            # (2, seq_len)
