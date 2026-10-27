@@ -1363,7 +1363,30 @@ class _IdentityNorm(torch.nn.Module):
         return summed, summed
 
 
-def test_qwen3_tts_code_predictor_projects_wider_talker_inputs():
+def _fake_cp_kernels(monkeypatch, calls=None):
+    """The code predictor's Triton kernels on CPU: the prologue writes k and v
+    into the cache without norm or rope, and attention is SDPA over the depth
+    positions so far."""
+    import mstar.model.qwen3_tts.components.talker as talker_module
+
+    def prologue(qkv, wq, wk, pos, kv_layer, cache_pos, seq_len, eps_q, eps_k, theta, hq, hkv, d):
+        k, v = qkv[:, hq * d:].view(-1, seq_len, 2, hkv, d).unbind(2)
+        kv_layer[:, 0, cache_pos:cache_pos + seq_len] = k
+        kv_layer[:, 1, cache_pos:cache_pos + seq_len] = v
+
+    def attention(q, k_cache, v_cache, cache_pos):
+        n = cache_pos + q.shape[1]
+        if calls is not None:
+            calls.append((q.shape, k_cache.shape, v_cache.shape, n))
+        return torch.nn.functional.scaled_dot_product_attention(
+            q.transpose(1, 2), k_cache[:, :n].transpose(1, 2), v_cache[:, :n].transpose(1, 2), enable_gqa=True,
+        ).transpose(1, 2)
+
+    monkeypatch.setattr(talker_module, "cp_qk_norm_rope_kv_write", prologue)
+    monkeypatch.setattr(talker_module, "cp_attention", attention)
+
+
+def test_qwen3_tts_code_predictor_projects_wider_talker_inputs(monkeypatch):
     """1.7B: Talker width 2048 vs predictor width 1024 -> biased projection on
     every depth input; 0.6B (equal widths) -> identity, no extra parameters."""
     narrow = _tiny_model_config()
@@ -1388,74 +1411,32 @@ def test_qwen3_tts_code_predictor_projects_wider_talker_inputs():
     for layer in predictor.model.layers:
         layer.input_layernorm = _IdentityNorm()
         layer.post_attention_layernorm = _IdentityNorm()
-        layer.self_attn.q_norm = torch.nn.Identity()
-        layer.self_attn.k_norm = torch.nn.Identity()
     predictor.model.norm = _IdentityNorm()
-    import mstar.model.qwen3_tts.components.talker as talker_module
-    original_rope = talker_module.apply_rope_pos_ids
-    original_attn = talker_module.decode_attn_nhd
-    talker_module.apply_rope_pos_ids = lambda q, k, pos, theta: (q, k)
-    talker_module.decode_attn_nhd = lambda q, k_cache, v_cache, n: (
-        torch.nn.functional.scaled_dot_product_attention(
-            q.transpose(1, 2), k_cache[:, :n].transpose(1, 2),
-            v_cache[:, :n].transpose(1, 2), enable_gqa=True,
-        ).transpose(1, 2)
+    _fake_cp_kernels(monkeypatch)
+    cp = wide.talker.code_predictor
+    out = predictor.forward_depth_unrolled(
+        inputs_embeds=torch.randn(2, 1, 32),
+        position_ids=torch.zeros(2, 1, dtype=torch.long),
+        kv_cache=torch.zeros(
+            cp.num_hidden_layers, 2, 2, wide.talker.num_code_groups,
+            cp.num_key_value_heads, cp.head_dim,
+        ),
+        cache_pos=0,
     )
-    try:
-        cp = wide.talker.code_predictor
-        out = predictor.forward_depth_unrolled(
-            inputs_embeds=torch.randn(2, 1, 32),
-            position_ids=torch.zeros(2, 1, dtype=torch.long),
-            kv_cache=torch.zeros(
-                cp.num_hidden_layers, 2, 2, wide.talker.num_code_groups,
-                cp.num_key_value_heads, cp.head_dim,
-            ),
-            cache_pos=0,
-        )
-    finally:
-        talker_module.apply_rope_pos_ids = original_rope
-        talker_module.decode_attn_nhd = original_attn
     assert out.shape == (2, 1, 16)
 
 
-def test_qwen3_tts_code_predictor_uses_decode_attn_nhd(monkeypatch):
+def test_qwen3_tts_code_predictor_uses_the_shared_kernels(monkeypatch):
     config = _tiny_model_config()
     predictor = Qwen3TTSCodePredictor(config)
-    # This CPU-only contract test targets the decode-attention call. FlashInfer
-    # RMSNorm and the Triton attention kernel are CUDA-only, so replace them
+    # FlashInfer RMSNorm and the Triton kernels are CUDA-only, so replace them
     # without changing attention geometry.
     for layer in predictor.model.layers:
         layer.input_layernorm = _IdentityNorm()
         layer.post_attention_layernorm = _IdentityNorm()
-        layer.self_attn.q_norm = torch.nn.Identity()
-        layer.self_attn.k_norm = torch.nn.Identity()
     predictor.model.norm = _IdentityNorm()
-    rope_calls = []
-
-    def capture_rope(q, k, position_ids, rope_theta):
-        rope_calls.append((q.shape, k.shape, position_ids.dtype, rope_theta))
-        return q, k
-
-    monkeypatch.setattr(
-        "mstar.model.qwen3_tts.components.talker.apply_rope_pos_ids",
-        capture_rope,
-    )
     calls = []
-
-    def capture_decode_attn(q, k_cache, v_cache, cache_len):
-        calls.append((q.shape, k_cache.shape, v_cache.shape, cache_len))
-        return torch.nn.functional.scaled_dot_product_attention(
-            q.transpose(1, 2),
-            k_cache[:, :cache_len].transpose(1, 2),
-            v_cache[:, :cache_len].transpose(1, 2),
-            is_causal=False,
-            enable_gqa=True,
-        ).transpose(1, 2)
-
-    monkeypatch.setattr(
-        "mstar.model.qwen3_tts.components.talker.decode_attn_nhd",
-        capture_decode_attn,
-    )
+    _fake_cp_kernels(monkeypatch, calls)
     output = predictor.forward_depth_unrolled(
         inputs_embeds=torch.randn(1, 1, config.talker.hidden_size),
         position_ids=torch.zeros(1, 1, dtype=torch.long),
@@ -1478,8 +1459,6 @@ def test_qwen3_tts_code_predictor_uses_decode_attn_nhd(monkeypatch):
     assert key_shape[1] == config.talker.num_code_groups
     assert cache_len == 1
     assert len(calls) == config.talker.code_predictor.num_hidden_layers
-    assert len(rope_calls) == config.talker.code_predictor.num_hidden_layers
-    assert rope_calls[0][2] == torch.int32
 
 
 def test_qwen3_tts_per_request_sampler_configs_drive_code_predictor():

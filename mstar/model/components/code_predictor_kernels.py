@@ -1,10 +1,12 @@
-"""Code-predictor attention prologue in one launch.
+"""Kernels of a residual code predictor's depth loop (Qwen3-Omni's and
+Qwen3-TTS's): a few layers walked once per codec group, 16 x 5 times per Talker
+step, over a dense frame-local KV cache.
 
-Per layer and depth step the code predictor normalized and roped q and k with one
-kernel each (plus an int32 cast of the positions before each), then copied k and v
-into its dense KV cache with two strided copies: six launches of a few microseconds
-around a ~1 us job, 16 x 5 times per Talker step. This does all of it in one, with
-the same per-element arithmetic as ``mstar.utils.attention._qk_norm_rope_kernel``.
+``cp_qk_norm_rope_kv_write`` is the attention prologue in one launch: per layer
+and depth step, q and k normed and roped and k and v copied into the cache had
+been six launches of a few microseconds around a ~1 us job.
+``cp_attention`` attends over the depth positions so far, and
+``cp_embed_accumulate`` records a depth step's codes and sums their embeddings.
 """
 from __future__ import annotations
 

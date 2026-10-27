@@ -21,9 +21,9 @@ from torch import nn
 
 from mstar.distributed.communication import CommGroup
 from mstar.model.components import ParallelSparseMoeBlockWithSharedExpert, RMSNorm
+from mstar.model.components.code_predictor_kernels import cp_attention, cp_qk_norm_rope_kv_write
 from mstar.model.components.distributed import ParallelGatedMLP
 from mstar.model.qwen3_omni.components.attention import Qwen3OmniAttention
-from mstar.model.qwen3_omni.components.cp_kernels import cp_attention, cp_qk_norm_rope_kv_write
 from mstar.model.qwen3_omni.config import TALKER_ATTN, TALKER_KV, TALKER_POS, Qwen3OmniModelConfig, TalkerTextConfig
 
 # ---------------------------------------------------------------------------
