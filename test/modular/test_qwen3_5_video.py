@@ -225,8 +225,8 @@ def sampled(video: torch.Tensor, fps: float, video_processor) -> tuple[torch.Ten
 
 
 def an_image() -> torch.Tensor:
-    # what the data worker sends: (C, H, W) float32 in [0, 1]
-    return torch.rand(3, 40, 56, generator=torch.Generator().manual_seed(1))
+    # what the data worker sends (`load_image`): uint8 (C, H, W)
+    return torch.randint(0, 256, (3, 40, 56), dtype=torch.uint8, generator=torch.Generator().manual_seed(1))
 
 
 LAYOUTS = {
