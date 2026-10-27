@@ -540,6 +540,13 @@ class NodeSubmodule(torch.nn.Module, ABC):
     float32_matmul_precision: str | None = None
     cudnn_allow_tf32: bool | None = None
 
+    # Set True to let cuDNN time its conv algorithms in this node's capture
+    # warm-up (once per captured shape, then cached) instead of taking its
+    # heuristic pick. The engine applies it around warm-up and capture; the
+    # capture itself turns it off (``accelerator_graph_runner``), and eager
+    # steps keep the process setting, so a new eager shape never searches.
+    capture_cudnn_benchmark: bool = False
+
     # Set True on a submodule whose decode walk may read its last sampled
     # tokens back off the sampler's slot masters (``device_loopback_signals``).
     # The sampler keeps the masters only for a node that says so: the eager

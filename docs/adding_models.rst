@@ -996,6 +996,12 @@ methods are:
    ``forward_batched`` only, not ``preprocess`` or ``postprocess``. It can also be set
    per instance in ``__init__``, for example only when the model loads in fp32.
 
+   A node whose captured convolutions are faster with cuDNN's timed algorithm choice
+   sets ``capture_cudnn_benchmark = True``: the engine turns
+   ``torch.backends.cudnn.benchmark`` on around that node's capture warm-up only, so
+   each captured shape is searched once, and eager steps keep the heuristic pick
+   (Kokoro is an example).
+
 ``postprocess(...)`` (optional)
    Metadata-only fixups that run on the GPU thread. This method must not read tensor
    values. Do not call ``.item()``, ``.cpu()`` or ``.tolist()`` here. This is a

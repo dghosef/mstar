@@ -412,3 +412,29 @@ def test_the_setting_holds_under_either_graph_runtime(runtime, monkeypatch):
         _step(engine, node)
     assert a.seen == [("highest", False)] and b.seen == [("high", True)]
     assert _flags() == ("high", True)
+
+
+def test_capture_cudnn_benchmark_covers_warmup_only(monkeypatch):
+    """``capture_cudnn_benchmark`` turns cuDNN's algorithm search on around the
+    node's capture warm-up alone: another node's warm-up and every eager step
+    keep the process setting, so a new eager shape never searches."""
+    from mstar.engine.accelerator_graph_runner import AcceleratorGraphRunner
+
+    class _Tuned(_Recorder):
+        capture_cudnn_benchmark = True
+
+        def forward(self, graph_walk, engine_inputs, x, **kwargs):
+            warmups.append(("forward", torch.backends.cudnn.benchmark))
+            return super().forward(graph_walk, engine_inputs, x, **kwargs)
+
+    warmups: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        AcceleratorGraphRunner, "warmup_and_capture",
+        lambda self, planned=None: warmups.append((self._submodule_name, torch.backends.cudnn.benchmark)),
+    )
+    monkeypatch.setattr(torch.backends.cudnn, "benchmark", False)
+    engine = _engine({"tuned": _Tuned(), "plain": _Recorder()})
+    engine.warmup()
+    _step(engine, "tuned")
+    assert warmups == [("tuned", True), ("plain", False), ("forward", False)]
+    assert torch.backends.cudnn.benchmark is False
