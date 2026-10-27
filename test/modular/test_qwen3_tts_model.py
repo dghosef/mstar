@@ -969,7 +969,7 @@ def test_qwen3_tts_prefill_frame_counts_toward_generation_limit():
         config,
     )
     submodule.request_state("request").add("generated_frames", 0)
-    outputs = {"new_token": [torch.tensor(1)]}
+    outputs = {"layer0_codes": [torch.tensor(1)]}
     request_info = SimpleNamespace(
         graph_walk="talker_decode",
         step_metadata={},
@@ -1018,7 +1018,7 @@ def test_qwen3_tts_honors_ignore_eos_for_fixed_length_benchmarks():
         config,
     )
     submodule.request_state("request").add("generated_frames", 0)
-    outputs = {"new_token": [torch.tensor(
+    outputs = {"layer0_codes": [torch.tensor(
         config.talker.codec_eos_token_id
     )]}
     request_info = SimpleNamespace(
@@ -1055,7 +1055,7 @@ def test_qwen3_tts_batched_stop_check_agrees_with_the_per_request_one():
     infos = {rid: info(ignore, limit) for rid, (_, ignore, limit, _) in cases.items()}
     for rid, (code, _, _, frames) in cases.items():
         submodule.request_state(rid).add("generated_frames", frames)
-        submodule.postprocess(rid, infos[rid], {"new_token": [torch.tensor(code)]})
+        submodule.postprocess(rid, infos[rid], {"layer0_codes": [torch.tensor(code)]})
     expected = {
         rid: stop for rid in cases
         if (stop := submodule.check_stop(
@@ -1079,7 +1079,7 @@ def test_qwen3_tts_talker_returns_row_outputs_except_for_the_clone_prefill():
     frame = {
         "talker_input_embeds": torch.zeros(2, 16),
         "codec_tokens": torch.arange(2 * groups).view(2, groups),
-        "new_token": torch.tensor([3, 4]),
+        "layer0_codes": torch.tensor([3, 4]),
     }
     submodule._run_frame = lambda *args: frame
     engine_inputs = ModelInputsFromEngine(request_ids=["a", "b"], per_request_info={})
@@ -1087,13 +1087,15 @@ def test_qwen3_tts_talker_returns_row_outputs_except_for_the_clone_prefill():
     out = submodule.forward_batched("talker_decode", engine_inputs, *tensors)
     assert isinstance(out, BatchedModelOutput)
     assert out.row_outputs is frame
-    assert torch.equal(out.check_stop_buffers["layer0_codes"], frame["new_token"])
+    # the stop check reads the row output's own clone: one copy of the codes a step
+    rows = out.clone_row_outputs(2)
+    assert out.clone_check_stop_buffers(reuse=rows)["layer0_codes"] is rows["layer0_codes"]
     # The clone prefill returns rows too; postprocess leads its codec items
     # with the reference tail, so the captured forward serves it as well.
     assert isinstance(submodule.forward_batched("talker_prefill_clone", engine_inputs, *tensors), BatchedModelOutput)
     reference = torch.arange(3 * groups).view(3, groups)
     submodule.request_state("a").add_all(reference_frames=reference, generated_frames=0)
-    row = {"codec_tokens": [frame["codec_tokens"][0:1]], "new_token": [frame["new_token"][0:1]]}
+    row = {"codec_tokens": [frame["codec_tokens"][0:1]], "layer0_codes": [frame["layer0_codes"][0:1]]}
     submodule.postprocess("a", SimpleNamespace(graph_walk="talker_prefill_clone"), row)
     left = config.codec.left_context_frames
     assert [item.shape for item in row["codec_tokens"]] == [(1, groups)] * (min(left, 3) + 1)

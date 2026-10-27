@@ -619,7 +619,7 @@ class TalkerSubmodule(ARNodeSubmodule):
         return {
             "talker_input_embeds": codec_embed_sum,
             "codec_tokens": all_codes,
-            "new_token": layer0_codes,
+            "layer0_codes": layer0_codes,
         }
 
     def _depth_loop(
@@ -747,7 +747,7 @@ class TalkerSubmodule(ARNodeSubmodule):
         return {
             "talker_input_embeds": [output["talker_input_embeds"]],
             "codec_tokens": [output["codec_tokens"][:1]],
-            "new_token": [output["new_token"]],
+            "layer0_codes": [output["layer0_codes"]],
         }
 
     def forward_batched(
@@ -766,10 +766,12 @@ class TalkerSubmodule(ARNodeSubmodule):
         del graph_walk
         # One frame per row: the engine clones each batch tensor once and the
         # stop check copies one host buffer, rather than three of each per
-        # request. A clone prefill's reference frames join in ``postprocess``.
+        # request; the stop buffer is the row output of the same name, so it
+        # shares that clone. A clone prefill's reference frames join in
+        # ``postprocess``.
         return BatchedModelOutput(
             row_outputs=output,
-            check_stop_buffers={"layer0_codes": output["new_token"]},
+            check_stop_buffers={"layer0_codes": output["layer0_codes"]},
         )
 
     def postprocess(
@@ -781,7 +783,7 @@ class TalkerSubmodule(ARNodeSubmodule):
     ) -> None:
         """Expose the stop token and advance metadata without a GPU sync.
 
-        Whole-graph replay and eager execution normally retain ``new_token``.
+        Whole-graph replay and eager execution normally retain ``layer0_codes``.
         ``codec_tokens`` is the routed output, though, so use its first codebook
         as a fallback.  This keeps EOS detection correct even if an execution
         path filters the sampler-only output before slow-path ``check_stop``.
@@ -791,9 +793,7 @@ class TalkerSubmodule(ARNodeSubmodule):
             outputs["codec_tokens"] = self._codec_stream_items(
                 request_info.graph_walk, request_id, outputs["codec_tokens"][-1],
             )
-        if "new_token" in outputs:
-            outputs["layer0_codes"] = outputs.pop("new_token")
-        elif "layer0_codes" not in outputs and "codec_tokens" in outputs:
+        if "layer0_codes" not in outputs and "codec_tokens" in outputs:
             codec_tokens = outputs["codec_tokens"][-1]
             outputs["layer0_codes"] = [codec_tokens.reshape(-1)[0]]
         if "layer0_codes" in outputs:
