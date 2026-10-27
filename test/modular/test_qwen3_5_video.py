@@ -575,16 +575,11 @@ def test_vision_encoder_refuses_patches_it_would_not_normalize():
 
 
 def test_vision_block_loop_replays_exactly_when_leased():
-    """A leased step declares nothing of its own, so the forward replays
-    then and runs eagerly otherwise, whatever the runner's buckets allow."""
+    """The forward replays the block loop when the step leased it and runs
+    eagerly otherwise, whatever the runner's buckets allow."""
     from mstar.model.qwen3_5.submodules import VISION_BLOCK_LOOP
 
     class Runner:
-        has_bucket = True
-
-        def can_run(self, batch_size, total_tokens):
-            return self.has_bucket
-
         def run(self, **kwargs):
             self.ran = kwargs
             return SimpleNamespace(get_view=lambda name: "replayed")
@@ -592,20 +587,16 @@ def test_vision_block_loop_replays_exactly_when_leased():
     encoder, runner = _encoder(max_segments=4), Runner()
     hidden = cos = sin = torch.zeros(8, 32)
 
-    def replay(step):
+    def replay(leases):
         engine_inputs = SimpleNamespace(
-            piecewise_runners={VISION_BLOCK_LOOP: runner}, request_ids=["r"], step=step,
+            piecewise_runners={VISION_BLOCK_LOOP: runner}, piecewise_leases=leases, request_ids=["r"],
         )
         return encoder._replay_block_loop(engine_inputs, hidden, cos, sin, (4, 4))
 
-    assert replay(step=object()) is None
+    # not leased: `can_lease` refused the batch, or a forward driven outside the engine
+    assert replay({}) is None
     assert not hasattr(runner, "ran")
-    # no declaration but no bucket either (a forward driven outside the engine)
-    runner.has_bucket = False
-    assert replay(step=None) is None
-    assert not hasattr(runner, "ran")
-    runner.has_bucket = True
-    assert replay(step=None) == "replayed"
+    assert replay({VISION_BLOCK_LOOP: object()}) == "replayed"
     assert runner.ran["seq_lens"] == [4, 4]
 
 

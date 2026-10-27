@@ -355,9 +355,8 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
             "pos_ids": position_ids.to(torch.int32),
         }
         num_requests = len(canvas.items)
-        runner = engine_inputs.piecewise_runners.get(BACKBONE_LAYERS)
-        if runner is not None and runner.can_run(num_requests, int(position_ids.shape[0])):
-            hidden = runner.run(
+        if BACKBONE_LAYERS in engine_inputs.piecewise_leases:
+            hidden = engine_inputs.piecewise_runners[BACKBONE_LAYERS].run(
                 static_inputs=static_inputs,
                 request_ids=list(engine_inputs.request_ids),
                 seq_lens=document_pairs([
