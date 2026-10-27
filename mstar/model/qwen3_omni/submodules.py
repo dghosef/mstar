@@ -991,7 +991,9 @@ class ThinkerSubmodule(ARNodeSubmodule):
     def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
         return len(model_inputs) > 1
 
-    PREFILL_TOKEN_BUCKETS = [128, 256, 512, 1024, 2048]
+    # through 8192: a burst of new prompts batches into one prefill step (5101
+    # tokens for 32 ShareGPT prompts), which otherwise ran eagerly and recompiled
+    PREFILL_TOKEN_BUCKETS = [128, 256, 512, 1024, 2048, 4096, 6144, 8192]
     # past 4 for thinker_mixed, whose decode rows ride in these captures
     PREFILL_CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16, 32]
 
