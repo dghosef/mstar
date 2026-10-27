@@ -444,7 +444,7 @@ def test_decoder_align_walk_uses_the_detected_language():
     sub.register_parameter("anchor", torch.nn.Parameter(torch.zeros(1)))
     for walk, token in ((DETECT_LANGUAGE_WALK, DE), (PREFILL_PROMPT_WALK, 7)):
         stops = sub.check_stop_batched(
-            ["r"], {"r": _stop_info(walk, 7)}, HostRows(("r",), {"new_token": torch.tensor([token])}), step_walk=walk,
+            ["r"], {"r": _stop_info(walk, 7)}, HostRows(("r",), {"new_token": torch.tensor([token])}),
         )
         assert stops == {}
     sub.check_stop_batched(
@@ -605,10 +605,9 @@ def test_decoder_check_stop_batched_agrees_with_per_request():
     assert sub.check_stop_batched(["eos"], infos, HostRows(("eos",), {})) is None
 
 
-@pytest.mark.parametrize("request_walks", [None, {"eos": DECODE_WALK, "word": DECODE_WALK}])
-def test_engine_stop_check_takes_the_batched_path(request_walks):
-    """The engine passes ``step_walk``; a signature without it raised, and the
-    engine silently fell back to one ``check_stop`` per row."""
+def test_engine_stop_check_takes_the_batched_path():
+    """The engine's stop check reaches the batched path rather than falling
+    back to one ``check_stop`` per row."""
     from types import SimpleNamespace
 
     from mstar.engine.engine import Engine
@@ -631,7 +630,6 @@ def test_engine_stop_check_takes_the_batched_path(request_walks):
     batch = SimpleNamespace(
         node_name="decoder", request_ids=["eos", "word"], per_request_info_wrapped=infos,
         register_failure=failures.setdefault,
-        step_context=SimpleNamespace(graph_walk=DECODE_WALK, request_walks=request_walks),
     )
     engine = SimpleNamespace(_submodules={"decoder": SimpleNamespace(submodule=sub)})
     tokens = torch.tensor([EOT, 1234, 0])  # a padding row past the real ones
@@ -668,7 +666,6 @@ def test_a_batched_stop_check_that_raises_partway_records_each_token_once():
     batch = SimpleNamespace(
         node_name="decoder", request_ids=["a", "b"], per_request_info_wrapped=_RaisesOnce(infos),
         register_failure=failures.setdefault,
-        step_context=SimpleNamespace(graph_walk=DECODE_WALK, request_walks=None),
     )
     engine = SimpleNamespace(_submodules={"decoder": SimpleNamespace(submodule=sub)})
     tokens = torch.tensor([1234, 99])
@@ -1063,7 +1060,7 @@ def test_decode_tokens_are_recorded_for_the_align_walk_until_the_stop():
     infos = {"r": _stop_info(PREFILL_WALK, 9), "plain": _stop_info(PREFILL_WALK, 10, word_timestamps=False)}
     # the prefill's token starts the transcript, only for a word-timestamp request
     sub.check_stop_batched(
-        ["r", "plain"], infos, HostRows(("r", "plain"), {"new_token": torch.tensor([10, 10])}), step_walk=PREFILL_WALK,
+        ["r", "plain"], infos, HostRows(("r", "plain"), {"new_token": torch.tensor([10, 10])}),
     )
     for info in infos.values():
         info.graph_walk = DECODE_WALK

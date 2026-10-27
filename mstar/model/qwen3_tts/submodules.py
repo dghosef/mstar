@@ -556,9 +556,8 @@ class TalkerSubmodule(ARNodeSubmodule):
         CODE_PRED_SAMPLER belongs to whoever runs the depth loop. The region
         declares it whenever it holds a slot for this step, so declaring it
         here too would plan and commit it twice; when the region has no slot
-        the loop runs inline and this step owns it. Keyed off the lease rather
-        than the walk, which disagreed with ``_run_frame`` — that picks inline
-        vs piecewise from what the runner can actually serve.
+        the loop runs inline and this step owns it. The forward replays the
+        region exactly when it holds this lease (``_run_depth_loop_piecewise``).
         """
         del slot_lease
         steps = {
