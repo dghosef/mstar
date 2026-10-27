@@ -36,6 +36,7 @@ def test_an_image_under_one_latent_patch_fails_at_intake(size):
     with pytest.raises(ValueError, match="width|height|16 pixels"):
         model.process_prompt(None, [], ["image"], **size)
     model.process_prompt(None, [], ["image"], width=16, height=512)
+    model.process_prompt(None, [], ["image"], width=None, height=None)  # null: the default size
 
 
 @pytest.mark.parametrize("hw, size", [((50, 5000), {}), ((512, 512), {"width": 8})])

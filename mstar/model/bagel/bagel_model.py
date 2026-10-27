@@ -631,7 +631,7 @@ class BagelModel(Model):
             image_output_format(kwargs)  # fail a bad output knob now, not after the denoise
             for key in ("width", "height"):
                 value = kwargs.get(key)
-                if key in kwargs and (isinstance(value, bool) or not isinstance(value, int)):
+                if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
                     raise ValueError(f"BAGEL image {key} must be an integer, got {value!r}")
         result: NameToTensorList = {}
 
@@ -716,7 +716,9 @@ class BagelModel(Model):
             # an edit's output takes its (resized) input's size, a generation the requested one;
             # under 16 pixels a side (the VAE's 8x times the 2x2 patch) it has no latent patch,
             # and the loop would fail mid-request
-            sides = images[0].shape[-2:] if images else [kwargs[k] for k in ("height", "width") if k in kwargs]
+            sides = images[0].shape[-2:] if images else [
+                kwargs[k] for k in ("height", "width") if kwargs.get(k) is not None
+            ]
             if any(side < 16 for side in sides):
                 raise ValueError(f"BAGEL's output image must be at least 16 pixels a side, got {list(sides)} (h, w)")
         if tensors is None:
