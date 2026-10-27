@@ -28,6 +28,7 @@ import pytest
 import torch
 
 from mstar.conductor.request_info import CurrentForwardPassInfo
+from mstar.model.components.diffusion.qwen3.submodule import TEXT_INPUTS
 from mstar.model.flux2_klein.config import DENOISE_LOOP, Flux2KleinConfig
 from mstar.model.flux2_klein.flux2_klein_model import IMAGE_EDIT_WALK, IMAGE_GEN_WALK, Flux2KleinModel
 from mstar.model.flux2_klein.submodules import IMAGE_INPUTS, LATENTS, REF_LATENTS, TEXT_EMBEDS
@@ -117,14 +118,16 @@ def _psnr(a: torch.Tensor, b: torch.Tensor) -> float:
 def _encode(model, subs, batched: bool) -> list[torch.Tensor]:
     """Per-prompt ``[1, 512, joint_dim]`` embeddings, from one stacked call or one call per prompt."""
     text = subs["text_encoder"]
-    ids, masks = zip(*(model.tokenize(p) for p in PROMPTS), strict=True)
+    rows = [text.prepare_inputs(IMAGE_GEN_WALK, None, {TEXT_INPUTS: [model.tokenize(p)]}) for p in PROMPTS]
+    rids = [f"b{i}" for i in range(len(PROMPTS))]
     with torch.inference_mode():
         if batched:
-            out = text.forward(IMAGE_GEN_WALK, _eng(f"b{i}" for i in range(len(PROMPTS))),
-                               text_inputs=torch.stack(ids), text_mask=torch.stack(masks))[TEXT_EMBEDS][0]
-            return [out[i:i + 1] for i in range(len(PROMPTS))]
-        return [text.forward(IMAGE_GEN_WALK, _eng([f"s{i}"]), text_inputs=i_ids[None], text_mask=i_mask[None])
-                [TEXT_EMBEDS][0] for i, (i_ids, i_mask) in enumerate(zip(ids, masks, strict=True))]
+            kwargs = text.preprocess(IMAGE_GEN_WALK, _eng(rids), rows)
+            packed = text.forward_batched(IMAGE_GEN_WALK, _eng(rids), **kwargs)
+            out = text.unpack_packed_outputs(packed, rids, [], rows, {})
+            return [out[rid][TEXT_EMBEDS][0] for rid in rids]
+        return [text.forward(IMAGE_GEN_WALK, _eng([f"s{i}"]), **text.preprocess(IMAGE_GEN_WALK, _eng([f"s{i}"]), [row]))
+                [TEXT_EMBEDS][0] for i, row in enumerate(rows)]
 
 
 def _trajectory(subs, embeds: list[torch.Tensor], prefix: str, batched: bool, seeds=SEEDS,

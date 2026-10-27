@@ -124,8 +124,9 @@ def test_postprocess_png_and_adapter():
 def test_text_node_pads_prompts_to_the_reference_length():
     """The pipeline encodes 512-padded prompts; the kernel's accumulation order depends on it."""
     from mstar.conductor.request_info import CurrentForwardPassInfo
+    from mstar.model.components.diffusion.qwen3.submodule import TEXT_INPUTS
     from mstar.model.z_image.config import ZImageConfig
-    from mstar.model.z_image.submodules import TEXT_INPUTS, ZImageTextEncoderSubmodule
+    from mstar.model.z_image.submodules import ZImageTextEncoderSubmodule
 
     config = ZImageConfig()
     node = ZImageTextEncoderSubmodule(None, config)

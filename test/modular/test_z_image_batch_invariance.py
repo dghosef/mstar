@@ -43,9 +43,10 @@ import pytest
 import torch
 
 from mstar.conductor.request_info import CurrentForwardPassInfo
+from mstar.model.components.diffusion.qwen3.submodule import TEXT_INPUTS
 from mstar.model.submodule_base import ModelInputsFromEngine
 from mstar.model.z_image.config import DENOISE_LOOP, ZImageConfig, resolve_snapshot_dir
-from mstar.model.z_image.submodules import CAP_PAD_MASK, LATENTS, TEXT_EMBEDS, TEXT_INPUTS, padded_length
+from mstar.model.z_image.submodules import CAP_PAD_MASK, LATENTS, TEXT_EMBEDS, padded_length
 from mstar.model.z_image.z_image_model import IMAGE_GEN_WALK, ZImageModel
 
 MODEL_REPO = "Tongyi-MAI/Z-Image-Turbo"

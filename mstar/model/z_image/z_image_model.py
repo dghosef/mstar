@@ -31,13 +31,13 @@ from mstar.graph.special_destinations import EMIT_TO_CLIENT, EMPTY_DESTINATION
 from mstar.model.base import ForwardPassArgs, Model
 from mstar.model.components.diffusion.decode_utils import VAE_DECODE_BATCH_SIZES
 from mstar.model.components.diffusion.image_io import encode_image, image_output_format
+from mstar.model.components.diffusion.qwen3.submodule import TEXT_INPUTS
 from mstar.model.submodule_base import NodeSubmodule
 from mstar.model.z_image.config import DENOISE_LOOP, DIT_ATTN, Z_IMAGE_TURBO, ZImageConfig, resolve_snapshot_dir
 from mstar.model.z_image.submodules import (
     IMAGE_OUTPUT,
     LATENTS,
     TEXT_EMBEDS,
-    TEXT_INPUTS,
     ZImageDenoiseSubmodule,
     ZImageTextEncoderSubmodule,
     ZImageVaeDecoderSubmodule,
