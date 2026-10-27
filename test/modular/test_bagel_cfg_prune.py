@@ -12,34 +12,33 @@ computed, and the declaration matching the branch count. CPU only.
 
 from __future__ import annotations
 
-import dataclasses
 import types
 
 import pytest
 import torch
 
+from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.engine.resources import KVStep, PositionStep
-from mstar.model.bagel.config import BagelModelConfig
+from mstar.model.bagel.config import BagelAutoEncoderConfig, BagelModelConfig, BagelViTConfig
 from mstar.model.bagel.submodules import (
     CFG_BRANCHES,
     IMAGE_GEN_LOOP,
     LLMSubmodule,
-    active_labels,
     apply_timestep_shift,
     cfg_branches,
     combine_cfg_velocity,
     image_gen_step_branches,
     image_gen_timestep,
 )
-from mstar.model.submodule_base import ARNodeInputs
+from mstar.model.submodule_base import ARNodeInputs, ModelInputsFromEngine
 
-_DEFAULTS = {f.name: f.default for f in dataclasses.fields(BagelModelConfig)}
-N = _DEFAULTS["num_timesteps"]
-SHIFT = _DEFAULTS["timestep_shift"]
+CONFIG = BagelModelConfig(vae_config=BagelAutoEncoderConfig(), vit_config=BagelViTConfig())
+N = CONFIG.num_timesteps
+SHIFT = CONFIG.timestep_shift
 T2I = dict(  # text-to-image request defaults
-    cfg_interval=tuple(_DEFAULTS["cfg_interval"]),
-    text_scale=_DEFAULTS["cfg_text_scale"],
-    img_scale=_DEFAULTS["cfg_img_scale"],
+    cfg_interval=tuple(CONFIG.cfg_interval),
+    text_scale=CONFIG.cfg_text_scale,
+    img_scale=CONFIG.cfg_img_scale,
 )
 EDIT = dict(cfg_interval=(0.0, 1.0), text_scale=4.0, img_scale=2.0)  # bagel_model edit overrides
 STEPS = range(N - 1)  # time_index 0 .. N-2
@@ -157,13 +156,16 @@ def test_pruned_combine_matches_the_old_combine(renorm, rmin, request_kind, dtyp
 # --- the declaration and the forward's inputs -----------------------------
 
 
-def _stub(**overrides):
-    return types.SimpleNamespace(
-        node_name="LLM",
-        CFG_BATCHED_LABEL=LLMSubmodule.CFG_BATCHED_LABEL,
-        _get_active_labels=lambda walk, cfg: active_labels(walk, cfg, "LLM"),
-        **overrides,
+def _llm() -> LLMSubmodule:
+    return LLMSubmodule(
+        language_model=types.SimpleNamespace(model=types.SimpleNamespace(embed_tokens=None), lm_head=None),
+        llm2vae=None, vae2llm=None, time_embedder=None, latent_pos_embed=None, config=CONFIG,
     )
+
+
+def _info(graph_walk: str = "image_gen", **fields) -> CurrentForwardPassInfo:
+    return CurrentForwardPassInfo(request_id="r0", graph_walk=graph_walk, fwd_index=0, random_seed=0, max_tokens=0,
+                                  **fields)
 
 
 def _image_gen_row(n_branches: int, span: int = 6) -> ARNodeInputs:
@@ -184,9 +186,7 @@ def _image_gen_row(n_branches: int, span: int = 6) -> ARNodeInputs:
 ])
 def test_declared_step_plans_exactly_the_branches_run(n_branches, labels):
     span = 6
-    step = LLMSubmodule.declare_step(
-        _stub(), "image_gen", ["r0"], [_image_gen_row(n_branches, span)],
-    )
+    step = _llm().declare_step("image_gen", ["r0"], [_image_gen_row(n_branches, span)])
     kv: KVStep = step.steps["kv"]
     rope: PositionStep = step.steps["rope"]
     assert tuple(seg.label for seg in kv.segments) == labels
@@ -205,11 +205,8 @@ def test_declared_step_plans_exactly_the_branches_run(n_branches, labels):
 @pytest.mark.parametrize("n_branches", [1, 2, 3])
 def test_preprocess_hands_the_forward_the_declared_count(n_branches):
     row = _image_gen_row(n_branches)
-    out = LLMSubmodule.preprocess(
-        _stub(), "image_gen",
-        engine_inputs=types.SimpleNamespace(
-            per_request_info={"r0": types.SimpleNamespace(step_metadata={})},
-        ),
+    out = _llm().preprocess(
+        "image_gen", engine_inputs=ModelInputsFromEngine(request_ids=["r0"], per_request_info={"r0": _info()}),
         inputs=[row],
     )
     assert "kwargs" not in out
@@ -222,31 +219,21 @@ def test_image_gen_shape_inputs_stay_bounded_across_output_sizes():
     that grows with every size requested."""
     from mstar.model.bagel.submodules import _IMAGE_GEN_SHAPES_CACHED
 
-    stub = _stub(
-        config=types.SimpleNamespace(latent_downsample=16, max_latent_size=64),
-        _image_gen_shape_cache={},
-        _get_text_vae_idxs=lambda n, device: LLMSubmodule._get_text_vae_idxs(None, n, device),
-    )
-    first = LLMSubmodule._image_gen_shape_inputs(stub, 256, 256, "cpu")
+    llm = _llm()
+    first = llm._image_gen_shape_inputs(256, 256, "cpu")
     for i in range(3 * _IMAGE_GEN_SHAPES_CACHED):
-        LLMSubmodule._image_gen_shape_inputs(stub, 256, 256 + 16 * (i + 1), "cpu")
+        llm._image_gen_shape_inputs(256, 256 + 16 * (i + 1), "cpu")
         # the size in use stays cached while others come and go
-        assert LLMSubmodule._image_gen_shape_inputs(stub, 256, 256, "cpu") is first
-    assert len(stub._image_gen_shape_cache) == _IMAGE_GEN_SHAPES_CACHED
+        assert llm._image_gen_shape_inputs(256, 256, "cpu") is first
+    assert len(llm._image_gen_shape_cache) == _IMAGE_GEN_SHAPES_CACHED
 
 
 def _request(k, first_iter, **meta):
-    cfg = types.SimpleNamespace(
-        num_timesteps=N, timestep_shift=SHIFT,
-        cfg_interval=_DEFAULTS["cfg_interval"],
-        cfg_text_scale=_DEFAULTS["cfg_text_scale"],
-        cfg_img_scale=_DEFAULTS["cfg_img_scale"],
-    )
-    info = types.SimpleNamespace(
+    info = _info(
         step_metadata={"requires_cfg": True, **meta},
         dynamic_loop_iter_counts={} if k is None else {IMAGE_GEN_LOOP: k},
     )
-    return image_gen_step_branches(cfg, info, first_iter)
+    return image_gen_step_branches(CONFIG, info, first_iter)
 
 
 def test_branch_count_follows_the_loop_counter_and_request_kwargs():
@@ -275,7 +262,7 @@ def test_image_gen_walk_names_the_loop_the_counter_is_read_from():
     from mstar.model.bagel.bagel_model import BagelModel
 
     model = BagelModel.__new__(BagelModel)
-    model.config = types.SimpleNamespace(num_timesteps=N, max_position_embeddings=32768)
+    model.config = CONFIG
     model._has_cfg_parallel = False
     model._has_llm_disaggregation = False
     model._image_gen_remote_handoff = False
@@ -302,10 +289,6 @@ def _combine_inputs(k: int, sat_out: tuple[str, ...], counter: int | None = None
     ``counter`` (default ``k``)."""
     from mstar.model.bagel.submodules import CombineCFGSubmodule, sat_out_velocity
 
-    cfg = types.SimpleNamespace(**{k_: _DEFAULTS[k_] for k_ in (
-        "num_timesteps", "timestep_shift", "cfg_text_scale", "cfg_img_scale",
-        "cfg_interval", "cfg_renorm_type", "cfg_renorm_min",
-    )})
     g = torch.Generator().manual_seed(0)
     latents = torch.randn(16, 8, generator=g)
     inputs = {
@@ -313,11 +296,11 @@ def _combine_inputs(k: int, sat_out: tuple[str, ...], counter: int | None = None
         for name in ("v_main", "v_cfg_text", "v_cfg_img")
     }
     inputs.update(latents=[latents], time_index=[torch.full((16,), float(k))])
-    info = types.SimpleNamespace(
-        step_metadata={"requires_cfg": True},
+    info = _info(
+        graph_walk="image_gen_cfg", step_metadata={"requires_cfg": True},
         dynamic_loop_iter_counts={IMAGE_GEN_LOOP: k if counter is None else counter},
     )
-    node = CombineCFGSubmodule(cfg)
+    node = CombineCFGSubmodule(CONFIG)
     return node, node.prepare_inputs("image_gen_cfg", info, inputs)
 
 
@@ -348,7 +331,7 @@ def test_image_gen_cfg_walk_names_the_loop_too():
     from mstar.model.bagel.bagel_model import BagelModel
 
     model = BagelModel.__new__(BagelModel)
-    model.config = types.SimpleNamespace(num_timesteps=N, max_position_embeddings=32768)
+    model.config = CONFIG
     model._has_cfg_parallel = True
     model._has_llm_disaggregation = False
     model._image_gen_remote_handoff = False
