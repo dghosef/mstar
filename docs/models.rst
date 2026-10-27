@@ -220,6 +220,17 @@ Higgs Audio notes
   sends the client's copy inline (``MSTAR_DEVICE_LOOPBACK``, on by default),
   as Qwen3.5 does: a decode step stores and routes no tensors.
 
+Orpheus notes
+~~~~~~~~~~~~~
+
+- Orpheus only ever emits ``<custom_token_*>`` ids (SNAC codes and the
+  speech/turn markers), so its LM head computes the logits of those rows alone
+  (``ColumnParallelLinear(output_start=...)``, about 18% of the head) and reads
+  ``-inf`` for the Llama text rows, at every TP size. Sampling therefore
+  renormalizes over the custom tokens: the reference samples the full
+  vocabulary, where a text token's probability during speech is negligible but
+  not zero, so sampled output is not identical to the reference's.
+
 Omnilingual ASR notes
 ~~~~~~~~~~~~~~~~~~~~~
 

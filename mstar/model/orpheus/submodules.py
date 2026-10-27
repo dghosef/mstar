@@ -3,7 +3,6 @@ from collections.abc import Mapping
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from mstar.communication.tensors import NameToTensorList
@@ -57,17 +56,10 @@ class OrpheusLLMSubmodule(ARNodeSubmodule):
             loop="decode_loop", buffer="new_token",
             stop_ids=frozenset({config.stop_token_id}), sampler=SAMPLER,
         )
-        # Orpheus only ever emits ``<custom_token_*>`` ids (SNAC codes and the
-        # speech/turn markers): the LM head computes the logits of rows
-        # ``[custom_token_base_id, vocab)`` alone, about 18% of the head, and
-        # pads the Llama text rows with -inf, so the sampler sees full-width
-        # logits and every token id stays in full-vocab space. Not under TP:
-        # the vocab-sharded head puts the custom rows on the last rank.
-        self._audio_vocab_start: int | None = None
-        if self.lm_head.tp_size == 1:
-            if config.stop_token_id < config.custom_token_base_id:
-                raise ValueError("Orpheus's stop token must be a custom token")
-            self._audio_vocab_start = config.custom_token_base_id
+        # The LM head computes the custom-token rows alone and reads -inf for
+        # the text rows (``output_start``), so the stop token must be one of them.
+        if config.stop_token_id < config.custom_token_base_id:
+            raise ValueError("Orpheus's stop token must be a custom token")
 
     PREFILL_TOKEN_BUCKETS = [32, 64, 128, 256, 512, 1024]
     PREFILL_CAPTURE_BATCH_SIZES = [1, 4, 16, 64]
@@ -168,11 +160,7 @@ class OrpheusLLMSubmodule(ARNodeSubmodule):
         if graph_walk != "decode":
             hidden = attn.select_last_hidden(hidden)
 
-        if self._audio_vocab_start is not None:
-            start = self._audio_vocab_start
-            logits = F.pad(F.linear(hidden, self.lm_head.weight[start:]), (start, 0), value=float("-inf"))
-        else:
-            logits = self.lm_head(hidden)
+        logits = self.lm_head(hidden)
         return sampler.sample(
             engine_inputs.request_ids,
             logits=logits
