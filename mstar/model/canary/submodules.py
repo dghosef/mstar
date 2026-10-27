@@ -41,5 +41,5 @@ class CanaryDecoderSubmodule(EncoderDecoderNode, ARNodeSubmodule):
         self.config = config
         self.token_stop = TokenStop(
             loop=self.DECODE_LOOP, buffer="new_token",
-            stop_ids=frozenset({config.eos_token_id}), sampler=SAMPLER,
+            stop_ids=frozenset({config.eos_token_id}), sampler=self.SAMPLER,
         )

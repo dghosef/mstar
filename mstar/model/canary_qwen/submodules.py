@@ -50,7 +50,8 @@ class CanaryQwenLLMSubmodule(TokenStepNode, ARNodeSubmodule):
         self.model = llm
         self.audio_token_id = audio_token_id
         self.token_stop = TokenStop(
-            loop=DECODE_LOOP, buffer="new_token", stop_ids=frozenset(stop_token_ids), sampler=SAMPLER,
+            loop=self.DECODE_LOOP, buffer="new_token", stop_ids=frozenset(stop_token_ids),
+            sampler=self.SAMPLER,
         )
 
     def splice_audio(self, input_ids: torch.Tensor, audio_embeds: torch.Tensor) -> torch.Tensor:
