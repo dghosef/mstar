@@ -165,7 +165,7 @@ def ragged_attention(
     or a clone of the graph-mode buffer the next call overwrites, so it aliases
     neither an input nor anything a later call writes.
     """
-    return _MANAGERS[key]._wrapper(label).run(q, k, v)
+    return _MANAGERS[key]._run(q, k, v, label)
 
 
 @ragged_attention.register_fake
