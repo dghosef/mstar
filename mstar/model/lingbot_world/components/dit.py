@@ -444,19 +444,19 @@ class LingBotCausalDiT(nn.Module):
         x = x.flatten(2).transpose(1, 2)
         seq_len = x.size(1)
 
-        per_token_t = None if t.dim() == 1 else t
-        if t.dim() == 1:
-            t = t.expand(t.size(0), seq_len)
+        per_token = t.dim() > 1
+        if not per_token:
+            # The reference embeds the chunk's one timestep once per token. Off
+            # reference numerics one row is embedded (a one-row GEMM may round
+            # differently).
+            t = t.expand(t.size(0), seq_len if cfg.reference_numerics else 1)
         with torch.amp.autocast("cuda", dtype=torch.float32):
-            bt = t.size(0)
-            e = self.time_embedding(
-                sinusoidal_embedding_1d(cfg.freq_dim, t.flatten()).unflatten(0, (bt, seq_len)).float())
+            e = self.time_embedding(sinusoidal_embedding_1d(cfg.freq_dim, t.flatten()).unflatten(0, t.shape).float())
             e0 = self.time_projection(e).unflatten(2, (6, cfg.dim))
-        if per_token_t is None:
-            # One timestep for the whole chunk: every token's row of e/e0 is
-            # the same bits, so keep one and let the modulation broadcast. The
-            # per-token [L, 6, dim] fp32 tensors otherwise cost ~10% of a
-            # forward in elementwise traffic, in every block.
+        if not per_token:
+            # Every token's row of e/e0 is the same bits, so keep one and let the
+            # modulation broadcast. The per-token [L, 6, dim] fp32 tensors
+            # otherwise cost ~10% of a forward in elementwise traffic, in every block.
             e, e0 = e[:, :1], e0[:, :1]
 
         if not cache.cross_k:
