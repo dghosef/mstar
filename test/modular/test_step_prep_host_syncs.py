@@ -397,3 +397,71 @@ def test_higgs_loopback_decode_prep_copies_no_pageable_index(monkeypatch):
         out = sub.preprocess("decode", engine_inputs, inputs)
     assert h2d_copies.copies == []
     assert out["input_ids"].shape == (2,)
+
+
+def test_higgs_encoder_prep_reads_no_tensor():
+    """The audio encoder's per-chunk embedding counts come from the step
+    metadata ``process_prompt`` filled, not off a lengths tensor."""
+    from mstar.model.higgs_audio.config import HiggsAudioModelConfig
+    from mstar.model.higgs_audio.higgs_audio_model import HiggsAudioModel
+    from mstar.model.higgs_audio.submodules import HiggsAudioEncoderSubmodule
+
+    config = HiggsAudioModelConfig()
+    lens = [400, 400, 123]
+    valid = [config.encoder_output_length(n) for n in lens]
+    model = SimpleNamespace(config=config, INTERNAL_KWARGS=HiggsAudioModel.INTERNAL_KWARGS)
+    (key,) = model.INTERNAL_KWARGS
+    sub = HiggsAudioEncoderSubmodule(None, None, config)
+    features = torch.zeros(len(lens), config.audio_num_mel_bins, 400)
+    with _HostReads() as reads:
+        row = sub.prepare_inputs("prefill_audio", _fwd("r", "prefill_audio", {key: valid}), {
+            "audio_features": [features],
+        })
+    assert reads.reads == []
+    assert row.kwargs["valid_lengths"] == valid and row.input_seq_len == len(lens)
+
+
+class _OmniAudioEncoder(torch.nn.Module):
+    """Records each call's mel frames; one embedding per output position."""
+
+    def __init__(self):
+        super().__init__()
+        self.call_frames = []
+
+    def forward(self, features, feature_lens=None):
+        from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import _get_feat_extract_output_lengths
+
+        self.call_frames.append(features.shape[-1])
+        return torch.zeros(int(_get_feat_extract_output_lengths(feature_lens).sum()), 4)
+
+
+def test_qwen3_omni_audio_encoder_prep_reads_no_tensor():
+    """A clip's mel frames and embedding count come off its tensor's shape,
+    with no host read of the lengths tensor; the frames are what the step's
+    encoder calls are budgeted by, so a step over the budget is packed into
+    several calls rather than refused into one call per clip."""
+    from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import _get_feat_extract_output_lengths
+
+    from mstar.model.qwen3_omni.submodules import AudioEncoderSubmodule
+
+    encoder = _OmniAudioEncoder()
+    sub = AudioEncoderSubmodule(encoder, SimpleNamespace())
+    rows = []
+    for frames in (1234, 3000):
+        with _HostReads() as reads:
+            rows.append(sub.prepare_inputs("prefill_audio", _fwd("r", "prefill_audio"), {
+                "audio_features": [torch.zeros(128, frames)], "audio_seqlens": [torch.tensor([frames])],
+            }))
+        assert reads.reads == []
+        assert rows[-1].input_seq_len == frames
+        assert rows[-1].kwargs["embed_len"] == int(_get_feat_extract_output_lengths(torch.tensor(frames)))
+    assert sub.max_batch_size("prefill_audio") == AudioEncoderSubmodule.MAX_BATCH_SIZE
+
+    rows = rows * (AudioEncoderSubmodule.MAX_BATCH_FRAMES // 4234 + 1)
+    engine_inputs = SimpleNamespace(request_ids=[str(i) for i in range(len(rows))])
+    assert sub.can_batch(None, rows)
+    out = sub.forward_batched("prefill_audio", engine_inputs, **sub.preprocess("prefill_audio", engine_inputs, rows))
+
+    assert len(encoder.call_frames) == 2
+    assert all(n <= AudioEncoderSubmodule.MAX_BATCH_FRAMES for n in encoder.call_frames)
+    assert [out[str(i)]["audio_embeds"][0].shape[0] for i in range(len(rows))] == [r.kwargs["embed_len"] for r in rows]

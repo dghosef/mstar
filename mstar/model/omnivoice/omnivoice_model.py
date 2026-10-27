@@ -114,8 +114,8 @@ class OmniVoiceModel(Model):
     # ------------------------------------------------------------------
 
     def get_node_resources(self) -> list[NodeResourceSpec]:
-        """The backbone's ragged attention, when its layer stack is captured;
-        nothing else, since every node here is stateless.
+        """The backbone's ragged attention; nothing else, since every node
+        here is stateless.
 
         There is deliberately no KV cache.  The canvas is rewritten each
         iteration and attention is bidirectional, so the prefix attends *into*
@@ -124,8 +124,6 @@ class OmniVoiceModel(Model):
         resource either: the reveal picks cells by confidence rank across the
         whole canvas rather than drawing one token per position.
         """
-        if not self.config.backbone_graphs:
-            return []
         body = self.config.backbone
         return [
             RaggedAttentionSpec(
@@ -759,6 +757,9 @@ class OmniVoiceModel(Model):
             # against model.device, and patching on CPU would allocate it there.
             fi.apply_flashinfer(reference, enable_cuda_graph=False)
             assert_flashinfer_patched(reference)
+            # mstar's layer loop attends through its own resource, so the
+            # reference's packed runner (a 128 MB workspace) is never used
+            del reference._fi_runner
             backbone = OmniVoiceBackbone(reference, plan_dtype=dtype).eval()
             return OmniVoiceBackboneSubmodule(backbone, self.config)
 

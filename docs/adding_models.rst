@@ -976,7 +976,12 @@ methods are:
    class attribute ``disable_torch_compile = True``. Keep the compiled paths
    compile-friendly. If a helper must not be traced, because it uses data-dependent
    Python control flow or forces a host synchronization, exclude it explicitly with
-   ``@torch.compiler.disable``.
+   ``@torch.compiler.disable``. A submodule that disables the whole-forward compile but
+   wants parts of it compiled returns them from ``compile_regions()``: attribute paths
+   (a module, or a method) mapped to example arguments to warm each with at start-up.
+   The engine compiles them, with dynamic shapes and before capture, on an accelerator
+   only; don't call ``torch.compile`` in model code. Qwen3.5's vision encoder and
+   Omnilingual ASR are examples.
 
    Some submodules must run in their own parameter dtype. One example is an fp32 vocoder
    that is numerically sensitive. Such a submodule sets ``disable_autocast = True``. The
@@ -996,6 +1001,12 @@ methods are:
    ``forward_batched`` only, not ``preprocess`` or ``postprocess``. It can also be set
    per instance in ``__init__``, for example only when the model loads in fp32.
 
+   A node whose captured convolutions are faster with cuDNN's timed algorithm choice
+   sets ``capture_cudnn_benchmark = True``: the engine turns
+   ``torch.backends.cudnn.benchmark`` on around that node's capture warm-up only, so
+   each captured shape is searched once, and eager steps keep the heuristic pick
+   (Kokoro is an example).
+
 ``postprocess(...)`` (optional)
    Metadata-only fixups that run on the GPU thread. This method must not read tensor
    values. Do not call ``.item()``, ``.cpu()`` or ``.tolist()`` here. This is a
@@ -1010,7 +1021,13 @@ methods are:
    terminates. An AR submodule whose loop ends on a stop token or the token budget sets
    ``self.token_stop = TokenStop(...)`` in ``__init__`` instead of writing one; that also
    gives it ``check_stop_batched``, which checks a whole step off one host copy of its
-   tokens. Qwen3.5's ``LLMSubmodule`` is an example.
+   tokens. Qwen3.5's ``LLMSubmodule`` is an example. A decode walk that feeds each row
+   its last sampled token can keep that token on the device instead of routing it: give
+   its ``TokenStop`` a ``walk`` and the ``loopback_signal`` the token feeds back to,
+   and read the row's token with the sampler's ``loopback_input_ids`` in ``preprocess``
+   (``prepare_inputs`` returns ``self.uniform_row_inputs(...)`` for such a row); the
+   loop-back hooks and the client's inline copy of the token follow from it
+   (``MSTAR_DEVICE_LOOPBACK``). Qwen3.5 and Higgs Audio declare it.
 
 ``cleanup_request(self, request_id)`` (optional)
    Free per-request state held inside the submodule when a request finishes: buffers,
@@ -1458,9 +1475,10 @@ Both types share the base ``PiecewiseCudaGraphConfig`` fields:
   ``lease_before_step``, and lets the region refuse a batch for a limit that the
   capture bucket key doesn't express, such as Qwen3.5's per-request segment count. The
   engine then gives the region no lease for that step. Your forward must replay only
-  when the region was leased, for example when the outer step is ``None``, and not
-  whenever ``runner.can_run`` is true: a refused batch can still fit a bucket, and
-  replaying it would declare the region's resources twice.
+  when the region was leased, that is when its label is in
+  ``engine_inputs.piecewise_leases``, and not whenever ``runner.can_run`` is true: a
+  refused batch can still fit a bucket, and replaying it would declare the region's
+  resources twice.
 - ``one_row_per_step`` makes the runner lease, check (``can_run``) and replay the region as
   one row, whatever the step's batch size, under the step's first request. It is for a
   packed region that runs every request's segments as one ragged batch, such as a vision
@@ -1578,8 +1596,8 @@ sequence, and an eager section after the region.
        }
 
    # --- invoke it inside the forward ---
-   runner = engine_inputs.piecewise_runners.get(BLOCK_LOOP_REGION)
-   if runner is not None and runner.can_run(x.size(0)):
+   if BLOCK_LOOP_REGION in engine_inputs.piecewise_leases:   # leased before the step
+       runner = engine_inputs.piecewise_runners[BLOCK_LOOP_REGION]
        out = runner.run(                       # admits + plans + replays + commits
            static_inputs={"x": x, "d_pos": d_pos, ...},
            request_ids=engine_inputs.request_ids,

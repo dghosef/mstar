@@ -19,7 +19,7 @@ import mstar.engine.engine as engine_module  # noqa: E402
 from mstar.conductor.request_info import CurrentForwardPassInfo  # noqa: E402
 from mstar.engine.engine import Engine, ExecutingBatch  # noqa: E402
 from mstar.engine.resources import StepContext  # noqa: E402
-from mstar.model.submodule_base import NodeInputs, NodeSubmodule  # noqa: E402
+from mstar.model.submodule_base import ARNodeSubmodule, NodeInputs, NodeSubmodule, TokenStop  # noqa: E402
 
 WALK = "run"
 
@@ -272,6 +272,24 @@ def test_an_invalid_setting_fails_when_the_engine_loads(bad):
         _engine({"flow": _Recorder(**bad)})
 
 
+def test_a_loopback_signal_without_its_walk_fails_when_the_engine_loads():
+    """``TokenStop.loopback_signal`` loops back ``walk``'s token, so without a
+    walk nothing would loop back while the sampler still kept its masters."""
+
+    class _Decoder(_Recorder, ARNodeSubmodule):
+        preprocess = NodeSubmodule.preprocess
+
+        def __init__(self):
+            super().__init__()
+            self.token_stop = TokenStop(
+                loop="decode_loop", buffer="y", stop_ids=frozenset(), sampler="sampler",
+                loopback_signal="x",
+            )
+
+    with pytest.raises(ValueError, match="llm:.*walk"):
+        _engine({"llm": _Decoder()})
+
+
 def test_the_scope_restores_the_exact_state_it_found():
     """``matmul.allow_tf32 = False`` alone changes only the CUDA backend, which
     leaves torch's legacy getter raising. The scope still runs, and puts that
@@ -412,3 +430,79 @@ def test_the_setting_holds_under_either_graph_runtime(runtime, monkeypatch):
         _step(engine, node)
     assert a.seen == [("highest", False)] and b.seen == [("high", True)]
     assert _flags() == ("high", True)
+
+
+def test_capture_cudnn_benchmark_covers_warmup_only(monkeypatch):
+    """``capture_cudnn_benchmark`` turns cuDNN's algorithm search on around the
+    node's capture warm-up alone: another node's warm-up and every eager step
+    keep the process setting, so a new eager shape never searches."""
+    from mstar.engine.accelerator_graph_runner import AcceleratorGraphRunner
+
+    class _Tuned(_Recorder):
+        capture_cudnn_benchmark = True
+
+        def forward(self, graph_walk, engine_inputs, x, **kwargs):
+            warmups.append(("forward", torch.backends.cudnn.benchmark))
+            return super().forward(graph_walk, engine_inputs, x, **kwargs)
+
+    warmups: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        AcceleratorGraphRunner, "warmup_and_capture",
+        lambda self, planned=None: warmups.append((self._submodule_name, torch.backends.cudnn.benchmark)),
+    )
+    monkeypatch.setattr(torch.backends.cudnn, "benchmark", False)
+    engine = _engine({"tuned": _Tuned(), "plain": _Recorder()})
+    engine.warmup()
+    _step(engine, "tuned")
+    assert warmups == [("tuned", True), ("plain", False), ("forward", False)]
+    assert torch.backends.cudnn.benchmark is False
+
+
+def test_compile_regions_are_compiled_and_warmed(monkeypatch):
+    """A node's ``compile_regions`` are compiled by the engine, a module by its
+    ``forward`` and a method in place, and warmed with their example
+    arguments; without an accelerator nothing is compiled."""
+    events: list = []
+
+    class _Regions(_Recorder):
+        disable_torch_compile = True
+
+        def __init__(self):
+            super().__init__()
+            self.inner = torch.nn.Linear(4, 4)
+
+        def scale(self, x):
+            return 2 * x
+
+        def compile_regions(self):
+            return {"inner": [(torch.ones(1, 4),)], "scale": []}
+
+    def fake_compile(fn, **kwargs):
+        name = fn.__name__
+        events.append(("compile", name, kwargs.get("dynamic")))
+
+        def compiled(*args):
+            events.append(("call", name))
+            return fn(*args)
+        return compiled
+
+    monkeypatch.setattr(torch, "compile", fake_compile)
+    monkeypatch.setattr(engine_module, "with_inductor_overrides", lambda fn, *a, **k: fn, raising=False)
+    node = _Regions()
+    engine = _engine({"n": node})
+    engine._compile_regions()
+    assert events == []   # CPU: nothing compiled
+    with monkeypatch.context() as on_gpu:
+        on_gpu.setattr(engine, "_device_capability", SimpleNamespace(is_available=True))
+        engine._compile_regions()
+    assert events == [("compile", "forward", True), ("call", "forward"), ("compile", "scale", True)]
+    node.inner(torch.ones(1, 4))
+    assert node.scale(torch.ones(1)) == 2 and events[-2:] == [("call", "forward"), ("call", "scale")]
+
+    # regions are for a node whose forward is not compiled whole
+    whole = _Regions()
+    whole.disable_torch_compile = False
+    engine = _engine({"whole": whole})
+    monkeypatch.setattr(engine, "_device_capability", SimpleNamespace(is_available=True))
+    with pytest.raises(ValueError, match="disable_torch_compile"):
+        engine._compile_regions()

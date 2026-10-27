@@ -39,7 +39,9 @@ class MaskedBiLSTM(nn.Module):
         the forward input and state, the second the reversed input and the
         backward state, so the two directions stay independent while their
         time steps advance together. The recurrence is a chain of tiny,
-        latency-bound kernels per step, so this halves the steps' cost.
+        latency-bound kernels per step, so this halves the number of those
+        steps. The result matches the two LSTMs to float rounding, not bit for bit
+        (the wider GEMMs may reduce in another order).
         """
         h, i = self.hidden_size, self.fwd.input_size
         ref = self.fwd.weight_ih_l0
@@ -57,15 +59,12 @@ class MaskedBiLSTM(nn.Module):
                     else:
                         dst[r : r + h, cols : cols + block.shape[1]] = block
         fused.flatten_parameters()
-        self._fused = [fused]
+        self._fused = [fused.eval().requires_grad_(False)]
 
     def forward(self, x: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
-        reversed_x = reverse_padded(x, lengths)
-        if self._fused:
-            out, _ = self._fused[0](torch.cat([x, reversed_x], dim=-1))
-            forward_out, backward_out = out.split(self.hidden_size, dim=-1)
-        else:
-            forward_out, _ = self.fwd(x)
-            backward_out, _ = self.bwd(reversed_x)
+        if not self._fused:
+            raise ValueError("MaskedBiLSTM.fuse() must run once its weights are loaded")
+        out, _ = self._fused[0](torch.cat([x, reverse_padded(x, lengths)], dim=-1))
+        forward_out, backward_out = out.split(self.hidden_size, dim=-1)
         out = torch.cat([forward_out, reverse_padded(backward_out, lengths)], dim=-1)
         return mask_features(out, length_mask(lengths, x.shape[1]))

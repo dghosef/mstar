@@ -969,7 +969,7 @@ def test_qwen3_tts_prefill_frame_counts_toward_generation_limit():
         config,
     )
     submodule.request_state("request").add("generated_frames", 0)
-    outputs = {"new_token": [torch.tensor(1)]}
+    outputs = {"layer0_codes": [torch.tensor(1)]}
     request_info = SimpleNamespace(
         graph_walk="talker_decode",
         step_metadata={},
@@ -1018,7 +1018,7 @@ def test_qwen3_tts_honors_ignore_eos_for_fixed_length_benchmarks():
         config,
     )
     submodule.request_state("request").add("generated_frames", 0)
-    outputs = {"new_token": [torch.tensor(
+    outputs = {"layer0_codes": [torch.tensor(
         config.talker.codec_eos_token_id
     )]}
     request_info = SimpleNamespace(
@@ -1055,7 +1055,7 @@ def test_qwen3_tts_batched_stop_check_agrees_with_the_per_request_one():
     infos = {rid: info(ignore, limit) for rid, (_, ignore, limit, _) in cases.items()}
     for rid, (code, _, _, frames) in cases.items():
         submodule.request_state(rid).add("generated_frames", frames)
-        submodule.postprocess(rid, infos[rid], {"new_token": [torch.tensor(code)]})
+        submodule.postprocess(rid, infos[rid], {"layer0_codes": [torch.tensor(code)]})
     expected = {
         rid: stop for rid in cases
         if (stop := submodule.check_stop(
@@ -1079,7 +1079,7 @@ def test_qwen3_tts_talker_returns_row_outputs_except_for_the_clone_prefill():
     frame = {
         "talker_input_embeds": torch.zeros(2, 16),
         "codec_tokens": torch.arange(2 * groups).view(2, groups),
-        "new_token": torch.tensor([3, 4]),
+        "layer0_codes": torch.tensor([3, 4]),
     }
     submodule._run_frame = lambda *args: frame
     engine_inputs = ModelInputsFromEngine(request_ids=["a", "b"], per_request_info={})
@@ -1087,13 +1087,15 @@ def test_qwen3_tts_talker_returns_row_outputs_except_for_the_clone_prefill():
     out = submodule.forward_batched("talker_decode", engine_inputs, *tensors)
     assert isinstance(out, BatchedModelOutput)
     assert out.row_outputs is frame
-    assert torch.equal(out.check_stop_buffers["layer0_codes"], frame["new_token"])
+    # the stop check reads the row output's own clone: one copy of the codes a step
+    rows = out.clone_row_outputs(2)
+    assert out.clone_check_stop_buffers(reuse=rows)["layer0_codes"] is rows["layer0_codes"]
     # The clone prefill returns rows too; postprocess leads its codec items
     # with the reference tail, so the captured forward serves it as well.
     assert isinstance(submodule.forward_batched("talker_prefill_clone", engine_inputs, *tensors), BatchedModelOutput)
     reference = torch.arange(3 * groups).view(3, groups)
     submodule.request_state("a").add_all(reference_frames=reference, generated_frames=0)
-    row = {"codec_tokens": [frame["codec_tokens"][0:1]], "new_token": [frame["new_token"][0:1]]}
+    row = {"codec_tokens": [frame["codec_tokens"][0:1]], "layer0_codes": [frame["layer0_codes"][0:1]]}
     submodule.postprocess("a", SimpleNamespace(graph_walk="talker_prefill_clone"), row)
     left = config.codec.left_context_frames
     assert [item.shape for item in row["codec_tokens"]] == [(1, groups)] * (min(left, 3) + 1)
@@ -1351,17 +1353,43 @@ def test_qwen3_tts_talker_preprocess_packs_the_tensors_the_per_row_device_copies
 
 
 class _IdentityNorm(torch.nn.Module):
-    """A CPU stand-in for the FlashInfer RMSNorm, fused residual add included."""
+    """A CPU stand-in for the FlashInfer RMSNorm, fused residual add included:
+    like FlashInfer's, the add updates the residual stream in place."""
 
     def forward(self, hidden_states):
-        return hidden_states
+        return hidden_states.clone()
 
     def forward_residual(self, hidden_states, residual):
-        summed = hidden_states + residual
-        return summed, summed
+        if residual is None:
+            return hidden_states.clone(), hidden_states
+        residual.add_(hidden_states)
+        return residual.clone(), residual
 
 
-def test_qwen3_tts_code_predictor_projects_wider_talker_inputs():
+def _fake_cp_kernels(monkeypatch, calls=None):
+    """The code predictor's Triton kernels on CPU: the prologue writes k and v
+    into the cache without norm or rope, and attention is SDPA over the depth
+    positions so far."""
+    import mstar.model.qwen3_tts.components.talker as talker_module
+
+    def prologue(qkv, wq, wk, pos, kv_layer, cache_pos, seq_len, eps_q, eps_k, theta, hq, hkv, d):
+        k, v = qkv[:, hq * d:].view(-1, seq_len, 2, hkv, d).unbind(2)
+        kv_layer[:, 0, cache_pos:cache_pos + seq_len] = k
+        kv_layer[:, 1, cache_pos:cache_pos + seq_len] = v
+
+    def attention(q, k_cache, v_cache, cache_pos):
+        n = cache_pos + q.shape[1]
+        if calls is not None:
+            calls.append((q.shape, k_cache.shape, v_cache.shape, n))
+        return torch.nn.functional.scaled_dot_product_attention(
+            q.transpose(1, 2), k_cache[:, :n].transpose(1, 2), v_cache[:, :n].transpose(1, 2), enable_gqa=True,
+        ).transpose(1, 2)
+
+    monkeypatch.setattr(talker_module, "cp_qk_norm_rope_kv_write", prologue)
+    monkeypatch.setattr(talker_module, "cp_attention", attention)
+
+
+def test_qwen3_tts_code_predictor_projects_wider_talker_inputs(monkeypatch):
     """1.7B: Talker width 2048 vs predictor width 1024 -> biased projection on
     every depth input; 0.6B (equal widths) -> identity, no extra parameters."""
     narrow = _tiny_model_config()
@@ -1386,74 +1414,58 @@ def test_qwen3_tts_code_predictor_projects_wider_talker_inputs():
     for layer in predictor.model.layers:
         layer.input_layernorm = _IdentityNorm()
         layer.post_attention_layernorm = _IdentityNorm()
-        layer.self_attn.q_norm = torch.nn.Identity()
-        layer.self_attn.k_norm = torch.nn.Identity()
     predictor.model.norm = _IdentityNorm()
-    import mstar.model.qwen3_tts.components.talker as talker_module
-    original_rope = talker_module.apply_rope_pos_ids
-    original_attn = talker_module.decode_attn_nhd
-    talker_module.apply_rope_pos_ids = lambda q, k, pos, theta: (q, k)
-    talker_module.decode_attn_nhd = lambda q, k_cache, v_cache, n: (
-        torch.nn.functional.scaled_dot_product_attention(
-            q.transpose(1, 2), k_cache[:, :n].transpose(1, 2),
-            v_cache[:, :n].transpose(1, 2), enable_gqa=True,
-        ).transpose(1, 2)
+    _fake_cp_kernels(monkeypatch)
+    cp = wide.talker.code_predictor
+    out = predictor.forward_depth_unrolled(
+        inputs_embeds=torch.randn(2, 1, 32),
+        position_ids=torch.zeros(2, 1, dtype=torch.long),
+        kv_cache=torch.zeros(
+            cp.num_hidden_layers, 2, 2, wide.talker.num_code_groups,
+            cp.num_key_value_heads, cp.head_dim,
+        ),
+        cache_pos=0,
     )
-    try:
-        cp = wide.talker.code_predictor
-        out = predictor.forward_depth_unrolled(
-            inputs_embeds=torch.randn(2, 1, 32),
-            position_ids=torch.zeros(2, 1, dtype=torch.long),
-            kv_cache=torch.zeros(
-                cp.num_hidden_layers, 2, 2, wide.talker.num_code_groups,
-                cp.num_key_value_heads, cp.head_dim,
-            ),
-            cache_pos=0,
-        )
-    finally:
-        talker_module.apply_rope_pos_ids = original_rope
-        talker_module.decode_attn_nhd = original_attn
     assert out.shape == (2, 1, 16)
 
 
-def test_qwen3_tts_code_predictor_uses_decode_attn_nhd(monkeypatch):
+def test_qwen3_tts_code_predictor_leaves_its_input_alone(monkeypatch):
+    """The fused add + norm updates the residual stream in place, and on 0.6B
+    the predictor's input projection is the identity: the stream must not be
+    the caller's tensor, which the Talker's captured step reads again."""
     config = _tiny_model_config()
     predictor = Qwen3TTSCodePredictor(config)
-    # This CPU-only contract test targets the decode-attention call. FlashInfer
-    # RMSNorm and the Triton attention kernel are CUDA-only, so replace them
+    assert isinstance(predictor.small_to_mtp_projection, torch.nn.Identity)
+    for layer in predictor.model.layers:
+        layer.input_layernorm = _IdentityNorm()
+        layer.post_attention_layernorm = _IdentityNorm()
+    predictor.model.norm = _IdentityNorm()
+    _fake_cp_kernels(monkeypatch)
+    cp = config.talker.code_predictor
+    inputs = torch.randn(2, 1, config.talker.hidden_size)
+    before = inputs.clone()
+    predictor.forward_depth_unrolled(
+        inputs_embeds=inputs,
+        position_ids=torch.zeros(2, 1, dtype=torch.long),
+        kv_cache=torch.zeros(
+            cp.num_hidden_layers, 2, 2, config.talker.num_code_groups, cp.num_key_value_heads, cp.head_dim,
+        ),
+        cache_pos=0,
+    )
+    assert torch.equal(inputs, before)
+
+
+def test_qwen3_tts_code_predictor_uses_the_shared_kernels(monkeypatch):
+    config = _tiny_model_config()
+    predictor = Qwen3TTSCodePredictor(config)
+    # FlashInfer RMSNorm and the Triton kernels are CUDA-only, so replace them
     # without changing attention geometry.
     for layer in predictor.model.layers:
         layer.input_layernorm = _IdentityNorm()
         layer.post_attention_layernorm = _IdentityNorm()
-        layer.self_attn.q_norm = torch.nn.Identity()
-        layer.self_attn.k_norm = torch.nn.Identity()
     predictor.model.norm = _IdentityNorm()
-    rope_calls = []
-
-    def capture_rope(q, k, position_ids, rope_theta):
-        rope_calls.append((q.shape, k.shape, position_ids.dtype, rope_theta))
-        return q, k
-
-    monkeypatch.setattr(
-        "mstar.model.qwen3_tts.components.talker.apply_rope_pos_ids",
-        capture_rope,
-    )
     calls = []
-
-    def capture_decode_attn(q, k_cache, v_cache, cache_len):
-        calls.append((q.shape, k_cache.shape, v_cache.shape, cache_len))
-        return torch.nn.functional.scaled_dot_product_attention(
-            q.transpose(1, 2),
-            k_cache[:, :cache_len].transpose(1, 2),
-            v_cache[:, :cache_len].transpose(1, 2),
-            is_causal=False,
-            enable_gqa=True,
-        ).transpose(1, 2)
-
-    monkeypatch.setattr(
-        "mstar.model.qwen3_tts.components.talker.decode_attn_nhd",
-        capture_decode_attn,
-    )
+    _fake_cp_kernels(monkeypatch, calls)
     output = predictor.forward_depth_unrolled(
         inputs_embeds=torch.randn(1, 1, config.talker.hidden_size),
         position_ids=torch.zeros(1, 1, dtype=torch.long),
@@ -1476,8 +1488,6 @@ def test_qwen3_tts_code_predictor_uses_decode_attn_nhd(monkeypatch):
     assert key_shape[1] == config.talker.num_code_groups
     assert cache_len == 1
     assert len(calls) == config.talker.code_predictor.num_hidden_layers
-    assert len(rope_calls) == config.talker.code_predictor.num_hidden_layers
-    assert rope_calls[0][2] == torch.int32
 
 
 def test_qwen3_tts_per_request_sampler_configs_drive_code_predictor():
@@ -1933,7 +1943,9 @@ def test_qwen3_tts_fused_snake_matches_the_reference_activation():
         alpha=torch.randn(6) * 0.3, beta=torch.randn(6) * 0.3, no_div_by_zero=1e-9,
     )
     fused = FusedSnakeBeta(snake).cuda()
-    x = torch.randn(3, 6, 1000, device="cuda")
+    # large activations too, where an approximate hardware sine drifts from torch.sin
+    scale = torch.tensor([1.0, 1.0, 1.0, 50.0, 50.0, 300.0], device="cuda")[:, None]
+    x = torch.randn(3, 6, 1000, device="cuda") * scale
     alpha = torch.exp(snake.alpha).cuda()[None, :, None]
     beta = torch.exp(snake.beta).cuda()[None, :, None]
     expected = x + (1.0 / (beta + snake.no_div_by_zero)) * torch.pow(torch.sin(x * alpha), 2)

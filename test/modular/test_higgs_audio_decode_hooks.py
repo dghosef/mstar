@@ -39,7 +39,6 @@ def test_decode_loop_routes_one_signal_to_itself_and_the_client():
 
 def test_decode_keeps_its_token_on_the_device_only_with_slot_masters():
     sub = _submodule()
-    assert sub.reads_device_loopback
     assert sub.device_loopback_signals("decode") == {"text_inputs"}
     assert sub.device_loopback_signals("prefill_audio") == frozenset()
     assert sub.inline_client_signals("decode") == {"text_inputs": "new_token"}

@@ -201,7 +201,7 @@ OmniVoice notes
   and each residual add folds into the next RMSNorm (flashinfer
   ``fused_add_rmsnorm``), so logits match the reference to half-precision
   rounding rather than bit for bit. ``model_kwargs: {backbone_graphs: false}``
-  keeps the reference's eager packed path.
+  runs the same layer loop eagerly.
 - ``configs/omnivoice_split.yaml`` runs code2wav (codec decode and the
   host-side silence trim) on a second worker sharing GPU 0, so the unmask loop
   no longer stops for each finished request. With a CUDA MPS daemon it raised
@@ -223,6 +223,17 @@ Higgs Audio notes
 - Decode keeps each request's last token in the sampler's slot master and
   sends the client's copy inline (``MSTAR_DEVICE_LOOPBACK``, on by default),
   as Qwen3.5 does: a decode step stores and routes no tensors.
+
+Orpheus notes
+~~~~~~~~~~~~~
+
+- Orpheus only ever emits ``<custom_token_*>`` ids (SNAC codes and the
+  speech/turn markers), so its LM head computes the logits of those rows alone
+  (``ColumnParallelLinear(output_start=...)``, about 18% of the head) and reads
+  ``-inf`` for the Llama text rows, at every TP size. Sampling therefore
+  renormalizes over the custom tokens: the reference samples the full
+  vocabulary, where a text token's probability during speech is negligible but
+  not zero, so sampled output is not identical to the reference's.
 
 Omnilingual ASR notes
 ~~~~~~~~~~~~~~~~~~~~~
@@ -336,6 +347,10 @@ default, which lowers the token count of short clips. Notes:
   segments per prompt. A prompt over either limit runs the encoder without the
   graph: a long video at ordinary resolution exceeds the patches, and one over
   ~64 s with frames resized below ~256x256 pixels exceeds the segments.
+- An encoder step packs the images and videos of up to 8 requests into one
+  replay; requests that would overflow it together run one at a time. The
+  packed GEMMs' shapes follow the step's total patches, so an image's
+  embeddings can differ at the last bit with what it is batched beside.
 - A long video is one wide prefill: one 1-3 minute video is ~11-12k tokens,
   beyond the largest captured ``prefill_vision`` bucket (4096), so it runs
   eagerly.
@@ -454,9 +469,9 @@ Kokoro notes
   in bf16 (about 13% more throughput at concurrency 32 on an H100 and 20-25% at
   concurrency 32-64 on an H200, Whisper WER unchanged, with the harmonic source and the
   iSTFT kept in fp32; the parity test covers fp32 only; ``configs/kokoro_bf16.yaml``).
-  ``fuse_lstm_directions`` (default on) runs each BiLSTM's two directions as one
-  block-diagonal recurrence, and ``decoder_cudnn_benchmark`` (default on) lets cuDNN
-  time the frame half's conv algorithms once per captured bucket.
+  Each BiLSTM's two directions run as one block-diagonal recurrence, and cuDNN times
+  the frame half's conv algorithms once per captured bucket
+  (``NodeSubmodule.capture_cudnn_benchmark``).
 - Text is cut at sentence boundaries into chunks of at most 510 phonemes (the
   PL-BERT window); each chunk is emitted to the client as soon as it is
   synthesized, so ``stream=True`` on ``/v1/audio/speech`` returns audio sentence by
@@ -490,6 +505,11 @@ Qwen3-Omni notes
   (``cp_attention``), neither bit-exact with the unfused ops. Its 15 depth
   steps feed each sampled code into the next, so small differences can change
   later codes at near-ties.
+- The audio encoder takes the clips of up to 16 requests a step and packs
+  them along time in request order, starting a new call when the next clip
+  would take it past 300 s of audio, with attention windowed within each clip. A clip's embeddings can differ at the
+  last bit with what it is batched beside, since the packed GEMMs' shapes
+  change with the call's total frames.
 - The MoE layers route through the fused softmax-top-k kernel
   (``TopKRouter(fused_softmax_topk=True)``), which gives equal probabilities to
   the lower expert id where ``torch.topk`` may pick another.
@@ -549,6 +569,9 @@ Qwen3-TTS notes
   ``code_predictor`` aux sampler, so custom values neither block batching nor
   fall off the graph. On the 1.7B checkpoints the CodePredictor projects the
   Talker-width inputs through ``small_to_mtp_projection`` before its depth loop.
+  Its depth loop runs the same Triton kernels as Qwen3-Omni's code predictor
+  (``mstar.model.components.code_predictor_kernels``): q/k norm, RoPE and the
+  KV write in one launch per layer, then ``cp_attention``.
 - ``configs/qwen3tts_1p7b_split.yaml`` (and ``configs/qwen3tts_split.yaml``
   for the 0.6B) runs the Codec on a second worker that
   shares GPU 0 (``rank_devices``) and caps the Talker KV pool so both fit.

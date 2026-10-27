@@ -18,6 +18,10 @@ KV_CACHE = "kv_cache"
 ATTN = "attn"
 ROPE = "rope"
 SAMPLER = "sampler"
+# Each audio chunk's encoder output length, from ``process_prompt`` to the
+# encoder's step metadata: known on the host there, so the encoder node never
+# reads it back from a tensor.
+AUDIO_VALID_LENGTHS_KEY = "audio_valid_lengths"
 
 
 @dataclass

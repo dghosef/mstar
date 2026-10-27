@@ -49,6 +49,7 @@ from mstar.model.base import keyed_labels
 from mstar.model.submodule_base import (
     EMPTY_INPUT_METADATA,
     ARNodeInputs,
+    ARNodeSubmodule,
     BatchedModelOutput,
     HostRows,
     InputMetadata,
@@ -91,6 +92,21 @@ _ENGINE_STEP_SYNC = os.environ.get("MSTAR_ENGINE_STEP_SYNC", "0") == "1"
 # stops, and it was a quarter of the gpu thread's host time at batch 32.
 _LAZY_PUBLISH = os.environ.get("MSTAR_LAZY_PUBLISH", "1") == "1"
 
+
+
+@contextmanager
+def _cudnn_benchmark(enabled: bool) -> Iterator[None]:
+    """``torch.backends.cudnn.benchmark`` on for the block when ``enabled``
+    (``NodeSubmodule.capture_cudnn_benchmark``), restored after."""
+    if not enabled:
+        yield
+        return
+    previous = torch.backends.cudnn.benchmark
+    torch.backends.cudnn.benchmark = True
+    try:
+        yield
+    finally:
+        torch.backends.cudnn.benchmark = previous
 
 
 def checkpoint_identity(path: str | Path) -> bytes:
@@ -585,13 +601,15 @@ class Engine:
                 fp32_precision=node_fp32_precision(node_name, submodule),
             )
             submodule.bind_node_resources(resources)
-            if getattr(submodule, "reads_device_loopback", False):
+            stop = submodule.token_stop if isinstance(submodule, ARNodeSubmodule) else None
+            if stop is not None and stop.loopback_signal is not None:
+                if stop.walk is None:
+                    raise ValueError(
+                        f"{node_name}: TokenStop.loopback_signal needs the walk whose token loops back"
+                    )
                 # the sampler keeps its slot masters only for a node that
-                # reads them back on the device (see NodeSubmodule)
-                for resource in resources.values():
-                    enable = getattr(resource, "enable_device_loopback_reader", None)
-                    if enable is not None:
-                        enable()
+                # reads them back on the device (see TokenStop)
+                resources[stop.sampler].enable_device_loopback_reader()
 
     def paged_kv_caches(self) -> list[PagedKVCache]:
         """Every paged KV cache this engine built, with the nodes that use it."""
@@ -645,11 +663,45 @@ class Engine:
                     node_name, exc_info=True
                 )
 
+    def _compile_regions(self) -> None:
+        """Compile and warm each node's ``compile_regions`` with dynamic=True
+        (a whole-forward compile uses dynamic=None) in torch.compile's default
+        mode: the compile level (``MSTAR_COMPILE_LEVEL``) tunes captured
+        forwards, whose shapes are fixed per bucket."""
+        if not self.device_capability.is_available:
+            return
+        for node_name, submodule_mgmt in self._submodules.items():
+            submodule = submodule_mgmt.submodule
+            regions = submodule.compile_regions()
+            if regions and not submodule.disable_torch_compile:
+                raise ValueError(
+                    f"{node_name} declares compile_regions but its forward is compiled whole; "
+                    "set disable_torch_compile"
+                )
+            for path, examples in regions.items():
+                owner_path, _, name = path.rpartition(".")
+                owner = submodule
+                for part in filter(None, owner_path.split(".")):
+                    owner = getattr(owner, part)
+                target = getattr(owner, name)
+                if isinstance(target, torch.nn.Module):
+                    owner, name, target = target, "forward", target.forward
+                # an instance attribute shadows the method for every caller
+                setattr(owner, name, with_inductor_overrides(torch.compile(target, dynamic=True)))
+                with torch.no_grad(), fp32_precision_scope(submodule_mgmt.fp32_precision), autocast_scope(
+                    self._autocast_dtype_for(submodule), self._device.type,
+                ):
+                    for args in examples:
+                        getattr(owner, name)(*args)
+                logger.info("Engine: torch.compile applied to %s.%s", node_name, path)
+
     def _autocast_dtype_for(self, submodule: NodeSubmodule) -> torch.dtype | None:
         """This node's autocast dtype, or None for one that opted out."""
         return None if submodule.disable_autocast else self._autocast_dtype
 
     def warmup(self) -> None:
+        # before capture: a region inside a captured graph compiles in its warm-up
+        self._compile_regions()
         ag_runners: dict[str, AcceleratorGraphRunner] = {}
         piecewise: dict[str, dict[str, PiecewiseAcceleratorGraphRunner]] = {}
         for node_name, submodule_mgmt in self._submodules.items():
@@ -684,10 +736,11 @@ class Engine:
 
         for node_name, submodule_mgmt in self._submodules.items():
             runner = ag_runners[node_name]
+            benchmark = submodule_mgmt.submodule.capture_cudnn_benchmark
             # the kernels a capture (and the compile inside it) picks are what
             # every replay runs, so it happens under the node's precision
             with self._capture_into(plan, node_name) as planned, \
-                    fp32_precision_scope(submodule_mgmt.fp32_precision):
+                    fp32_precision_scope(submodule_mgmt.fp32_precision), _cudnn_benchmark(benchmark):
                 runner.warmup_and_capture(planned)
             if plan is not None or runner.any_graphs:
                 submodule_mgmt.capture_runner = runner
@@ -697,7 +750,7 @@ class Engine:
             captured: dict[str, PiecewiseAcceleratorGraphRunner] = {}
             with self._capture_into(plan, f"{node_name} piecewise") as planned:
                 for label, pw_runner in piecewise[node_name].items():
-                    with fp32_precision_scope(submodule_mgmt.fp32_precision):
+                    with fp32_precision_scope(submodule_mgmt.fp32_precision), _cudnn_benchmark(benchmark):
                         pw_runner.warmup_and_capture(
                             None if planned is None else {bucket for region, bucket in planned if region == label}
                         )
@@ -1623,6 +1676,7 @@ class Engine:
             per_request_info=req_info,
             resources=submodule_mgmt.resources,
             piecewise_runners=submodule_mgmt.piecewise_runners,
+            piecewise_leases=ctx.piecewise_leases,
             # padding rows get their own states, like their cache streams:
             # the submodule indexes this by step id, not by real rid
             per_request_states=LazyRequestStates(submodule, rids),

@@ -66,7 +66,8 @@ class RaggedAttentionConfig:
     # Per-request ceiling sizing a CUDA-graph bucket: a capture at batch size
     # `bs` gets `bs` times this. A "segment" is an independently-attending
     # span, not a request — a request carrying several images contributes
-    # several.
+    # several. A `one_row_per_step` region replays a whole step as one row,
+    # so there this is the ceiling for every segment of the step.
     max_segments_per_request: int = 1
     # Only for a runner that buckets by batch size alone; elsewhere the
     # bucket's own token count is the ceiling and this stays None.

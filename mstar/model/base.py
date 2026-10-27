@@ -431,6 +431,10 @@ class Model(ABC):
     # default of one per core; ``preprocess_torch_threads`` in the model's
     # config.yaml overrides either. See ``entrypoint._set_preprocess_threads``.
     PREPROCESS_TORCH_THREADS: int | None = None
+    # GIL switch interval of the API server process, in seconds; None keeps
+    # Python's 5 ms, and ``api_switch_interval_s`` in the config overrides
+    # either. See ``entrypoint._set_switch_interval``.
+    API_SWITCH_INTERVAL_S: float | None = None
 
     def _get_worker_graphs_for_graph_walk(
         self,
@@ -713,11 +717,7 @@ class Model(ABC):
     def load_image(self, filepath: str, device: str) -> TensorAndMetadata:
         # RGB whatever the file holds: image processors cannot place the
         # channel axis of a 4-channel (RGBA or CMYK) image.
-        try:
-            img = read_image(filepath, rgb=True)
-        except (RuntimeError, OSError) as exc:  # torchvision's decoders raise RuntimeError, Pillow's OSError
-            raise ValueError("could not decode image: the file is corrupt or truncated") from exc
-        img = img.to(device).float().div_(255.0)  # CxHxW
+        img = read_image(filepath, rgb=True).to(device).float().div_(255.0)  # CxHxW
 
         return TensorAndMetadata(img)
 

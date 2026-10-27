@@ -32,8 +32,8 @@ from mstar.engine.engine import ExecutingBatch
 from mstar.engine.resources import AttentionStep, KVStep, PositionStep, SamplerStep, Segment, SlotLease, SubmoduleStep
 from mstar.engine.resources.attn.flashinfer import FlashInferManager
 from mstar.engine.resources.sampler.resource import SamplerResource
+from mstar.model.components.code_predictor_kernels import cp_embed_accumulate
 from mstar.model.qwen3_omni.components.code2wav import Qwen3OmniMoeCode2Wav
-from mstar.model.qwen3_omni.components.cp_kernels import cp_embed_accumulate
 from mstar.model.qwen3_omni.components.rope import (
     compute_3d_cos_sin,
     compute_rope_freqs,
@@ -113,17 +113,23 @@ def talker_text_mask(input_ids: torch.Tensor, config: Qwen3OmniModelConfig) -> t
 class AudioEncoderSubmodule(NodeSubmodule):
     """Thin wrapper around the HF Whisper-style audio encoder.
 
-    Extracts mel spectrograms from raw audio inputs, pads for batching,
-    and runs the encoder to produce audio embeddings that the Thinker
-    will splice into its input sequence.
-
-    Runs once per request (not batched across requests).
+    Runs the encoder over a step's mel spectrograms to produce the audio
+    embeddings the Thinker splices into its input sequence. A step's clips
+    are packed along time in request order, starting a new call when the next
+    clip would pass the frame budget (``forward_batched``).
     """
 
     # The HF encoder splits its input by host-side chunk lengths (``.tolist()``),
     # so compiled frames guard on the chunk count and recompile for nearly
     # every new clip length, seconds each, on the request's critical path.
     disable_torch_compile = True
+    # Clips per encoder step, and mel frames (100 per second) per encoder
+    # call. A clip may run 30 min (``media_io.MAX_AUDIO_SECONDS``), and a
+    # call's activations grow with its total frames, so the budget bounds one
+    # call's memory; a step over it packs its clips into several calls. This
+    # sits in the forward until the scheduler can budget a step's tokens.
+    MAX_BATCH_SIZE = 16
+    MAX_BATCH_FRAMES = 30_000
 
     def __init__(self, audio_encoder: nn.Module, config: Qwen3OmniModelConfig):
         super().__init__()
@@ -139,15 +145,23 @@ class AudioEncoderSubmodule(NodeSubmodule):
         inputs: NameToTensorList,
         **kwargs
     ) -> NodeInputs:
+        from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+            _get_feat_extract_output_lengths,
+        )
+
         # Edge name from graph walk is "audio_features"
         audio_features = inputs["audio_features"][0]
         audio_seqlens = inputs.get("audio_seqlens", [None])[0]
-
+        # one clip, its valid mel frames packed along time: its length is the
+        # tensor's width, known on the host
+        frames = audio_features.shape[-1]
         return NodeInputs(
             tensor_inputs={
                 "audio_features": audio_features,
                 "audio_seqlens": audio_seqlens,
-            }
+            },
+            kwargs={"embed_len": int(_get_feat_extract_output_lengths(frames))},
+            input_seq_len=frames,
         )
 
     def forward(
@@ -184,41 +198,57 @@ class AudioEncoderSubmodule(NodeSubmodule):
     def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
         return True
 
+    def max_batch_size(self, graph_walk: str) -> int:
+        return self.MAX_BATCH_SIZE
+
     def preprocess(
         self,
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
         inputs: list[NodeInputs],
     ) -> dict[str, torch.Tensor | Any]:
-        # The encoder packs clips along time and windows its attention within
-        # each clip (``feature_lens``), so a batch is one call over the
-        # concatenated mel frames.
         return {
-            "audio_features": torch.cat([inp.tensor_inputs["audio_features"] for inp in inputs], dim=-1),
-            "audio_seqlens": torch.cat([inp.tensor_inputs["audio_seqlens"].reshape(-1) for inp in inputs]),
+            "audio_features": [inp.tensor_inputs["audio_features"] for inp in inputs],
+            "audio_seqlens": [inp.tensor_inputs["audio_seqlens"].reshape(-1) for inp in inputs],
+            "embed_lens": [inp.kwargs["embed_len"] for inp in inputs],
         }
 
     def forward_batched(
         self,
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
-        audio_features: torch.Tensor,
-        audio_seqlens: torch.Tensor,
+        audio_features: list[torch.Tensor],
+        audio_seqlens: list[torch.Tensor],
+        embed_lens: list[int],
         **kwargs,
     ) -> dict[str, NameToTensorList]:
-        """Encode several requests' clips in one call (each ~10 ms on an H200,
-        mostly launches, whatever the clip length) and split the packed
-        embeddings back by each clip's output length."""
-        from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
-            _get_feat_extract_output_lengths,
-        )
-
-        embeds = self.forward(graph_walk, engine_inputs, audio_features, audio_seqlens)["audio_embeds"][0]
-        # the encoder already reads its chunk lengths on the host
-        counts = _get_feat_extract_output_lengths(audio_seqlens).tolist()
+        """Encode the step's clips packed along time in request order, starting
+        a new call (each ~10 ms on an H200, mostly launches, whatever the clip
+        length) when the next clip would pass ``MAX_BATCH_FRAMES``, and split
+        each call's embeddings back by clip.
+        The encoder windows its attention within each clip (``feature_lens``),
+        so packing does not mix clips."""
+        groups: list[list[int]] = []
+        frames = 0
+        for row, features in enumerate(audio_features):
+            n = features.shape[-1]
+            if groups and frames + n <= self.MAX_BATCH_FRAMES:
+                groups[-1].append(row)
+                frames += n
+            else:
+                groups.append([row])
+                frames = n
+        parts: list[torch.Tensor] = []
+        for group in groups:
+            embeds = self.forward(
+                graph_walk, engine_inputs,
+                torch.cat([audio_features[row] for row in group], dim=-1),
+                torch.cat([audio_seqlens[row] for row in group]),
+            )["audio_embeds"][0]
+            parts.extend(embeds.split([embed_lens[row] for row in group]))
         return {
             rid: {"audio_embeds": [part]}
-            for rid, part in zip(engine_inputs.request_ids, embeds.split(counts), strict=True)
+            for rid, part in zip(engine_inputs.request_ids, parts, strict=True)
         }
 
 
@@ -360,14 +390,6 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # Pre-compute inverse frequencies for 3D MRoPE
         self._inv_freq: torch.Tensor | None = None
 
-        # Lazily-cached constant mask used by ``_preprocess_decode`` for the
-        # Talker partition.  Every decode-step mask is the same constant
-        # ``[[0], [1]]`` so we allocate it once per device instead of per
-        # request per step.  Helps keep the captured graph's output-dict
-        # contents self-evidently constant, too.
-        self._decode_thinker_mask: torch.Tensor | None = None
-        self._decode_talker_mm_mask: torch.Tensor | None = None
-
         self._audio_bos_embed: torch.Tensor | None = None
         self._audio_eos_embed: torch.Tensor | None = None
 
@@ -383,25 +405,6 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 device=device,
             )
         return self._inv_freq
-
-    def _get_decode_thinker_mask(self, device: torch.device) -> torch.Tensor:
-        """Return the constant ``[[0], [1]]`` decode mask (multimodal row =
-        0, text-inclusion row = 1), lazily allocated per device."""
-        if (
-            self._decode_thinker_mask is None
-            or self._decode_thinker_mask.device != device
-        ):
-            self._decode_thinker_mask = torch.tensor(
-                [[0], [1]], dtype=torch.bool, device=device,
-            )
-        return self._decode_thinker_mask
-
-    def _get_decode_talker_mm_mask(self, device: torch.device) -> torch.Tensor:
-        """The 1D multimodal mask ``postprocess`` emits for a decode token:
-        ``[False]``, lazily allocated per device. Never written after."""
-        if self._decode_talker_mm_mask is None or self._decode_talker_mm_mask.device != device:
-            self._decode_talker_mm_mask = torch.zeros(1, dtype=torch.bool, device=device)
-        return self._decode_talker_mm_mask
 
     def _wrap_audio_input(self, audio_embeds: torch.Tensor):
         # Wrap the audio span in ``<|audio_bos|>`` / ``<|audio_eos|>``
@@ -479,9 +482,6 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 input_seq_len=1,
                 input_embeds=embeds,
                 custom_pos_ids=pos_ids,
-                tensor_inputs={
-                    "masks_for_talker": self._get_decode_thinker_mask(device)
-                }  # no additional tensors for decode step
             )
 
         if graph_walk == "prefill_text":
@@ -857,8 +857,13 @@ class ThinkerSubmodule(ARNodeSubmodule):
                     [layer_0_embed, layer_0_embed], dim=-1,
                 )
             result["thinker_states"] = [thinker_states]
-            result["thinker_mask"] = [next(iter(masks_for_talker.values()))] \
-                if masks_for_talker else []
+            if graph_walk == "thinker_decode":
+                # a decode token is text: ``[False]``, fresh each step (see
+                # ``forward_batched``)
+                result["thinker_mask"] = [torch.zeros(1, dtype=torch.bool, device=hidden.device)]
+            else:
+                result["thinker_mask"] = [next(iter(masks_for_talker.values()))] \
+                    if masks_for_talker else []
         return result
 
     # ---- batching ----
@@ -894,9 +899,6 @@ class ThinkerSubmodule(ARNodeSubmodule):
                         dtype=torch.float,
                         device=device,
                     ),
-                    tensor_inputs={
-                        "masks_for_talker": self._get_decode_thinker_mask(device)
-                    }
                 ),
                 capture_batch_sizes=[1, 2, 4, 8, 16, 32],
             ),
@@ -995,10 +997,10 @@ class ThinkerSubmodule(ARNodeSubmodule):
         """Batched Thinker forward shared between ``thinker_decode`` and the prefill walks.
 
         Decode path (1 token per request, ``hidden`` shape ``(bs, hidden)``):
-        Always packs ``thinker_states`` + ``thinker_mask`` in every per-rid
-        output dict so the captured CUDA graph has a static output shape
-        regardless of request metadata. Per-rid filtering happens in
-        ``unpack_packed_output``.
+        always emits ``thinker_states`` and ``thinker_mask`` as row outputs so
+        the captured CUDA graph's outputs are fixed whatever the request
+        metadata; ``postprocess`` drops them for a text-only request.
+        Prefill packs ``thinker_states`` for ``unpack_packed_outputs``.
         """
 
         is_prefill = graph_walk in (
@@ -1060,10 +1062,16 @@ class ThinkerSubmodule(ARNodeSubmodule):
             )
 
         # Row i is request i: one clone per output and one host copy of the
-        # tokens per step. A decode row's Talker mask is the constant one,
-        # which postprocess attaches.
+        # tokens per step. A decode token is text, so its Talker mask is
+        # ``[False]``; a row view of the step's clone, never one tensor shared
+        # by every row, which the RDMA/TCP store would register once per row
+        # at the same address.
         return BatchedModelOutput(
-            row_outputs={"thinker_states": thinker_states, "new_token": new_tokens},
+            row_outputs={
+                "thinker_states": thinker_states,
+                "new_token": new_tokens,
+                "thinker_mask": torch.zeros_like(new_tokens, dtype=torch.bool),
+            },
             check_stop_buffers={"new_token": new_tokens},
         )
 
@@ -1089,6 +1097,9 @@ class ThinkerSubmodule(ARNodeSubmodule):
             return {}
 
         out: dict[str, dict[str, list[torch.Tensor]]] = {}
+        # a decode row's ``[False]``, as in ``forward_batched``: a row view of
+        # one step tensor, not the cached mask every decode row's inputs share
+        decode_masks = torch.zeros(len(request_ids), dtype=torch.bool, device=packed_states.device)
         cum = 0
         for i, rid in enumerate(request_ids):
             sl = real_seq_lens[i]
@@ -1104,7 +1115,9 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 "thinker_states": [ts_slice],
             }
             mask = inputs[i].tensor_inputs.get("masks_for_talker")
-            if mask is not None:
+            if inputs[i].graph_walk == "thinker_decode":
+                rid_out["thinker_mask"] = [decode_masks[i:i + 1]]
+            elif mask is not None:
                 rid_out["thinker_mask"] = [mask]
             out[rid] = rid_out
         return out
@@ -1133,13 +1146,12 @@ class ThinkerSubmodule(ARNodeSubmodule):
             ts_list = outputs.get("thinker_states")
             mask_list = outputs.get("thinker_mask")
             if ts_list and request_info.graph_walk == "thinker_decode":
-                # A decode token is text the Talker keeps (``prepare_inputs``
-                # gives it the constant ``[[0], [1]]`` mask), so it is layer 0
-                # as is. The boolean indexing below would sync the host on
-                # every row of every decode step.
+                # A decode token is text the Talker keeps, so it is layer 0
+                # as is, and its 1D mask is already a row of its own. The
+                # boolean indexing below would sync the host on every row of
+                # every decode step.
                 thinker_hidden = self.config.thinker_hidden_size
                 outputs["thinker_states"] = [ts_list[0][..., :thinker_hidden]]
-                outputs["thinker_mask"] = [self._get_decode_talker_mm_mask(ts_list[0].device)]
             elif ts_list and mask_list:
                 ts = ts_list[0]                # (seq_len, 2*hidden)
                 mask = mask_list[0]            # (2, seq_len)
@@ -1611,8 +1623,9 @@ class TalkerSubmodule(ARNodeSubmodule):
 
         Decode path (1 token per request, ``hidden`` shape ``(bs, hidden)``):
           Runs the full LLM + codec_head + suppress_mask via _forward_decode_like,
-          samples inline through the injected samplers, and emits per-rid
-          {talker_input_embeds, codec_tokens, new_token} entries.
+          samples inline through the injected samplers, and emits
+          ``talker_input_embeds``, ``codec_tokens`` and ``layer0_codes`` as row
+          outputs.
 
         Prefill path (``talker_prefill``; multi-token-per-request, ``hidden``
         shape ``(total_tokens, hidden)``): Runs only the LLM backbone, and

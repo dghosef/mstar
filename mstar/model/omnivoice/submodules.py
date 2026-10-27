@@ -286,7 +286,7 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
         **kwargs,
     ) -> SubmoduleStep | None:
         """The eager path's attention layout; a leased replay plans its own."""
-        if not self.config.backbone_graphs or (piecewise_leases or {}).get(BACKBONE_LAYERS):
+        if (piecewise_leases or {}).get(BACKBONE_LAYERS):
             return None
         return self._attention_step(
             request_ids, document_pairs([inp.kwargs["doc_lens"] for inp in inputs])
@@ -348,8 +348,6 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
     def _logits(self, engine_inputs: ModelInputsFromEngine, canvas: PackedCanvas) -> torch.Tensor:
         """The step's target logits: from the captured layer stack when a
         bucket fits, else eagerly through the same ragged attention."""
-        if not self.config.backbone_graphs:
-            return self.backbone(canvas)
         position_ids = canvas.position_ids[0]
         static_inputs = {
             "input_ids": canvas.packed_ids[0].t(),
@@ -357,9 +355,8 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
             "pos_ids": position_ids.to(torch.int32),
         }
         num_requests = len(canvas.items)
-        runner = engine_inputs.piecewise_runners.get(BACKBONE_LAYERS)
-        if runner is not None and runner.can_run(num_requests, int(position_ids.shape[0])):
-            hidden = runner.run(
+        if BACKBONE_LAYERS in engine_inputs.piecewise_leases:
+            hidden = engine_inputs.piecewise_runners[BACKBONE_LAYERS].run(
                 static_inputs=static_inputs,
                 request_ids=list(engine_inputs.request_ids),
                 seq_lens=document_pairs([
@@ -399,7 +396,7 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
         ]
         return {
             "items": items,
-            "canvas": build_packed_canvas(items, self.config.audio_mask_id, device),
+            "canvas": build_packed_canvas(items, device),
         }
 
     def max_batch_size(self, graph_walk: str):

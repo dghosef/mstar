@@ -225,8 +225,8 @@ def sampled(video: torch.Tensor, fps: float, video_processor) -> tuple[torch.Ten
 
 
 def an_image() -> torch.Tensor:
-    # what the data worker sends: (C, H, W) float32 in [0, 1]
-    return torch.rand(3, 40, 56, generator=torch.Generator().manual_seed(1))
+    # what the data worker sends (`load_image`): uint8 (C, H, W)
+    return torch.randint(0, 256, (3, 40, 56), dtype=torch.uint8, generator=torch.Generator().manual_seed(1))
 
 
 LAYOUTS = {
@@ -389,18 +389,26 @@ class _Embed(nn.Module):
 IMAGE_MARK, VIDEO_MARK = -1.0, -2.0
 
 
+def _host_grids(out) -> dict:
+    """The host grids `process_prompt` hands the conductor, as the schedule gets them."""
+    from mstar.model.qwen3_5.qwen3_5_model import IMAGE_GRIDS_KEY, VIDEO_GRIDS_KEY
+
+    return {key: out.metadata.get(key) for key in (IMAGE_GRIDS_KEY, VIDEO_GRIDS_KEY)}
+
+
 @needs_new_layout
 @pytest.mark.parametrize("layout", list(LAYOUTS))
 def test_vision_walk_matches_get_rope_index(model, processor, rope_model, layout):
     """The schedule and the LLM's `prefill_vision` row, against transformers:
     the row's token order and its 3D positions, plus where decode resumes."""
     from mstar.model.qwen3_5.config import KV_CACHE, ROPE
+    from mstar.model.qwen3_5.qwen3_5_model import STEP_GRIDS_KEY
     from mstar.model.qwen3_5.submodules import LLMSubmodule
 
     _, out, ref = run_both(model, processor, layout)
     tensors = out.new_input_tensors
     modalities, _ = LAYOUTS[layout]
-    (step,) = model._prefill_schedule(modalities, tensors, out.metadata["video_groups"])
+    (step,) = model._prefill_schedule(modalities, tensors, out.metadata["video_groups"], _host_grids(out))
     assert step.walk == "prefill_vision"
 
     # the encoder gets each image and video once, in prompt order
@@ -426,7 +434,9 @@ def test_vision_walk_matches_get_rope_index(model, processor, rope_model, layout
     ]
     llm = LLMSubmodule(_Embed(len(model.tokenizer)), model.config, model.vision_config)
     llm.node_resources = {ROPE: SimpleNamespace(position=lambda rid, label: 0)}
-    fwd_info = SimpleNamespace(request_id="r", step_metadata={"prefill_order": step.order})
+    fwd_info = SimpleNamespace(
+        request_id="r", step_metadata={"prefill_order": step.order, STEP_GRIDS_KEY: step.image_grids},
+    )
     row = llm._vision_inputs(fwd_info, {
         "text_inputs": step.input_tensors["text_inputs"],
         "image_grid_thw": step.input_tensors["image_grid_thw"],
@@ -542,22 +552,34 @@ def test_vision_block_loop_leases_only_what_a_replay_holds():
     assert not config.can_lease([request(2), request(3)])
 
 
+def test_vision_batch_that_overflows_one_replay_runs_request_by_request():
+    """Requests that fit a replay alone but not together are not packed into
+    one eager step: ``can_batch`` refuses, and each replays on its own."""
+    from mstar.model.qwen3_5.submodules import VisionEncoderSubmodule
+    from mstar.model.submodule_base import NodeInputs
+
+    encoder = _encoder(max_segments=4)
+    top = VisionEncoderSubmodule.BLOCK_LOOP_PATCH_BUCKETS[-1]
+
+    def request(patches: int, segments: int = 1) -> NodeInputs:
+        return NodeInputs(input_seq_len=patches, tensor_inputs={"seq_lengths": (patches // segments,) * segments})
+
+    assert encoder.can_batch(None, [request(top // 2), request(top // 2)])
+    assert not encoder.can_batch(None, [request(top // 2), request(top // 2 + 256)])
+    assert not encoder.can_batch(None, [request(64, 2), request(64, 3)])
+
+
 def test_vision_encoder_refuses_patches_it_would_not_normalize():
     with pytest.raises(ValueError, match="uint8"):
         _encoder(max_segments=4)._normalize(torch.zeros(2, 3))
 
 
 def test_vision_block_loop_replays_exactly_when_leased():
-    """A leased step declares nothing of its own, so the forward replays
-    then and runs eagerly otherwise, whatever the runner's buckets allow."""
+    """The forward replays the block loop when the step leased it and runs
+    eagerly otherwise, whatever the runner's buckets allow."""
     from mstar.model.qwen3_5.submodules import VISION_BLOCK_LOOP
 
     class Runner:
-        has_bucket = True
-
-        def can_run(self, batch_size, total_tokens):
-            return self.has_bucket
-
         def run(self, **kwargs):
             self.ran = kwargs
             return SimpleNamespace(get_view=lambda name: "replayed")
@@ -565,20 +587,16 @@ def test_vision_block_loop_replays_exactly_when_leased():
     encoder, runner = _encoder(max_segments=4), Runner()
     hidden = cos = sin = torch.zeros(8, 32)
 
-    def replay(step):
+    def replay(leases):
         engine_inputs = SimpleNamespace(
-            piecewise_runners={VISION_BLOCK_LOOP: runner}, request_ids=["r"], step=step,
+            piecewise_runners={VISION_BLOCK_LOOP: runner}, piecewise_leases=leases, request_ids=["r"],
         )
         return encoder._replay_block_loop(engine_inputs, hidden, cos, sin, (4, 4))
 
-    assert replay(step=object()) is None
+    # not leased: `can_lease` refused the batch, or a forward driven outside the engine
+    assert replay({}) is None
     assert not hasattr(runner, "ran")
-    # no declaration but no bucket either (a forward driven outside the engine)
-    runner.has_bucket = False
-    assert replay(step=None) is None
-    assert not hasattr(runner, "ran")
-    runner.has_bucket = True
-    assert replay(step=None) == "replayed"
+    assert replay({VISION_BLOCK_LOOP: object()}) == "replayed"
     assert runner.ran["seq_lens"] == [4, 4]
 
 
@@ -694,7 +712,7 @@ def test_schedule_and_prompt_share_the_plan(model, processor):
     groups = out.metadata["video_groups"]
     plan = prefill_plan(expand_video_parts(parts, groups))
     tensors = out.new_input_tensors
-    (step,) = model._prefill_schedule(["video", "image", "video", "text"], tensors, groups)
+    (step,) = model._prefill_schedule(["video", "image", "video", "text"], tensors, groups, _host_grids(out))
     kinds = {TEXT: 0, "image": 1, VIDEO: 2}
     assert step.order == tuple(kinds[p.modality] for p in plan)
     assert len(step.input_tensors["text_inputs"]) == len(tensors["text_inputs"])

@@ -1,5 +1,6 @@
-"""The boot check for the fused weights ``apply_flashinfer`` leaves on each
-layer, which ``OmniVoiceBackbone.encode`` reads."""
+"""The boot check for what ``OmniVoiceBackbone`` reads off the patched model:
+its embedding merge and audio head, and the fused weights ``apply_flashinfer``
+leaves on each layer."""
 
 from types import SimpleNamespace
 
@@ -18,7 +19,9 @@ def _layer(**drop):
 
 
 def _model(*layers):
-    return SimpleNamespace(llm=SimpleNamespace(layers=list(layers)))
+    return SimpleNamespace(
+        llm=SimpleNamespace(layers=list(layers)), _prepare_embed_inputs=None, audio_heads=None,
+    )
 
 
 def test_a_patched_model_passes():
@@ -27,5 +30,5 @@ def test_a_patched_model_passes():
 
 @pytest.mark.parametrize("name", ["_fi_w_qkv", "_fi_qkv_split", "_fi_rope_theta", "_fi_w_gate_up"])
 def test_a_missing_fused_weight_fails_at_boot(name):
-    with pytest.raises(RuntimeError, match=name):
+    with pytest.raises(SystemExit, match=name):
         assert_flashinfer_patched(_model(_layer(), _layer(**{name: True})))

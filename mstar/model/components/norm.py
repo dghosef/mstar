@@ -94,17 +94,28 @@ class RMSNorm(nn.Module):
         return rms_norm(hidden_states, self.weight, self.variance_epsilon, self.gemma_mode)
 
     def forward_residual(
-        self, hidden_states: torch.Tensor, residual: torch.Tensor,
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None,
         comm_group=None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """``r = hidden_states + residual``; returns ``(norm(r), r)``.
+
+        ``residual`` None starts a residual stream at ``hidden_states``
+        (``(norm(hidden_states), hidden_states)``), so a layer loop that defers
+        each add into the next norm needs no first-layer branch. It must be a
+        full tensor, not a TP partial sum. Later calls update the stream in
+        place, so start it from a tensor the caller may overwrite.
 
         Keeps add and norm together so inductor fuses them, rather than folding
         the add into the producing GEMM as an ``addmm`` (an extra copy of
         ``residual``). Under TP ``hidden_states`` is a row-parallel partial sum
         that ``comm_group`` reduces in the same fused kernel.
         """
-        if comm_group is not None and comm_group.world_size > 1:
+        tp = comm_group is not None and comm_group.world_size > 1
+        if residual is None:
+            if tp:
+                raise ValueError("forward_residual starts a residual stream from a full tensor, not a TP partial sum")
+            return self(hidden_states), hidden_states
+        if tp:
             orig_shape = hidden_states.shape
             normed, r = comm_group.allreduce_add_rmsnorm(
                 hidden_states.reshape(-1, orig_shape[-1]),

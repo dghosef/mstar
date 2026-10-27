@@ -467,7 +467,7 @@ def test_higgs_lays_out_the_prefill_steps_it_schedules():
     schedule = model._build_prefill_schedule({name: tensors[name] for name in tensors})
 
     assert [span.walk for span in layout.spans] == [walk for walk, _ in schedule]
-    audio = sum(model.config.encoder_output_length(int(n)) for n in tensors["audio_feature_lens"][0].tolist())
+    audio = sum(output.metadata["audio_valid_lengths"])
     text = sum(ids.numel() for ids in tensors["text_inputs"])
     assert sum(span.length for span in layout.spans) == text + audio
 
@@ -537,7 +537,7 @@ def test_qwen3_tts_caps_decode_where_its_stop_check_ends_it(max_tokens):
     from test_qwen3_tts_model import _make_model
 
     talker = _tiny_qwen3_tts_talker()
-    outputs = {"new_token": [torch.tensor(NOT_EOS)]}
+    outputs = {"layer0_codes": [torch.tensor(NOT_EOS)]}
     talker.request_state("r").add_all(generated_frames=0)
     talker.postprocess("r", SimpleNamespace(graph_walk="talker_prefill"), outputs)
 

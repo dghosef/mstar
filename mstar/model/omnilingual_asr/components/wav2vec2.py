@@ -245,14 +245,13 @@ class Wav2Vec2CTC(nn.Module):
         self.final_proj = nn.Linear(cfg.model_dim, cfg.vocab_size)
 
     def frontend(
-        self, waveforms: torch.Tensor, seq_lens: list[int] | None = None, features=None,
+        self, waveforms: torch.Tensor, seq_lens: list[int] | None = None,
     ) -> tuple[torch.Tensor, list[int], torch.Tensor | None]:
         """``(N, S)`` waveforms -> ``(N, T, model_dim)`` encoder inputs (padded
         frames zeroed), each row's valid frame count, and the ``(N, T)`` frame
-        mask (None when no row is padded). ``features`` stands in for the
-        feature extractor (e.g. a compiled copy of it)."""
+        mask (None when no row is padded)."""
         front = self.encoder_frontend
-        x = (front.feature_extractor if features is None else features)(waveforms)
+        x = front.feature_extractor(waveforms)
         n, t = x.shape[:2]
         frame_lens = [t] * n if seq_lens is None else self.frame_lengths(seq_lens)
         frame_mask = None
@@ -278,14 +277,13 @@ class Wav2Vec2CTC(nn.Module):
         self,
         waveforms: torch.Tensor,
         seq_lens: list[int] | None = None,
-        features=None,
     ) -> tuple[torch.Tensor, list[int]]:
         """``(N, S)`` waveforms (and each row's sample count, for a padded batch) ->
         ``(N, T, vocab)`` logits and each row's valid frame count.
 
         The lengths are host ints, so a padded batch is masked without reading
         anything back from the device."""
-        x, frame_lens, frame_mask = self.frontend(waveforms, seq_lens, features)
+        x, frame_lens, frame_mask = self.frontend(waveforms, seq_lens)
         # cuDNN attention builds a plan per new sequence length, and nearly
         # every upload has its own length
         with sdpa_kernel(_ATTENTION_BACKENDS):

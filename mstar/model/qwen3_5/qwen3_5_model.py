@@ -121,20 +121,9 @@ def _resolve_model_metadata(repo_id: str, cache_dir: str | None) -> str:
 
 
 def _as_hwc_uint8(image: torch.Tensor):
-    """What the HF image processor expects, from what the data worker sends.
-
-    Images arrive ``(C, H, W)`` float32 in [0, 1] on the GPU. The processor
-    defaults to ``do_rescale=True``, so floats would be rescaled twice and the
-    model would silently see a near-black image.
-    """
-    if image.dtype.is_floating_point:
-        image = (image * 255.0).clamp(0, 255).to(torch.uint8)
-    if image.dim() == 3 and image.shape[0] == 4:
-        # the processor refuses a 4-channel (RGBA) tensor, so drop alpha
-        image = image[:3]
-    if image.dim() == 3 and image.shape[0] in (1, 3):
-        image = image.permute(1, 2, 0)
-    return image.cpu().contiguous().numpy()
+    """What the HF image processor expects, from what ``load_image`` sends:
+    uint8 RGB ``(C, H, W)`` to ``(H, W, C)`` on the host."""
+    return image.permute(1, 2, 0).cpu().contiguous().numpy()
 
 
 @dataclass(frozen=True)
@@ -174,6 +163,9 @@ class Qwen3_5DenseModel(Model):
     # 35-130 ms); at 4, preprocessing held at 7-10 ms and p95 at 49 ms. One
     # thread is steadier but slower (13 ms).
     PREPROCESS_TORCH_THREADS = 4
+    # token streaming keeps three API-server threads busy: +4 to +8% tok/s on
+    # 0.8B text at c=64 (docs/serving.rst)
+    API_SWITCH_INTERVAL_S = 0.001
     INTERNAL_KWARGS = (IMAGE_GRIDS_KEY, VIDEO_GRIDS_KEY)
 
     _text_detokenizer: TextChunkDetokenizer | None = None
@@ -449,17 +441,13 @@ class Qwen3_5DenseModel(Model):
         return mean.repeat_interleave(per_channel), std.repeat_interleave(per_channel)
 
     def load_image(self, filepath: str, device: str) -> TensorAndMetadata:
-        """The decoded image, left uint8 ``(C, H, W)``.
+        """The decoded RGB image, left uint8 ``(C, H, W)``.
 
-        The base class hands out floats in [0, 1], which `_as_hwc_uint8` only
-        turns back into bytes for the processor: two full-image passes that
-        cost more than the processor itself on a large image.
+        The base class hands out floats in [0, 1], which would only be turned
+        back into bytes for the processor: two full-image passes that cost
+        more than the processor itself on a large image.
         """
-        try:
-            img = read_image(filepath, rgb=True)
-        except (RuntimeError, OSError) as exc:  # torchvision's decoders raise RuntimeError, Pillow's OSError
-            raise ValueError("could not decode image: the file is corrupt or truncated") from exc
-        return TensorAndMetadata(img.to(device))
+        return TensorAndMetadata(read_image(filepath, rgb=True).to(device))
 
     def load_video(self, filepath: str, device: str) -> TensorAndMetadata:
         """Only the frames the video processor samples, on the host whatever
@@ -753,8 +741,7 @@ class Qwen3_5DenseModel(Model):
             if first_group:
                 picked["pixel_values"].append(pool[index])
                 picked["image_grid_thw"].append(grid_pools[step.modality][index])
-                if index < len(host_pools[step.modality]):
-                    picked_grids.append(tuple(host_pools[step.modality][index]))
+                picked_grids.append(tuple(host_pools[step.modality][index]))
 
         if not order:
             return []
@@ -767,9 +754,6 @@ class Qwen3_5DenseModel(Model):
         # TODO: one walk holds every image and video, so a many-image prompt
         # makes one very wide step. Cap images per walk here and emit several
         # steps, each with its share of `order`.
-        # all or nothing: the nodes fall back to the device grids without them
-        if len(picked_grids) != len(picked["image_grid_thw"]):
-            picked_grids = []
         return [PrefillStep("prefill_vision", picked, tuple(order), tuple(picked_grids))]
 
     def get_initial_forward_pass_args(

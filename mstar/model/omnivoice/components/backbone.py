@@ -20,15 +20,14 @@ What M* adds on top is what the reference cannot do from inside one
 requests*, at different diffusion steps, with different per-request knobs.  Its
 own server has no batching at all (k2-fsa/OmniVoice#251).
 
-The coupling to ``omnivoice.models.omnivoice_flashinfer`` is deliberate but
-narrow — four module-private names and the four fused-weight attributes its
-``apply_flashinfer`` sets on each layer, checked at load by
+The coupling to the reference is deliberate but narrow — ``apply_flashinfer``,
+the four fused-weight attributes it sets on each layer, and the model's
+``_prepare_embed_inputs`` and ``audio_heads``, checked at load by
 ``assert_flashinfer_api`` and ``assert_flashinfer_patched`` so an upstream
 rename fails at boot rather than at the first request.
 """
 
 import logging
-import threading
 from dataclasses import dataclass, field
 
 import torch
@@ -41,11 +40,12 @@ from mstar.utils.h2d import to_device_nonblocking
 
 logger = logging.getLogger(__name__)
 
-# The private surface this integration rides on. Checked once at load: the
-# module's names before ``apply_flashinfer`` runs, and the fused weights it
-# leaves on every layer's attention and MLP (read by ``OmniVoiceBackbone.encode``)
-# after.
-_REQUIRED_FI_NAMES = ("_CTX", "PackedAttnRunner", "_forward_logits", "apply_flashinfer")
+# The private surface this integration rides on, all of it read by
+# ``OmniVoiceBackbone``. Checked once at load: the module's names before
+# ``apply_flashinfer`` runs, and the model's members and the fused weights it
+# leaves on every layer's attention and MLP after.
+_REQUIRED_FI_NAMES = ("apply_flashinfer",)
+_REQUIRED_MODEL_ATTRS = ("_prepare_embed_inputs", "audio_heads")
 _REQUIRED_FI_LAYER_ATTRS = {
     "self_attn": ("_fi_w_qkv", "_fi_qkv_split", "_fi_rope_theta"),
     "mlp": ("_fi_w_gate_up",),
@@ -63,7 +63,7 @@ def assert_flashinfer_api():
 
     missing = [name for name in _REQUIRED_FI_NAMES if not hasattr(fi, name)]
     if missing:
-        raise RuntimeError(
+        raise SystemExit(
             "omnivoice.models.omnivoice_flashinfer is missing "
             f"{missing}; mstar's OmniVoice backbone drives its packed "
             "attention directly. Pin the omnivoice version, or port the "
@@ -73,7 +73,7 @@ def assert_flashinfer_api():
     from omnivoice.models import omnivoice as ov
 
     if not hasattr(ov, "_resolve_instruct"):
-        raise RuntimeError(
+        raise SystemExit(
             "omnivoice.models.omnivoice is missing _resolve_instruct; "
             "mstar validates voice-design instructs with it. Pin the "
             "omnivoice version, or port the validator into mstar."
@@ -82,9 +82,10 @@ def assert_flashinfer_api():
 
 
 def assert_flashinfer_patched(model: nn.Module) -> None:
-    """Fail at boot if ``apply_flashinfer`` no longer leaves the fused weights
-    ``OmniVoiceBackbone.encode`` reads, rather than at capture."""
-    missing = sorted({
+    """Fail at boot if the patched model no longer has what
+    ``OmniVoiceBackbone`` reads (its embedding merge and audio head, and the
+    fused weights ``apply_flashinfer`` leaves), rather than at capture."""
+    missing = sorted({name for name in _REQUIRED_MODEL_ATTRS if not hasattr(model, name)} | {
         f"{part}.{name}"
         for layer in model.llm.layers
         for part, names in _REQUIRED_FI_LAYER_ATTRS.items()
@@ -92,10 +93,9 @@ def assert_flashinfer_patched(model: nn.Module) -> None:
         if not hasattr(getattr(layer, part), name)
     })
     if missing:
-        raise RuntimeError(
-            f"omnivoice's apply_flashinfer no longer sets {missing} on the layers; "
-            "mstar's OmniVoice layer loop reads them. Pin the omnivoice version, "
-            "or port the fused weights into mstar."
+        raise SystemExit(
+            f"the patched OmniVoice model is missing {missing}; mstar's OmniVoice "
+            "layer loop reads them. Pin the omnivoice version, or port them into mstar."
         )
 
 
@@ -171,11 +171,7 @@ class PackedCanvas:
         return c_logits, u_logits
 
 
-def build_packed_canvas(
-    items: list[CanvasItem],
-    audio_mask_id: int,
-    device: torch.device,
-) -> PackedCanvas:
+def build_packed_canvas(items: list[CanvasItem], device: torch.device) -> PackedCanvas:
     """Pack a step's requests into one ragged row.
 
     Documents are laid out ``[cond_0, uncond_0, cond_1, uncond_1, ...]`` and
@@ -254,21 +250,14 @@ class OmniVoiceBackbone(nn.Module):
 
     Holding the reference instance keeps the embedding merge, the audio head
     reshape and the fused weights the upstream ones. ``encode`` runs the layer
-    stack over them itself (see the module docstring); ``forward`` is the
-    reference's own packed forward, the path with backbone graphs off.
+    stack over them itself (see the module docstring), with attention through
+    the engine's ragged attention resource.
     """
 
     def __init__(self, model: nn.Module, plan_dtype: torch.dtype):
         super().__init__()
         self.model = model
         self.plan_dtype = plan_dtype
-        # The engine runs forwards on a single dedicated GPU thread
-        # (worker.py: ThreadPoolExecutor(max_workers=1)), so the module-global
-        # _CTX the reference's attention reads is not contended today. The lock
-        # costs nothing per step and makes that assumption survive a change to
-        # the worker's threading, where the failure mode would otherwise be one
-        # request attending with another's document boundaries.
-        self._ctx_lock = threading.Lock()
 
     def encode(
         self,
@@ -327,29 +316,3 @@ class OmniVoiceBackbone(nn.Module):
         return logits.view(
             1, tgt_hidden.shape[0], cfg.num_audio_codebook, cfg.audio_vocab_size
         ).permute(0, 2, 1, 3)
-
-    @torch.inference_mode()
-    def forward(self, canvas: PackedCanvas) -> torch.Tensor:
-        """One packed forward; returns ``[1, C, 2 * flat_target_total, V]``.
-
-        Only the logits-consuming positions go through the 1024 -> 8200 head
-        GEMM and the float32 upcast. Running them over the full packed length
-        would be several times the work, most of it on prefix positions whose
-        logits are never read.
-        """
-        fi = assert_flashinfer_api()
-
-        with self._ctx_lock:
-            self.model._fi_runner.plan(canvas.doc_lens, self.plan_dtype)
-            fi._CTX["wrapper"] = self.model._fi_runner.wrapper
-            fi._CTX["pos_ids"] = canvas.position_ids[0].to(torch.int32)
-            # CUDA-graph bucketing is not used here; M* has its own capture
-            # machinery and reconciling the two is a separate piece of work.
-            fi._CTX["doc_slots"] = None
-            return fi._forward_logits(
-                self.model,
-                canvas.packed_ids,
-                canvas.audio_mask,
-                canvas.position_ids,
-                canvas.tgt_index,
-            )
