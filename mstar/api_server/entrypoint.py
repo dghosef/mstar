@@ -2455,9 +2455,12 @@ def _set_switch_interval(config: dict) -> None:
     shorter interval hands the GIL between them sooner, which also preempts a
     model's preprocessing on the data-worker thread more often."""
     interval = config.get("api_switch_interval_s")
-    if interval is not None:
-        sys.setswitchinterval(float(interval))
-        logger.info("API server GIL switch interval: %s s", interval)
+    if interval is None:
+        return
+    if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not interval > 0:
+        raise ValueError(f"api_switch_interval_s must be a positive number of seconds, got {interval!r}")
+    sys.setswitchinterval(float(interval))
+    logger.info("API server GIL switch interval: %s s", interval)
 
 
 def main(argv: list[str] | None = None):
@@ -2565,12 +2568,12 @@ def main(argv: list[str] | None = None):
      # Create a lightweight model instance for prompt processing
     # (tokenization only — no GPU weights needed)
     from mstar.model.registry import get_model_class
+    _set_switch_interval(config)
     model = get_model_class(model_name)(
         cache_dir=args.cache_dir,
         **{**model_init_kwargs(model_name), **yaml_model_kwargs},
     )
     _set_preprocess_threads(model, config)
-    _set_switch_interval(config)
 
     global api_server
     log_stats = args.log_stats or args.log_stats_file is not None

@@ -336,7 +336,8 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
        rendezvouses. Default 512.
    * - ``api_switch_interval_s``
      - *(optional)* GIL switch interval of the API server process, in seconds
-       (``sys.setswitchinterval``); unset keeps Python's 5 ms. Under streaming load
+       (``sys.setswitchinterval``), a positive number (anything else fails at
+       startup); unset keeps Python's 5 ms. Under streaming load
        that process keeps three threads busy (event loop, message thread, data
        worker), and a shorter interval hands the GIL between them sooner:
        ``0.001`` gave Qwen3.5-0.8B text, c=64, +4 to +8% tok/s. A
