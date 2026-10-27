@@ -144,3 +144,31 @@ def test_every_decode_row_gets_its_own_talker_mask(thinker, step_walk, walks):
 
     assert all(m.dtype == torch.bool and m.shape == (1,) and not m.any() for m in masks)
     assert len({m.data_ptr() for m in masks}) == len(masks)
+
+
+def test_a_decode_step_s_thinker_states_are_the_rows_the_engine_handed_out(thinker):
+    """A decode step's ``thinker_states`` row output is already the Talker's
+    layer-0 row, so postprocess leaves the engine's row view as it is: a
+    rebound slice would fail the row-output fast store's identity check."""
+    from mstar.model.qwen3_omni.config import THINKER_ATTN, THINKER_SAMPLER
+
+    rids = ["0", "1", "2"]
+    thinker.__dict__["model"] = _DecodeModel()
+    engine_inputs = SimpleNamespace(resources={THINKER_ATTN: None, THINKER_SAMPLER: _Greedy()}, request_ids=rids)
+    out = thinker.forward_batched("thinker_decode", engine_inputs, input_embeds=torch.randn(len(rids), HIDDEN))
+    rows = out.clone_row_outputs(len(rids))
+    views = rows["thinker_states"].split(1)
+    for i, rid in enumerate(rids):
+        outputs = {name: [rows[name].split(1)[i]] for name in rows}
+        outputs["thinker_states"] = [views[i]]
+        thinker.postprocess(rid, SimpleNamespace(graph_walk="thinker_decode", step_metadata={}), outputs)
+        assert outputs["thinker_states"][0] is views[i]
+        assert outputs["thinker_states"][0].shape == (1, HIDDEN)
+    # a lone decode row runs the unbatched forward: the same layer-0 row
+    info = SimpleNamespace(graph_walk="thinker_decode", step_metadata={})
+    single = SimpleNamespace(
+        resources={THINKER_SAMPLER: _Greedy()}, request_ids=["0"], single_request_info=info,
+    )
+    outputs = thinker.forward("thinker_decode", single, input_embeds=torch.randn(1, HIDDEN))
+    thinker.postprocess("0", info, outputs)
+    assert outputs["thinker_states"][0].shape == (1, HIDDEN)
