@@ -345,7 +345,9 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
        worker), and a shorter interval hands the GIL between them sooner:
        ``0.001`` gave Qwen3.5-0.8B text, c=64, +4 to +8% tok/s. A
        model whose preprocessing runs long on the data-worker thread can lose from
-       it (Kokoro's G2P: about -3.6% at c=32), so it is per deployment.
+       it (Kokoro's G2P: about -3.6% at c=32), so it is per deployment. It is
+       re-measured once `#849 <https://github.com/mstar-project/mstar/pull/849>`_
+       lands, and deleted if neutral.
    * - ``tp_async_sched``
      - *(optional)* Async scheduling for the parallel nodes: ``true``, ``false``
        (default) or a list of node names (see ``MSTAR_TP_ASYNC_SCHED``, which
