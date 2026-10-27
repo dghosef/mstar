@@ -552,6 +552,23 @@ def test_vision_block_loop_leases_only_what_a_replay_holds():
     assert not config.can_lease([request(2), request(3)])
 
 
+def test_vision_batch_that_overflows_one_replay_runs_request_by_request():
+    """Requests that fit a replay alone but not together are not packed into
+    one eager step: ``can_batch`` refuses, and each replays on its own."""
+    from mstar.model.qwen3_5.submodules import VisionEncoderSubmodule
+    from mstar.model.submodule_base import NodeInputs
+
+    encoder = _encoder(max_segments=4)
+    top = VisionEncoderSubmodule.BLOCK_LOOP_PATCH_BUCKETS[-1]
+
+    def request(patches: int, segments: int = 1) -> NodeInputs:
+        return NodeInputs(input_seq_len=patches, tensor_inputs={"seq_lengths": (patches // segments,) * segments})
+
+    assert encoder.can_batch(None, [request(top // 2), request(top // 2)])
+    assert not encoder.can_batch(None, [request(top // 2), request(top // 2 + 256)])
+    assert not encoder.can_batch(None, [request(64, 2), request(64, 3)])
+
+
 def test_vision_encoder_refuses_patches_it_would_not_normalize():
     with pytest.raises(ValueError, match="uint8"):
         _encoder(max_segments=4)._normalize(torch.zeros(2, 3))

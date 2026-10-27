@@ -650,8 +650,10 @@ class VisionEncoderSubmodule(NodeSubmodule):
     group of every request is its own attention segment.
 
     A replay's attention plan holds at most the vision attention resource's
-    ``max_segments_per_request`` segments. A step with more takes no lease
-    and runs the block loop eagerly, however few its patches.
+    ``max_segments_per_request`` segments. A batch that would overflow it or
+    the top patch bucket runs its requests one at a time instead, each
+    replaying if it fits alone; a request too large alone runs the block loop
+    eagerly.
     """
 
     # Patch-count buckets of one replay. 16384 patches merge to the LLM's
@@ -740,7 +742,11 @@ class VisionEncoderSubmodule(NodeSubmodule):
     def can_batch(
         self, batch: ExecutingBatch, model_inputs: list[NodeInputs],
     ) -> bool:
-        return True
+        # packed, the requests must fit one replay together. Applied with the
+        # block loop uncaptured too (capture off, or a node without the
+        # runner), where it only splits a large step into per-request runs.
+        patches = sum(inp.input_seq_len for inp in model_inputs)
+        return patches <= self.BLOCK_LOOP_PATCH_BUCKETS[-1] and self._fits_capture(model_inputs)
 
     def max_batch_size(self, graph_walk: str) -> int | None:
         return self.MAX_BATCH_SIZE

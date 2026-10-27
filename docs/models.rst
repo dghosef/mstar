@@ -331,6 +331,10 @@ default, which lowers the token count of short clips. Notes:
   segments per prompt. A prompt over either limit runs the encoder without the
   graph: a long video at ordinary resolution exceeds the patches, and one over
   ~64 s with frames resized below ~256x256 pixels exceeds the segments.
+- An encoder step packs the images and videos of up to 8 requests into one
+  replay; requests that would overflow it together run one at a time. The
+  packed GEMMs' shapes follow the step's total patches, so an image's
+  embeddings can differ at the last bit with what it is batched beside.
 - A long video is one wide prefill: one 1-3 minute video is ~11-12k tokens,
   beyond the largest captured ``prefill_vision`` bucket (4096), so it runs
   eagerly.
