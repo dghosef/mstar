@@ -1,4 +1,4 @@
-"""Length masks for padded batches.
+"""Zeroing the padded tail of a batch.
 
 Every Kokoro block runs over a padded ``[B, C, T]`` (or ``[B, T, C]``) batch in
 which row ``b`` is valid up to ``lengths[b]``. The reference implementation
