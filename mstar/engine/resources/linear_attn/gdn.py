@@ -38,6 +38,8 @@ def _l2norm(t: torch.Tensor) -> torch.Tensor:
 
 # Eager, the normalize is four full-size passes per tensor (fp32 copy, norm,
 # divide, cast); compiled, one. Built on first use, once the device is known.
+# Not dynamic=True: a symbolic head dim made the reduction ~3x slower; the
+# token count goes dynamic on its own at the second size.
 _L2NORM = None
 
 
@@ -46,7 +48,7 @@ def _l2norm_compiled(t: torch.Tensor) -> torch.Tensor:
     if _L2NORM is None:
         from mstar.platforms.compile import with_inductor_overrides
 
-        _L2NORM = with_inductor_overrides(torch.compile(_l2norm, dynamic=True))
+        _L2NORM = with_inductor_overrides(torch.compile(_l2norm))
     return _L2NORM(t)
 
 
