@@ -21,6 +21,7 @@ CPU only, no weights.
 
 from __future__ import annotations
 
+import dataclasses
 from types import SimpleNamespace
 
 import pytest
@@ -82,7 +83,19 @@ def _assert_same(got: NodeInputs | None, want: NodeInputs | None):
         assert torch.equal(got.tensor_inputs[key], value), key
     assert got.input_seq_len == want.input_seq_len
     assert got.resource_step_info == want.resource_step_info
-    assert got.kwargs == want.kwargs
+    assert got.kwargs.keys() == want.kwargs.keys()
+    for key, value in want.kwargs.items():
+        assert _same(got.kwargs[key], value), key
+
+
+def _same(a, b) -> bool:
+    """Equal, comparing tensors (and dataclasses holding them, such as
+    OmniVoice's ``CanvasItem``) by value."""
+    if torch.is_tensor(a):
+        return torch.equal(a, b)
+    if dataclasses.is_dataclass(a):
+        return all(_same(getattr(a, f.name), getattr(b, f.name)) for f in dataclasses.fields(a))
+    return a == b
 
 
 def _check_schedule(prepare, walk_fwd, edge_inputs, loop, steps):

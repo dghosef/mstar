@@ -135,6 +135,13 @@ class CanvasItem:
     def does_cfg(self) -> bool:
         return self.guidance_scale != 0
 
+    @property
+    def doc_pair(self) -> tuple[int, int]:
+        """Its two documents' lengths, conditional then unconditional (0 with
+        CFG off): what the attention plan, the lease and the packed row all
+        count."""
+        return self.cond_len, self.target_len if self.does_cfg else 0
+
 
 @dataclass
 class PackedCanvas:
