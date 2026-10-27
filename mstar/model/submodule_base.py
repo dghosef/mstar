@@ -1063,7 +1063,8 @@ class ARNodeSubmodule(NodeSubmodule):
             return super().check_stop(request_id, request_info, outputs)
         if (stop.walk is not None and request_info.graph_walk != stop.walk) or stop.buffer not in outputs:
             return set()
-        token = outputs[stop.buffer][0].item()
+        # a row's first element, as ``HostRows.first_values`` reads it
+        token = outputs[stop.buffer][0].reshape(-1)[0].item()
         return self._token_stops(((request_id, token),), {request_id: request_info}, False).get(request_id, set())
 
     def check_stop_batched(
