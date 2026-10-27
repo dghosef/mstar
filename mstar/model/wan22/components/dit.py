@@ -243,16 +243,6 @@ def _groups(tokens: torch.Tensor, groups: int) -> torch.Tensor:
     return tokens.unflatten(1, (groups, -1))
 
 
-def _ffn_gelu_epilogue(mlp: MLP, x: torch.Tensor) -> torch.Tensor:
-    """``mlp(x)`` with the tanh-GELU in the up-projection's cuBLASLt epilogue: one
-    kernel instead of a GEMM plus a pass over its [tokens, 14336] output. The GELU
-    reads the fp32 accumulator, so this rounds once fewer than the reference."""
-    hidden = torch._addmm_activation(
-        mlp.linear_in.bias, x.flatten(0, -2), mlp.linear_in.weight.t(), use_gelu=True,
-    )
-    return mlp.linear_out(hidden.unflatten(0, x.shape[:-1]))
-
-
 class Wan22DiTBlock(nn.Module):
     """One transformer block: adaLN-modulated self-attention, cross-attention
     to the text stream, adaLN-modulated FFN (reference ``WanTransformerBlock``,
@@ -263,18 +253,15 @@ class Wan22DiTBlock(nn.Module):
     residual stays bf16. All three follow the reference exactly.
     """
 
-    def __init__(self, dim: int, ffn_dim: int, num_heads: int, eps: float):
+    def __init__(self, dim: int, ffn_dim: int, num_heads: int, eps: float, fuse_ffn_gelu: bool = False):
         super().__init__()
         self.norm1 = WanFP32LayerNorm(dim, eps, elementwise_affine=False)
         self.self_attn = Wan22DiTAttention(dim, num_heads, eps)
         self.cross_attn = Wan22DiTAttention(dim, num_heads, eps)
         self.norm2 = WanFP32LayerNorm(dim, eps, elementwise_affine=True)
-        self.ffn = MLP(dim, ffn_dim, dim, activation="gelu_tanh", bias=True)
+        self.ffn = MLP(dim, ffn_dim, dim, activation="gelu_tanh", bias=True, gelu_epilogue=fuse_ffn_gelu)
         self.norm3 = WanFP32LayerNorm(dim, eps, elementwise_affine=False)
         self.scale_shift_table = nn.Parameter(torch.empty(1, 6, dim))
-        # Serving sets this (Wan22DiT.fuse_ffn_gelu); the reference path keeps
-        # the separate GELU.
-        self.fuse_ffn_gelu = False
 
     def forward(
         self,
@@ -311,7 +298,7 @@ class Wan22DiTBlock(nn.Module):
         norm_hidden = (
             (self.norm3(grouped.float()) * (1 + c_scale_msa) + c_shift_msa).type_as(hidden_states).flatten(1, 2)
         )
-        ff_output = _ffn_gelu_epilogue(self.ffn, norm_hidden) if self.fuse_ffn_gelu else self.ffn(norm_hidden)
+        ff_output = self.ffn(norm_hidden)
         return (
             (grouped.float() + _groups(ff_output, groups).float() * c_gate_msa).type_as(hidden_states).flatten(1, 2)
         )
@@ -321,9 +308,11 @@ class Wan22DiT(nn.Module):
     """The dense 5B TI2V video DiT: Conv3d patchify -> 30 blocks -> adaLN
     output head + unpatchify. Built on the meta device and materialized by
     ``weight_loader.build_wan22_dit`` (meta -> ``cast_serving_dtypes`` ->
-    ``to_empty(device)`` -> checkpoint load)."""
+    ``to_empty(device)`` -> checkpoint load). ``fuse_ffn_gelu`` runs every
+    FFN GELU in its GEMM's epilogue (``MLP.gelu_epilogue``), the serving
+    numerics; off, the module is the reference port."""
 
-    def __init__(self, config: Wan22Config):
+    def __init__(self, config: Wan22Config, fuse_ffn_gelu: bool = False):
         super().__init__()
         if config.qk_norm != "rms_norm_across_heads" or not config.cross_attn_norm:
             # These two config facts are baked into Wan22DiTAttention /
@@ -342,19 +331,12 @@ class Wan22DiT(nn.Module):
         )
         self.condition_embedder = Wan22TimeTextEmbedding(dim, config.freq_dim, config.text_dim)
         self.blocks = nn.ModuleList(
-            Wan22DiTBlock(dim, config.ffn_dim, config.num_attention_heads, config.eps)
+            Wan22DiTBlock(dim, config.ffn_dim, config.num_attention_heads, config.eps, fuse_ffn_gelu)
             for _ in range(config.num_layers)
         )
         self.norm_out = WanFP32LayerNorm(dim, config.eps, elementwise_affine=False)
         self.proj_out = nn.Linear(dim, config.out_channels * math.prod(config.patch_size))
         self.scale_shift_table = nn.Parameter(torch.empty(1, 2, dim))
-
-    def set_fuse_ffn_gelu(self, enabled: bool) -> None:
-        """Run every block's FFN GELU in the GEMM epilogue (see
-        ``_ffn_gelu_epilogue``); off by default, so the module alone stays the
-        reference port."""
-        for block in self.blocks:
-            block.fuse_ffn_gelu = enabled
 
     @property
     def dtype(self) -> torch.dtype:
