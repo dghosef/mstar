@@ -169,9 +169,6 @@ class RollingKVCache:
     local_end: int = 0
     cross_k: list[torch.Tensor] = field(default_factory=list)
     cross_v: list[torch.Tensor] = field(default_factory=list)
-    # Per-block camera (scale, shift) for the chunk whose rays are ``cam_rays``.
-    cam_rays: torch.Tensor | None = None
-    cam_mod: list[tuple[torch.Tensor, torch.Tensor]] = field(default_factory=list)
 
     @classmethod
     def allocate(
@@ -410,19 +407,34 @@ class LingBotCausalDiT(nn.Module):
             sink_tokens=cfg.sink_size * frame_seqlen, windowed=windowed, device=device,
         )
 
+    def camera_modulation(self, plucker: torch.Tensor) -> list[tuple[torch.Tensor, torch.Tensor]]:
+        """Each block's camera (scale, shift) for a chunk's Plucker rays
+        ``[1, 384, f, h, w]`` bf16. A chunk's denoise and commit forwards share
+        its rays, so the caller computes this (four GEMMs a block) once per chunk."""
+        cfg = self.config
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16), torch.no_grad():
+            cam = rearrange(
+                plucker, "1 c (f c1) (h c2) (w c3) -> 1 (f h w) (c c1 c2 c3)",
+                c1=cfg.patch_size[0], c2=cfg.patch_size[1], c3=cfg.patch_size[2],
+            ).contiguous()
+            cam = self.patch_embedding_wancamctrl(cam)
+            cam = cam + self.c2ws_hidden_states_layer2(F.silu(self.c2ws_hidden_states_layer1(cam)))
+            return [block.cam_modulation(cam) for block in self.blocks]
+
     def forward(
         self, x: torch.Tensor, t: torch.Tensor, context: torch.Tensor, y: torch.Tensor,
-        plucker: torch.Tensor, cache: RollingKVCache, current_start: int, frame_seqlen: int,
+        cam_mod: list[tuple[torch.Tensor, torch.Tensor]], cache: RollingKVCache, current_start: int,
+        frame_seqlen: int,
     ) -> torch.Tensor:
         """One chunk: ``x`` ``[16, f, h, w]`` fp32 noisy latents, ``t`` ``[1]``
         timestep, ``context`` ``[L, 4096]`` text embeds, ``y`` ``[20, f, h, w]``
-        mask + image latent, ``plucker`` ``[1, 384, f, h, w]`` bf16. Writes the
-        chunk's K/V at absolute token ``current_start``; returns the fp32 flow
-        prediction ``[16, f, h, w]``."""
+        mask + image latent, ``cam_mod`` the chunk's ``camera_modulation``.
+        Writes the chunk's K/V at absolute token ``current_start``; returns the
+        fp32 flow prediction ``[16, f, h, w]``."""
         with torch.amp.autocast("cuda", dtype=torch.bfloat16), torch.no_grad():
-            return self._forward(x, t, context, y, plucker, cache, current_start, frame_seqlen)
+            return self._forward(x, t, context, y, cam_mod, cache, current_start, frame_seqlen)
 
-    def _forward(self, x, t, context, y, plucker, cache, current_start, frame_seqlen):
+    def _forward(self, x, t, context, y, cam_mod, cache, current_start, frame_seqlen):
         cfg = self.config
         device = self.patch_embedding.weight.device
         freqs = self.freqs(device)
@@ -455,18 +467,6 @@ class LingBotCausalDiT(nn.Module):
                 cache.cross_k.append(k)
                 cache.cross_v.append(v)
 
-        # A chunk's denoise and commit forwards share its Plucker rays, so the
-        # camera path (four GEMMs a block) runs once per chunk.
-        if cache.cam_rays is not plucker:
-            cam = rearrange(
-                plucker, "1 c (f c1) (h c2) (w c3) -> 1 (f h w) (c c1 c2 c3)",
-                c1=cfg.patch_size[0], c2=cfg.patch_size[1], c3=cfg.patch_size[2],
-            ).contiguous()
-            cam = self.patch_embedding_wancamctrl(cam)
-            cam = cam + self.c2ws_hidden_states_layer2(F.silu(self.c2ws_hidden_states_layer1(cam)))
-            cache.cam_mod = [block.cam_modulation(cam) for block in self.blocks]
-            cache.cam_rays = plucker
-
         plan = cache.plan(current_start, seq_len)
         start_frame = current_start // frame_seqlen
         if start_frame + grid[0] > freqs.shape[0]:
@@ -474,7 +474,7 @@ class LingBotCausalDiT(nn.Module):
                 f"latent frame {start_frame + grid[0]} is past the RoPE table ({freqs.shape[0]} frames)")
         for i, block in enumerate(self.blocks):
             attn_args = dict(grid=grid, freqs=freqs, start_frame=start_frame, cache=cache, layer=i, plan=plan)
-            x = block(x, e0, cache.cam_mod[i], cache.cross_k[i], cache.cross_v[i], attn_args)
+            x = block(x, e0, cam_mod[i], cache.cross_k[i], cache.cross_v[i], attn_args)
         cache.global_end = plan.current_end
         cache.local_end = plan.local_end
 
