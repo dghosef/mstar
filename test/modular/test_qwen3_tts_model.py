@@ -1513,6 +1513,53 @@ def test_qwen3_tts_code_predictor_uses_the_shared_kernels(monkeypatch):
     assert len(calls) == config.talker.code_predictor.num_hidden_layers
 
 
+@torch.compiler.disable
+def _opaque_launch(*args, **kwargs):
+    pass
+
+
+class _OpaqueKernel:
+    """A Triton kernel as Dynamo sees its launch: a call it cannot trace."""
+
+    def __getitem__(self, grid):
+        return _opaque_launch
+
+
+def test_qwen3_tts_depth_loop_compiles_its_kernel_launchers_once(monkeypatch):
+    """The engine compiles a captured forward with static ints, so a launcher
+    frame Dynamo compiled would recompile at every depth position (and batch
+    bucket) until the recompile limit."""
+    import inspect
+
+    import mstar.model.components.code_predictor_kernels as kernels
+
+    monkeypatch.setattr(kernels, "_cp_qk_norm_rope_kv_kernel", _OpaqueKernel())
+    monkeypatch.setattr(kernels, "_cp_attn_kernel", _OpaqueKernel())
+    config = _tiny_model_config()
+    predictor = Qwen3TTSCodePredictor(config)
+    for layer in predictor.model.layers:
+        layer.input_layernorm = _IdentityNorm()
+        layer.post_attention_layernorm = _IdentityNorm()
+    predictor.model.norm = _IdentityNorm()
+    cp = config.talker.code_predictor
+    kv_cache = torch.zeros(
+        cp.num_hidden_layers, 2, 2, config.talker.num_code_groups, cp.num_key_value_heads, cp.head_dim,
+    )
+    torch._dynamo.reset()
+    try:
+        depth_step = torch.compile(predictor.forward_depth_unrolled, backend="eager", dynamic=False)
+        for cache_pos in range(config.talker.num_code_groups):
+            depth_step(
+                torch.randn(2, 1, config.talker.hidden_size),
+                torch.full((2, 1), cache_pos, dtype=torch.int32), kv_cache, cache_pos=cache_pos,
+            )
+        for launcher in (kernels.cp_qk_norm_rope_kv_write, kernels.cp_attention):
+            code = inspect.unwrap(launcher).__code__
+            assert torch._dynamo.eval_frame._debug_get_cache_entry_list(code) == []
+    finally:
+        torch._dynamo.reset()
+
+
 def test_qwen3_tts_per_request_sampler_configs_drive_code_predictor():
     """Residual groups are configured through the code predictor's own sampler
     resource, which the engine opens per-request buffers for."""

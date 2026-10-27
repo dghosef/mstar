@@ -84,8 +84,9 @@ class ARSubmodule(ARNodeSubmodule):
     disable_torch_compile = True
     # The top decode bucket is also the cap on rows per AR step; a step
     # costs about the same at 64 rows as at 32, so 64 streams do not run as
-    # two alternating batches.
-    DECODE_CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16, 24, 32, 48, 64]
+    # two alternating batches, and padding a batch up to 32 or 64 is cheap.
+    # Each bucket is a compile of its own (~3 min on a cold Inductor cache).
+    DECODE_CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64]
     MAX_BATCH_SIZE = DECODE_CAPTURE_BATCH_SIZES[-1]
     # Plain prompts are short (the chat frame around one text). Eager, a
     # prefill step took ~60 ms of mostly launch-bound stream time on an H200.
