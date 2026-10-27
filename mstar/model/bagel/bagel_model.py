@@ -632,6 +632,12 @@ class BagelModel(Model):
         """
         if "image" in output_modalities:
             image_output_format(kwargs)  # fail a bad output knob now, not after the denoise
+            for key in ("width", "height"):
+                value = kwargs.get(key)
+                # under 16 pixels a side (the VAE's 8x times the 2x2 patch) the
+                # image has no latent patch, and the loop would fail mid-request
+                if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 16):
+                    raise ValueError(f"BAGEL image {key} must be an integer of at least 16 pixels, got {value!r}")
         result: NameToTensorList = {}
 
         if prompt is not None:
