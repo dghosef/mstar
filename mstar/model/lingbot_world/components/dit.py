@@ -382,10 +382,9 @@ class LingBotCausalDiT(nn.Module):
         compiled around the GEMMs. Attention, RoPE and the cache writes stay
         eager: they take the chunk's Python-int cache indices, which would
         recompile per chunk."""
-        from mstar.model.components.diffusion.compile_utils import with_inductor_rounding
-
         def compiled(fn):
-            return with_inductor_rounding(torch.compile(fn, dynamic=False), eager_rounding=True)
+            # the rounding is a compile-time option: no config patch per call
+            return torch.compile(fn, dynamic=False, options={"emulate_precision_casts": True})
 
         for block in self.blocks:
             for name in ("_pre", "_post_self", "_norm3", "_ffn"):
