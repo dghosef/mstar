@@ -57,15 +57,12 @@ class MaskedBiLSTM(nn.Module):
                     else:
                         dst[r : r + h, cols : cols + block.shape[1]] = block
         fused.flatten_parameters()
-        self._fused = [fused]
+        self._fused = [fused.eval().requires_grad_(False)]
 
     def forward(self, x: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
-        reversed_x = reverse_padded(x, lengths)
-        if self._fused:
-            out, _ = self._fused[0](torch.cat([x, reversed_x], dim=-1))
-            forward_out, backward_out = out.split(self.hidden_size, dim=-1)
-        else:
-            forward_out, _ = self.fwd(x)
-            backward_out, _ = self.bwd(reversed_x)
+        if not self._fused:
+            raise ValueError("MaskedBiLSTM.fuse() must run once its weights are loaded")
+        out, _ = self._fused[0](torch.cat([x, reverse_padded(x, lengths)], dim=-1))
+        forward_out, backward_out = out.split(self.hidden_size, dim=-1)
         out = torch.cat([forward_out, reverse_padded(backward_out, lengths)], dim=-1)
         return mask_features(out, length_mask(lengths, x.shape[1]))
