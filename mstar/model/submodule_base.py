@@ -570,12 +570,11 @@ class NodeSubmodule(torch.nn.Module, ABC):
     # would pay for nothing.
     reads_device_loopback: bool = False
 
-    # Whether this node's ranks (its TP x SP lockstep instance) split the
-    # attention heads, as tensor and Ulysses sequence parallelism do: the
-    # engine then sizes every resource it builds for the node (KV, attention,
-    # recurrent state) for one rank's slice. False keeps every head on every
-    # rank, for a node whose ranks split other work, e.g. one guidance branch
-    # per rank.
+    # Whether this node's SP ranks split the attention heads, as Ulysses
+    # sequence parallelism does; its TP ranks always do. The engine sizes
+    # every resource it builds for the node (KV, attention, recurrent state)
+    # for one rank's slice. False keeps every head across the SP ranks, for a
+    # node that puts other work there, e.g. one guidance branch per rank.
     splits_heads: bool = True
 
     def __init__(self):

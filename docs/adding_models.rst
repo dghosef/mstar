@@ -1007,9 +1007,10 @@ methods are:
    per instance in ``__init__``, for example only when the model loads in fp32.
 
    Under TP or SP the engine sizes every resource it builds for a node (KV, attention,
-   recurrent state) for one rank's slice of the heads. A node whose ranks split other
+   recurrent state) for one rank's slice of the heads. A node whose SP ranks split other
    work instead, such as one guidance branch per rank, sets ``splits_heads = False``,
-   and every rank keeps all the heads.
+   and its SP ranks keep all the heads (TP ranks still split them). Nodes sharing a
+   resource must agree.
 
 ``postprocess(...)`` (optional)
    Metadata-only fixups that run on the GPU thread. This method must not read tensor
