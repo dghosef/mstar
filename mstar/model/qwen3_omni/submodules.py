@@ -1190,7 +1190,6 @@ class TalkerSubmodule(ARNodeSubmodule):
         # Pre-computed TTS special inputs.
         self._tts_pad_embed_cached: torch.Tensor | None = None
         self._tts_bos_embed_cached: torch.Tensor | None = None
-        self._tts_eos_embed_cached: torch.Tensor | None = None
         # The same pad/eos before ``text_projection``: a decode step projects
         # its rows' text inputs in the captured forward, so these stand in
         # for the Thinker state once the Thinker has finished.
@@ -1268,7 +1267,6 @@ class TalkerSubmodule(ARNodeSubmodule):
             self._tts_pad_raw, self._tts_eos_raw = pad_raw, eos_raw
             self._tts_pad_embed_cached = self.model.text_projection(pad_raw).squeeze(0)
             self._tts_bos_embed_cached = self.model.text_projection(bos_raw).squeeze(0)
-            self._tts_eos_embed_cached = self.model.text_projection(eos_raw).squeeze(0)
 
         logger.info(
             "TalkerSubmodule: pre-computed TTS special embeddings via "
