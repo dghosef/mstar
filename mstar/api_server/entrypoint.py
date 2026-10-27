@@ -1653,13 +1653,14 @@ def _run_warmup_requests(server: APIServer, specs: list, copies: int = 1) -> Non
         await server.collect_results(request.submit(server, request_id))
 
     async def _all(request: WarmupRequest, base_id: str, n: int) -> None:
-        ids = [base_id] + [f"{base_id}-{c}" for c in range(1, n)]
         # every copy runs to its end before a failure is reported, so none is
         # cancelled mid-request and still in the server when the next spec starts
-        results = await asyncio.gather(*(_one(request, rid) for rid in ids), return_exceptions=True)
-        errors = [r for r in results if isinstance(r, BaseException)]
-        if errors:
-            raise errors[0]
+        results = await asyncio.gather(
+            *(_one(request, f"{base_id}.{copy}") for copy in range(n)), return_exceptions=True,
+        )
+        for r in results:
+            if isinstance(r, BaseException):
+                raise r
 
     for index, spec in enumerate(specs):
         try:
@@ -1670,8 +1671,7 @@ def _run_warmup_requests(server: APIServer, specs: list, copies: int = 1) -> Non
         for level, concurrency in enumerate(request.concurrency):
             t0 = time.perf_counter()
             try:
-                base_id = f"warmup-{index}" + (f".{level}" if level else "")
-                asyncio.run(_all(request, base_id, copies * concurrency))
+                asyncio.run(_all(request, f"warmup-{index}.{level}", copies * concurrency))
             except Exception as exc:  # noqa: BLE001 — a cold server is better than none
                 logger.warning(
                     "warmup request %d/%d failed after %.1f s at concurrency %d: %s",

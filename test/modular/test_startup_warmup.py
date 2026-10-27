@@ -38,8 +38,8 @@ def test_warmup_requests_run_as_generate_requests(caplog) -> None:
     ]
     with caplog.at_level(logging.INFO, logger="mstar.api_server.entrypoint"):
         entrypoint._run_warmup_requests(fake, specs)
-    assert [s["request_id"] for s in fake.submitted] == ["warmup-0", "warmup-1", "warmup-2"]
-    assert fake.collected == ["warmup-0", "warmup-1", "warmup-2"]
+    assert [s["request_id"] for s in fake.submitted] == ["warmup-0.0.0", "warmup-1.0.0", "warmup-2.0.0"]
+    assert fake.collected == ["warmup-0.0.0", "warmup-1.0.0", "warmup-2.0.0"]
     first, second, third = fake.submitted
     assert first["output_modalities"] == ["video"] and first["model_kwargs"] == {"num_frames": 121}
     assert first["streaming"] is False and first["input_modalities"] == ["text"]
@@ -84,7 +84,7 @@ def test_malformed_warmups_are_skipped(caplog) -> None:
             {"text": "x", "model_kwargs": [1]},     # model_kwargs not a mapping
             {"text": "ok"},
         ])
-    assert fake.collected == ["warmup-3"]
+    assert fake.collected == ["warmup-3.0.0"]
     assert "set 'modality'" in caplog.text
     assert "unknown key(s) ['image']" in caplog.text
     assert "model_kwargs must be a mapping" in caplog.text
@@ -103,7 +103,7 @@ def test_repeat_sends_a_long_text(caplog) -> None:
             # past what a str can hold: skipped, not a failed boot
             {"text": "x", "repeat": 10**19},
         ])
-    assert fake.collected == ["warmup-0"]
+    assert fake.collected == ["warmup-0.0.0"]
     assert fake.submitted[0]["text"] == "ab ab ab "
     assert fake.submitted[0]["prompt_parts"][0].text == "ab ab ab "
     assert caplog.text.count("repeat must be a positive integer") == 3
@@ -113,15 +113,15 @@ def test_repeat_sends_a_long_text(caplog) -> None:
 
 
 def test_a_failing_warmup_is_logged_and_skipped(caplog) -> None:
-    fake = _FakeServer(fail_on="warmup-0")
+    fake = _FakeServer(fail_on="warmup-0.0.0")
     with caplog.at_level(logging.WARNING, logger="mstar.api_server.entrypoint"):
         entrypoint._run_warmup_requests(fake, [{"text": "x"}, "not a mapping", {"text": "y"}])
-    assert fake.collected == ["warmup-0", "warmup-2"]
+    assert fake.collected == ["warmup-0.0.0", "warmup-2.0.0"]
     assert "warmup request 1/3 failed" in caplog.text and "compile blew up" in caplog.text
     assert "not a mapping" in caplog.text
     # not a list at all: nothing runs, one warning
     entrypoint._run_warmup_requests(fake, {"text": "x"})
-    assert fake.collected == ["warmup-0", "warmup-2"]
+    assert fake.collected == ["warmup-0.0.0", "warmup-2.0.0"]
 
 
 def test_hf_file_references_resolve_from_the_cache(monkeypatch) -> None:
@@ -162,7 +162,7 @@ def test_warmup_reaches_every_data_parallel_replica() -> None:
     assert entrypoint._data_parallel_replicas({"node_groups": [{"ranks": [0, 1, 2, 3], "tp_size": 2}]}) == 2
     fake = _FakeServer()
     entrypoint._run_warmup_requests(fake, [{"text": "a"}, {"text": "b"}], copies=2)
-    assert [s["request_id"] for s in fake.submitted] == ["warmup-0", "warmup-0-1", "warmup-1", "warmup-1-1"]
+    assert [s["request_id"] for s in fake.submitted] == ["warmup-0.0.0", "warmup-0.0.1", "warmup-1.0.0", "warmup-1.0.1"]
 
 
 def test_concurrency_runs_copies_together_for_batched_shapes() -> None:
@@ -170,11 +170,11 @@ def test_concurrency_runs_copies_together_for_batched_shapes() -> None:
     a step compiled per batch size sees that batch before the bind."""
     fake = _FakeServer()
     entrypoint._run_warmup_requests(fake, [{"text": "a", "concurrency": 3}], copies=2)
-    assert [s["request_id"] for s in fake.submitted] == [f"warmup-0{s}" for s in ("", "-1", "-2", "-3", "-4", "-5")]
+    assert [s["request_id"] for s in fake.submitted] == [f"warmup-0.0.{c}" for c in range(6)]
     # a list runs one warmup per batch size, in order, each under its own ids
     fake = _FakeServer()
     entrypoint._run_warmup_requests(fake, [{"text": "a", "concurrency": [1, 2]}])
-    assert [s["request_id"] for s in fake.submitted] == ["warmup-0", "warmup-0.1", "warmup-0.1-1"]
+    assert [s["request_id"] for s in fake.submitted] == ["warmup-0.0.0", "warmup-0.1.0", "warmup-0.1.1"]
     fake = _FakeServer()
     entrypoint._run_warmup_requests(fake, [
         {"text": "a", "concurrency": 0}, {"text": "b", "concurrency": True},
@@ -190,7 +190,7 @@ def test_a_failing_copy_lets_its_siblings_finish(caplog) -> None:
 
     class _SlowServer(_FakeServer):
         async def collect_results(self, request_id, raw_request=None):
-            if request_id == "warmup-0":
+            if request_id == "warmup-0.0.0":
                 raise RuntimeError("compile blew up")
             await asyncio.sleep(0.01)
             self.collected.append(request_id)
@@ -199,5 +199,5 @@ def test_a_failing_copy_lets_its_siblings_finish(caplog) -> None:
     fake = _SlowServer()
     with caplog.at_level(logging.WARNING):
         entrypoint._run_warmup_requests(fake, [{"text": "a", "concurrency": 3}])
-    assert sorted(fake.collected) == ["warmup-0-1", "warmup-0-2"]
+    assert sorted(fake.collected) == ["warmup-0.0.1", "warmup-0.0.2"]
     assert "warmup request 1/1 failed" in caplog.text
