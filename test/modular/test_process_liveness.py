@@ -105,7 +105,7 @@ def _conductor(procs, inbox=()):
     c._next_liveness_check = 0.0
     c.requests = {}
     c.draining = {}
-    c._worker_load = Counter()
+    c._replica_load = Counter()
     c.waiting_queue = []
     return c
 
@@ -302,6 +302,7 @@ def test_stopping_data_worker_drops_tracked_requests():
         force_cleanup_request=cleaned.append,
         has_inflight_reads=lambda rid: False,
         get_ready_tensors=lambda: {},
+        take_failed_reads=lambda: [],
     )
     wt.in_flight_requests = {"r1", "r2"}
     wt.tensor_uuid_to_metadata_per_request = {"r2": {}}

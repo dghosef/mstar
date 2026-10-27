@@ -4,7 +4,7 @@ import os
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field, is_dataclass, replace
-from functools import partial
+from functools import cache, partial
 from typing import Any, Callable, Collection, Iterator, Mapping, NamedTuple
 
 import torch
@@ -36,18 +36,48 @@ logger = logging.getLogger(__name__)
 DEFAULT_CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64]
 
 
-# torch.compile mode for a captured forward whose config's ``compile_mode`` is None
-_DEFAULT_COMPILE_MODE = "max-autotune-no-cudagraphs"
+# torch.compile arguments per compile level (``mstar serve -O``), for a captured
+# forward whose config names no ``compile_mode``. Qwen3.5-0.8B on H200 with an
+# empty Inductor cache started in 170 s / 320 s / 1,294 s at levels 0 / 1 / 2.
+# Coordinate descent alone got all of max-autotune's GPU time per decode step
+# (it fuses the decode GEMMs with their epilogues); the GEMM template search on
+# top bought nothing measurable.
+COMPILE_LEVELS: dict[int, dict[str, Any]] = {
+    0: {},  # torch.compile's default: Inductor fusion, cuBLAS GEMMs, no tuning
+    1: {"options": {"coordinate_descent_tuning": True}},
+    2: {"mode": "max-autotune-no-cudagraphs"},
+}
+DEFAULT_COMPILE_LEVEL = 1
+
+
+@cache
+def compile_level() -> int:
+    """How much tuning a captured forward's compile does: ``MSTAR_COMPILE_LEVEL``
+    (``mstar serve -O``), one of ``COMPILE_LEVELS``."""
+    raw = os.environ.get("MSTAR_COMPILE_LEVEL") or str(DEFAULT_COMPILE_LEVEL)
+    try:
+        level = int(raw)
+    except ValueError:
+        level = -1
+    if level not in COMPILE_LEVELS:
+        logger.warning(
+            "MSTAR_COMPILE_LEVEL=%r is not one of %s; using %d",
+            raw, sorted(COMPILE_LEVELS), DEFAULT_COMPILE_LEVEL,
+        )
+        return DEFAULT_COMPILE_LEVEL
+    return level
 
 
 def compile_kwargs(config_mode: str | None) -> dict[str, Any]:
     """``torch.compile``'s arguments for a capture config whose ``compile_mode``
-    is ``config_mode``, which the config checked when it was built."""
+    is ``config_mode``, which the config checked when it was built. None takes
+    the compile level's arguments."""
     kwargs: dict[str, Any] = {"fullgraph": False, "dynamic": False}
-    mode = _DEFAULT_COMPILE_MODE if config_mode is None else config_mode
+    if config_mode is None:
+        return {**kwargs, **COMPILE_LEVELS[compile_level()]}
     # "default" is torch.compile's own: Inductor fusion, cuBLAS GEMMs, no autotuning
-    if mode != "default":
-        kwargs["mode"] = mode
+    if config_mode != "default":
+        kwargs["mode"] = config_mode
     return kwargs
 
 
@@ -1190,6 +1220,7 @@ class AcceleratorGraphRunner:
             per_request_info=dummy_metadata(dummy_rids, graph_walk),
             resources=dict(self._resources),
             captured=True,
+            synthetic=True,
         )
 
     @staticmethod
@@ -1491,12 +1522,16 @@ class AcceleratorGraphRunner:
         earlier hands the main thread a GIL the GPU thread still needs. Only
         `graph.replay()` below drops it in C++.
         """
+        laps = profiler.PhaseLaps("engine.forward.")
         self._stage(lease, preprocessed)
         if plan_done_event is not None:
             self._graph_backend.current_stream().wait_event(plan_done_event)
         if launch_started_event is not None:
             launch_started_event.set()
-        return self._replay(lease)
+        laps.lap("stage")
+        out = self._replay(lease)
+        laps.lap("replay")
+        return out
 
     def release(self, lease: SlotLease, real_bs: int) -> None:
         """Return the padding rows to their at-rest state after a step.
@@ -2018,6 +2053,7 @@ class PiecewiseAcceleratorGraphRunner:
                 per_request_info=dummy_metadata(step_ids, PIECEWISE_WALK),
                 resources=dict(self._resources),
                 step=step,
+                synthetic=True,
             ),
             kwargs=self._config.forward_kwargs,
         )
@@ -2093,9 +2129,10 @@ class PiecewiseAcceleratorGraphRunner:
         """The captured bucket serving this call, or None for eager.
 
         BATCHED buckets are fixed by the padded batch size; PACKED ones take
-        the smallest captured token bucket that fits.
+        the smallest captured token bucket that fits. A ``one_row_per_step``
+        region resolves every batch as one row.
         """
-        padded_bs = self._padded_bs(batch_size)
+        padded_bs = self._padded_bs(1 if self._config.one_row_per_step else batch_size)
         if padded_bs is None:
             return None
         if self._config.get_config_type() == PiecewiseConfigType.BATCHED:
@@ -2127,11 +2164,6 @@ class PiecewiseAcceleratorGraphRunner:
         """The config's ``can_lease`` for this batch; True when it sets none."""
         return self._config.can_lease is None or self._config.can_lease(inputs)
 
-    @property
-    def one_row_per_step(self) -> bool:
-        """Whether a replay carries the whole step as one row."""
-        return self._config.one_row_per_step
-
     def lease_slot(
         self, batch_size: int, total_tokens: int | None = None,
     ) -> SlotLease | None:
@@ -2161,7 +2193,14 @@ class PiecewiseAcceleratorGraphRunner:
         Only the static buffers carry data into a replay: the region's Python
         ran once, at capture, so whatever it read off ``PiecewiseCallInputs``
         is baked into the graph.
+
+        A ``one_row_per_step`` region replays the step as one row named by its
+        first request, however many requests or segments it is passed.
         """
+        if self._config.one_row_per_step:
+            real_bs = 1
+            if request_ids is not None:
+                request_ids = request_ids[:1]
         if real_bs is None:
             if request_ids is not None:
                 real_bs = len(request_ids)

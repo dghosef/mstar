@@ -77,7 +77,7 @@ from mstar.model.submodule_base import (
 )
 from mstar.platforms.compile import with_inductor_overrides
 from mstar.utils.h2d import to_device_nonblocking
-from mstar.utils.profiler import PHASE_PERIOD, phase_record
+from mstar.utils.profiler import PHASE_PERIOD, PhaseLaps, phase_record
 
 logger = logging.getLogger(__name__)
 
@@ -442,7 +442,10 @@ class LLMSubmodule(ARNodeSubmodule):
             # last sampled token, read by slot (padding rows read slot 0)
             sampler: SamplerResource = engine_inputs.resources[SAMPLER]
             t0 = perf_counter() if PHASE_PERIOD else 0.0
-            if graph_walk != "decode":
+            if graph_walk == "decode":
+                # rows whose last step ran elsewhere brought their token
+                ids = sampler.loopback_input_ids(engine_inputs.request_ids, inputs)
+            else:
                 # a mixed step packs its decode rows' single tokens beside the
                 # prompts: each row takes its own ids, or its loop-back token
                 ids = sampler.loopback_tokens(engine_inputs.request_ids)
@@ -451,8 +454,6 @@ class LLMSubmodule(ARNodeSubmodule):
                     else ids[i:i + 1]
                     for i, inp in enumerate(inputs)
                 ])
-            else:
-                ids = self.loopback_input_ids(sampler, engine_inputs.request_ids, inputs)
             out["input_ids"] = ids
             if PHASE_PERIOD:
                 phase_record("engine.preprocess.loopback", perf_counter() - t0)
@@ -466,10 +467,13 @@ class LLMSubmodule(ARNodeSubmodule):
                 [inp.input_embeds for inp in inputs], dim=0,
             )
 
+        laps = PhaseLaps("engine.preprocess.")
         position_ids_3d = self._position_ids_3d(inputs)  # (3, total_tokens)
+        laps.lap("position_ids")
         cos, sin = self.model.model.build_cos_sin(
             position_ids_3d, dtype=self.model.model.embed_tokens.weight.dtype,
         )
+        laps.lap("cos_sin")
         out["cos_3d"] = cos
         out["sin_3d"] = sin
         return out
@@ -859,17 +863,15 @@ class VisionEncoderSubmodule(NodeSubmodule):
         forward driven outside the engine (no declaration either) eager.
         """
         runner = engine_inputs.piecewise_runners.get(VISION_BLOCK_LOOP)
-        # the whole step is one row (`one_row_per_step`)
         if runner is None or engine_inputs.step is not None or not runner.can_run(
-            1, int(hidden.shape[0]),
+            len(engine_inputs.request_ids), int(hidden.shape[0]),
         ):
             return None
         # one replay for every image, not one each: a second plan overwrites the schedule a queued replay still reads
         return runner.run(
             static_inputs={"hidden": hidden, "cos": cos, "sin": sin},
-            request_ids=[engine_inputs.request_ids[0]],
+            request_ids=engine_inputs.request_ids,
             seq_lens=list(seq_lengths),
-            real_bs=1,
         ).get_view("hidden")
 
     def preprocess(

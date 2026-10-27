@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from mstar.engine.resources.sampler.resource import SamplerResource
 from mstar.model.qwen3_5.config import SAMPLER
 from mstar.model.qwen3_5.submodules import LLMSubmodule
 
@@ -19,6 +20,8 @@ class _Sampler:
     def loopback_tokens(self, request_ids):
         self.asked = list(request_ids)
         return self.tokens
+
+    loopback_input_ids = SamplerResource.loopback_input_ids
 
 
 def _sub(sampler):

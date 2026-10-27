@@ -1,5 +1,5 @@
-"""Ragged attention checks that need no GPU: head-dimension padding and head
-sharding."""
+"""Ragged attention checks that need no GPU: head-dimension padding, head
+sharding and the custom op's manager registry."""
 
 import sys
 from types import SimpleNamespace
@@ -10,7 +10,7 @@ import torch
 
 from mstar.engine.resources.attn.ragged.wrappers import (
     SUPPORTED_HEAD_DIMS,
-    RaggedPrefillWrapper,
+    FlashInferRaggedPrefillWrapper,
     padded_head_dim,
 )
 from mstar.engine.resources.attn.wrappers import (
@@ -44,7 +44,7 @@ def test_padded_head_dim_rejects_oversized():
             dict(page_size=16, batch_size=2, max_num_pages=4),
         ),
         (
-            RaggedPrefillWrapper, "BatchPrefillWithRaggedKVCacheWrapper",
+            FlashInferRaggedPrefillWrapper, "BatchPrefillWithRaggedKVCacheWrapper",
             dict(max_num_segments=2, max_total_tokens=16),
         ),
     ],
@@ -135,3 +135,23 @@ def test_shard_heads_false_keeps_every_head(shard_heads, expected):
         ),
     )
     assert mgr._kwargs["num_qo_heads"] == expected
+
+
+def test_a_dropped_manager_leaves_the_op_registry():
+    """The custom op finds a manager by key; the registry must not keep one
+    alive past the engine that built it."""
+    import gc
+
+    from mstar.engine.resources import RaggedAttentionConfig, RaggedAttentionSpec
+    from mstar.engine.resources.attn.ragged.base import _MANAGERS
+    from mstar.engine.resources.base import EngineResourceInfo, build_resource
+
+    spec = RaggedAttentionSpec(
+        resource_key="dropped", nodes={"encoder"},
+        config=RaggedAttentionConfig(num_qo_heads=4, num_kv_heads=4, head_dim=64),
+    )
+    mgr = build_resource(spec, EngineResourceInfo(device=torch.device("cpu"), kv_dtype=torch.bfloat16))
+    assert _MANAGERS["dropped"] is mgr
+    del mgr
+    gc.collect()
+    assert "dropped" not in _MANAGERS
