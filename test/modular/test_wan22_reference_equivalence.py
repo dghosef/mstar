@@ -548,7 +548,7 @@ def test_i2v_first_frame_injection_semantics(oracle_meta, text_embeds, dit_submo
     """8-step small-resolution I2V run asserting the expand_timesteps
     conditioning contract:
       * the transformer INPUT's frame 0 equals the condition at every step, with
-        frame 0's timestep zeroed (one timestep per latent frame);
+        frame-0 per-token timesteps zeroed;
       * the loop-carried latents stay un-injected mid-loop;
       * the OUTPUT latents get the condition only at the final iteration.
     """
@@ -598,13 +598,11 @@ def test_i2v_first_frame_injection_semantics(oracle_meta, text_embeds, dit_submo
             assert torch.equal(hidden_states[b : b + 1, :, 0], cond_bf16[:, :, 0]), (
                 f"step {step} batch {b}: transformer input frame 0 != condition"
             )
-        # One timestep per latent frame, [batch, frames]: frame 0 at 0, every
-        # later frame at the same t.
-        frames = timestep[0]
-        assert frames.shape == (t_lat,), f"step {step}: timesteps {tuple(timestep.shape)}, not per frame"
-        assert frames[0] == 0, f"step {step}: frame-0 timestep not zeroed"
-        assert torch.all(frames[1:] == frames[1]), f"step {step}: non-uniform later timesteps"
-        assert frames[1].item() > 0
+        # Per-token timesteps: frame-0 tokens 0, all later frames uniform t.
+        grid = timestep[0].reshape(t_lat, (h_lat + 1) // 2, (w_lat + 1) // 2)
+        assert torch.all(grid[0] == 0), f"step {step}: frame-0 timesteps not zeroed"
+        assert torch.all(grid[1:] == grid[1, 0, 0]), f"step {step}: non-uniform later timesteps"
+        assert grid[1, 0, 0].item() > 0
 
 
 # ---------------------------------------------------------------------------
