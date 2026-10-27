@@ -195,7 +195,7 @@ class Wan22DiTAttention(nn.Module):
 
 
 class Wan22TimeTextEmbedding(nn.Module):
-    """Condition embedder: per-token timestep embedding + text projection
+    """Condition embedder: timestep embedding (one per token group) + text projection
     (reference ``WanTimeTextImageEmbedding``, image branch absent on
     TI2V-5B).
 
