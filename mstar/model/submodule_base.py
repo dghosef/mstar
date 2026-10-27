@@ -13,7 +13,6 @@ import torch
 from mstar.communication.tensors import NameToTensorList
 from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.engine.resources import Resource, SlotLease, SubmoduleStep
-from mstar.utils.h2d import to_device_nonblocking
 from mstar.utils.knobs import device_loopback_enabled  # noqa: F401  (re-export)
 
 
@@ -54,7 +53,6 @@ if TYPE_CHECKING:
     from mstar.engine.accelerator_graph_config import AcceleratorGraphConfig, PiecewiseAcceleratorGraphConfig
     from mstar.engine.accelerator_graph_runner import PiecewiseAcceleratorGraphRunner
     from mstar.engine.engine import ExecutingBatch
-    from mstar.engine.resources.sampler.resource import SamplerResource
     from mstar.streaming.stream_buffer import StreamChunkInfo
 
 
@@ -488,6 +486,13 @@ class ModelInputsFromEngine:
     # ``capture_forward_method``, so most submodules never need this.
     captured: bool = False
 
+    # Every row is a dummy request (CUDA-graph capture or warmup), not real traffic.
+    synthetic: bool = False
+
+    # Real requests' token count; they lead the batch, later rows are replay padding.
+    # None: no padding.
+    real_seq_len: int | None = None
+
     # rid -> this step's InputMetadata; rids without any are absent
     per_request_input_metadata: Mapping[str, InputMetadata] = field(default_factory=dict)
 
@@ -524,6 +529,16 @@ class NodeSubmodule(torch.nn.Module, ABC):
     # params to the autocast dtype nor wraps its forward (or capture) in
     # autocast, and explicitly disables any ambient one.
     disable_autocast: bool = False
+
+    # Float32 math for this node's forward, where the process default (TF32
+    # matmuls and cuDNN, see ``mstar.engine.apply_torch_config``) is too coarse:
+    # "highest" runs fp32 matmuls in full fp32, and ``cudnn_allow_tf32 = False``
+    # does the same for cuDNN convolutions and RNNs. None keeps the default. The
+    # engine applies them around the forward, its compile and its capture (see
+    # ``mstar.engine.fp32_precision``); don't flip the process-wide flags here.
+    # Read once, when the engine loads the submodule.
+    float32_matmul_precision: str | None = None
+    cudnn_allow_tf32: bool | None = None
 
     # Set True on a submodule whose decode walk may read its last sampled
     # tokens back off the sampler's slot masters (``device_loopback_signals``).
@@ -1080,9 +1095,10 @@ class ARNodeSubmodule(NodeSubmodule):
             if token in stop_ids and not info.resource_configs[stop.sampler].ignore_eos:
                 stops[rid] = {loop}
                 continue
+            # read, never create: the check can run after the state was dropped
             generated = (
                 info.dynamic_loop_iter_counts.get(loop, 0) + 1 if key is None
-                else int(self.request_state(rid).get(key, 0))
+                else int(self.request_states.get(rid, {}).get(key, 0))
             )
             if generated >= info.max_tokens:
                 stops[rid] = {loop}
@@ -1151,24 +1167,3 @@ class ARNodeSubmodule(NodeSubmodule):
         inputs: list[ARNodeInputs],
     ) -> dict[str, torch.Tensor | Any]: # input name to tensor
         pass
-
-    @staticmethod
-    def loopback_input_ids(
-        sampler: SamplerResource, request_ids: list[str], inputs: Sequence[ARNodeInputs],
-    ) -> torch.Tensor:
-        """A device loop-back decode step's input ids: each row's last sampled
-        token, read off the sampler on the device, except where a row brought
-        its own (its previous step ran elsewhere, e.g. the prefill)."""
-        ids = sampler.loopback_tokens(request_ids)
-        routed = [
-            i for i, inp in enumerate(inputs)
-            if inp.input_ids is not None and inp.input_seq_len
-        ]
-        if routed:
-            # every request's first decode step after its prefill comes here,
-            # so the row index goes up without a blocking copy
-            ids.index_copy_(
-                0, to_device_nonblocking(torch.tensor(routed, dtype=torch.long), ids.device),
-                torch.cat([inputs[i].input_ids for i in routed]).to(ids.dtype),
-            )
-        return ids

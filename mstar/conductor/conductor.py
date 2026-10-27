@@ -41,6 +41,8 @@ from mstar.observability.recorders import Gauge, MetricSnapshot, merge
 from mstar.platforms import apply_process_env_defaults
 from mstar.profile.format import RxInfo, TxInfo
 from mstar.profile.worker import GraphTimings
+from mstar.utils import knobs
+from mstar.utils.client_errors import client_error_text, scrub_paths
 from mstar.utils.exitcode import describe_exitcode
 from mstar.utils.gc_freeze import freeze_after_setup
 from mstar.utils.generation_kwargs import check_seed
@@ -61,6 +63,7 @@ from mstar.utils.ipc_format import (
 from mstar.utils.logging_config import quiet_noisy_loggers
 from mstar.utils.orphan import exit_when_orphaned
 from mstar.utils.profiler import nvtx_enabled, range_pop, range_push
+from mstar.validation import validate_deployment
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +146,9 @@ def keep_bootstrap_sockets_on_loopback() -> None:
     os.environ.setdefault("GLOO_SOCKET_IFNAME", "lo")
 
 
-def _exit_when_orphaned(worker_id: str, parent=None, poll_s: float = 0.5) -> None:
+def _exit_when_orphaned(
+    worker_id: str, parent=None, poll_s: float = 0.5, before_hard_exit=None,
+) -> None:
     """Worker-side watchdog that leaves once the conductor is gone.
 
     So no worker outlives it holding GPU memory. That includes a worker still
@@ -154,37 +159,63 @@ def _exit_when_orphaned(worker_id: str, parent=None, poll_s: float = 0.5) -> Non
     """
     exit_when_orphaned(
         f"Worker {worker_id}", "conductor", signal.SIGTERM,
-        parent=parent, poll_s=poll_s,
+        parent=parent, poll_s=poll_s, before_hard_exit=before_hard_exit,
     )
 
 
+def _unlink_owned_files(tensor_manager) -> None:
+    """Unlink the files ``tensor_manager`` still owns, if no later launch can
+    be writing the same names: under a launch token it names its own, so this
+    holds even once the conductor is gone. Without one (a Conductor built
+    directly, not under an API server) the names are the endpoint's alone, a
+    restart on the same prefix reuses them, and no check of the conductor
+    covers the unlinks that follow it (#767); the files stay for a later
+    start to sweep or reclaim instead."""
+    if tensor_manager.names_unique_per_launch:
+        tensor_manager.unlink_owned_files()
+
+
 def _run_worker(worker) -> None:
-    """``worker.run()``, then unlink the tensor files the worker still owns.
+    """``worker.run()``, then unlink the tensor files (and arena segments) the
+    worker still owns.
 
     A stop (the conductor's SIGTERM, a Ctrl-C) leaves the files of requests in
     flight waiting for a TENSOR_RECEIVED or REMOVE_REQUEST that will not come,
-    in a RAM-backed dir. Only while the conductor lives: it holds the
-    deployment's IPC lock and ports until it has joined its workers, so no
-    other deployment can be using these names yet. An orphaned worker leaves
-    them, as a new deployment on the same prefix may already reuse them.
+    in a RAM-backed dir. Then leave with the first stop or error ``run()``
+    ended on.
     """
+    stop = None
     try:
         worker.run()
-    finally:
-        # A Ctrl-C reaches the conductor too, and its SIGTERM lands here within
-        # milliseconds, often already pending. Finish unlinking (it resumes
-        # where it was cut), then leave with that stop.
-        stop = None
-        while True:
-            try:
-                parent = mp.parent_process()
-                if parent is not None and parent.is_alive():
-                    worker.tensor_manager.unlink_owned_files()
-                break
-            except (KeyboardInterrupt, SystemExit) as e:
-                stop = e
-        if stop is not None:
-            raise stop
+    except BaseException as e:
+        stop = e
+    handlers = None
+    while True:
+        try:
+            # A Ctrl-C reaches the conductor too, and its SIGTERM lands here
+            # within milliseconds, often already pending. One that fires before
+            # these are ignored is caught below, and the unlinks start over
+            # (each file is untracked only once it is gone).
+            if handlers is None:
+                handlers = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            _unlink_owned_files(worker.tensor_manager)
+            break
+        except (KeyboardInterrupt, SystemExit) as e:
+            stop = stop or e
+    # A signal that arrives while ignored is dropped, not queued. Putting the
+    # handlers back lets a second stop break a teardown that hangs (a thread
+    # join, an atexit hook). One that fires right away must not hide the
+    # error run() ended on.
+    try:
+        for s, h in handlers.items():
+            if h is not None:  # None: set outside Python, nothing to put back
+                signal.signal(s, h)
+    except (KeyboardInterrupt, SystemExit) as e:
+        stop = stop or e
+    if stop is not None:
+        raise stop
 
 
 def worker_device(device_type: str, rank: int, rank_devices: dict[int, int] | None = None) -> str:
@@ -241,8 +272,10 @@ def _worker_process_target(
         force=True,
     )
     quiet_noisy_loggers()
+    built: list = []  # the Worker, once it exists
     threading.Thread(
         target=_exit_when_orphaned, args=(worker_id,), daemon=True, name="parent-watch",
+        kwargs={"before_hard_exit": lambda: [_unlink_owned_files(w.tensor_manager) for w in built]},
     ).start()
 
     from mstar.worker.worker import Worker
@@ -276,6 +309,7 @@ def _worker_process_target(
     except BaseException as e:
         logger.exception("Worker %s failed to initialize: %s", worker_id, str(e))
         raise e
+    built.append(worker)
     _run_worker(worker)
 
 
@@ -291,6 +325,9 @@ class RequestData:
     # resource label -> the config this request's resources were opened with
     resource_configs: dict[str, ResourceReqConfig]
     sharding_config: ShardingConfig | None = None
+    # node group id -> the DP replica it runs on; counted in the conductor's
+    # replica load while the request is live
+    dp_replicas: dict[int, int] = field(default_factory=dict)
     # set once a NewRequest goes out; before that a failed ingest has nothing to drain
     dispatched: bool = False
     # set once request_complete goes out; after that the client must never get
@@ -394,9 +431,9 @@ class Conductor:
         status_interval_s: float | None = None,
     ):
         self.requests: dict[str, RequestData] = {}
-        # worker id -> requests in self.requests it serves, for the DP replica
-        # pick; kept by _register_request / _drop_request
-        self._worker_load: Counter[str] = Counter()
+        # (node group id, DP replica index) -> requests in self.requests it
+        # serves, for the replica pick; kept by _register_request / _drop_request
+        self._replica_load: Counter[tuple[int, int]] = Counter()
         # Requests in teardown: kept in self.requests (so they still count toward
         # concurrency until their GPU state is freed) with barrier state here.
         self.draining: dict[str, DrainingRequest] = {}
@@ -437,6 +474,11 @@ class Conductor:
 
         with open(model_config_file, "r") as f:
             self.model_config = yaml.safe_load(f)
+        # fail here, once, rather than in every worker
+        knobs.check(self.model_config.get("knobs"))
+        # Every check that needs only the model, this YAML and the environment,
+        # before any worker exists; raises listing every problem found.
+        deployment = validate_deployment(model, self.model_config, model_config_file)
         accelerator = torch.accelerator.current_accelerator(check_available=True)
         self.device_type = accelerator.type if accelerator is not None else "cpu"
         self.enable_nvtx = nvtx_enabled(enable_nvtx, torch.device(self.device_type))
@@ -444,8 +486,6 @@ class Conductor:
         self.max_concurrent_requests: int = self.model_config.get(
             "max_concurrent_requests", None
         )
-        assert "max_seq_len" in self.model_config
-        assert "node_groups" in self.model_config
         # Optional ``rank_devices: {rank: device_index}`` places a worker rank
         # on a device other than the one its number implies, e.g. two workers
         # sharing one GPU so a light node's steps stop interleaving with a
@@ -454,13 +494,11 @@ class Conductor:
             int(rank): int(index)
             for rank, index in (self.model_config.get("rank_devices") or {}).items()
         }
-        model.validate_config_yaml(self.model_config, model_config_file)
-
-        self.default_sharding_config = model.get_sharding_config(model_config_file)
+        self.default_sharding_config = deployment.sharding_config
         # The conductor is the only process that sees every worker graph, so it
         # owns the numbering. Workers receive their graphs (and these ids) at
         # spawn, so everyone agrees without the ids having to be negotiated.
-        worker_graphs = model.get_worker_graphs(model_config_file)
+        worker_graphs = deployment.worker_graphs
         for index, worker_graph in enumerate(worker_graphs):
             worker_graph.worker_graph_id = index
         self.worker_graphs = {
@@ -468,8 +506,8 @@ class Conductor:
             for worker_graph in worker_graphs
         }
 
-        # (1) Set up worker graph TP ranks
-        # (2) Assert that streaming consumers don't have graph-walk-specific sharding config
+        # Set up worker graph TP ranks; validate_deployment checked each worker
+        # graph belongs to one sharding group of its tp_size.
         self.streaming_consumers = set()
         self.node_walk_to_wg: dict[tuple[str, str], WorkerGraph] = {}
 
@@ -477,6 +515,7 @@ class Conductor:
         self.worker_group_to_instance_rank: dict[int, dict[str, int]] = {}
 
         graph_walks = set()
+        streamed_inputs: dict[str, set[str]] = defaultdict(set)
         for wg in self.worker_graphs.values():
             for walk in wg.graph_walks:
                 graph_walks.add(walk)
@@ -485,21 +524,30 @@ class Conductor:
                     self.node_walk_to_wg[(name, walk)] = wg
                 if node.consumes_stream:
                     self.streaming_consumers.add(name)
-
-        # v1: one sharding group per worker graph. Track which group "owns"
-        # each wg so we can assert single-group-per-wg.
-        wg_to_owning_group: dict[int, str] = {}
+                    streamed_inputs[name] |= node._streaming_inputs
+        stream_edges = {
+            (edge.name, name, walk, edge.next_node)
+            for wg in self.worker_graphs.values()
+            for name, node in wg.section.get_nodes().items()
+            for edge in node.outputs
+            if edge.name in streamed_inputs.get(edge.next_node, ())
+            for walk in wg.graph_walks
+        }
+        # a Loop streams its outputs on completion; the producer is the inner
+        # node that makes the signal
+        stream_edges |= {
+            (edge.name, name, walk, edge.next_node)
+            for wg in self.worker_graphs.values()
+            for loop in wg.section.get_loops().values()
+            for edge in loop.outputs + loop.accumulated_outputs
+            if edge.name in streamed_inputs.get(edge.next_node, ())
+            for name, node in loop.get_nodes().items()
+            if any(out.name == edge.name for out in node.outputs)
+            for walk in wg.graph_walks
+        }
+        self.default_sharding_config.assert_streams_keep_tp_size(sorted(stream_edges))
 
         for group in self.default_sharding_config.groups:
-            if group.graph_walks is not None and any([
-                node in self.streaming_consumers for node in group.nodes
-            ]):
-                raise RuntimeError((
-                    f"Sharding group with nodes {group.nodes} includes a streaming consumer but "
-                    f"has custom graph walk configuration {group.graph_walks}. It is currently "
-                    "disallowed to set custom graph walks for TP groups that include streaming "
-                    "consumer nodes."
-                ))
             group_graph_walks = group.graph_walks or graph_walks
             group_key = group.key_str()
             for walk in group_graph_walks:
@@ -507,22 +555,6 @@ class Conductor:
                     if (node, walk) not in self.node_walk_to_wg:
                         continue
                     wg = self.node_walk_to_wg[(node, walk)]
-                    # v1: a worker graph belongs to at most one sharding group.
-                    # Construct worker graphs so this holds; revisit if we
-                    # need multiple TP groups colocated in one wg.
-                    prior = wg_to_owning_group.setdefault(wg.worker_graph_id, group_key)
-                    assert prior == group_key, (
-                        f"Worker graph {wg.worker_graph_id} is claimed by two sharding "
-                        f"groups ({prior!r} and {group_key!r}). v1 requires one TP group "
-                        f"per worker graph; split the wg or merge the groups."
-                    )
-                    # wg._tp_ranks is computed in WorkerGraph.__post_init__
-                    # from wg.tp_size (which came from the node_group entry).
-                    assert wg.tp_size == group.tp_size, (
-                        f"Worker graph {wg.worker_graph_id} has tp_size {wg.tp_size}, "
-                        f"but its sharding group has tp_size {group.tp_size}. "
-                        f"node_groups and sharding_config disagree."
-                    )
                     # The instance rank is the worker's index within the
                     # lockstep instance (0..tp*sp-1), used by the
                     # replicated-signal fanout (so exactly one rank — index 0
@@ -846,46 +878,48 @@ class Conductor:
                 ),
             )
 
-    def _assign_worker_graphs_to_workers(self) -> dict[int, list[str]]:
+    def _pick_replicas(self) -> dict[int, int]:
+        """A new request's DP replica in each node group: the one serving the
+        fewest live requests, ties at random. A random pick alone puts two of
+        two concurrent requests on one replica half the time, leaving the other
+        idle. Load is counted per (group, replica), so groups that share
+        workers don't skew each other's picks."""
+        replicas: dict[int, int] = {}
+        for wg in self.worker_graphs.values():
+            if wg._group_id in replicas:
+                continue
+            n = len(wg._instance_ranks) if wg._instance_ranks else len(wg.ranks)
+            if n == 1:
+                replicas[wg._group_id] = 0
+                continue
+            loads = [self._replica_load[(wg._group_id, i)] for i in range(n)]
+            least = min(loads)
+            replicas[wg._group_id] = int(np.random.choice([i for i, k in enumerate(loads) if k == least]))
+        return replicas
+
+    def _assign_worker_graphs_to_workers(self, replicas: dict[int, int]) -> dict[int, list[str]]:
         """
-        For a request, assign worker graphs to workers. DP picks are
-        coordinated by ``_group_id`` so all wgs derived from the same
-        node_group land on the same (replica's) workers — without this,
-        two wgs sharing a TP group could end up on different DP replicas
-        and break model topology.
+        For a request, assign worker graphs to the workers of their group's
+        replica in ``replicas`` (``_pick_replicas``). DP picks are coordinated
+        by ``_group_id`` so all wgs derived from the same node_group land on
+        the same (replica's) workers — without this, two wgs sharing a TP
+        group could end up on different DP replicas and break model topology.
 
         TODO: smarter assignment that minimizes cross-graph-walk tensor
         transfer (e.g., bias toward keeping prefill→decode handoff local
         for the same request).
         """
-        # _group_id -> chosen DP-replica index within that group's ranks
-        group_id_to_replica_idx: dict[int, int] = {}
-
-        def pick(replicas: list[list[int]]) -> int:
-            """The least-loaded replica (by live requests on its workers), ties at
-            random. A random pick alone puts two of two concurrent requests on one
-            replica half the time, leaving the other idle."""
-            if len(replicas) == 1:
-                return 0
-            loads = [sum(self._worker_load[f"worker_{r}"] for r in ranks) for ranks in replicas]
-            least = min(loads)
-            return int(np.random.choice([i for i, n in enumerate(loads) if n == least]))
-
         result = {}
         for wg_id, wg in self.worker_graphs.items():
+            replica_idx = replicas[wg._group_id]
             if wg._instance_ranks:
                 # Route to a whole instance (the lockstep unit): every rank of a
                 # tp*sp instance runs the request together, so its TP all-reduce
                 # and SP all-to-all collectives stay in sync. Picking a single TP
                 # row here would desync the SP all-to-all across rows.
-                if wg._group_id not in group_id_to_replica_idx:
-                    group_id_to_replica_idx[wg._group_id] = pick(wg._instance_ranks)
-                ranks = wg._instance_ranks[group_id_to_replica_idx[wg._group_id]]
-                result[wg_id] = [f"worker_{r}" for r in ranks]
+                result[wg_id] = [f"worker_{r}" for r in wg._instance_ranks[replica_idx]]
             else:
-                if wg._group_id not in group_id_to_replica_idx:
-                    group_id_to_replica_idx[wg._group_id] = pick([[r] for r in wg.ranks])
-                result[wg_id] = [f"worker_{wg.ranks[group_id_to_replica_idx[wg._group_id]]}"]
+                result[wg_id] = [f"worker_{wg.ranks[replica_idx]}"]
         return result
 
     def _build_request_sharding_config(
@@ -1114,18 +1148,19 @@ class Conductor:
             if request_data is None or not request_data.dispatched:
                 self._drop_request(body.request_id)
                 if isinstance(exc, ValueError):
-                    self._reject_request(body.request_id, str(exc), status=400)
+                    self._reject_request(body.request_id, scrub_paths(str(exc)), status=400)
                     return
-                logger.exception("Ingest failed for request %s", body.request_id)
-                self._reject_request(
-                    body.request_id, f"Ingest failed: {type(exc).__name__}: {exc}", status=500,
+                text, _ = client_error_text(
+                    exc, f"Ingest failed for request {body.request_id}", log=logger,
                 )
+                self._reject_request(body.request_id, f"Ingest failed: {text}", status=500)
             elif body.request_id not in self.draining:
-                logger.exception("Ingest failed for request %s", body.request_id)
+                text, _ = client_error_text(
+                    exc, f"Ingest failed for request {body.request_id}", log=logger,
+                )
                 # Some workers may already hold it: drain them like a worker failure.
                 self._remove_request(
-                    body.request_id, request_data,
-                    failure_error=f"Ingest failed: {type(exc).__name__}: {exc}",
+                    body.request_id, request_data, failure_error=f"Ingest failed: {text}",
                 )
 
     def _reject_request(self, request_id: str, error: str, status: int):
@@ -1156,7 +1191,8 @@ class Conductor:
             None if self._status_interval_s is None
             else self._queued_since.pop(body.request_id, ingest_time)
         )
-        worker_graph_to_workers = self._assign_worker_graphs_to_workers()
+        dp_replicas = self._pick_replicas()
+        worker_graph_to_workers = self._assign_worker_graphs_to_workers(dp_replicas)
 
         model_kwargs = body.model_kwargs or {}
         max_output_tokens = self._max_output_tokens(model_kwargs)
@@ -1214,6 +1250,7 @@ class Conductor:
             streaming_connections=streaming_connections,
             resource_configs={},
             sharding_config=self._build_request_sharding_config(worker_graph_to_workers),
+            dp_replicas=dp_replicas,
             conductor_ingest_time=ingest_time,
             conductor_arrival_time=arrival_time,
         )
@@ -1362,13 +1399,13 @@ class Conductor:
 
     def _register_request(self, request_id: str, request_data: RequestData) -> None:
         self.requests[request_id] = request_data
-        self._worker_load.update(self._request_workers(request_data))
+        self._replica_load.update(request_data.dp_replicas.items())
 
     def _drop_request(self, request_id: str) -> None:
-        """The one way a request leaves ``self.requests``, so ``_worker_load`` cannot leak."""
+        """The one way a request leaves ``self.requests``, so ``_replica_load`` cannot leak."""
         request_data = self.requests.pop(request_id, None)
         if request_data is not None:
-            self._worker_load.subtract(self._request_workers(request_data))
+            self._replica_load.subtract(request_data.dp_replicas.items())
 
     def _register_draining(
         self, request_id: str, expected_acks: set[str], participants: set[str],
@@ -1973,7 +2010,9 @@ class Conductor:
 
         A request whose ``request_complete`` already went out is only torn
         down: its client has the result."""
-        logger.exception("Conductor error %s for request %s", step, request_id)
+        text, _ = client_error_text(
+            exc, f"Conductor error {step} for request {request_id}", log=logger,
+        )
         request_data = self.requests.get(request_id)
         if request_data is None or request_id in self.draining:
             return  # unknown, never admitted, or already being torn down
@@ -1982,7 +2021,7 @@ class Conductor:
                 request_id, request_data,
                 failure_error=(
                     None if request_data.completion_sent
-                    else f"Conductor error {step}: {type(exc).__name__}: {exc}"
+                    else f"Conductor error {step}: {text}"
                 ),
             )
         except Exception:

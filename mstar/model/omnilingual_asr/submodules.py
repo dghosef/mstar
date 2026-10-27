@@ -251,14 +251,14 @@ class OmniASRCTCSubmodule(NodeSubmodule):
         packed = rows[0] if len(rows) == 1 else torch.cat(rows)
         frames = [r.shape[0] for r in rows]
         runner = engine_inputs.piecewise_runners.get(ENCODER_LOOP)
-        if runner is not None and runner.can_run(1, packed.shape[0]):
-            # all of the step's segments under one row; a copy, since the
-            # output buffer is overwritten by the next step's replay
+        if runner is not None and runner.can_run(len(engine_inputs.request_ids), packed.shape[0]):
+            # all of the step's segments under one row (`one_row_per_step`);
+            # a copy, since the output buffer is overwritten by the next
+            # step's replay
             ids = runner.run(
                 static_inputs={"hidden": packed},
-                request_ids=[engine_inputs.request_ids[0]],
+                request_ids=engine_inputs.request_ids,
                 seq_lens=frames,
-                real_bs=1,
             ).get("ids")
         else:
             ids = self.model.encode_packed(packed, self._attn_fn(attn)).argmax(dim=-1)

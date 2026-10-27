@@ -279,6 +279,8 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
     ) -> list[AcceleratorGraphConfig]:
         return [
             BatchedAcceleratorGraphConfig(
+                # max-autotune until the default compile level (mstar serve -O) is measured on this model
+                compile_mode="max-autotune-no-cudagraphs",
                 capture_graph_walk="decode",
                 single_request_inputs=ARNodeInputs(
                     input_ids=torch.zeros(1, dtype=torch.long, device=device),
@@ -287,6 +289,8 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
                 capture_batch_sizes=self.DECODE_CAPTURE_BATCH_SIZES,
             ),
             PackedAcceleratorGraphConfig(
+                # max-autotune until the default compile level (mstar serve -O) is measured on this model
+                compile_mode="max-autotune-no-cudagraphs",
                 capture_graph_walk="prefill_audio",
                 make_node_input=lambda n: ARNodeInputs(
                     input_seq_len=n,
@@ -394,9 +398,8 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
                 return {"input_ids": torch.cat([inp.input_ids for inp in inputs])}
             # device loop-back: each row's last sampled token, read by slot;
             # rows whose previous step was the prefill brought theirs
-            return {"input_ids": self.loopback_input_ids(
-                engine_inputs.resources[SAMPLER], engine_inputs.request_ids, inputs,
-            )}
+            sampler: SamplerResource = engine_inputs.resources[SAMPLER]
+            return {"input_ids": sampler.loopback_input_ids(engine_inputs.request_ids, inputs)}
         return {
             "input_embeds": torch.cat(
                 [inp.input_embeds for inp in inputs], dim=0

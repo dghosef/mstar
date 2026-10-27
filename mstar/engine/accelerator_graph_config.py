@@ -49,8 +49,8 @@ class AcceleratorGraphConfig(ABC):
         # Must be hashable.
         additional_key_info: Any | None = None,
         compile: bool = True, # whether to run torch.compile before cuda graph capture
-        # torch.compile mode for the captured forward; None takes the runner's
-        # default, max-autotune-no-cudagraphs
+        # torch.compile mode for the captured forward; None takes the deployment's
+        # compile level (mstar serve -O), a mode opts the config out of it
         compile_mode: str | None = None,
 
         # Per-config override for the set of batch sizes to capture
@@ -301,8 +301,9 @@ class PiecewiseAcceleratorGraphConfig(ABC):
     can_lease: Callable[[list[NodeInputs]], bool] | None = None
     # The region replays a whole step as ONE row, however many requests the
     # step carries (a vision tower packing every request's images as segments
-    # of one ragged batch), so its slot is leased at batch size 1. Only for a
-    # packed `lease_before_step` region captured at batch size 1 alone.
+    # of one ragged batch), so the runner leases, checks and replays it at batch
+    # size 1, under the step's first request. Only for a packed
+    # `lease_before_step` region captured at batch size 1 alone.
     one_row_per_step: bool = False
     # static kwargs threaded into capture_fn (e.g. cond_tokens, is_causal)
     forward_kwargs: dict[str, Any] = field(default_factory=dict)
@@ -311,8 +312,8 @@ class PiecewiseAcceleratorGraphConfig(ABC):
     # Whether to torch.compile capture_fn before capture. Default off; the
     # block loop already benefits from graph capture alone.
     compile: bool = False
-    # torch.compile mode for the region; None takes the runner's default,
-    # max-autotune-no-cudagraphs
+    # torch.compile mode for the region; None takes the deployment's compile
+    # level (mstar serve -O), a mode opts the config out of it
     compile_mode: str | None = None
 
     def __post_init__(self):

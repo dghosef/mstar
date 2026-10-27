@@ -612,6 +612,27 @@ def test_vjepa2_without_frame_size_in_the_header_decodes_one_frame_to_check(monk
     assert pulled == [0]
 
 
+@pytest.mark.parametrize("torch_threads,cpus,expected", [(2, 3, 2), (16, 3, 3), (16, 64, 8)])
+def test_video_decodes_thread_within_the_preprocess_pool_and_affinity(monkeypatch, torch_threads, cpus, expected):
+    """FFmpeg threads per decode follow the API server's preprocessing pool and
+    the CPUs the process may run on (a container's cpuset), at most 8."""
+    import os
+
+    from mstar.model.vjepa2.vjepa2_model import VJepa2Model
+
+    monkeypatch.setattr(torch, "get_num_threads", lambda: torch_threads)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(cpus)), raising=False)
+    monkeypatch.setenv("MSTAR_MAX_VIDEO_PIXELS", str(64 * 64 * 4))
+    opened = []
+    _fake_torchcodec(monkeypatch, [], opened=opened)
+    vjepa2 = object.__new__(VJepa2Model)
+    vjepa2.config = types.SimpleNamespace(frames_per_clip=64)
+    for load in (lambda: Model.load_video(None, "clip.mp4", "cpu"), lambda: vjepa2.load_video("clip.mp4", "cpu")):
+        with pytest.raises(ValueError, match="MSTAR_MAX_VIDEO_PIXELS"):
+            load()
+    assert [kw["num_ffmpeg_threads"] for kw in opened] == [expected, expected]
+
+
 def test_probe_reads_torchcodec_metadata_without_a_scan(monkeypatch):
     opened = []
     _fake_torchcodec(monkeypatch, [], _Metadata(num_frames=10), opened=opened)
