@@ -1935,7 +1935,9 @@ def test_qwen3_tts_fused_snake_matches_the_reference_activation():
         alpha=torch.randn(6) * 0.3, beta=torch.randn(6) * 0.3, no_div_by_zero=1e-9,
     )
     fused = FusedSnakeBeta(snake).cuda()
-    x = torch.randn(3, 6, 1000, device="cuda")
+    # large activations too, where an approximate hardware sine drifts from torch.sin
+    scale = torch.tensor([1.0, 1.0, 1.0, 50.0, 50.0, 300.0], device="cuda")[:, None]
+    x = torch.randn(3, 6, 1000, device="cuda") * scale
     alpha = torch.exp(snake.alpha).cuda()[None, :, None]
     beta = torch.exp(snake.beta).cuda()[None, :, None]
     expected = x + (1.0 / (beta + snake.no_div_by_zero)) * torch.pow(torch.sin(x * alpha), 2)
