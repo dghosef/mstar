@@ -305,9 +305,12 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
        ``hf://<owner>/<repo>/<path>`` (a file in a model's HF repo); its modality
        comes from the extension, or give ``{path: ..., modality: ...}``.
        ``repeat: N`` sends ``text`` N times over, a long prompt for a path only
-       long prompts take (a long-context prefill). Each entry is sent once per
-       data-parallel replica at a time, so every replica warms. ``concurrency: N``
-       submits N copies per replica at once, so they can batch, for a step that
+       long prompts take (a long-context prefill). Each entry is sent as many
+       times at once as the most data-parallel replicas any node group serves (its
+       ranks over ``tp_size`` x ``sp_size``), so every replica warms. A node group
+       with fewer replicas, such as one DiT instance beside a replicated VAE, gets
+       those copies together and may batch them, so its one-request shape can stay
+       cold. ``concurrency: N`` submits N copies per replica at once, so they can batch, for a step that
        compiles per batch size (whether they share a step is the scheduler's
        call); a list (``concurrency: [1, 2, 4]``) runs the entry once per size, in
        order. A malformed or failing warmup is logged and skipped.
