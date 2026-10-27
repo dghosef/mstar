@@ -1,53 +1,182 @@
-name: Docs
+name: Docs  # TEST BRANCH: pr883 wheel checks, no publish job
+
+# Publishes the mstar-ai distribution and the alias packages under
+# packaging/aliases/ when a GitHub Release is published. Uses PyPI Trusted
+# Publishing (OIDC), so no API token or secret is needed. Each of the three
+# projects needs its own pending publisher on PyPI before its first upload
+# (project mstar-ai, mstar-project or mstar-serve, owner mstar-project, repo
+# mstar, workflow release.yml, environment pypi).
+#
+# PyPI allows only one pending publisher per configuration at a time and
+# activates it on first use, so the three projects have to be bootstrapped
+# one release run at a time: publish with the engine's pending publisher,
+# add the next alias's pending publisher, re-run the failed job, repeat.
+# Uploads skip files that already exist, so re-runs are safe.
+#
+# mstar-ai ships an sdist, a pure-Python wheel, and Linux wheels per CPython
+# version and architecture that also carry the mstar_rust extension (setup.py
+# compiles rust/ only under cibuildwheel). pip prefers the Linux wheel where
+# one matches and falls back to the pure one elsewhere, which then runs on the
+# Python transport and graph runtime.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "docs/**"
-      - "mstar/**"
-      - "pyproject.toml"
-      - ".github/workflows/docs.yml"
   workflow_dispatch:
 
-# Builds the Sphinx site and publishes it to this repo's own gh-pages branch,
-# served as a GitHub Pages project page at https://mstar-project.github.io/mstar/.
-# Uses the built-in GITHUB_TOKEN — no deploy key or PAT to own, rotate, or expire.
-permissions:
-  contents: write
-
 jobs:
-  build-and-publish:
+  wheels:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.2
+      # The licenses of the crates and vendored C/C++ compiled into the wheel,
+      # shipped in its dist-info/licenses (setuptools' default LICEN[CS]E*
+      # glob). Fails on any license rust/about.toml does not accept.
+      - name: Collect third-party licenses
+        run: >-
+          cargo about generate --locked -c rust/about.toml
+          -m rust/server/Cargo.toml rust/about.hbs -o LICENSES-THIRD-PARTY.txt
+      - uses: pypa/cibuildwheel@v4.2.1
+        env:
+          # Version-specific rather than abi3, matching the extension that
+          # `maturin develop` builds and the tests exercise.
+          CIBW_BUILD: "cp312-manylinux_* cp313-manylinux_* cp314-manylinux_*"
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none &&
+            cd {project} && $HOME/.cargo/bin/rustup toolchain install
+          CIBW_ENVIRONMENT_LINUX: PATH="$HOME/.cargo/bin:$PATH"
+        with:
+          output-dir: wheelhouse
+      - uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.12
+            3.13
+            3.14
+      # Outside the build container, with no dependencies installed: the
+      # extension imports, the frontend binary runs from the scripts directory
+      # find_server_binary looks in, and the licenses are in the metadata.
+      - name: Check each wheel in a clean venv
+        shell: python
+        run: |
+          import glob, re, subprocess, tempfile
+          check = (
+              "import importlib.metadata as md, mstar_rust, pathlib, subprocess, sysconfig\n"
+              "assert 'LICENSES-THIRD-PARTY.txt' in {f.name for f in md.files('mstar-ai')}\n"
+              "subprocess.run([pathlib.Path(sysconfig.get_path('scripts')) / 'mstar-server', '--help'], check=True)\n"
+          )
+          wheels = sorted(glob.glob("wheelhouse/*.whl"))
+          assert len(wheels) == 3, wheels
+          for whl in wheels:
+              py = "python3." + re.search(r"-cp3(\d+)-", whl).group(1)
+              venv = tempfile.mkdtemp()
+              subprocess.run([py, "-m", "venv", venv], check=True)
+              subprocess.run([f"{venv}/bin/pip", "install", "-q", "--no-deps", whl], check=True)
+              subprocess.run([f"{venv}/bin/python", "-c", check], check=True)
+              print("ok", whl)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  rust-transport:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
+      - name: Install the pinned Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            rust
+            rust/server
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-
-      - name: Install build dependencies
+      - name: Install libzmq
+        run: sudo apt-get update && sudo apt-get install -y libzmq3-dev
+      - name: Cargo tests (transport + arena semantics)
+        working-directory: rust
+        # Off with extension-module (see rust/Cargo.toml): the test binary is an
+        # executable, so it links libpython rather than resolving CPython
+        # symbols at import time. setup-python's interpreter is --enable-shared,
+        # so point the loader at its libdir for the run.
+        env:
+          LD_LIBRARY_PATH: ${{ env.pythonLocation }}/lib
+        run: cargo test --release --no-default-features
+      - run: cargo test --release --manifest-path rust/server/Cargo.toml
+      - name: Build the Rust frontend (mstar-server)
+        working-directory: rust/server
+        run: cargo build --release
+      - name: Build and install the extension
+        working-directory: rust
         run: |
-          python -m pip install --upgrade pip
-          # CPU-only torch: the API autosummary imports the package, and conf.py
-          # deliberately does not mock torch (PEP 604 annotations break under mocks).
-          pip install torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0 \
-            --index-url https://download.pytorch.org/whl/cpu
-          # Base install only; GPU-only model extras (flashinfer, transformers, ...)
-          # are not needed for the narrative docs. Modules that import them at module
-          # scope yield autosummary stub pages, which is acceptable for the first site.
-          pip install -e .
-          pip install -r docs/requirements.txt
+          python -m pip install --upgrade pip maturin
+          maturin build --release
+          pip install target/wheels/*.whl
+      - name: Interop tests (transport + arena + frontend)
+        env:
+          LD_LIBRARY_PATH: ${{ env.pythonLocation }}/lib
+        run: |
+          # pyyaml: the runtime tests reach mstar.model.base, which imports it;
+          # prometheus-client: the frontend's /metrics test renders a real registry;
+          # fastapi, uvicorn, python-multipart and httpx: the Rust/Python chat
+          # parity cases run the Python app through fastapi's TestClient
+          pip install pytest pyzmq msgpack numpy pyyaml prometheus-client \
+            fastapi uvicorn python-multipart httpx
+          # cpu torch + triton: the arena test imports the tensor-transport
+          # stack, which reaches mstar.utils.sampling (triton at module level)
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install triton
+          # the package itself, without its remaining (heavy) deps
+          pip install --no-deps -e .
+          # the row store needs the columnar tensor store; CPU Core skips most of it
+          pytest test/rust/ test/modular/test_row_output_store.py -v
 
-      - name: Build HTML
-        run: sphinx-build -b html docs docs/_build/html
-
-      - name: Publish to gh-pages
-        if: github.ref == 'refs/heads/main'
-        uses: peaceiris/actions-gh-pages@v4
+  two-dists:
+    needs: wheels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./docs/_build/html
-          publish_branch: gh-pages
-          commit_message: "docs: publish ${{ github.sha }}"
+          python-version: "3.12"
+      - run: rustup toolchain install
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-ubuntu-latest
+          path: wheelhouse
+      - name: Build the standalone mstar-rust wheel (maturin, as a checkout does)
+        run: pip install maturin && maturin build --release -m rust/Cargo.toml -i python3.12 -o mr
+      - name: Inspect the binaries
+        run: |
+          cd "$RUNNER_TEMP" && unzip -q -o "$GITHUB_WORKSPACE"/wheelhouse/*cp312*.whl -d w && find w -name 'mstar*' -type f | xargs ls -la
+          readelf -d w/*.data/scripts/mstar-server | grep NEEDED; readelf -d w/mstar_rust*.so | grep NEEDED
+          nm -D --defined-only w/*.data/scripts/mstar-server | grep -c ' Py' || true
+          ls w/*.dist-info/licenses
+      - name: Install both distributions, uninstall one
+        shell: python
+        run: |
+          import glob, subprocess, tempfile
+          ai = glob.glob("wheelhouse/*cp312*.whl")[0]
+          mr = glob.glob("mr/*.whl")[0]
+          def run(*a): return subprocess.run(a, check=True, capture_output=True, text=True).stdout
+          for first, second, drop in [(ai, mr, "mstar-ai"), (ai, mr, "mstar-rust"), (mr, ai, "mstar-ai"), (mr, ai, "mstar-rust")]:
+              v = tempfile.mkdtemp(); py = f"{v}/bin/python"
+              run("python", "-m", "venv", v)
+              for w in (first, second): run(f"{v}/bin/pip", "install", "-q", "--no-deps", w)
+              print("== install", first.split("/")[-1], "then", second.split("/")[-1])
+              for d in ("mstar-ai", "mstar-rust"):
+                  print(d, "owns", run(py, "-c", f"import importlib.metadata as m; print(sorted(str(f) for f in m.files('{d}') if 'mstar_rust' in str(f) or 'mstar-server' in str(f)))").strip())
+              print("import resolves to", run(py, "-c", "import mstar_rust; print(mstar_rust.__file__)").strip())
+              run(f"{v}/bin/pip", "uninstall", "-y", drop)
+              keep = "mstar-rust" if drop == "mstar-ai" else "mstar-ai"
+              missing = run(py, "-c", f"import importlib.metadata as m; print([str(f) for f in m.files('{keep}') if not f.locate().exists()])").strip()
+              r = subprocess.run([py, "-c", "import mstar_rust; print(mstar_rust.__file__)"], capture_output=True, text=True)
+              print(f"after uninstalling {drop}: {keep} missing files {missing}; import ->", r.stdout.strip() or r.stderr.strip().splitlines()[-1])
