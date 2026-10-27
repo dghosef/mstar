@@ -369,6 +369,22 @@ def test_batched_stop_check_agrees_with_the_per_request_one():
     }
 
 
+def test_a_stop_check_on_a_dropped_request_creates_no_state():
+    """A token budget counted in request state (``TokenStop.generated_key``) is
+    read, not created: the check can run after the request's state is dropped,
+    and a state made then would outlive the request."""
+    from types import SimpleNamespace
+
+    from mstar.model.canary.config import SAMPLER
+
+    node = _tiny_node()
+    node.token_stop = node.token_stop._replace(generated_key="generated")
+    info = SimpleNamespace(resource_configs={SAMPLER: SimpleNamespace(ignore_eos=False)},
+                           dynamic_loop_iter_counts={}, max_tokens=2)
+    assert node.check_stop("gone", info, {"new_token": [torch.tensor([7])]}) == set()
+    assert "gone" not in node.request_states
+
+
 def test_decoder_node_caps_captures_and_names(snapshot):
     """What the shared TokenStepNode gives the decoder node: prefill batches
     capped, decode bounded by its captures, the sampled token fed back, and

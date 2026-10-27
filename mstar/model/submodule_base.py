@@ -1097,9 +1097,10 @@ class ARNodeSubmodule(NodeSubmodule):
             if token in stop_ids and not info.resource_configs[stop.sampler].ignore_eos:
                 stops[rid] = {loop}
                 continue
+            # read, never create: the check can run after the state was dropped
             generated = (
                 info.dynamic_loop_iter_counts.get(loop, 0) + 1 if key is None
-                else int(self.request_state(rid).get(key, 0))
+                else int(self.request_states.get(rid, {}).get(key, 0))
             )
             if generated >= info.max_tokens:
                 stops[rid] = {loop}
