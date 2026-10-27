@@ -69,10 +69,9 @@ def test_batched_stop_check_agrees_with_the_per_request_one():
     }
     assert want == {"b": {"decode_loop"}, "c": {"decode_loop"}}
     rows = HostRows(("a", "b", "c", "d"), {"new_token": tokens})
-    assert sub.check_stop_batched(["d", "c", "b", "a"], infos, rows, step_walk="decode") == want
-    assert sub.check_stop_batched(list(infos), infos, rows, step_walk=None) == want
+    assert sub.check_stop_batched(["d", "c", "b", "a"], infos, rows) == want
     # only decode rows end the loop: not on a prefill step, stop token or budget alike
     prefill_step = {rid: _info(walk="prefill_audio", decoded=7) for rid in infos}
-    assert sub.check_stop_batched(list(prefill_step), prefill_step, rows, step_walk="prefill_audio") == {}
+    assert sub.check_stop_batched(list(prefill_step), prefill_step, rows) == {}
     prefill = {**infos, "b": _info(walk="prefill_audio")}
-    assert sub.check_stop_batched(list(prefill), prefill, rows, step_walk=None) == {"c": {"decode_loop"}}
+    assert sub.check_stop_batched(list(prefill), prefill, rows) == {"c": {"decode_loop"}}

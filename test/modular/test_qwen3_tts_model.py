@@ -1067,7 +1067,7 @@ def test_qwen3_tts_batched_stop_check_agrees_with_the_per_request_one():
     order = list(reversed(cases))
     codes = torch.tensor([cases[rid][0] for rid in order] + [eos])
     host_rows = HostRows(tuple(order), {"layer0_codes": codes})
-    assert submodule.check_stop_batched(list(cases), infos, host_rows, "talker_decode") == expected
+    assert submodule.check_stop_batched(list(cases), infos, host_rows) == expected
 
 
 def test_qwen3_tts_depth_loop_replays_only_on_a_step_that_leased_it():

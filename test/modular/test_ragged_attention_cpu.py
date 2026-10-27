@@ -204,6 +204,7 @@ def test_nodes_sharing_a_resource_must_agree_on_splitting_heads():
     with pytest.raises(ValueError, match="split its heads differently"):
         _load_heads("ragged", {"a": True, "b": False})
 
+
 def test_resource_info_built_without_head_shards_shards_over_its_group():
     """Built outside the engine (a reference test, the checkpoint validator),
     an ``EngineResourceInfo`` over a two-rank group gives one rank's heads."""
@@ -218,6 +219,7 @@ def test_resource_info_built_without_head_shards_shards_over_its_group():
         device=torch.device("cpu"), kv_dtype=torch.bfloat16, joint_comm_group=SimpleNamespace(world_size=2),
     ))
     assert mgr._kwargs["num_qo_heads"] == 2
+
 
 def test_a_dropped_manager_leaves_the_op_registry():
     """The custom op finds a manager by key; the registry must not keep one

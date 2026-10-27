@@ -113,4 +113,4 @@ def test_batched_stop_check_agrees_with_the_per_request_one():
     assert expected == {"eos": {"decode_loop"}, "budget": {"decode_loop"}}
     order = list(reversed(cases))
     rows = HostRows(tuple(order), {"new_token": torch.tensor([cases[r][0] for r in order] + [eos])})
-    assert sub.check_stop_batched(list(cases), infos, rows, "decode") == expected
+    assert sub.check_stop_batched(list(cases), infos, rows) == expected

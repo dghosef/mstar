@@ -1058,14 +1058,12 @@ class NodeSubmodule(torch.nn.Module, ABC):
         self, request_ids: list[str],
         request_infos: dict[str, CurrentForwardPassInfo],
         host_rows: HostRows,
-        step_walk: str | None = None,
     ) -> dict[str, set[str]] | None:
         """``check_stop`` for the whole batch at once, off the host rows.
 
         Optional. Returns rid -> loops to stop (rids with none left out), and
         must agree with ``check_stop`` for every rid. None, or a raise, falls
-        back to the per-request path. ``step_walk`` is the walk every row ran,
-        or None when the step mixes walks (each row's is on its info).
+        back to the per-request path.
         """
         return None
 
@@ -1137,11 +1135,10 @@ class ARNodeSubmodule(NodeSubmodule):
         self, request_ids: list[str],
         request_infos: dict[str, CurrentForwardPassInfo],
         host_rows: HostRows,
-        step_walk: str | None = None,
     ) -> dict[str, set[str]] | None:
         stop = self.token_stop
         if stop is None:
-            return super().check_stop_batched(request_ids, request_infos, host_rows, step_walk)
+            return super().check_stop_batched(request_ids, request_infos, host_rows)
         pairs = host_rows.first_values(stop.buffer, request_ids)
         if pairs is None:
             return None
