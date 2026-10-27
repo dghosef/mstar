@@ -27,7 +27,7 @@ from mstar.communication.tensors import (
     TensorCommunicationManager,
 )
 from mstar.graph.base import GraphEdge, GraphNode, TensorPointerInfo
-from mstar.graph.runtime.base import FreedTensors, RouteOutput, SendInput
+from mstar.graph.runtime.base import FreedTensors, PhasedPostprocess, RouteOutput, SendInput
 from mstar.graph.special_destinations import EMIT_TO_CLIENT
 from mstar.model.submodule_base import BatchedModelOutput
 from mstar.utils.containers import ParallelList
@@ -43,6 +43,10 @@ class _Communicator(BaseCommunicator):
 
     def get_all_new_messages(self):
         return []
+
+
+class _StubRuntime(SimpleNamespace, PhasedPostprocess):
+    """Stubbed phase methods under the reference begin / resume."""
 
 
 class _Engine:
@@ -120,6 +124,7 @@ def test_the_worker_fails_only_the_refused_request():
         r7 = _store(mgr, 7, mine, bad)
         r8 = _store(mgr, 8, theirs)
         worker = Worker.__new__(Worker)
+        worker._stop_token_signal = {}  # no declared stop policies: check_stop decides
         worker.streams = StreamBufferManager(SimpleNamespace(per_request_info={}), None, [])  # no streams
         worker.tensor_manager = mgr
         worker.scheduler = SimpleNamespace(failed_rids=set())
@@ -170,6 +175,7 @@ def _postprocess_worker(refuse, follower=False):
     graph runtime and transfer engine faked around it. The transfer engine
     refuses every tensor of the rids in ``refuse``, step after step."""
     w = Worker.__new__(Worker)
+    w._stop_token_signal = {}  # no declared stop policies: check_stop decides
     w.streams = StreamBufferManager(SimpleNamespace(per_request_info={}), None, [])  # no streams
     w._phase_period = 0
     w.enable_nvtx = w.enable_prof = False
@@ -206,6 +212,7 @@ def _postprocess_worker(refuse, follower=False):
         materialize_publish=lambda *a: None,
         # like the engine's, reads each stopped rid's info
         finalize_stopped_requests=lambda nb, rids: [nb.per_request_info[r] for r in rids],
+        step_finished=lambda batch, outputs, **kwargs: None,
     )
     w.engine_manager = SimpleNamespace(get_engine=lambda node: engine)
 
@@ -245,7 +252,7 @@ def _postprocess_worker(refuse, follower=False):
         )
         return []
 
-    w._graph_runtime = SimpleNamespace(
+    w._graph_runtime = _StubRuntime(
         cleanup_consumed_inputs=lambda *a: FreedTensors.none(),
         clear_pending_loop_stops=lambda: None,
         stop_loops_batched=lambda **kw: list(kw["loop_names"].keys),
@@ -456,6 +463,7 @@ def test_remove_request_finishes_when_an_unregister_fails(monkeypatch, rust):
     assert mgr.transfer_engine.unregister_memory(t.data_ptr()) == 0
     released = []
     w = Worker.__new__(Worker)
+    w._stop_token_signal = {}  # no declared stop policies: check_stop decides
     w.streams = StreamBufferManager(SimpleNamespace(per_request_info={}), None, [])  # no streams
     w.is_tp_follower = False
     w._rid = lambda wire: 3
