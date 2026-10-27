@@ -431,6 +431,10 @@ class Model(ABC):
     # default of one per core; ``preprocess_torch_threads`` in the model's
     # config.yaml overrides either. See ``entrypoint._set_preprocess_threads``.
     PREPROCESS_TORCH_THREADS: int | None = None
+    # GIL switch interval of the API server process, in seconds; None keeps
+    # Python's 5 ms, and ``api_switch_interval_s`` in the config overrides
+    # either. See ``entrypoint._set_switch_interval``.
+    API_SWITCH_INTERVAL_S: float | None = None
 
     def _get_worker_graphs_for_graph_walk(
         self,

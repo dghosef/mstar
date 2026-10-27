@@ -301,12 +301,14 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
        rendezvouses. Default 512.
    * - ``api_switch_interval_s``
      - *(optional)* GIL switch interval of the API server process, in seconds
-       (``sys.setswitchinterval``); unset keeps Python's 5 ms. Under streaming load
+       (``sys.setswitchinterval``); unset keeps the model's default
+       (``Model.API_SWITCH_INTERVAL_S``: ``0.001`` for Qwen3.5, Python's 5 ms
+       otherwise). Under streaming load
        that process keeps three threads busy (event loop, message thread, data
        worker), and a shorter interval hands the GIL between them sooner:
        ``0.001`` gave Qwen3.5-0.8B text, c=64, +4 to +8% tok/s. A
        model whose preprocessing runs long on the data-worker thread can lose from
-       it (Kokoro's G2P: about -3.6% at c=32), so it is per deployment.
+       it (Kokoro's G2P: about -3.6% at c=32), so it is per model.
    * - ``tp_async_sched``
      - *(optional)* Async scheduling for the parallel nodes: ``true``, ``false``
        (default) or a list of node names (see ``MSTAR_TP_ASYNC_SCHED``, which
