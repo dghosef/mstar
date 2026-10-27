@@ -365,9 +365,10 @@ class ThinkerSubmodule(ARNodeSubmodule):
       - prefill_vision: splice vision embeddings, extend KV cache
       - thinker_decode: embed previous token, single-step decode
 
-    All walks produce ``thinker_states`` (layer-0 + layer-N concat) that
-    stream to the Talker partition.  ``thinker_decode`` additionally
-    produces ``logits`` for text token sampling.
+    All walks produce ``thinker_states`` that stream to the Talker partition:
+    the layer-0 + layer-N concat at prefill (postprocess picks per token), the
+    layer-0 row at decode, whose token is text.  ``thinker_decode``
+    additionally produces ``logits`` for text token sampling.
     """
 
     # Default MRoPE section for head_dim=128: [24, 20, 20]
@@ -843,7 +844,12 @@ class ThinkerSubmodule(ARNodeSubmodule):
         # Pack thinker_states for Talker conditioning ONLY when audio output
         # is requested.  For text-only requests we skip this entirely to
         # avoid sending hidden states the Talker will never consume.
-        if audio_output:
+        if audio_output and graph_walk == "thinker_decode":
+            # a decode token is text: its layer-0 row and ``[False]``, fresh
+            # each step, as ``forward_batched`` emits them
+            result["thinker_states"] = [layer_0_embed]
+            result["thinker_mask"] = [torch.zeros(1, dtype=torch.bool, device=hidden.device)]
+        elif audio_output:
             # Concatenate layer-0 embeddings and layer-N hidden states along
             # last dim -> (tokens, 2 * hidden_size)
             if layer_n_hidden is not None:
@@ -857,13 +863,8 @@ class ThinkerSubmodule(ARNodeSubmodule):
                     [layer_0_embed, layer_0_embed], dim=-1,
                 )
             result["thinker_states"] = [thinker_states]
-            if graph_walk == "thinker_decode":
-                # a decode token is text: ``[False]``, fresh each step (see
-                # ``forward_batched``)
-                result["thinker_mask"] = [torch.zeros(1, dtype=torch.bool, device=hidden.device)]
-            else:
-                result["thinker_mask"] = [next(iter(masks_for_talker.values()))] \
-                    if masks_for_talker else []
+            result["thinker_mask"] = [next(iter(masks_for_talker.values()))] \
+                if masks_for_talker else []
         return result
 
     # ---- batching ----
@@ -1052,23 +1053,15 @@ class ThinkerSubmodule(ARNodeSubmodule):
         logits = self.model.lm_head(hidden)  # (batch, vocab)
         new_tokens = sampler.sample(request_ids, logits)
 
-        if layer_n_hidden is not None:
-            thinker_states = torch.cat(
-                [layer_0_embed, layer_n_hidden], dim=-1,
-            )
-        else:
-            thinker_states = torch.cat(
-                [layer_0_embed, layer_0_embed], dim=-1,
-            )
-
         # Row i is request i: one clone per output and one host copy of the
-        # tokens per step. A decode token is text, so its Talker mask is
-        # ``[False]``; a row view of the step's clone, never one tensor shared
-        # by every row, which the RDMA/TCP store would register once per row
-        # at the same address.
+        # tokens per step. A decode token is text, so the Talker takes its
+        # layer-0 row as is and its Talker mask is ``[False]``; a row view of
+        # the step's clone, never one tensor shared by every row, which the
+        # RDMA/TCP store would register once per row at the same address.
+        # postprocess leaves both rows as they are, for the row-output store.
         return BatchedModelOutput(
             row_outputs={
-                "thinker_states": thinker_states,
+                "thinker_states": layer_0_embed,
                 "new_token": new_tokens,
                 "thinker_mask": torch.zeros_like(new_tokens, dtype=torch.bool),
             },
@@ -1110,11 +1103,14 @@ class ThinkerSubmodule(ARNodeSubmodule):
             if info is not None and not info.step_metadata.get("audio_output", True):
                 continue
 
-            ts_slice = packed_states[slice_start:slice_end].clone()
-            rid_out: dict[str, list[torch.Tensor]] = {
-                "thinker_states": [ts_slice],
-            }
+            ts_slice = packed_states[slice_start:slice_end]
             mask = inputs[i].tensor_inputs.get("masks_for_talker")
+            if inputs[i].graph_walk == "thinker_decode":
+                # a decode token is text: its layer-0 half, as forward_batched emits it
+                ts_slice = ts_slice[..., :self.config.thinker_hidden_size]
+            rid_out: dict[str, list[torch.Tensor]] = {
+                "thinker_states": [ts_slice.clone()],
+            }
             if inputs[i].graph_walk == "thinker_decode":
                 rid_out["thinker_mask"] = [decode_masks[i:i + 1]]
             elif mask is not None:
@@ -1145,14 +1141,10 @@ class ThinkerSubmodule(ARNodeSubmodule):
             # shipping both hidden states for every token.
             ts_list = outputs.get("thinker_states")
             mask_list = outputs.get("thinker_mask")
-            if ts_list and request_info.graph_walk == "thinker_decode":
-                # A decode token is text the Talker keeps, so it is layer 0
-                # as is, and its 1D mask is already a row of its own. The
-                # boolean indexing below would sync the host on every row of
-                # every decode step.
-                thinker_hidden = self.config.thinker_hidden_size
-                outputs["thinker_states"] = [ts_list[0][..., :thinker_hidden]]
-            elif ts_list and mask_list:
+            # A decode token is text the Talker keeps: its row is layer 0
+            # already and its 1D mask a row of its own. The boolean indexing
+            # below would sync the host on every row of every decode step.
+            if ts_list and mask_list and request_info.graph_walk != "thinker_decode":
                 ts = ts_list[0]                # (seq_len, 2*hidden)
                 mask = mask_list[0]            # (2, seq_len)
                 thinker_hidden = self.config.thinker_hidden_size
@@ -1198,7 +1190,6 @@ class TalkerSubmodule(ARNodeSubmodule):
         # Pre-computed TTS special inputs.
         self._tts_pad_embed_cached: torch.Tensor | None = None
         self._tts_bos_embed_cached: torch.Tensor | None = None
-        self._tts_eos_embed_cached: torch.Tensor | None = None
         # The same pad/eos before ``text_projection``: a decode step projects
         # its rows' text inputs in the captured forward, so these stand in
         # for the Thinker state once the Thinker has finished.
@@ -1276,7 +1267,6 @@ class TalkerSubmodule(ARNodeSubmodule):
             self._tts_pad_raw, self._tts_eos_raw = pad_raw, eos_raw
             self._tts_pad_embed_cached = self.model.text_projection(pad_raw).squeeze(0)
             self._tts_bos_embed_cached = self.model.text_projection(bos_raw).squeeze(0)
-            self._tts_eos_embed_cached = self.model.text_projection(eos_raw).squeeze(0)
 
         logger.info(
             "TalkerSubmodule: pre-computed TTS special embeddings via "

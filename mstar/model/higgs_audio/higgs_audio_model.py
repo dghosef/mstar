@@ -52,7 +52,7 @@ from mstar.graph.special_destinations import EMIT_TO_CLIENT
 from mstar.model.base import ForwardPassArgs, KVLabel, LabelLayout, Model, ProcessPromptOutput, Span
 from mstar.model.higgs_audio.config import (
     ATTN,
-    AUDIO_VALID_LENGTHS_KEY,
+    AUDIO_FEATURE_LENS_KEY,
     KV_CACHE,
     ROPE,
     SAMPLER,
@@ -81,7 +81,7 @@ def _resolve_local_hf_snapshot(repo_id: str, cache_dir: str | None = None) -> st
 class HiggsAudioModel(Model):
     """Higgs-Audio STT: audio_tower + projector + dense Qwen3 LLM."""
 
-    INTERNAL_KWARGS = (AUDIO_VALID_LENGTHS_KEY,)
+    INTERNAL_KWARGS = (AUDIO_FEATURE_LENS_KEY,)
 
     # The reference pipeline extracts mel features with the
     # whisper-large-v3 processor (not from the higgs checkpoint).
@@ -245,45 +245,6 @@ class HiggsAudioModel(Model):
     # Model ABC: forward pass args
     # -------------------------------------------------------------------
 
-    def _build_prefill_schedule(
-        self,
-        input_signals: dict[str, list[TensorPointerInfo]],
-    ) -> list[tuple[str, dict[str, TensorPointerInfo]]]:
-        """One ``prefill_audio`` step: the ChatML text before the audio, the
-        audio embeddings and the text after it, prefilled as one span.
-
-        ``process_prompt`` emits two ``text_inputs`` tensors (the ChatML
-        prompt split at the audio splice point) plus the per-chunk mel
-        features.
-        """
-        texts = input_signals.get("text_inputs", [])
-        audio_features = input_signals.get("audio_features", [])
-        if len(texts) != 2 or not audio_features:
-            raise ValueError(
-                "Higgs-Audio expects the prompt split around one audio input; got "
-                f"{len(texts)} text spans and {len(audio_features)} audio inputs."
-            )
-        return [("prefill_audio", {
-            "text_pre": texts[0],
-            "audio_features": audio_features[0],
-            "text_post": texts[1],
-        })]
-
-    def _prefill_inputs(
-        self, metadata: CurrentForwardConductorMetadata,
-    ) -> list[GraphEdge]:
-        schedule = metadata.kwargs["prefill_schedule"]
-        step = metadata.kwargs["prefill_step"]
-        _, tensor_dict = schedule[step]
-
-        edges: list[GraphEdge] = []
-        for input_name, tensor_info in tensor_dict.items():
-            target_node = "audio_encoder" if input_name.startswith("audio_") else "LLM"
-            edge = GraphEdge(next_node=target_node, name=input_name)
-            edge.tensor_info = [tensor_info]
-            edges.append(edge)
-        return edges
-
     def get_initial_forward_pass_args(
         self,
         partition_name: str,
@@ -292,32 +253,41 @@ class HiggsAudioModel(Model):
         input_signals: dict[str, list[TensorPointerInfo]],
         model_kwargs: dict | None = None,
     ) -> ForwardPassArgs:
-        schedule = self._build_prefill_schedule(input_signals)
-        if not schedule:
-            raise ValueError("Higgs-Audio request has no prefill inputs.")
-
-        full_metadata = CurrentForwardConductorMetadata(
-            input_modalities=input_modalities,
-            output_modalities=output_modalities,
-            graph_walk=schedule[0][0],
-            is_prefill=True,
-            kwargs={
-                "prefill_schedule": schedule,
-                "prefill_step": 0,
-            },
-        )
-
-        inputs = self._prefill_inputs(full_metadata)
-        unpersist_tensors = sum([inp.tensor_info for inp in inputs], start=[])
+        """One ``prefill_audio`` step: the ChatML text before the audio, the
+        audio's mel features (to the encoder) and the text after it, prefilled
+        as one span. ``process_prompt`` emits the two ``text_inputs`` (the
+        prompt split at the audio splice point) and the per-chunk features."""
+        texts = input_signals.get("text_inputs", [])
+        audio_features = input_signals.get("audio_features", [])
+        if len(texts) != 2 or not audio_features:
+            raise ValueError(
+                "Higgs-Audio expects the prompt split around one audio input; got "
+                f"{len(texts)} text spans and {len(audio_features)} audio inputs."
+            )
+        inputs = []
+        for name, node, tensor_info in (
+            ("text_pre", "LLM", texts[0]),
+            ("audio_features", "audio_encoder", audio_features[0]),
+            ("text_post", "LLM", texts[1]),
+        ):
+            edge = GraphEdge(next_node=node, name=name)
+            edge.tensor_info = [tensor_info]
+            inputs.append(edge)
 
         return ForwardPassArgs(
-            full_metadata=full_metadata,
+            full_metadata=CurrentForwardConductorMetadata(
+                input_modalities=input_modalities,
+                output_modalities=output_modalities,
+                graph_walk="prefill_audio",
+                is_prefill=True,
+            ),
             inputs=inputs,
-            unpersist_tensors=unpersist_tensors,
+            unpersist_tensors=sum([inp.tensor_info for inp in inputs], start=[]),
             step_metadata={
                 "is_prefill": True,
-                "is_last_prefill": len(schedule) == 1,
-                AUDIO_VALID_LENGTHS_KEY: (model_kwargs or {}).get(AUDIO_VALID_LENGTHS_KEY),
+                # the only prefill step: its token is the first one decoded
+                "is_last_prefill": True,
+                AUDIO_FEATURE_LENS_KEY: (model_kwargs or {}).get(AUDIO_FEATURE_LENS_KEY),
             },
         )
 
@@ -328,28 +298,10 @@ class HiggsAudioModel(Model):
         persist_signals: dict[str, list[TensorPointerInfo]],
         incoming_connections: list[StreamingConnectionState] | None = None,
     ) -> ForwardPassArgs:
-        """Single-partition state machine: prefill schedule -> decode -> done."""
+        """Single-partition state machine: prefill -> decode -> done."""
         metadata = partition_metadata
 
         if metadata.is_prefill:
-            step = metadata.kwargs["prefill_step"] + 1
-            schedule = metadata.kwargs["prefill_schedule"]
-            if step < len(schedule):
-                metadata.kwargs["prefill_step"] = step
-                metadata.graph_walk = schedule[step][0]
-                inputs = self._prefill_inputs(metadata)
-                unpersist_tensors = sum(
-                    [inp.tensor_info for inp in inputs], start=[]
-                )
-                return ForwardPassArgs(
-                    full_metadata=metadata,
-                    inputs=inputs,
-                    unpersist_tensors=unpersist_tensors,
-                    step_metadata={
-                        "is_prefill": True,
-                        "is_last_prefill": step == len(schedule) - 1,
-                    },
-                )
             metadata.is_prefill = False
             metadata.graph_walk = "decode"
         elif metadata.graph_walk == "decode":
@@ -438,8 +390,8 @@ class HiggsAudioModel(Model):
         if not kwargs.get("enable_thinking", False):
             post_ids += enc("<think>\n\n</think>\n\n")
 
-        valid_lengths = [self.config.encoder_output_length(int(n)) for n in audio_feature_lens.tolist()]
-        audio = sum(valid_lengths)
+        feature_lens = audio_feature_lens.tolist()
+        audio = sum(self.config.encoder_output_length(n) for n in feature_lens)
         # One step writes the text around the audio and the audio together, so
         # one span; it mixes text and audio, so nothing keys it.
         prompt = len(pre_ids) + audio + len(post_ids)
@@ -453,7 +405,7 @@ class HiggsAudioModel(Model):
                 torch.tensor(post_ids, dtype=torch.long),
             ],
             "audio_features": [audio_features],
-        }, {"kv_layout": {KV_CACHE: {"main": layout}}, AUDIO_VALID_LENGTHS_KEY: valid_lengths})
+        }, {"kv_layout": {KV_CACHE: {"main": layout}}, AUDIO_FEATURE_LENS_KEY: feature_lens})
 
     # -------------------------------------------------------------------
     # Model ABC: postprocess

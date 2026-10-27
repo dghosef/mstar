@@ -273,14 +273,17 @@ def run_both(model, processor, layout: str):
     return parts, out, ref
 
 
-def rebuild_ids(model, parts, tensors, groups) -> torch.Tensor:
+def rebuild_ids(model, parts, out, groups) -> torch.Tensor:
     """The full prompt from mstar's pieces: text spans, and each span's
     sentinels around one pad per merged token, as transformers writes it."""
+    from mstar.model.qwen3_5.qwen3_5_model import IMAGE_GRIDS_KEY, VIDEO_GRIDS_KEY
+
     specs = model._placeholder_specs()
     merge = model.vision_config.spatial_merge_size ** 2
     owners = group_owners(groups)
-    texts = iter(tensors["text_inputs"])
-    image_grids = iter(tensors.get("image_grid_thw", []))
+    texts = iter(out.new_input_tensors["text_inputs"])
+    image_grids = iter(out.metadata[IMAGE_GRIDS_KEY])
+    video_grids = out.metadata[VIDEO_GRIDS_KEY]
     out = []
     for step in prefill_plan(expand_video_parts(parts, groups)):
         if step.modality == TEXT:
@@ -288,10 +291,11 @@ def rebuild_ids(model, parts, tensors, groups) -> torch.Tensor:
             continue
         start, pad, end = specs[step.modality]
         if step.modality == VIDEO:
-            _, h, w = tensors["video_grid_thw"][owners[step.index]].tolist()
+            _, h, w = video_grids[owners[step.index]]
             n = h * w // merge
         else:
-            n = int(next(image_grids).prod()) // merge
+            t, h, w = next(image_grids)
+            n = t * h * w // merge
         out.append(torch.tensor([start] + [pad] * n + [end]))
     return torch.cat(out)
 
@@ -355,20 +359,24 @@ def normalized(model, patches: torch.Tensor) -> torch.Tensor:
 @needs_new_layout
 @pytest.mark.parametrize("layout", list(LAYOUTS))
 def test_prompt_ids_match_processor(model, processor, layout):
+    from mstar.model.qwen3_5.qwen3_5_model import VIDEO_GRIDS_KEY
+
     parts, out, ref = run_both(model, processor, layout)
-    tensors, groups = out.new_input_tensors, out.metadata["video_groups"]
-    assert groups == [int(g[0]) for g in tensors.get("video_grid_thw", [])]
-    assert torch.equal(rebuild_ids(model, parts, tensors, groups), ref["input_ids"][0])
+    groups = out.metadata["video_groups"]
+    assert groups == [g[0] for g in out.metadata[VIDEO_GRIDS_KEY]]
+    assert torch.equal(rebuild_ids(model, parts, out, groups), ref["input_ids"][0])
 
 
 @pytest.mark.parametrize("layout", list(LAYOUTS))
 def test_patches_and_grids_match_processor(model, processor, layout):
+    from mstar.model.qwen3_5.qwen3_5_model import IMAGE_GRIDS_KEY, VIDEO_GRIDS_KEY
+
     _, out, ref = run_both(model, processor, layout)
     tensors = out.new_input_tensors
-    assert torch.equal(torch.stack(tensors["video_grid_thw"]), ref["video_grid_thw"])
+    assert torch.equal(torch.tensor(out.metadata[VIDEO_GRIDS_KEY]), ref["video_grid_thw"])
     assert torch.equal(normalized(model, torch.cat(tensors["pixel_values_videos"])), ref["pixel_values_videos"])
-    if "image_grid_thw" in tensors:
-        assert torch.equal(torch.stack(tensors["image_grid_thw"]), ref["image_grid_thw"])
+    if out.metadata[IMAGE_GRIDS_KEY]:
+        assert torch.equal(torch.tensor(out.metadata[IMAGE_GRIDS_KEY]), ref["image_grid_thw"])
         assert torch.equal(normalized(model, torch.cat(tensors["pixel_values"])), ref["pixel_values"])
     # the raw frames are not kept past preprocessing
     assert tensors["video_inputs"] == []
@@ -427,10 +435,8 @@ def test_vision_walk_matches_get_rope_index(model, processor, rope_model, layout
 
     merge = model.vision_config.spatial_merge_size ** 2
     marks = [
-        torch.full((int(g.prod()) // merge, 1), VIDEO_MARK if by_id[id(p)] < 0 else IMAGE_MARK)
-        for g, p in zip(
-            step.input_tensors["image_grid_thw"], step.input_tensors["pixel_values"], strict=True,
-        )
+        torch.full((t * h * w // merge, 1), VIDEO_MARK if by_id[id(p)] < 0 else IMAGE_MARK)
+        for (t, h, w), p in zip(step.image_grids, step.input_tensors["pixel_values"], strict=True)
     ]
     llm = LLMSubmodule(_Embed(len(model.tokenizer)), model.config, model.vision_config)
     llm.node_resources = {ROPE: SimpleNamespace(position=lambda rid, label: 0)}
@@ -439,7 +445,6 @@ def test_vision_walk_matches_get_rope_index(model, processor, rope_model, layout
     )
     row = llm._vision_inputs(fwd_info, {
         "text_inputs": step.input_tensors["text_inputs"],
-        "image_grid_thw": step.input_tensors["image_grid_thw"],
         "vision_embeds": [torch.cat(marks)],
     })
 
@@ -478,15 +483,17 @@ def test_mp4_matches_processor(model, processor, tmp_path):
             container.mux(stream.encode(av.VideoFrame.from_ndarray(frame, format="rgb24")))
         container.mux(stream.encode())
 
+    from mstar.model.qwen3_5.qwen3_5_model import VIDEO_GRIDS_KEY
+
     loaded = model.load_video(str(path), "cpu")
     out = model.process_prompt(
         "What happens?", ["video", "text"], ["text"],
         tensors={"video_inputs": [loaded.data]},
         input_metadata={"video_inputs": [loaded.metadata]},
-    ).new_input_tensors
+    )
     ref = processor.video_processor(videos=[str(path)], return_tensors="pt")
-    assert torch.equal(out["video_grid_thw"][0], ref["video_grid_thw"][0])
-    assert torch.equal(normalized(model, out["pixel_values_videos"][0]), ref["pixel_values_videos"])
+    assert torch.equal(torch.tensor(out.metadata[VIDEO_GRIDS_KEY][0]), ref["video_grid_thw"][0])
+    assert torch.equal(normalized(model, out.new_input_tensors["pixel_values_videos"][0]), ref["pixel_values_videos"])
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +504,7 @@ def test_mp4_matches_processor(model, processor, tmp_path):
 def test_more_frame_groups_than_a_replay_holds_is_accepted(model):
     """Many tiny frame groups fit the top patch bucket but overflow a replay's
     segment ceiling; the encoder runs them eagerly, so intake takes them."""
+    from mstar.model.qwen3_5.qwen3_5_model import VIDEO_GRIDS_KEY
     from mstar.model.qwen3_5.submodules import VisionEncoderSubmodule
 
     (spec,) = model._vision_resources()
@@ -509,9 +517,9 @@ def test_more_frame_groups_than_a_replay_holds_is_accepted(model):
         tensors={"video_inputs": [frames]},
         input_metadata={"video_inputs": [metadata]},
     )
-    (grid,) = out.new_input_tensors["video_grid_thw"]
-    assert int(grid[0]) > limit
-    assert int(grid.prod()) <= VisionEncoderSubmodule.BLOCK_LOOP_PATCH_BUCKETS[-1]
+    (grid,) = out.metadata[VIDEO_GRIDS_KEY]
+    assert grid[0] > limit
+    assert grid[0] * grid[1] * grid[2] <= VisionEncoderSubmodule.BLOCK_LOOP_PATCH_BUCKETS[-1]
 
 
 def _encoder(max_segments: int):

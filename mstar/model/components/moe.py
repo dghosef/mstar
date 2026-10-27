@@ -292,7 +292,6 @@ class SparseMoeBlock(nn.Module):
         moe_intermediate_size: int,
         norm_topk_prob: bool = True,
         router: nn.Module | None = None,
-        fused_softmax_topk: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -305,7 +304,6 @@ class SparseMoeBlock(nn.Module):
             num_experts=num_experts,
             num_experts_per_tok=num_experts_per_tok,
             norm_topk_prob=norm_topk_prob,
-            fused_softmax_topk=fused_softmax_topk,
         )
         self.experts = nn.Module()
         self.experts.gate_up_proj = nn.Parameter(
@@ -355,7 +353,6 @@ class SparseMoeBlockWithSharedExpert(nn.Module):
         shared_expert: nn.Module,
         norm_topk_prob: bool = False,
         router: nn.Module | None = None,
-        fused_softmax_topk: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -368,7 +365,6 @@ class SparseMoeBlockWithSharedExpert(nn.Module):
             num_experts=num_experts,
             num_experts_per_tok=num_experts_per_tok,
             norm_topk_prob=norm_topk_prob,
-            fused_softmax_topk=fused_softmax_topk,
         )
         self.experts = nn.Module()
         self.experts.gate_up_proj = nn.Parameter(
@@ -469,7 +465,6 @@ class ParallelSparseMoeBlock(nn.Module):
         norm_topk_prob: bool = True,
         router: nn.Module | None = None,
         comm_group: CommGroup | None = None,
-        fused_softmax_topk: bool = False,
     ) -> None:
         super().__init__()
         if comm_group is None:
@@ -488,7 +483,6 @@ class ParallelSparseMoeBlock(nn.Module):
             num_experts=num_experts,
             num_experts_per_tok=num_experts_per_tok,
             norm_topk_prob=norm_topk_prob,
-            fused_softmax_topk=fused_softmax_topk,
         )
 
         shard_inter = divide(moe_intermediate_size, tp_size)
@@ -587,7 +581,6 @@ class ParallelSparseMoeBlockWithSharedExpert(nn.Module):
         norm_topk_prob: bool = False,
         router: nn.Module | None = None,
         comm_group: CommGroup | None = None,
-        fused_softmax_topk: bool = False,
     ) -> None:
         super().__init__()
         if comm_group is None:
@@ -606,7 +599,6 @@ class ParallelSparseMoeBlockWithSharedExpert(nn.Module):
             num_experts=num_experts,
             num_experts_per_tok=num_experts_per_tok,
             norm_topk_prob=norm_topk_prob,
-            fused_softmax_topk=fused_softmax_topk,
         )
 
         shard_inter = divide(moe_intermediate_size, tp_size)
@@ -765,7 +757,6 @@ class ExpertParallelSparseMoeBlock(nn.Module):
         router: nn.Module | None = None,
         comm_group: CommGroup | None = None,
         track_expert_load: bool = False,
-        fused_softmax_topk: bool = False,
     ) -> None:
         super().__init__()
         if comm_group is None:
@@ -790,7 +781,6 @@ class ExpertParallelSparseMoeBlock(nn.Module):
             num_experts=num_experts,
             num_experts_per_tok=num_experts_per_tok,
             norm_topk_prob=norm_topk_prob,
-            fused_softmax_topk=fused_softmax_topk,
         )
 
         self.experts = nn.Module()

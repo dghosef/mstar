@@ -16,10 +16,11 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from mstar.model.components.masking import length_mask
 from mstar.model.kokoro.components.albert import PLBert
 from mstar.model.kokoro.components.decoder import Decoder
 from mstar.model.kokoro.components.lstm import MaskedBiLSTM
-from mstar.model.kokoro.components.masking import length_mask, mask_channels, mask_features
+from mstar.model.kokoro.components.masking import mask_channels, mask_features
 from mstar.model.kokoro.components.prosody import ProsodyPredictor, TextEncoder
 from mstar.model.kokoro.config import KokoroModelConfig
 

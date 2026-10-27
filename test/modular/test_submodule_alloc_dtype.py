@@ -56,8 +56,8 @@ def test_to_on_meta_is_in_place_and_zero_alloc():
 
 
 def test_submodule_device_follows_materialisation():
-    """``NodeSubmodule.get_device`` is cached by a move, which updates it, and a
-    compiled forward that asks for it doesn't recompile on its second call."""
+    """``NodeSubmodule.get_device`` follows a move, and a compiled forward that
+    asks for it doesn't recompile on its second call."""
     from torch._dynamo.utils import counters
 
     from mstar.model.submodule_base import NodeSubmodule

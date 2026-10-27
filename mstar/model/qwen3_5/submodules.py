@@ -82,8 +82,8 @@ logger = logging.getLogger(__name__)
 
 def _host_grids(fwd_info: CurrentForwardPassInfo) -> list[tuple[int, int, int]]:
     """Each image's or video's (t, h, w), off the step metadata the conductor
-    filled from `process_prompt`; reading `image_grid_thw` back from the
-    device instead would block the host on every kernel queued ahead of it."""
+    filled from `process_prompt`: host ints, so sizing a span never waits on
+    the device."""
     return [(int(t), int(h), int(w)) for t, h, w in fwd_info.step_metadata[STEP_GRIDS_KEY]]
 
 
@@ -411,18 +411,22 @@ class LLMSubmodule(ARNodeSubmodule):
             # last sampled token, read by slot (padding rows read slot 0)
             sampler: SamplerResource = engine_inputs.resources[SAMPLER]
             t0 = perf_counter() if PHASE_PERIOD else 0.0
-            if graph_walk == "decode":
-                # rows whose last step ran elsewhere brought their token
-                ids = sampler.loopback_input_ids(engine_inputs.request_ids, inputs)
-            else:
+            ids = sampler.loopback_tokens(engine_inputs.request_ids)
+            # rows whose last step ran elsewhere brought their token
+            routed = [
+                i for i, inp in enumerate(inputs)
+                if inp.input_ids is not None and inp.input_seq_len
+            ]
+            if graph_walk != "decode":
                 # a mixed step packs its decode rows' single tokens beside the
                 # prompts: each row takes its own ids, or its loop-back token
-                ids = sampler.loopback_tokens(engine_inputs.request_ids)
                 ids = torch.cat([
                     inp.input_ids.to(ids.dtype) if inp.input_ids is not None
                     else ids[i:i + 1]
                     for i, inp in enumerate(inputs)
                 ])
+            elif routed:
+                sampler.overwrite_rows(routed, (ids, torch.cat([inputs[i].input_ids for i in routed])))
             out["input_ids"] = ids
             if PHASE_PERIOD:
                 phase_record("engine.preprocess.loopback", perf_counter() - t0)

@@ -319,7 +319,7 @@ def test_shards_head_counts_at_build():
     )
     mgr = build_resource(
         spec,
-        EngineResourceInfo(device=DEVICE, kv_dtype=DTYPE, joint_comm_group=_Group()),
+        EngineResourceInfo(device=DEVICE, kv_dtype=DTYPE, joint_comm_group=_Group(), head_shards=2),
     )
     assert mgr._kwargs["num_qo_heads"] == HEADS // 2
     # head_dim never shards

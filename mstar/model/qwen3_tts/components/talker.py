@@ -51,7 +51,8 @@ class Qwen3TTSResizeMLP(nn.Module):
 
 
 class Qwen3TTSTalkerLayer(nn.Module):
-    """One pre-norm Talker block backed by M* tensor-parallel layers."""
+    """One pre-norm Talker block backed by M* tensor-parallel layers; the
+    language model runs its residual chain across the layers."""
 
     def __init__(
         self,
@@ -82,22 +83,6 @@ class Qwen3TTSTalkerLayer(nn.Module):
             activation="silu",
             comm_group=comm_group,
         )
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
-            hidden_states,
-        )
-        hidden_states = residual + hidden_states
-
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        return residual + hidden_states
 
 
 class Qwen3TTSTalkerLanguageModel(nn.Module):

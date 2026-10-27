@@ -76,13 +76,6 @@ class RaggedAttentionConfig:
     backend: RaggedAttnBackend = RaggedAttnBackend.AUTO
     flashinfer_backend: str = "auto"
 
-    # Whether the node's ranks split the attention heads. True (tensor
-    # parallelism, Ulysses sequence parallelism): each rank's resource is sized
-    # for its slice of the heads. False: every rank attends with all the heads,
-    # for a node whose ranks divide other work, e.g. one guidance branch per
-    # rank.
-    shard_heads: bool = True
-
     # Whether a compiled caller keeps the attention in its graph, as the
     # ``mstar::ragged_attention`` op, rather than breaking there per layer. For
     # a compiled, uncaptured region whose fusions around attention pay; off by

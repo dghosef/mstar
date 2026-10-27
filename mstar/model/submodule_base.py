@@ -26,6 +26,28 @@ class HostRows(NamedTuple):
     request_ids: tuple
     buffers: dict[str, torch.Tensor]
 
+    def first_values(self, name: str, request_ids: Sequence[str]):
+        """``(rid, value)`` for each of ``request_ids`` that has a row, where
+        ``value`` is the first element of its row of buffer ``name``, off one
+        ``tolist``; None when the step staged no such buffer. A request with
+        no row is skipped, as the per-request stop path skips a request with
+        no output."""
+        buffer = self.buffers.get(name)
+        if not torch.is_tensor(buffer) or buffer.dim() == 0:
+            return None
+        values = buffer.reshape(buffer.shape[0], -1)[:, 0].tolist()
+        rows = self.request_ids
+        if len(rows) >= len(request_ids) and all(
+            a == b for a, b in zip(request_ids, rows, strict=False)
+        ):
+            # the common case: the batch in forward order, no row map needed
+            return zip(request_ids, values, strict=False)
+        row_of = {rid: i for i, rid in enumerate(rows)}
+        return (
+            (rid, values[i]) for rid in request_ids
+            if (i := row_of.get(rid)) is not None and i < len(values)
+        )
+
 
 class TokenStop(NamedTuple):
     """When an AR submodule's sampled token ends its decode loop: on a stop
@@ -562,6 +584,14 @@ class NodeSubmodule(torch.nn.Module, ABC):
     # steps keep the process setting, so a new eager shape never searches.
     capture_cudnn_benchmark: bool = False
 
+    # Whether this node's ranks (its TP x SP lockstep instance) split the
+    # attention heads, as tensor and Ulysses sequence parallelism do: the
+    # engine then sizes every resource it builds for the node (KV, attention,
+    # recurrent state) for one rank's slice. False keeps every head on every
+    # rank, for a node whose ranks split other work, e.g. one guidance branch
+    # per rank.
+    splits_heads: bool = True
+
     def __init__(self):
         super().__init__()
         # Per-request state store. prepare_inputs-time code (no engine inputs
@@ -636,25 +666,18 @@ class NodeSubmodule(torch.nn.Module, ABC):
             state = self.request_states[request_id] = PerRequestState()
         return state
 
-    # Cached: prepare_inputs and preprocess ask per row per step, and finding
-    # a parameter walks the module tree. Set by ``_apply`` (``.to()``,
-    # ``.cuda()``, ``to_empty()``), which the engine runs on every submodule at
-    # load, and never on read, so a compiled forward that asks doesn't see it
-    # change between calls. ``load_state_dict(assign=True)`` and reassigning a
-    # parameter don't update it; the engine's ``.to()`` after them does.
-    _device_cache: torch.device | None = None
-
     def get_device(self):
-        device = self._device_cache
+        # Cached rather than read off ``parameters()``, which walks the module
+        # tree; ``_apply`` (to / cuda / to_empty) drops it, so a moved module
+        # reports its new device.
+        device = self.__dict__.get("_cached_device")
         if device is None:
-            device = next(self.parameters()).device
+            device = self.__dict__["_cached_device"] = next(self.parameters()).device
         return device
 
-    def _apply(self, fn, *args, **kwargs):
-        module = super()._apply(fn, *args, **kwargs)
-        param = next(self.parameters(), None)
-        self._device_cache = None if param is None else param.device
-        return module
+    def _apply(self, fn, recurse=True):
+        self.__dict__.pop("_cached_device", None)
+        return super()._apply(fn, recurse)
 
     @abstractmethod
     def prepare_inputs(
@@ -1116,7 +1139,8 @@ class ARNodeSubmodule(NodeSubmodule):
             return super().check_stop(request_id, request_info, outputs)
         if (stop.walk is not None and request_info.graph_walk != stop.walk) or stop.buffer not in outputs:
             return set()
-        token = outputs[stop.buffer][0].item()
+        # a row's first element, as ``HostRows.first_values`` reads it
+        token = outputs[stop.buffer][0].reshape(-1)[0].item()
         return self._token_stops(((request_id, token),), {request_id: request_info}, False).get(request_id, set())
 
     def check_stop_batched(
@@ -1130,22 +1154,9 @@ class ARNodeSubmodule(NodeSubmodule):
             return super().check_stop_batched(request_ids, request_infos, host_rows, step_walk)
         if stop.walk is not None and step_walk is not None and step_walk != stop.walk:
             return {}
-        tokens = host_rows.buffers.get(stop.buffer)
-        if not torch.is_tensor(tokens) or tokens.dim() == 0:
+        pairs = host_rows.first_values(stop.buffer, request_ids)
+        if pairs is None:
             return None
-        values = tokens.reshape(tokens.shape[0], -1)[:, 0].tolist()
-        rows = host_rows.request_ids
-        if len(rows) >= len(request_ids) and all(
-            a == b for a, b in zip(request_ids, rows, strict=False)
-        ):
-            # the common case: the batch in forward order, no row map needed
-            pairs = zip(request_ids, values, strict=False)
-        else:
-            row_of = {rid: i for i, rid in enumerate(rows)}
-            pairs = (
-                (rid, values[i]) for rid in request_ids
-                if (i := row_of.get(rid)) is not None and i < len(values)
-            )  # no row, no output: the per-request path skips it too
         # a mixed step reads each row's walk; a step of one walk need not
         return self._token_stops(pairs, request_infos, stop.walk is not None and step_walk is None)
 

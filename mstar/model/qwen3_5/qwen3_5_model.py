@@ -144,15 +144,15 @@ class PrefillStep:
     # one list per name: a `prefill_vision` step carries every span and image
     input_tensors: dict[str, list[TensorPointerInfo]]
     order: tuple[int, ...] = ()
-    # each picked image's or video's (t, h, w) patch grid, as `image_grid_thw`
-    # holds it on the device; the nodes read these instead of syncing on it
+    # each picked image's or video's (t, h, w) patch grid, in plan order: the
+    # nodes size their spans from these host ints
     image_grids: tuple[tuple[int, int, int], ...] = ()
 
 
 # model_kwargs keys: every image's / video's (t, h, w) patch grid, in attachment order
 IMAGE_GRIDS_KEY, VIDEO_GRIDS_KEY = "image_grids", "video_grids"
 # the step_metadata key the prefill_vision nodes read the picked grids from
-STEP_GRIDS_KEY = "image_grids"
+STEP_GRIDS_KEY = "step_grids"
 
 
 # TODO: implement MoE variants
@@ -349,15 +349,15 @@ class Qwen3_5DenseModel(Model):
         prefill_vision = Sequential([
             GraphNode(
                 name="vision_encoder",
-                # each image's (t, h, w) patch grid: token count and 3D ids
-                input_names=["pixel_values", "image_grid_thw"],
+                # each image's (t, h, w) patch grid rides in the step metadata
+                input_names=["pixel_values"],
                 outputs=[
                     GraphEdge(next_node="LLM", name="vision_embeds"),
                 ],
             ),
             GraphNode(
                 name="LLM",
-                input_names=["vision_embeds", "image_grid_thw", "text_inputs"],
+                input_names=["vision_embeds", "text_inputs"],
                 outputs=[
                     GraphEdge(
                         next_node=EMIT_TO_CLIENT,
@@ -587,15 +587,16 @@ class Qwen3_5DenseModel(Model):
         ]
 
         result: NameToTensorList = {"text_inputs": segments}
+        # the grids reach the nodes as host ints (step metadata), not as tensors
+        image_grids = [g for out in images for g in out["image_grid_thw"]]
+        video_grids = [video.grid for video in videos]
         if images:
             result["pixel_values"] = [out["pixel_values"] for out in images]
-            result["image_grid_thw"] = [g for out in images for g in out["image_grid_thw"]]
             # the raw images are not a graph input (the encoder reads
             # `pixel_values`), so do not ship them to the workers
             result["image_inputs"] = []
         if videos:
             result["pixel_values_videos"] = [video.pixel_values for video in videos]
-            result["video_grid_thw"] = [video.grid for video in videos]
             # the decoded frames are spent; don't hold them for the request's life
             result["video_inputs"] = []
         walk = "prefill_vision" if images or videos else "prefill_text"
@@ -606,7 +607,7 @@ class Qwen3_5DenseModel(Model):
             # A span is the merged tokens and two sentinels, and each temporal group of a video
             # is placed like a one-frame image.
             video = step.modality == VIDEO
-            grid = result["video_grid_thw"][owners[step.index]] if video else result["image_grid_thw"][step.index]
+            grid = video_grids[owners[step.index]] if video else image_grids[step.index]
             grid = grid[0] if grid.dim() == 2 else grid
             t, h, w = (int(v) for v in grid.tolist())
             grid = torch.tensor((1 if video else t, h, w))
@@ -624,8 +625,8 @@ class Qwen3_5DenseModel(Model):
         return ProcessPromptOutput(result, {
             "video_groups": groups,
             "kv_layout": {KV_CACHE: {"main": layout}},
-            IMAGE_GRIDS_KEY: host(result.get("image_grid_thw", [])),
-            VIDEO_GRIDS_KEY: host(result.get("video_grid_thw", [])),
+            IMAGE_GRIDS_KEY: host(image_grids),
+            VIDEO_GRIDS_KEY: host(video_grids),
         })
 
     def get_loop_caps(self, **model_kwargs) -> dict[str, int]:
@@ -654,13 +655,12 @@ class Qwen3_5DenseModel(Model):
     # Model ABC: forward pass args
     # ------------------------------------------------------------------
 
-    # Which node reads which of a walk's signals. Both `prefill_vision` nodes
-    # need the grid, so it appears twice; the conductor dedupes the unpersist.
+    # Which node reads which of a walk's signals.
     _WALK_INPUTS: dict[str, list[WalkInput]] = {
         "prefill_text": [WalkInput("LLM", ("text_inputs",))],
         "prefill_vision": [
-            WalkInput("vision_encoder", ("pixel_values", "image_grid_thw")),
-            WalkInput("LLM", ("text_inputs", "image_grid_thw")),
+            WalkInput("vision_encoder", ("pixel_values",)),
+            WalkInput("LLM", ("text_inputs",)),
         ]
     }
 
@@ -686,10 +686,6 @@ class Qwen3_5DenseModel(Model):
             "image": signals.get("pixel_values", []),
             VIDEO: signals.get("pixel_values_videos", []),
         }
-        grid_pools = {
-            "image": signals.get("image_grid_thw", []),
-            VIDEO: signals.get("video_grid_thw", []),
-        }
         host_grids = host_grids or {}
         host_pools = {
             "image": host_grids.get(IMAGE_GRIDS_KEY) or [],
@@ -706,7 +702,7 @@ class Qwen3_5DenseModel(Model):
 
         order: list[int] = []
         picked: dict[str, list[TensorPointerInfo]] = {
-            "text_inputs": [], "pixel_values": [], "image_grid_thw": [],
+            "text_inputs": [], "pixel_values": [],
         }
         plan = prefill_plan(
             expand_video_parts(parts_from_modalities(input_modalities), video_groups)
@@ -718,7 +714,7 @@ class Qwen3_5DenseModel(Model):
             # an image or video needs its grid too
             short = index >= len(pool) or (
                 step.modality != TEXT
-                and index >= len(grid_pools.get(step.modality, []))
+                and index >= len(host_pools.get(step.modality, []))
             )
             if short:
                 # `check_plan` already 400s a mismatch at intake. This runs in
@@ -740,7 +736,6 @@ class Qwen3_5DenseModel(Model):
             )
             if first_group:
                 picked["pixel_values"].append(pool[index])
-                picked["image_grid_thw"].append(grid_pools[step.modality][index])
                 picked_grids.append(tuple(host_pools[step.modality][index]))
 
         if not order:
