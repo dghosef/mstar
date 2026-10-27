@@ -299,7 +299,10 @@ Per-model notes:
 - **FLUX.2 klein / Z-Image** — ``/v1/images/generations`` (and ``/v1/images/edits`` for
   klein) only: ``size`` as ``WxH`` (multiples of 16); ``seed``; ``num_inference_steps``,
   ``output_format`` (``png`` default, ``jpeg``, ``webp``), ``output_compression`` (JPEG /
-  WebP quality) and ``png_compress_level`` (0-9, default 1) via ``extra_body``.
+  WebP quality, 0-100) and ``png_compress_level`` (0-9, default 1) via ``extra_body``; an
+  out-of-range value is a 400. The PNG writer favours speed (no scanline filters, zlib
+  level 1), so its files are ~30% larger than PIL's defaults; a higher
+  ``png_compress_level`` shrinks them.
 - **Qwen3-Omni** — text sampling uses ``thinker_*`` keys, speech uses ``talker_*``, and the
   residual codec groups use ``code_predictor_*``; set the speaker with ``voice`` (default
   ``Ethan``) and request audio output by including ``"audio"`` in ``modalities``.

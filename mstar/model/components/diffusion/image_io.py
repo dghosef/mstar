@@ -148,13 +148,23 @@ OUTPUT_FORMATS = ("png", "jpeg", "webp")
 
 def image_output_format(request_kwargs: dict | None) -> str:
     """The request's ``output_format`` (default ``png``; ``jpg`` means ``jpeg``), or ValueError
-    for one :func:`encode_image` cannot write. A model calls it at intake too, so a bad value
-    fails the request before generation rather than after."""
-    fmt = str((request_kwargs or {}).get("output_format") or "png").lower()
+    for one :func:`encode_image` cannot write, or an ``output_compression`` (0-100) or
+    ``png_compress_level`` (0-9) it cannot apply. A model calls it at intake too, so a bad
+    value fails the request before generation rather than after."""
+    kwargs = request_kwargs or {}
+    fmt = str(kwargs.get("output_format") or "png").lower()
     if fmt == "jpg":
         fmt = "jpeg"
     if fmt not in OUTPUT_FORMATS:
         raise ValueError(f"output_format must be one of {OUTPUT_FORMATS}, got {fmt!r}")
+    for key, top in (("output_compression", 100), ("png_compress_level", 9)):
+        value = kwargs.get(key)
+        try:
+            ok = value is None or 0 <= int(value) <= top
+        except (TypeError, ValueError):
+            ok = False
+        if not ok:
+            raise ValueError(f"{key} must be an integer from 0 to {top}, got {value!r}")
     return fmt
 
 
@@ -178,7 +188,7 @@ def encode_image(image: torch.Tensor, request_kwargs: dict | None = None) -> byt
     quality = int(quality) if quality is not None else (95 if fmt == "jpeg" else 80)
     buffer = io.BytesIO()
     Image.fromarray(image.permute(1, 2, 0).contiguous().cpu().numpy(), mode="RGB").save(
-        buffer, format=fmt.upper(), quality=max(0, min(100, quality)),
+        buffer, format=fmt.upper(), quality=quality,
     )
     return buffer.getvalue()
 

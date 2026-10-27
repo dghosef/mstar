@@ -45,7 +45,7 @@ from mstar.graph.base import GraphEdge, GraphNode, GraphSection, Loop, Sequentia
 from mstar.graph.special_destinations import EMIT_TO_CLIENT, EMPTY_DESTINATION
 from mstar.model.base import ForwardPassArgs, Model, ProcessPromptOutput, TensorAndMetadata
 from mstar.model.components.diffusion.decode_utils import VAE_DECODE_BATCH_SIZES
-from mstar.model.components.diffusion.image_io import encode_image
+from mstar.model.components.diffusion.image_io import encode_image, image_output_format
 from mstar.model.components.diffusion.lora import LoraSpec
 from mstar.model.flux2_klein.config import (
     DENOISE_LOOP,
@@ -331,6 +331,7 @@ class Flux2KleinModel(Model):
         ref_dims = [(int(img.shape[-2]), int(img.shape[-1])) for img in images]
         self._resolve_size(kwargs, ref_dims)
         self._resolve_steps(kwargs)
+        image_output_format(kwargs)  # fail a bad output knob now, not after the denoise
         # Ungated on is_distilled: a non-distilled checkpoint is the case that most
         # needed telling, and it was the one case that stayed silent. Only distilled
         # checkpoints load at all now (Flux2KleinConfig.from_snapshot), so this fires

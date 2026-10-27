@@ -636,7 +636,7 @@ class BagelModel(Model):
         Given the tensors, it also returns a ``kv_layout`` for each label the request may open.
         """
         if "image" in output_modalities:
-            image_output_format(kwargs)  # fail a bad output_format now, not after the denoise
+            image_output_format(kwargs)  # fail a bad output knob now, not after the denoise
         result: NameToTensorList = {}
 
         if prompt is not None:
