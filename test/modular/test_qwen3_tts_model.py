@@ -1092,6 +1092,7 @@ def test_qwen3_tts_depth_loop_replays_only_on_a_step_that_leased_it():
     assert step({}) is None and runs == []
     assert step({DEPTH_LOOP_REGION: object()}) == ("codes", "sum") and len(runs) == 1
 
+
 def test_qwen3_tts_talker_returns_row_outputs_except_for_the_clone_prefill():
     """A decode or plain prefill step is one frame per row, handed back as
     batch tensors; the codec reads a ``[1, groups]`` row view as one frame."""
