@@ -638,6 +638,14 @@ class VJepa2Model(Model):
         return TensorAndMetadata(data=torch.empty(0, dtype=torch.uint8), metadata=metadata)
 
 
+    def _preprocess_frames(self, frames: torch.Tensor) -> torch.Tensor:
+        """uint8 ``[n, C, H, W]`` -> the encoder's normalized crops, per frame."""
+        return torch.cat([
+            _preprocess_video(chunk.float().div_(255.0), crop_size=self.config.crop_size,
+                              target_frames=chunk.size(0))
+            for chunk in frames.split(_PREPROCESS_CHUNK)
+        ])
+
     def process_prompt(
         self,
         prompt: str | None,
@@ -681,15 +689,13 @@ class VJepa2Model(Model):
                 # Cell 5): matched FLOPs to upstream's inference path. The other
                 # sampled frames are never decoded.
                 keep = keep[:AC_ROLLOUT_NUM_FRAMES]
-            frames = decode_frames_at(meta.pop(_VIDEO_PATH), [sampled[i] for i in keep])
             # resize, crop and normalize act per frame, so preprocessing only
-            # the kept frames, a few at a time, is exact; the chunks keep the
-            # full-size float frames (~11 MB each at 720p) cache-sized
-            processed = torch.cat([
-                _preprocess_video(chunk.float().div_(255.0), crop_size=self.config.crop_size,
-                                  target_frames=chunk.size(0))
-                for chunk in frames.split(_PREPROCESS_CHUNK)
-            ])
+            # the kept frames, a few at a time and as each decode group lands,
+            # is exact; the chunks keep the full-size float frames (~11 MB
+            # each at 720p) cache-sized
+            processed = decode_frames_at(
+                meta.pop(_VIDEO_PATH), [sampled[i] for i in keep], transform=self._preprocess_frames,
+            )
             out["video_frames"] = [processed]
             # the encoder reads ``video_frames``; don't ship the raw input
             out["video_inputs"] = []
