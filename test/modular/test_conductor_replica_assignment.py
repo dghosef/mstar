@@ -52,7 +52,6 @@ def test_lockstep_instances_are_balanced_whole():
     assert picks == {("worker_0", "worker_1"), ("worker_2", "worker_3")}
 
 
-
 def test_groups_sharing_a_worker_balance_independently():
     # group 1 is DP2 on ranks 0 and 1; group 0 has one replica, on rank 0. Rank
     # 0's group-0 requests must not push every group-1 request onto rank 1.

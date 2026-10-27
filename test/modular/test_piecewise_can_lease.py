@@ -61,21 +61,23 @@ def test_runner_defers_to_the_configs_predicate():
 
 
 def _packed_runner(one_row):
-    """A real runner over three captured packed buckets, (1, 256), (2, 256) and
-    (4, 256), with the capture and the step lifecycle stubbed out."""
+    """A real runner over captured packed buckets of 256 tokens, with the capture
+    and the step lifecycle stubbed out. A one-row region captures batch size 1
+    only (its config refuses more); a per-row one captures 1, 2 and 4."""
+    sizes = [1] if one_row else [1, 2, 4]
     runner = PiecewiseAcceleratorGraphRunner.__new__(PiecewiseAcceleratorGraphRunner)
     runner._config = SimpleNamespace(
         lease_before_step=True, can_lease=None, one_row_per_step=one_row,
         get_config_type=lambda: PiecewiseConfigType.PACKED,
         replay_seq_lens=lambda shape, seq_lens, real_bs: list(seq_lens),
     )
-    runner._label, runner._current_slot, runner._capture_batch_sizes = "region", 0, [1, 2, 4]
+    runner._label, runner._current_slot, runner._capture_batch_sizes = "region", 0, sizes
     runner._graphs = {
         PiecewiseGraphKey(bs=bs, seq_len=256, slot=0): SimpleNamespace(
             bucket=(bs, 256), shape=SimpleNamespace(bs=bs), dummy_rids=list(range(bs)),
             static_inputs={}, static_outputs={}, graph=SimpleNamespace(replay=lambda: None),
         )
-        for bs in (1, 2, 4)
+        for bs in sizes
     }
     runner.declared = []
     runner._declare = lambda ids, seq_lens, bucket, **kw: runner.declared.append((ids, bucket, kw["real_bs"]))
