@@ -169,6 +169,8 @@ class VJepa2EncoderSubmodule(NodeSubmodule):
             replay_graph_walks=list(self._AC_ROLLOUT_WALKS),
             single_request_inputs=NodeInputs(tensor_inputs={"video_frames": clip}, input_seq_len=frames),
             capture_batch_sizes=[1, 2, 4],
+            # an acceleration subset: larger encoder batches run eager, as before the capture
+            caps_eager_batch_size=False,
             capture_forward_method="forward_batched",
             additional_key_info=self._ac_rollout_key(),
             input_seq_dims={"pixel_values_videos": 0},
