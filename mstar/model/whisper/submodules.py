@@ -22,6 +22,7 @@ from mstar.model.submodule_base import (
     ModelInputsFromEngine,
     NodeInputs,
     NodeSubmodule,
+    TokenStop,
 )
 from mstar.model.whisper.components.decoder import WhisperDecoderModel
 from mstar.model.whisper.config import (
@@ -116,7 +117,10 @@ class WhisperDecoderSubmodule(EncoderDecoderNode, ARNodeSubmodule):
         super().__init__()
         self.decoder = decoder
         self.config = config
-        self.stop_token_ids = frozenset({config.eos_token_id})
+        self.token_stop = TokenStop(
+            loop=self.DECODE_LOOP, buffer="new_token",
+            stop_ids=frozenset({config.eos_token_id}), sampler=SAMPLER,
+        )
         self._suppress_ids: torch.Tensor | None = None
         self._begin_suppress_ids: torch.Tensor | None = None
 
