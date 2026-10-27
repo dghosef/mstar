@@ -115,13 +115,21 @@ class AudioEncoderSubmodule(NodeSubmodule):
 
     Runs the encoder over a step's mel spectrograms to produce the audio
     embeddings the Thinker splices into its input sequence. A step's clips
-    are packed along time into one call (``forward_batched``).
+    are packed along time in request order, starting a new call when the next
+    clip would pass the frame budget (``forward_batched``).
     """
 
     # The HF encoder splits its input by host-side chunk lengths (``.tolist()``),
     # so compiled frames guard on the chunk count and recompile for nearly
     # every new clip length, seconds each, on the request's critical path.
     disable_torch_compile = True
+    # Clips per encoder step, and mel frames (100 per second) per encoder
+    # call. A clip may run 30 min (``media_io.MAX_AUDIO_SECONDS``), and a
+    # call's activations grow with its total frames, so the budget bounds one
+    # call's memory; a step over it packs its clips into several calls. This
+    # sits in the forward until the scheduler can budget a step's tokens.
+    MAX_BATCH_SIZE = 16
+    MAX_BATCH_FRAMES = 30_000
 
     def __init__(self, audio_encoder: nn.Module, config: Qwen3OmniModelConfig):
         super().__init__()
@@ -137,15 +145,23 @@ class AudioEncoderSubmodule(NodeSubmodule):
         inputs: NameToTensorList,
         **kwargs
     ) -> NodeInputs:
+        from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+            _get_feat_extract_output_lengths,
+        )
+
         # Edge name from graph walk is "audio_features"
         audio_features = inputs["audio_features"][0]
         audio_seqlens = inputs.get("audio_seqlens", [None])[0]
-
+        # one clip, its valid mel frames packed along time: its length is the
+        # tensor's width, known on the host
+        frames = audio_features.shape[-1]
         return NodeInputs(
             tensor_inputs={
                 "audio_features": audio_features,
                 "audio_seqlens": audio_seqlens,
-            }
+            },
+            kwargs={"embed_len": int(_get_feat_extract_output_lengths(frames))},
+            input_seq_len=frames,
         )
 
     def forward(
@@ -182,41 +198,57 @@ class AudioEncoderSubmodule(NodeSubmodule):
     def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
         return True
 
+    def max_batch_size(self, graph_walk: str) -> int:
+        return self.MAX_BATCH_SIZE
+
     def preprocess(
         self,
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
         inputs: list[NodeInputs],
     ) -> dict[str, torch.Tensor | Any]:
-        # The encoder packs clips along time and windows its attention within
-        # each clip (``feature_lens``), so a batch is one call over the
-        # concatenated mel frames.
         return {
-            "audio_features": torch.cat([inp.tensor_inputs["audio_features"] for inp in inputs], dim=-1),
-            "audio_seqlens": torch.cat([inp.tensor_inputs["audio_seqlens"].reshape(-1) for inp in inputs]),
+            "audio_features": [inp.tensor_inputs["audio_features"] for inp in inputs],
+            "audio_seqlens": [inp.tensor_inputs["audio_seqlens"].reshape(-1) for inp in inputs],
+            "embed_lens": [inp.kwargs["embed_len"] for inp in inputs],
         }
 
     def forward_batched(
         self,
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
-        audio_features: torch.Tensor,
-        audio_seqlens: torch.Tensor,
+        audio_features: list[torch.Tensor],
+        audio_seqlens: list[torch.Tensor],
+        embed_lens: list[int],
         **kwargs,
     ) -> dict[str, NameToTensorList]:
-        """Encode several requests' clips in one call (each ~10 ms on an H200,
-        mostly launches, whatever the clip length) and split the packed
-        embeddings back by each clip's output length."""
-        from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
-            _get_feat_extract_output_lengths,
-        )
-
-        embeds = self.forward(graph_walk, engine_inputs, audio_features, audio_seqlens)["audio_embeds"][0]
-        # the encoder already reads its chunk lengths on the host
-        counts = _get_feat_extract_output_lengths(audio_seqlens).tolist()
+        """Encode the step's clips packed along time in request order, starting
+        a new call (each ~10 ms on an H200, mostly launches, whatever the clip
+        length) when the next clip would pass ``MAX_BATCH_FRAMES``, and split
+        each call's embeddings back by clip.
+        The encoder windows its attention within each clip (``feature_lens``),
+        so packing does not mix clips."""
+        groups: list[list[int]] = []
+        frames = 0
+        for row, features in enumerate(audio_features):
+            n = features.shape[-1]
+            if groups and frames + n <= self.MAX_BATCH_FRAMES:
+                groups[-1].append(row)
+                frames += n
+            else:
+                groups.append([row])
+                frames = n
+        parts: list[torch.Tensor] = []
+        for group in groups:
+            embeds = self.forward(
+                graph_walk, engine_inputs,
+                torch.cat([audio_features[row] for row in group], dim=-1),
+                torch.cat([audio_seqlens[row] for row in group]),
+            )["audio_embeds"][0]
+            parts.extend(embeds.split([embed_lens[row] for row in group]))
         return {
             rid: {"audio_embeds": [part]}
-            for rid, part in zip(engine_inputs.request_ids, embeds.split(counts), strict=True)
+            for rid, part in zip(engine_inputs.request_ids, parts, strict=True)
         }
 
 

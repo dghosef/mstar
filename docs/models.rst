@@ -485,6 +485,11 @@ Qwen3-Omni notes
   (``cp_attention``), neither bit-exact with the unfused ops. Its 15 depth
   steps feed each sampled code into the next, so small differences can change
   later codes at near-ties.
+- The audio encoder takes the clips of up to 16 requests a step and packs
+  them along time in request order, starting a new call when the next clip
+  would take it past 300 s of audio, with attention windowed within each clip. A clip's embeddings can differ at the
+  last bit with what it is batched beside, since the packed GEMMs' shapes
+  change with the call's total frames.
 - The MoE layers route through the fused softmax-top-k kernel
   (``TopKRouter(fused_softmax_topk=True)``), which gives equal probabilities to
   the lower expert id where ``torch.topk`` may pick another.
