@@ -627,11 +627,12 @@ class BagelModel(Model):
 
         Given the tensors, it also returns a ``kv_layout`` for each label the request may open.
         """
+        params = self._request_params(input_modalities, output_modalities, kwargs)
         if "image" in output_modalities:
             image_output_format(kwargs)  # fail a bad output knob now, not after the denoise
             for key in ("width", "height"):
-                value = kwargs.get(key)
-                if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+                value = params[key]
+                if isinstance(value, bool) or not isinstance(value, int):
                     raise ValueError(f"BAGEL image {key} must be an integer, got {value!r}")
         result: NameToTensorList = {}
 
@@ -639,7 +640,7 @@ class BagelModel(Model):
             target_output = output_modalities[0] if output_modalities else "text"
             is_understanding = target_output == "text"
             has_image = "image" in input_modalities
-            think_mode = kwargs.get("think_mode", self.config.think_mode)
+            think_mode = params["think_mode"]
             system_prompt = self.BAGEL_DEFAULT_SYSTEM_PROMPT
 
             texts, roles = prompt, None
@@ -716,16 +717,13 @@ class BagelModel(Model):
             # an edit's output takes its (resized) input's size, a generation the requested one;
             # under 16 pixels a side (the VAE's 8x times the 2x2 patch) it has no latent patch,
             # and the loop would fail mid-request
-            sides = images[0].shape[-2:] if images else [
-                kwargs[k] for k in ("height", "width") if kwargs.get(k) is not None
-            ]
+            sides = images[0].shape[-2:] if images else (params["height"], params["width"])
             if any(side < 16 for side in sides):
                 raise ValueError(f"BAGEL's output image must be at least 16 pixels a side, got {list(sides)} (h, w)")
         if tensors is None:
             return result
         if prompt is None:
             parts, segments = parts_from_modalities(input_modalities), []
-        params = self._request_params(input_modalities, output_modalities, kwargs)
         layout = self._kv_layout(parts, segments, images, output_modalities, params)
         return ProcessPromptOutput(result, {"kv_layout": {"kv": layout}})
 
@@ -1314,7 +1312,7 @@ class BagelModel(Model):
 
         if model_kwargs:
             for key in overridable_keys:
-                if key in model_kwargs:
+                if model_kwargs.get(key) is not None:  # an explicit null is the default
                     params[key] = model_kwargs[key]
         return params
 

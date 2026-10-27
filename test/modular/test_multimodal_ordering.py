@@ -275,7 +275,10 @@ def bagel():
 
     class _Bagel(BagelModel):
         def __init__(self):
-            self.config = SimpleNamespace(think_mode=False)
+            self.config = SimpleNamespace(
+                think_mode=False, cfg_text_scale=4.0, cfg_img_scale=1.0, cfg_interval=[0.4, 1.0],
+                cfg_renorm_type="global", cfg_renorm_min=0.0,
+            )
             self.tokenizer = _StubTokenizer()
             self.boi_token_id = _StubTokenizer.SPECIALS["<|vision_start|>"]
             self.eoi_token_id = _StubTokenizer.SPECIALS["<|vision_end|>"]
@@ -657,8 +660,6 @@ def _laid_out(bagel, modalities: list[str], output_modalities=("text",), tensors
     bagel.config.vit_config = SimpleNamespace(patch_size=PATCH_SIZE)
     bagel.config.vit_max_num_patch_per_side = MAX_PATCHES_PER_SIDE
     bagel.config.latent_downsample, bagel.config.max_latent_size = 16, 64
-    bagel.config.cfg_text_scale, bagel.config.cfg_img_scale, bagel.config.cfg_interval = 4.0, 1.0, [0.4, 1.0]
-    bagel.config.cfg_renorm_type, bagel.config.cfg_renorm_min = "global", 0.0
     texts = iter(["what is", "in this picture", "and in this one"])
     parts, images = [], []
     for modality in modalities:
