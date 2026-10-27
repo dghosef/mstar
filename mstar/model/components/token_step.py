@@ -1,25 +1,24 @@
 """The parts of a decoder node that samples one token per decode step which
-don't depend on the model: the decode capture, the batch caps, feeding the
-sampled token back in, and the stop checks."""
+don't depend on the model: the decode capture, the batch caps and feeding the
+sampled token back in. Its stop checks are ``ARNodeSubmodule``'s, from the
+node's ``token_stop``."""
 from __future__ import annotations
-
-from functools import cached_property
 
 import torch
 
 from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.engine.accelerator_graph_config import AcceleratorGraphConfig, BatchedAcceleratorGraphConfig
 from mstar.engine.engine import ExecutingBatch
-from mstar.model.submodule_base import ARNodeInputs, NodeInputs, TokenStop
+from mstar.model.submodule_base import ARNodeInputs, NodeInputs
 
 
 class TokenStepNode:
     """Mixin for an ``ARNodeSubmodule`` whose forward returns ``new_token``.
 
-    A subclass binds ``SAMPLER`` to its sampler resource's key and sets
-    ``MAX_PREFILL_BATCH_SIZE`` and ``stop_token_ids``; it overrides the walk
-    and loop names if its graph uses others. The stop checks are
-    ``ARNodeSubmodule``'s, from the ``token_stop`` declared here.
+    A subclass binds ``SAMPLER`` to its sampler resource's key, sets
+    ``MAX_PREFILL_BATCH_SIZE``, and sets ``token_stop`` in ``__init__`` as any
+    ``ARNodeSubmodule`` does; it overrides the walk and loop names if its graph
+    uses others.
     """
 
     DECODE_WALK = "decode"
@@ -27,7 +26,6 @@ class TokenStepNode:
     DECODE_CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64]
     SAMPLER: str
     MAX_PREFILL_BATCH_SIZE: int
-    stop_token_ids: frozenset[int]
 
     def get_accelerator_graph_configs(
         self, device: torch.device, tp_world_size: int = 1,
@@ -61,11 +59,3 @@ class TokenStepNode:
         # the decode loop feeds the sampled token back in as text_inputs
         if "new_token" in outputs:
             outputs["text_inputs"] = outputs["new_token"]
-
-    @cached_property
-    def token_stop(self) -> TokenStop:
-        # read on first stop check, after ``__init__`` has set the stop ids
-        return TokenStop(
-            loop=self.DECODE_LOOP, buffer="new_token",
-            stop_ids=frozenset(self.stop_token_ids), sampler=self.SAMPLER,
-        )
