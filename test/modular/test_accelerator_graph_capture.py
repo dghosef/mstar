@@ -475,3 +475,8 @@ def test_geometric_batch_sizes(max_batch_size, expected):
     B. B that is itself a power of two ends on it once (no duplicate); a B that
     is not appends the odd top bucket the padding path rounds up to."""
     assert geometric_batch_sizes(max_batch_size) == expected
+
+
+def test_geometric_batch_sizes_refuses_a_max_under_one():
+    with pytest.raises(ValueError, match="at least 1"):
+        geometric_batch_sizes(0)
