@@ -82,8 +82,8 @@ logger = logging.getLogger(__name__)
 
 def _host_grids(fwd_info: CurrentForwardPassInfo) -> list[tuple[int, int, int]]:
     """Each image's or video's (t, h, w), off the step metadata the conductor
-    filled from `process_prompt`; reading `image_grid_thw` back from the
-    device instead would block the host on every kernel queued ahead of it."""
+    filled from `process_prompt`: host ints, so sizing a span never waits on
+    the device."""
     return [(int(t), int(h), int(w)) for t, h, w in fwd_info.step_metadata[STEP_GRIDS_KEY]]
 
 

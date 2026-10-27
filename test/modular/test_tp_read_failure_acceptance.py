@@ -20,7 +20,7 @@ with a gloo process group, running the real ``Worker.run`` loop, the real
 ``MicroScheduler``, the real shared-memory tensor manager, the real
 ``Engine`` (prepare, admit, forward, commit through the real ``StepRunner``
 and ``KVManager``) and Qwen3.5's real ``prepare_inputs``, which sizes the image
-span from the step's host grid while ``image_grid_thw`` is still read in. The LLM forward is a
+span from the step's host grid while ``vision_embeds`` is still read in. The LLM forward is a
 stand-in that all-reduces each rank's partial over the TP group, as a
 row-parallel layer does, so a rank that never joins a step, or joins it with
 another token count, shows up as a collective timeout or a gloo abort.
@@ -95,7 +95,7 @@ _PROMPTS = {
     },
 }
 # the input of r1 whose follower read fails
-_FAILING = {"grid": "image_grid_thw", "text": "text_inputs"}
+_FAILING = {"grid": "vision_embeds", "text": "text_inputs"}
 
 
 def _ids(n: int, seed: int) -> list[int]:
@@ -114,7 +114,6 @@ def _inputs(kind: str, rid: str) -> dict[str, list[torch.Tensor]]:
     gen = torch.Generator().manual_seed(seed)
     return {
         "text_inputs": texts,
-        "image_grid_thw": [torch.tensor([[t, h, w]], dtype=torch.int64)],
         "vision_embeds": [torch.randn(span, HIDDEN, generator=gen)],
     }
 
