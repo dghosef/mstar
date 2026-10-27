@@ -32,7 +32,14 @@ from mstar.engine.engine import ExecutingBatch
 from mstar.engine.resources import AttentionStep, KVStep, PositionStep, SamplerStep, Segment, SlotLease, SubmoduleStep
 from mstar.engine.resources.attn.base import AttentionManager
 from mstar.engine.resources.sampler.resource import SamplerResource
-from mstar.model.higgs_audio.config import ATTN, KV_CACHE, ROPE, SAMPLER, HiggsAudioModelConfig
+from mstar.model.higgs_audio.config import (
+    ATTN,
+    AUDIO_VALID_LENGTHS_KEY,
+    KV_CACHE,
+    ROPE,
+    SAMPLER,
+    HiggsAudioModelConfig,
+)
 from mstar.model.submodule_base import (
     ARNodeInputs,
     ARNodeSubmodule,
@@ -108,11 +115,8 @@ class HiggsAudioEncoderSubmodule(NodeSubmodule):
         features = inputs["audio_features"][0]
         if features.dim() == 2:
             features = features.unsqueeze(0)  # (1, num_mel_bins, T)
-        # one host read per request: the valid embeddings of each chunk
-        valid = [
-            self.config.encoder_output_length(int(n))
-            for n in inputs["audio_feature_lens"][0].reshape(-1).tolist()
-        ]
+        # the valid embeddings of each chunk, known on the host since process_prompt
+        valid = list(fwd_info.step_metadata[AUDIO_VALID_LENGTHS_KEY])
         return NodeInputs(
             tensor_inputs={"audio_features": features},
             kwargs={"valid_lengths": valid},
@@ -120,8 +124,9 @@ class HiggsAudioEncoderSubmodule(NodeSubmodule):
         )
 
     def _padded(self, width: int) -> bool:
-        """A clip under one chunk: run at the full width, its tail masked."""
-        return self.graphs and width < self.chunk_frames
+        """A clip under one chunk: run at the full width, its tail masked,
+        captured or not."""
+        return width < self.chunk_frames
 
     def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
         # chunks are padded to their own request's longest, so only requests of

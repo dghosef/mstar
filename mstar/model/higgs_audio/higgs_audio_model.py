@@ -50,7 +50,14 @@ from mstar.engine.resources import (
 from mstar.graph.base import GraphEdge, GraphNode, GraphSection, Loop, Sequential, TensorPointerInfo
 from mstar.graph.special_destinations import EMIT_TO_CLIENT
 from mstar.model.base import ForwardPassArgs, KVLabel, LabelLayout, Model, ProcessPromptOutput, Span
-from mstar.model.higgs_audio.config import ATTN, KV_CACHE, ROPE, SAMPLER, HiggsAudioModelConfig
+from mstar.model.higgs_audio.config import (
+    ATTN,
+    AUDIO_VALID_LENGTHS_KEY,
+    KV_CACHE,
+    ROPE,
+    SAMPLER,
+    HiggsAudioModelConfig,
+)
 from mstar.model.submodule_base import NodeSubmodule
 
 logger = logging.getLogger(__name__)
@@ -73,6 +80,8 @@ def _resolve_local_hf_snapshot(repo_id: str, cache_dir: str | None = None) -> st
 
 class HiggsAudioModel(Model):
     """Higgs-Audio STT: audio_tower + projector + dense Qwen3 LLM."""
+
+    INTERNAL_KWARGS = (AUDIO_VALID_LENGTHS_KEY,)
 
     # The reference pipeline extracts mel features with the
     # whisper-large-v3 processor (not from the higgs checkpoint).
@@ -194,7 +203,7 @@ class HiggsAudioModel(Model):
         prefill_audio = Sequential([
             GraphNode(
                 name="audio_encoder",
-                input_names=["audio_features", "audio_feature_lens"],
+                input_names=["audio_features"],
                 outputs=[GraphEdge(next_node="LLM", name="audio_embeds")],
             ),
             GraphNode(
@@ -249,8 +258,7 @@ class HiggsAudioModel(Model):
         """
         texts = input_signals.get("text_inputs", [])
         audio_features = input_signals.get("audio_features", [])
-        audio_feature_lens = input_signals.get("audio_feature_lens", [])
-        if len(texts) != 2 or not audio_features or not audio_feature_lens:
+        if len(texts) != 2 or not audio_features:
             raise ValueError(
                 "Higgs-Audio expects the prompt split around one audio input; got "
                 f"{len(texts)} text spans and {len(audio_features)} audio inputs."
@@ -258,7 +266,6 @@ class HiggsAudioModel(Model):
         return [("prefill_audio", {
             "text_pre": texts[0],
             "audio_features": audio_features[0],
-            "audio_feature_lens": audio_feature_lens[0],
             "text_post": texts[1],
         })]
 
@@ -310,6 +317,7 @@ class HiggsAudioModel(Model):
             step_metadata={
                 "is_prefill": True,
                 "is_last_prefill": len(schedule) == 1,
+                AUDIO_VALID_LENGTHS_KEY: (model_kwargs or {}).get(AUDIO_VALID_LENGTHS_KEY),
             },
         )
 
@@ -430,7 +438,8 @@ class HiggsAudioModel(Model):
         if not kwargs.get("enable_thinking", False):
             post_ids += enc("<think>\n\n</think>\n\n")
 
-        audio = sum(self.config.encoder_output_length(int(n)) for n in audio_feature_lens.tolist())
+        valid_lengths = [self.config.encoder_output_length(int(n)) for n in audio_feature_lens.tolist()]
+        audio = sum(valid_lengths)
         # One step writes the text around the audio and the audio together, so
         # one span; it mixes text and audio, so nothing keys it.
         prompt = len(pre_ids) + audio + len(post_ids)
@@ -444,8 +453,7 @@ class HiggsAudioModel(Model):
                 torch.tensor(post_ids, dtype=torch.long),
             ],
             "audio_features": [audio_features],
-            "audio_feature_lens": [audio_feature_lens],
-        }, {"kv_layout": {KV_CACHE: {"main": layout}}})
+        }, {"kv_layout": {KV_CACHE: {"main": layout}}, AUDIO_VALID_LENGTHS_KEY: valid_lengths})
 
     # -------------------------------------------------------------------
     # Model ABC: postprocess

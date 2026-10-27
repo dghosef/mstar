@@ -397,3 +397,25 @@ def test_higgs_loopback_decode_prep_copies_no_pageable_index(monkeypatch):
         out = sub.preprocess("decode", engine_inputs, inputs)
     assert h2d_copies.copies == []
     assert out["input_ids"].shape == (2,)
+
+
+def test_higgs_encoder_prep_reads_no_tensor():
+    """The audio encoder's per-chunk embedding counts come from the step
+    metadata ``process_prompt`` filled, not off a lengths tensor."""
+    from mstar.model.higgs_audio.config import HiggsAudioModelConfig
+    from mstar.model.higgs_audio.higgs_audio_model import HiggsAudioModel
+    from mstar.model.higgs_audio.submodules import HiggsAudioEncoderSubmodule
+
+    config = HiggsAudioModelConfig()
+    lens = [400, 400, 123]
+    valid = [config.encoder_output_length(n) for n in lens]
+    model = SimpleNamespace(config=config, INTERNAL_KWARGS=HiggsAudioModel.INTERNAL_KWARGS)
+    (key,) = model.INTERNAL_KWARGS
+    sub = HiggsAudioEncoderSubmodule(None, None, config)
+    features = torch.zeros(len(lens), config.audio_num_mel_bins, 400)
+    with _HostReads() as reads:
+        row = sub.prepare_inputs("prefill_audio", _fwd("r", "prefill_audio", {key: valid}), {
+            "audio_features": [features],
+        })
+    assert reads.reads == []
+    assert row.kwargs["valid_lengths"] == valid and row.input_seq_len == len(lens)
