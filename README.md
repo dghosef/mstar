@@ -167,7 +167,7 @@ pyzmq — wire-compatible, selectable per process with `MSTAR_RUST_ZMQ` (default
 Note what AUTO-by-default means: on any machine where the extension is built, the whole
 mesh switches to the Rust transport with no configuration change — each process logs its
 choice at startup (`control mesh transport: ...`), and `MSTAR_RUST_ZMQ=0` pins pyzmq. The Linux
-wheels on PyPI (x86_64 and aarch64, CPython 3.12 and 3.13) ship the extension; in a source checkout,
+wheels on PyPI (x86_64 and aarch64, CPython 3.12 to 3.14) ship the extension; in a source checkout,
 build it with [maturin](https://www.maturin.rs): `uv pip install maturin && maturin develop --release -m rust/Cargo.toml`.
 See the [installation docs](https://m-star.org/mstar/installation.html) and
 [environment variables](https://m-star.org/mstar/environment_variables.html).

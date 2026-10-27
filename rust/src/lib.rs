@@ -86,7 +86,7 @@ impl PyZmqCommunicator {
     /// high-water mark, and blocking with the GIL held would freeze every
     /// Python thread in the process (pyzmq releases it here too).
     fn send(&self, py: Python<'_>, peer_id: &str, data: &[u8]) -> PyResult<()> {
-        py.allow_threads(|| self.inner.send(peer_id, data))
+        py.detach(|| self.inner.send(peer_id, data))
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -97,12 +97,12 @@ impl PyZmqCommunicator {
     /// Drain all currently-queued frames in one call — one GIL round-trip
     /// per batch instead of one `try_recv` per message.
     fn drain<'py>(&self, py: Python<'py>) -> Vec<Bound<'py, PyBytes>> {
-        let frames = py.allow_threads(|| self.inner.drain());
+        let frames = py.detach(|| self.inner.drain());
         frames.iter().map(|b| PyBytes::new(py, b)).collect()
     }
 
     fn recv_timeout<'py>(&self, py: Python<'py>, timeout_ms: u64) -> Option<Bound<'py, PyBytes>> {
-        py.allow_threads(|| self.inner.recv_timeout(Duration::from_millis(timeout_ms)))
+        py.detach(|| self.inner.recv_timeout(Duration::from_millis(timeout_ms)))
             .map(|b| PyBytes::new(py, &b))
     }
 
@@ -114,7 +114,7 @@ impl PyZmqCommunicator {
         py: Python<'py>,
         timeout_ms: u64,
     ) -> PyResult<(&'static str, Option<Bound<'py, PyBytes>>)> {
-        let ev = py.allow_threads(|| self.inner.recv_or_wake(Duration::from_millis(timeout_ms)));
+        let ev = py.detach(|| self.inner.recv_or_wake(Duration::from_millis(timeout_ms)));
         Ok(match ev {
             RecvEvent::Message(b) => ("msg", Some(PyBytes::new(py, &b))),
             RecvEvent::Wake => ("wake", None),
@@ -277,7 +277,7 @@ impl PySegmentedShmArena {
     /// which must not stall other Python threads (the serve loop, stream
     /// relays).
     fn reserve(&self, py: Python<'_>, nbytes: usize) -> PyResult<(usize, usize)> {
-        py.allow_threads(|| self.arena.reserve(nbytes))
+        py.detach(|| self.arena.reserve(nbytes))
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -285,12 +285,12 @@ impl PySegmentedShmArena {
     /// across an mmap for milliseconds; blocking on that mutex with the
     /// GIL held would freeze every Python thread for the duration.
     fn free(&self, py: Python<'_>, segment: usize, offset: usize) -> bool {
-        py.allow_threads(|| self.arena.free(segment, offset))
+        py.detach(|| self.arena.free(segment, offset))
     }
 
     #[getter]
     fn num_segments(&self, py: Python<'_>) -> usize {
-        py.allow_threads(|| self.arena.num_segments())
+        py.detach(|| self.arena.num_segments())
     }
 
     /// `(total_bytes, free_bytes, largest_free_block)` across all segments.
@@ -298,7 +298,7 @@ impl PySegmentedShmArena {
     /// fragmentation signature (allocations fail / segments grow despite
     /// healthy total free space).
     fn stats(&self, py: Python<'_>) -> (usize, usize, usize) {
-        py.allow_threads(|| self.arena.stats())
+        py.detach(|| self.arena.stats())
     }
 
     fn segment_name(&self, i: usize) -> String {
