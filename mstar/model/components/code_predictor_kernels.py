@@ -7,6 +7,10 @@ and depth step, q and k normed and roped and k and v copied into the cache had
 been six launches of a few microseconds around a ~1 us job.
 ``cp_attention`` attends over the depth positions so far, and
 ``cp_embed_accumulate`` records a depth step's codes and sums their embeddings.
+
+The launchers are opaque to Dynamo, as the ops they replace were: a captured
+forward compiles with static ints, so a traced launcher would recompile for
+every depth position and batch bucket.
 """
 from __future__ import annotations
 
@@ -58,6 +62,7 @@ def _cp_qk_norm_rope_kv_kernel(
         tl.store(k_dst + s_kv_c + d, v.to(KV.dtype.element_ty))
 
 
+@torch.compiler.disable
 def cp_qk_norm_rope_kv_write(
     qkv: torch.Tensor, q_norm_w: torch.Tensor, k_norm_w: torch.Tensor, pos: torch.Tensor,
     kv_layer: torch.Tensor, cache_pos: int, seq_len: int, eps_q: float, eps_k: float,
@@ -95,6 +100,7 @@ def _cp_embed_accumulate_kernel(
     tl.store(Codes + b * s_codes + group, tok.to(Codes.dtype.element_ty))
 
 
+@torch.compiler.disable
 def cp_embed_accumulate(
     tokens: torch.Tensor, weight: torch.Tensor, emb_sum: torch.Tensor,
     all_codes: torch.Tensor, group: int,
@@ -136,6 +142,7 @@ def _cp_attn_kernel(Q, K, V, O, cache_pos, sm_scale,
     tl.store(O + b * so_b + s * so_s + h * so_h + d, out.to(O.dtype.element_ty))
 
 
+@torch.compiler.disable
 def cp_attention(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, cache_pos: int) -> torch.Tensor:
     """Causal attention of the code predictor's ``q (bs, S, Hq, D)``, whose tokens sit
     at depth positions ``cache_pos .. cache_pos + S - 1``, over its dense cache
