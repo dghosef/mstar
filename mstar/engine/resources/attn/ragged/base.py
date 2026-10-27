@@ -7,6 +7,7 @@ segments of one packed forward. There is nothing to page, nothing to advance,
 and nothing to carry between steps: the resource holds only planned wrappers.
 """
 
+import weakref
 from collections.abc import Iterable
 
 import torch
@@ -145,11 +146,12 @@ class RaggedBlockCausalAttnManager(AttentionResource):
         raise ValueError(f"Unknown ragged block-causal attention backend {backend!r}")
 
 
-# Managers by resource key, which is how the custom op below names one: an op
-# takes tensors and scalars, not objects. The key is unique within the worker's
-# engine, so a rebuilt resource replaces its entry, and a compiled graph, which
-# bakes the key in as a constant, reaches the new manager without recompiling.
-_MANAGERS: dict[str, "_RaggedManagerBase"] = {}
+# Live managers by resource key, which is how the custom op below names one: an
+# op takes tensors and scalars, not objects. The key is unique within the
+# worker's engine, so a rebuilt resource replaces its entry, and a compiled
+# graph, which bakes the key in as a constant, reaches the new manager without
+# recompiling. Weak, so an entry goes with the engine's last reference to it.
+_MANAGERS: weakref.WeakValueDictionary[str, "_RaggedManagerBase"] = weakref.WeakValueDictionary()
 
 
 @torch.library.custom_op("mstar::ragged_attention", mutates_args=())
