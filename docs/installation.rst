@@ -481,8 +481,9 @@ runs on the pure-Python paths as before. Migrated so far (see
 The PyPI wheels for Linux (x86_64 and aarch64, CPython 3.12 to 3.14) already
 carry the extension, so ``pip install mstar-ai`` there needs nothing more. Other
 platforms get the pure-Python wheel. In a source checkout, build the extension into
-your environment with `maturin <https://www.maturin.rs>`_ (needs a Rust toolchain;
-``rustup`` works):
+your environment with `maturin <https://www.maturin.rs>`_ (needs `rustup
+<https://rustup.rs>`_, which installs the compiler version pinned in
+``rust-toolchain.toml``):
 
 .. code-block:: bash
 

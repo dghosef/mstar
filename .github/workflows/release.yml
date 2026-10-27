@@ -36,7 +36,9 @@ jobs:
           # Version-specific rather than abi3, matching the extension that
           # `maturin develop` builds and the tests exercise.
           CIBW_BUILD: "cp312-manylinux_* cp313-manylinux_* cp314-manylinux_*"
-          CIBW_BEFORE_ALL_LINUX: curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none &&
+            cd {project} && $HOME/.cargo/bin/rustup toolchain install
           CIBW_ENVIRONMENT_LINUX: PATH="$HOME/.cargo/bin:$PATH"
         with:
           output-dir: wheelhouse
