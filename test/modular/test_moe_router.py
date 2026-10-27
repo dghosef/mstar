@@ -1,5 +1,6 @@
 """``TopKRouter``'s fused softmax -> top-k -> renormalize (``mstar::moe_router_topk``)
-against the op sequence it replaces, and where the swept MoE tiles apply."""
+against the op sequence it replaces, and that the router keeps that sequence unless
+a model opts in."""
 from __future__ import annotations
 
 import pytest

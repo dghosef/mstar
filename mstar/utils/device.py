@@ -57,4 +57,3 @@ class DeviceCapability:
 @lru_cache(maxsize=None)
 def _device_capability(device: torch.device) -> DeviceCapability:
     return DeviceCapability(device)
-

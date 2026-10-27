@@ -109,8 +109,9 @@ class TopKRouter(nn.Module):
         fused_softmax_topk: on CUDA, route through one Triton kernel
             (``mstar::moe_router_topk``) instead of softmax, ``torch.topk``
             and the renormalize. Equal probabilities go to the lower expert
-            id, where ``torch.topk`` may pick another, so a model opts in
-            once it has checked its outputs.
+            id, where ``torch.topk`` may pick another; bf16 logits tie often,
+            so a model opts in once it has checked how often its outputs
+            diverge.
     """
 
     def __init__(
