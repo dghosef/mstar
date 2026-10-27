@@ -422,18 +422,22 @@ class LLMSubmodule(ARNodeSubmodule):
             # last sampled token, read by slot (padding rows read slot 0)
             sampler: SamplerResource = engine_inputs.resources[SAMPLER]
             t0 = perf_counter() if PHASE_PERIOD else 0.0
-            if graph_walk == "decode":
-                # rows whose last step ran elsewhere brought their token
-                ids = sampler.loopback_input_ids(engine_inputs.request_ids, inputs)
-            else:
+            ids = sampler.loopback_tokens(engine_inputs.request_ids)
+            # rows whose last step ran elsewhere brought their token
+            routed = [
+                i for i, inp in enumerate(inputs)
+                if inp.input_ids is not None and inp.input_seq_len
+            ]
+            if graph_walk != "decode":
                 # a mixed step packs its decode rows' single tokens beside the
                 # prompts: each row takes its own ids, or its loop-back token
-                ids = sampler.loopback_tokens(engine_inputs.request_ids)
                 ids = torch.cat([
                     inp.input_ids.to(ids.dtype) if inp.input_ids is not None
                     else ids[i:i + 1]
                     for i, inp in enumerate(inputs)
                 ])
+            elif routed:
+                sampler.overwrite_rows(routed, (ids, torch.cat([inputs[i].input_ids for i in routed])))
             out["input_ids"] = ids
             if PHASE_PERIOD:
                 phase_record("engine.preprocess.loopback", perf_counter() - t0)
@@ -678,22 +682,9 @@ class LLMSubmodule(ARNodeSubmodule):
         """``check_stop`` for every request off one ``tolist``."""
         if step_walk is not None and step_walk != "decode":
             return {}  # as check_stop: only a decode row's stop ends decode_loop
-        tokens = host_rows.buffers.get("new_token")
-        if not torch.is_tensor(tokens) or tokens.dim() == 0:
+        pairs = host_rows.first_values("new_token", request_ids)
+        if pairs is None:
             return None
-        values = tokens.reshape(tokens.shape[0], -1)[:, 0].tolist()
-        rows = host_rows.request_ids
-        if len(rows) >= len(request_ids) and all(
-            a == b for a, b in zip(request_ids, rows, strict=False)
-        ):
-            # the common case: the batch in forward order, no row map needed
-            pairs = zip(request_ids, values, strict=False)
-        else:
-            row_of = {rid: i for i, rid in enumerate(rows)}
-            pairs = (
-                (rid, values[i]) for rid in request_ids
-                if (i := row_of.get(rid)) is not None and i < len(values)
-            )  # no row, no output: the per-request path skips it too
         stop_ids = self.config.stop_token_ids
         stops: dict[str, set[str]] = {}
         mixed = step_walk is None
