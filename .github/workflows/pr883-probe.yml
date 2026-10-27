@@ -1,0 +1,9 @@
+name: pr883 probe
+on:
+  push:
+    branches: [test/pr883-wheels]
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
