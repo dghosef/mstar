@@ -35,18 +35,9 @@ class HostRows(NamedTuple):
         buffer = self.buffers.get(name)
         if not torch.is_tensor(buffer) or buffer.dim() == 0:
             return None
-        values = buffer.reshape(buffer.shape[0], -1)[:, 0].tolist()
-        rows = self.request_ids
-        if len(rows) >= len(request_ids) and all(
-            a == b for a, b in zip(request_ids, rows, strict=False)
-        ):
-            # the common case: the batch in forward order, no row map needed
-            return zip(request_ids, values, strict=False)
-        row_of = {rid: i for i, rid in enumerate(rows)}
-        return (
-            (rid, values[i]) for rid in request_ids
-            if (i := row_of.get(rid)) is not None and i < len(values)
-        )
+        # padded rows past the real ones fall off the zip
+        value_of = dict(zip(self.request_ids, buffer.reshape(buffer.shape[0], -1)[:, 0].tolist(), strict=False))
+        return ((rid, value) for rid in request_ids if (value := value_of.get(rid)) is not None)
 
 
 class TokenStop(NamedTuple):
