@@ -921,7 +921,8 @@ class LLMSubmodule(ARNodeSubmodule):
         self.eos_token_id = eos_token_id
         # least recently used first; bounded, since the output size is the client's
         self._image_gen_shape_cache: dict[tuple, dict[str, torch.Tensor]] = {}
-        self._sentinel_ids: dict[torch.device, tuple[torch.Tensor, torch.Tensor]] = {}
+        # (device, dtype) -> the <|vision_start|> and <|vision_end|> embeddings
+        self._sentinel_embeds: dict[tuple[torch.device, torch.dtype], tuple[torch.Tensor, torch.Tensor]] = {}
 
     def _get_image_pos_ids(
         self, labels: list[str],
@@ -1098,12 +1099,8 @@ class LLMSubmodule(ARNodeSubmodule):
 
             node_inputs.kwargs[CFG_BRANCHES] = image_gen_step_branches(self.config, fwd_info, first_iter)
 
-            tensor_inputs["empty_combined_emb"] = self._wrap_with_boi_eoi(
-                torch.empty(
-                    (node_inputs.input_embeds.shape[0], self.config.hidden_size),
-                    dtype=node_inputs.input_embeds.dtype,
-                    device=device
-                )
+            tensor_inputs["empty_combined_emb"] = self._sentinel_frame(
+                node_inputs.input_embeds.shape[0], node_inputs.input_embeds.dtype, device,
             )
             labels = ["main", "cfg_text", "cfg_img"]
             seq_len = tensor_inputs["empty_combined_emb"].shape[0]
@@ -1820,25 +1817,34 @@ class LLMSubmodule(ARNodeSubmodule):
         return {_LOGITS: [self.lm_head(hidden)]}
 
 
+    def _sentinels(self, device: torch.device, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+        """The <|vision_start|> and <|vision_end|> embeddings, ``[1, hidden]`` each,
+        embedded once per (device, dtype): the ids' ``torch.tensor(..., device=)`` is
+        a host copy that syncs the stream (holding every image_gen step's
+        prepare_inputs until the step before had finished), and the gather and cast
+        (all-reduced under TP) were redone every step."""
+        assert self.boi_token_id is not None and self.eoi_token_id is not None
+        embeds = self._sentinel_embeds.get((device, dtype))
+        if embeds is None:
+            ids = torch.tensor([self.boi_token_id, self.eoi_token_id], device=device)
+            with torch.no_grad():
+                boi, eoi = self.embed_tokens(ids).to(dtype).split(1)
+            embeds = self._sentinel_embeds[(device, dtype)] = (boi, eoi)
+        return embeds
+
     def _wrap_with_boi_eoi(self, emb: torch.Tensor) -> torch.Tensor:
         """Wrap embeddings with <|vision_start|> and <|vision_end|> tokens."""
-        assert self.boi_token_id is not None and self.eoi_token_id is not None
+        boi, eoi = self._sentinels(emb.device, emb.dtype)
+        return torch.cat([boi, emb, eoi], dim=0)
 
-        device = emb.device
-        # built once per device: `torch.tensor(..., device=)` is a host copy that syncs the
-        # stream, which held every image_gen step's prepare_inputs until the step before it
-        # had finished (no speculation across denoising steps)
-        ids = self._sentinel_ids.get(device)
-        if ids is None:
-            ids = self._sentinel_ids[device] = (
-                torch.tensor([self.boi_token_id], device=device),
-                torch.tensor([self.eoi_token_id], device=device),
-            )
-        boi_ids, eoi_ids = ids
-        with torch.no_grad():
-            boi_emb = self.embed_tokens(boi_ids).to(emb.dtype)
-            eoi_emb = self.embed_tokens(eoi_ids).to(emb.dtype)
-        return torch.cat([boi_emb, emb, eoi_emb], dim=0)
+    def _sentinel_frame(self, n: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        """``[n + 2, hidden]``: the sentinels in the first and last rows around ``n``
+        rows the forward fills (an image_gen step's latents)."""
+        boi, eoi = self._sentinels(device, dtype)
+        frame = torch.empty((n + IMAGE_SENTINELS, self.config.hidden_size), dtype=dtype, device=device)
+        frame[:1].copy_(boi)
+        frame[-1:].copy_(eoi)
+        return frame
 
     def max_batch_size(self, graph_walk: str):
         if graph_walk == "prefill_vit":
