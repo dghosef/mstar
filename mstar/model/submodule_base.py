@@ -35,18 +35,9 @@ class HostRows(NamedTuple):
         buffer = self.buffers.get(name)
         if not torch.is_tensor(buffer) or buffer.dim() == 0:
             return None
-        values = buffer.reshape(buffer.shape[0], -1)[:, 0].tolist()
-        rows = self.request_ids
-        if len(rows) >= len(request_ids) and all(
-            a == b for a, b in zip(request_ids, rows, strict=False)
-        ):
-            # the common case: the batch in forward order, no row map needed
-            return zip(request_ids, values, strict=False)
-        row_of = {rid: i for i, rid in enumerate(rows)}
-        return (
-            (rid, values[i]) for rid in request_ids
-            if (i := row_of.get(rid)) is not None and i < len(values)
-        )
+        # padded rows past the real ones fall off the zip
+        value_of = dict(zip(self.request_ids, buffer.reshape(buffer.shape[0], -1)[:, 0].tolist(), strict=False))
+        return ((rid, value) for rid in request_ids if (value := value_of.get(rid)) is not None)
 
 
 class TokenStop(NamedTuple):
@@ -584,12 +575,11 @@ class NodeSubmodule(torch.nn.Module, ABC):
     # steps keep the process setting, so a new eager shape never searches.
     capture_cudnn_benchmark: bool = False
 
-    # Whether this node's ranks (its TP x SP lockstep instance) split the
-    # attention heads, as tensor and Ulysses sequence parallelism do: the
-    # engine then sizes every resource it builds for the node (KV, attention,
-    # recurrent state) for one rank's slice. False keeps every head on every
-    # rank, for a node whose ranks split other work, e.g. one guidance branch
-    # per rank.
+    # Whether this node's SP ranks split the attention heads, as Ulysses
+    # sequence parallelism does; its TP ranks always do. The engine sizes
+    # every resource it builds for the node (KV, attention, recurrent state)
+    # for one rank's slice. False keeps every head across the SP ranks, for a
+    # node that puts other work there, e.g. one guidance branch per rank.
     splits_heads: bool = True
 
     def __init__(self):
@@ -1137,11 +1127,11 @@ class ARNodeSubmodule(NodeSubmodule):
         stop = self.token_stop
         if stop is None:
             return super().check_stop(request_id, request_info, outputs)
-        if (stop.walk is not None and request_info.graph_walk != stop.walk) or stop.buffer not in outputs:
+        if stop.buffer not in outputs:
             return set()
         # a row's first element, as ``HostRows.first_values`` reads it
         token = outputs[stop.buffer][0].reshape(-1)[0].item()
-        return self._token_stops(((request_id, token),), {request_id: request_info}, False).get(request_id, set())
+        return {stop.loop} if self._token_stops(request_id, token, request_info) else set()
 
     def check_stop_batched(
         self, request_ids: list[str],
@@ -1152,36 +1142,29 @@ class ARNodeSubmodule(NodeSubmodule):
         stop = self.token_stop
         if stop is None:
             return super().check_stop_batched(request_ids, request_infos, host_rows, step_walk)
-        if stop.walk is not None and step_walk is not None and step_walk != stop.walk:
-            return {}
         pairs = host_rows.first_values(stop.buffer, request_ids)
         if pairs is None:
             return None
-        # a mixed step reads each row's walk; a step of one walk need not
-        return self._token_stops(pairs, request_infos, stop.walk is not None and step_walk is None)
+        verdict = self._token_stops
+        return {rid: {stop.loop} for rid, token in pairs if verdict(rid, token, request_infos[rid])}
 
-    def _token_stops(self, pairs, request_infos, check_walk: bool) -> dict[str, set[str]]:
-        """Both stop checks' verdict on ``(rid, token)`` pairs."""
+    def _token_stops(self, request_id: str, token: int, info: CurrentForwardPassInfo) -> bool:
+        """Both stop checks' verdict on one row: whether its sampled
+        ``token`` ends ``token_stop.loop``."""
         stop = self.token_stop
-        stop_ids, loop, key = stop.stop_ids, stop.loop, stop.generated_key
-        stops: dict[str, set[str]] = {}
-        for rid, token in pairs:
-            info = request_infos[rid]
-            if check_walk and info.graph_walk != stop.walk:
-                continue
-            # the set test first: a stop id is rare, and the config read
-            # behind it goes through the info wrapper
-            if token in stop_ids and not info.resource_configs[stop.sampler].ignore_eos:
-                stops[rid] = {loop}
-                continue
+        # the set test first: a stop id is rare, and the config read behind
+        # it goes through the info wrapper
+        on_stop_id = token in stop.stop_ids and not info.resource_configs[stop.sampler].ignore_eos
+        if not on_stop_id:
             # read, never create: the check can run after the state was dropped
             generated = (
-                info.dynamic_loop_iter_counts.get(loop, 0) + 1 if key is None
-                else int(self.request_states.get(rid, {}).get(key, 0))
+                info.dynamic_loop_iter_counts.get(stop.loop, 0) + 1 if stop.generated_key is None
+                else int(self.request_states.get(request_id, {}).get(stop.generated_key, 0))
             )
-            if generated >= info.max_tokens:
-                stops[rid] = {loop}
-        return stops
+            if generated < info.max_tokens:
+                return False
+        # only a row of ``walk`` ends the loop; tested last, as most rows go on
+        return stop.walk is None or info.graph_walk == stop.walk
 
     def split_inputs(
         self,

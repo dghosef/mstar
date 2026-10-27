@@ -697,14 +697,16 @@ def test_node_batches_and_matches_single_requests(tiny_model):
 
 def test_a_step_over_the_audio_budget_is_not_encoded_packed(tiny_model, monkeypatch):
     """With the packed encoder bound, a step whose frames fit `max_batch_seconds`
-    encodes in one packed call (leased or planned whole); one over it plans and
+    encodes in one packed call: leased while its rows fit the attention
+    resource's segment ceiling (a YAML override may set it below
+    `max_batch_size`), planned whole otherwise. One over the budget plans and
     leases nothing and encodes padded per sub-batch."""
     from mstar.model.omnilingual_asr.config import ENCODER_ATTN
     from mstar.model.omnilingual_asr.submodules import ENCODER_LOOP, OmniASRCTCSubmodule
 
     sub = tiny_model.get_submodule(ENCODER_NODE, "cpu")
     small = OmniASRCTCSubmodule(sub.model, max_batch_size=4, max_batch_seconds=0.5)  # 8000 samples
-    small.node_resources = {ENCODER_ATTN: object()}
+    small.node_resources = {ENCODER_ATTN: types.SimpleNamespace(max_segments_per_request=2)}
     packed_calls = []
     monkeypatch.setattr(small, "_transcribe_packed", lambda waves, attn, ei: packed_calls.append(len(waves)) or [
         torch.zeros(n, dtype=torch.long) for n in small.model.frame_lengths([w.shape[0] for w in waves])
@@ -726,13 +728,15 @@ def test_a_step_over_the_audio_budget_is_not_encoded_packed(tiny_model, monkeypa
             out = small.forward_batched(TRANSCRIBE_WALK, engine_inputs, **pre)
         return waves, inputs, declared, out
 
+    _, inputs, declared, _ = step((1000, 2000))
+    assert lease(inputs) and declared is not None and len(declared.segments) == 2
     _, inputs, declared, _ = step((1000, 2000, 3000))
-    assert lease(inputs) and declared is not None and len(declared.segments) == 3
-    assert packed_calls == [3]
+    assert not lease(inputs) and declared is not None and len(declared.segments) == 3
+    assert packed_calls == [2, 3]
 
     waves, inputs, declared, out = step((6000, 1000, 5000, 2000))
     assert not lease(inputs) and declared is None
-    assert packed_calls == [3]
+    assert packed_calls == [2, 3]
     for i, w in enumerate(waves):
         assert torch.equal(out[f"r{i}"][TOKEN_IDS][0], _run_node(sub, [w])["r0"])
 

@@ -146,7 +146,7 @@ class OmniASRCTCSubmodule(NodeSubmodule):
                 make_static_inputs=make_static_inputs,
                 declare_step=declare_step,
                 lease_before_step=True,
-                can_lease=lambda inputs: self._packs([inp.input_seq_len for inp in inputs]),
+                can_lease=self._fits_capture,
                 one_row_per_step=True,
                 total_tokens=self.ENCODER_FRAME_BUCKETS,
                 capture_batch_sizes=[1],
@@ -200,6 +200,15 @@ class OmniASRCTCSubmodule(NodeSubmodule):
             for i, row in enumerate(group):
                 batch[i, : lengths[row]] = waveforms[row]
             yield group, batch, group_lens if any(n < longest for n in group_lens) else None
+
+    def _fits_capture(self, inputs: list[NodeInputs]) -> bool:
+        """Whether a step replays the captured encoder: it packs, and its rows,
+        one segment each under the replay's one row, fit the attention
+        resource's per-request ceiling (read from it, so a YAML override
+        holds). A step over the ceiling encodes packed eagerly."""
+        return len(inputs) <= self.node_resources[ENCODER_ATTN].max_segments_per_request and self._packs(
+            [inp.input_seq_len for inp in inputs]
+        )
 
     def _packs(self, frames: list[int]) -> bool:
         """Whether a step's rows encode packed, in one call: their frames fit

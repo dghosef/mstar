@@ -58,10 +58,11 @@ class EngineResourceInfo:
     """
     device: torch.device
     joint_comm_group: JointGroups | None = None
-    # how many ways the node's ranks split its attention heads: the lockstep
-    # instance's size, or 1 where they split other work
-    # (``NodeSubmodule.splits_heads``). Each builder sizes head counts by it.
-    head_shards: int = 1
+    # how many ways the node's ranks split its attention heads; each builder
+    # sizes head counts by it. None means every rank of ``joint_comm_group``
+    # (1 without one); the engine passes the node's own count
+    # (``NodeSubmodule.splits_heads``).
+    head_shards: int | None = None
     transfer_engine_info: "TransferEngineInfo | None" = None
     kv_dtype: torch.dtype = torch.bfloat16
     # Whether this logical resource has consumers in another worker instance.
@@ -75,6 +76,11 @@ class EngineResourceInfo:
     max_rows_in_combined: "Mapping[str, int | None]" = field(
         default_factory=dict
     )
+
+    def __post_init__(self):
+        if self.head_shards is None:
+            group = self.joint_comm_group
+            object.__setattr__(self, "head_shards", 1 if group is None else group.world_size)
 
     def dependency(self, key: str) -> NodeResourceSpec:
         spec = self.dependencies.get(key)

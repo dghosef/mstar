@@ -26,6 +26,7 @@ from torch import nn
 
 from mstar.api_server.media_io import check_resample_rate
 from mstar.engine.fp32_precision import Fp32Precision, fp32_precision_scope
+from mstar.model.components.masking import length_mask
 from mstar.utils.h2d import to_device_nonblocking
 
 
@@ -240,7 +241,7 @@ class NemoLogMel:
         n_samples = to_device_nonblocking(torch.tensor(lengths), device)
         if self.preemphasis:
             x = torch.cat([x[:, :1], x[:, 1:] - self.preemphasis * x[:, :-1]], dim=1)
-            x = x * (torch.arange(x.shape[1], device=device) < n_samples[:, None])
+            x = x * length_mask(n_samples, x.shape[1])
         stft = torch.stft(
             x, self.n_fft, hop_length=self.hop_length, win_length=self.win_length,
             window=self.window, return_complex=True, pad_mode="constant",

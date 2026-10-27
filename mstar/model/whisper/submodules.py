@@ -33,7 +33,6 @@ from mstar.model.submodule_base import (
     ARNodeInputs,
     ARNodeSubmodule,
     BatchedModelOutput,
-    HostRows,
     ModelInputsFromEngine,
     NodeInputs,
     NodeSubmodule,
@@ -742,37 +741,18 @@ class WhisperDecoderSubmodule(TokenStepNode, ARNodeSubmodule):
             rows["ts_rules"] = next_rules
         return BatchedModelOutput(row_outputs=rows, check_stop_buffers={"new_token": new_tokens})
 
-    def check_stop(
-        self,
-        request_id: str,
-        request_info: CurrentForwardPassInfo,
-        outputs: dict[str, list[torch.Tensor]],
-    ) -> set[str]:
-        # a prompt walk's token never stops the loop (``token_stop.walk``), and
-        # only a word-timestamp request keeps it
-        if (
-            request_info.graph_walk != DECODE_WALK and "new_token" in outputs
-            and request_info.step_metadata.get("word_timestamps")
-        ):
-            self._record_prompt_token(request_info, outputs["new_token"][0].reshape(-1)[0].item())
-        return super().check_stop(request_id, request_info, outputs)
-
-    def _token_stops(self, pairs, request_infos, check_walk: bool) -> dict[str, set[str]]:
-        """The shared stop condition (EOS or the token cap) on decode rows'
-        tokens; a prompt row of a mixed step never stops the loop. Either way
-        the token is kept for the align walk first."""
-        decode = []
-        for rid, token in pairs:
-            info = request_infos[rid]
-            if info.graph_walk != DECODE_WALK:
-                self._record_prompt_token(info, token)
-            else:
-                self._record(info, token)
-                decode.append((rid, token))
-        stops = super()._token_stops(decode, request_infos, check_walk)
-        for rid in stops:
-            self.request_state(request_infos[rid].rid_handle).add("stopped", True)
-        return stops
+    def _token_stops(self, request_id: str, token: int, info: CurrentForwardPassInfo) -> bool:
+        """The shared stop condition (EOS or the token cap) on a decode row's
+        token; a prompt walk's token never stops the loop. Either way the token
+        is kept for the align walk first."""
+        if info.graph_walk != DECODE_WALK:
+            self._record_prompt_token(info, token)
+            return False
+        self._record(info, token)
+        if not super()._token_stops(request_id, token, info):
+            return False
+        self.request_state(info.rid_handle).add("stopped", True)
+        return True
 
     def _record_prompt_token(self, info: CurrentForwardPassInfo, token: int) -> None:
         """For a word-timestamp request, keep what the align walk needs off a
@@ -804,24 +784,3 @@ class WhisperDecoderSubmodule(TokenStepNode, ARNodeSubmodule):
         ):
             decoded.append(token)
 
-    def check_stop_batched(
-        self,
-        request_ids: list[str],
-        request_infos: dict[str, CurrentForwardPassInfo],
-        host_rows: HostRows,
-        step_walk: str | None = None,
-    ) -> dict[str, set[str]] | None:
-        """``check_stop`` for every request off one ``tolist``."""
-        if step_walk is not None and step_walk != DECODE_WALK:
-            # as check_stop: a prompt walk's token never stops the loop, and
-            # only a word-timestamp request keeps it
-            request_ids = [rid for rid in request_ids if request_infos[rid].step_metadata.get("word_timestamps")]
-            if not request_ids:
-                return {}
-            pairs = host_rows.first_values("new_token", request_ids)
-            if pairs is None:
-                return None
-            for rid, token in pairs:
-                self._record_prompt_token(request_infos[rid], token)
-            return {}
-        return super().check_stop_batched(request_ids, request_infos, host_rows, step_walk)
