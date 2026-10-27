@@ -325,6 +325,9 @@ class RequestData:
     # resource label -> the config this request's resources were opened with
     resource_configs: dict[str, ResourceReqConfig]
     sharding_config: ShardingConfig | None = None
+    # node group id -> the DP replica it runs on; counted in the conductor's
+    # replica load while the request is live
+    dp_replicas: dict[int, int] = field(default_factory=dict)
     # set once a NewRequest goes out; before that a failed ingest has nothing to drain
     dispatched: bool = False
     # set once request_complete goes out; after that the client must never get
@@ -428,9 +431,9 @@ class Conductor:
         status_interval_s: float | None = None,
     ):
         self.requests: dict[str, RequestData] = {}
-        # worker id -> requests in self.requests it serves, for the DP replica
-        # pick; kept by _register_request / _drop_request
-        self._worker_load: Counter[str] = Counter()
+        # (node group id, DP replica index) -> requests in self.requests it
+        # serves, for the replica pick; kept by _register_request / _drop_request
+        self._replica_load: Counter[tuple[int, int]] = Counter()
         # Requests in teardown: kept in self.requests (so they still count toward
         # concurrency until their GPU state is freed) with barrier state here.
         self.draining: dict[str, DrainingRequest] = {}
@@ -875,46 +878,48 @@ class Conductor:
                 ),
             )
 
-    def _assign_worker_graphs_to_workers(self) -> dict[int, list[str]]:
+    def _pick_replicas(self) -> dict[int, int]:
+        """A new request's DP replica in each node group: the one serving the
+        fewest live requests, ties at random. A random pick alone puts two of
+        two concurrent requests on one replica half the time, leaving the other
+        idle. Load is counted per (group, replica), so groups that share
+        workers don't skew each other's picks."""
+        replicas: dict[int, int] = {}
+        for wg in self.worker_graphs.values():
+            if wg._group_id in replicas:
+                continue
+            n = len(wg._instance_ranks) if wg._instance_ranks else len(wg.ranks)
+            if n == 1:
+                replicas[wg._group_id] = 0
+                continue
+            loads = [self._replica_load[(wg._group_id, i)] for i in range(n)]
+            least = min(loads)
+            replicas[wg._group_id] = int(np.random.choice([i for i, k in enumerate(loads) if k == least]))
+        return replicas
+
+    def _assign_worker_graphs_to_workers(self, replicas: dict[int, int]) -> dict[int, list[str]]:
         """
-        For a request, assign worker graphs to workers. DP picks are
-        coordinated by ``_group_id`` so all wgs derived from the same
-        node_group land on the same (replica's) workers — without this,
-        two wgs sharing a TP group could end up on different DP replicas
-        and break model topology.
+        For a request, assign worker graphs to the workers of their group's
+        replica in ``replicas`` (``_pick_replicas``). DP picks are coordinated
+        by ``_group_id`` so all wgs derived from the same node_group land on
+        the same (replica's) workers — without this, two wgs sharing a TP
+        group could end up on different DP replicas and break model topology.
 
         TODO: smarter assignment that minimizes cross-graph-walk tensor
         transfer (e.g., bias toward keeping prefill→decode handoff local
         for the same request).
         """
-        # _group_id -> chosen DP-replica index within that group's ranks
-        group_id_to_replica_idx: dict[int, int] = {}
-
-        def pick(replicas: list[list[int]]) -> int:
-            """The least-loaded replica (by live requests on its workers), ties at
-            random. A random pick alone puts two of two concurrent requests on one
-            replica half the time, leaving the other idle."""
-            if len(replicas) == 1:
-                return 0
-            loads = [sum(self._worker_load[f"worker_{r}"] for r in ranks) for ranks in replicas]
-            least = min(loads)
-            return int(np.random.choice([i for i, n in enumerate(loads) if n == least]))
-
         result = {}
         for wg_id, wg in self.worker_graphs.items():
+            replica_idx = replicas[wg._group_id]
             if wg._instance_ranks:
                 # Route to a whole instance (the lockstep unit): every rank of a
                 # tp*sp instance runs the request together, so its TP all-reduce
                 # and SP all-to-all collectives stay in sync. Picking a single TP
                 # row here would desync the SP all-to-all across rows.
-                if wg._group_id not in group_id_to_replica_idx:
-                    group_id_to_replica_idx[wg._group_id] = pick(wg._instance_ranks)
-                ranks = wg._instance_ranks[group_id_to_replica_idx[wg._group_id]]
-                result[wg_id] = [f"worker_{r}" for r in ranks]
+                result[wg_id] = [f"worker_{r}" for r in wg._instance_ranks[replica_idx]]
             else:
-                if wg._group_id not in group_id_to_replica_idx:
-                    group_id_to_replica_idx[wg._group_id] = pick([[r] for r in wg.ranks])
-                result[wg_id] = [f"worker_{wg.ranks[group_id_to_replica_idx[wg._group_id]]}"]
+                result[wg_id] = [f"worker_{wg.ranks[replica_idx]}"]
         return result
 
     def _build_request_sharding_config(
@@ -1186,7 +1191,8 @@ class Conductor:
             None if self._status_interval_s is None
             else self._queued_since.pop(body.request_id, ingest_time)
         )
-        worker_graph_to_workers = self._assign_worker_graphs_to_workers()
+        dp_replicas = self._pick_replicas()
+        worker_graph_to_workers = self._assign_worker_graphs_to_workers(dp_replicas)
 
         model_kwargs = body.model_kwargs or {}
         max_output_tokens = self._max_output_tokens(model_kwargs)
@@ -1244,6 +1250,7 @@ class Conductor:
             streaming_connections=streaming_connections,
             resource_configs={},
             sharding_config=self._build_request_sharding_config(worker_graph_to_workers),
+            dp_replicas=dp_replicas,
             conductor_ingest_time=ingest_time,
             conductor_arrival_time=arrival_time,
         )
@@ -1392,13 +1399,13 @@ class Conductor:
 
     def _register_request(self, request_id: str, request_data: RequestData) -> None:
         self.requests[request_id] = request_data
-        self._worker_load.update(self._request_workers(request_data))
+        self._replica_load.update(request_data.dp_replicas.items())
 
     def _drop_request(self, request_id: str) -> None:
-        """The one way a request leaves ``self.requests``, so ``_worker_load`` cannot leak."""
+        """The one way a request leaves ``self.requests``, so ``_replica_load`` cannot leak."""
         request_data = self.requests.pop(request_id, None)
         if request_data is not None:
-            self._worker_load.subtract(self._request_workers(request_data))
+            self._replica_load.subtract(request_data.dp_replicas.items())
 
     def _register_draining(
         self, request_id: str, expected_acks: set[str], participants: set[str],

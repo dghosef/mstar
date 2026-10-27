@@ -106,7 +106,7 @@ def _conductor(*ticks, requests):
     c._startup_message_backlog = []
     c.requests = dict(requests)
     c.draining = {}
-    c._worker_load = Counter()
+    c._replica_load = Counter()
     c.waiting_queue = []
     c.max_concurrent_requests = None
     c._early_reads_done = {}
