@@ -168,7 +168,8 @@ class TestCli(unittest.TestCase):
         self.assertIn("## Inline comments whose result is unknown (check pr-comments.json)\n\n"
                       "- `b.py:7` **[P1]** unknown one", md)
         self.assertNotIn("Inline comments it made", comment, "a comment that may not have posted would show as made")
-        self.assertIn("**Progress:** P1 `b.py:7` unverified", comment)
+        self.assertIn("**Progress:** P1 `b.py:7` unverified", md)
+        self.assertNotIn("unverified", comment, "the public comment would list unverified leads")
 
     def test_a_corrupt_previous_handoff_starts_afresh(self):
         with tempfile.TemporaryDirectory() as d:

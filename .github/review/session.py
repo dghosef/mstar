@@ -25,8 +25,6 @@ TOKENS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_token
 PROGRESS = re.compile(r"[#*_\s]*progress[*_\s]*:", re.IGNORECASE)
 NOTE_CHARS = 6000
 LAST_TEXT_CHARS = 3000
-# The "didn't complete" comment is public and the note lists unverified leads, so it shows less.
-COMMENT_NOTE_CHARS = 1500
 
 
 def load(paths):
@@ -198,17 +196,13 @@ def handoff_md(h, pr, head, mode):
 
 
 def partial_md(h):
-    """The part of the handoff the "didn't complete" comment shows."""
+    """The part of the handoff the "didn't complete" comment shows: the inline comments that
+    posted. The notes stay in the handoff, since they list unverified leads."""
     made = [c for c in h["comments"] if c["status"] == "posted"]
-    out = ""
-    if made:
-        out += f"**Inline comments it made ({len(made)}):**\n" + "\n".join(
-            f"- `{c['path']}:{c['line']}` {c['body']}" for c in made) + "\n"
-    notes = h["note"] or h["last_text"]
-    if notes:
-        cut = notes[:COMMENT_NOTE_CHARS] + (" …" if len(notes) > COMMENT_NOTE_CHARS else "")
-        out += "\n**Its latest notes:**\n\n" + quote(cut) + "\n"
-    return out
+    if not made:
+        return ""
+    return f"**Inline comments it made ({len(made)}):**\n" + "\n".join(
+        f"- `{c['path']}:{c['line']}` {c['body']}" for c in made) + "\n"
 
 
 def main():

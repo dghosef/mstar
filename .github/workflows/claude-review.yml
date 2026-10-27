@@ -64,10 +64,11 @@ name: Claude Review
 # Failing gracefully: a review that finished but went past --max-turns (the
 # action then reports a failure) still has its summary in the action's
 # execution file, and that summary is posted. A review that stopped before it
-# finished gets a "didn't complete" comment with what it had so far (the inline
-# comments it made, which the action posts even when the run fails, and its
-# latest notes), and a handoff is saved as an artifact for 7 days: its progress
-# note, the inline comments it made and the files it read (session.py).
+# finished gets a "didn't complete" comment listing the inline comments it made
+# (the action posts them even when the run fails), and a handoff is saved as an
+# artifact for 7 days: its progress note, the inline comments it made and the
+# files it read (session.py). The note stays out of the comment, since it lists
+# unverified leads.
 # `/review continue` starts a fresh session from that handoff with a fresh turn
 # budget, rather than resuming the old session, which would replay the whole
 # transcript, usually after its prompt cache has expired. Only artifacts made
