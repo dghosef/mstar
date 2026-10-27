@@ -27,7 +27,7 @@ from mstar.engine.resources import PagedKVConfig, PositionConfig, StepContext, S
 from mstar.engine.resources.kv.manager import KVManager
 from mstar.engine.resources.kv.transfer import TransferEngineInfo
 from mstar.engine.resources.position.manager import RopeManager
-from mstar.model.bagel.submodules import MIXED_TEXT, LLMSubmodule, active_labels
+from mstar.model.bagel.submodules import CFG_BRANCHES, MIXED_TEXT, LLMSubmodule, active_labels
 from mstar.model.submodule_base import ARNodeInputs
 
 pytestmark = pytest.mark.skipif(
@@ -76,6 +76,9 @@ class _Harness:
     def run(self, graph_walk: str, span: int, pos_ids=None) -> None:
         inputs = ARNodeInputs(input_seq_len=span)
         inputs.resource_step_info = True  # requires_cfg
+        if graph_walk.startswith("image_gen"):
+            # every label a guided request holds, as an in-interval step stamps it
+            inputs.kwargs[CFG_BRANCHES] = 3
         if pos_ids is not None:
             inputs.custom_pos_ids = pos_ids
         step = LLMSubmodule.declare_step(
