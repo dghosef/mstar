@@ -365,6 +365,50 @@ def test_windowed_kv_commit_iteration_declares_and_commits(monkeypatch) -> None:
     assert torch.equal(out["latents"][0], x0) and torch.equal(out["window_latents"][0], x0)
 
 
+def test_action_batches_hold_one_shape_signature() -> None:
+    """The compiled batched action step specializes on each request's shapes, so
+    an action batch holds one (mode, latent shape, chunk size) and does not
+    compile per ordered mix of them."""
+    sub = _dit()
+    shape = (1, 48, 9, 30, 40)
+    for rid, sig in (("a", ("policy", shape, 32)), ("b", ("policy", shape, 32)),
+                     ("c", ("inverse_dynamics", shape, 32)), ("d", ("policy", shape, 16))):
+        sub.request_state(rid).add_all(uncond=None, action_signature=sig)
+
+    def batches(*rids):
+        return sub.can_batch(SimpleNamespace(graph_walk=C.ACTION_GEN_WALK, request_ids=list(rids)), [None] * len(rids))
+
+    assert batches("a", "b")
+    assert not batches("a", "c")
+    assert not batches("a", "d")
+
+
+def test_batched_action_step_reads_contiguous_gen_position_ids() -> None:
+    """The compiled batched action step guards on input strides, so the gen-token
+    position ids it gets must not be views whose stride is the prompt length."""
+    sub = _dit()
+    seen = []
+
+    def step(reqs, *args):
+        seen.extend(r["position_ids_cond"] for r in reqs)
+        raise StopIteration
+
+    sub.transformer = SimpleNamespace(denoise_step_action_batched=step)
+    for rid, prompt_len in (("a", 7), ("b", 11)):
+        cond = sub._build_action_static(list(range(prompt_len)), 64, 64, 9, 8, "policy", 10.0, 10.0, 1, "cpu")
+        sub.request_state(rid).add_all(
+            cond=cond, uncond=None, scheduler=SimpleNamespace(timesteps=torch.tensor([1.0])),
+            domain_t=torch.tensor([0]),
+        )
+    rids = ["a", "b"]
+    engine_inputs = SimpleNamespace(request_ids=rids, per_request_states=None, step=None, resources={ATTN: None})
+    zeros = {rid: torch.zeros(1) for rid in rids}
+    time_index = {rid: torch.zeros(1, dtype=torch.long) for rid in rids}
+    with pytest.raises(StopIteration):
+        sub._forward_batched_action(engine_inputs, zeros, zeros, time_index)
+    assert len(seen) == 2 and all(p.is_contiguous() for p in seen)
+
+
 def test_windowed_can_batch_and_batched_boundary(monkeypatch) -> None:
     """Windowed denoise steps batch across requests (loop counters mapped to
     within-window steps per request); any request at a kv commit iteration

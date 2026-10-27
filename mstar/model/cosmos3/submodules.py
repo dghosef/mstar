@@ -327,8 +327,11 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             self.transformer.denoise_step_batched_cfg = torch.compile(
                 self.transformer.denoise_step_batched_cfg, fullgraph=False, dynamic=False,
             )
-            # One graph per batch size: dynamo unrolls the per-request loop, so
-            # the first batch of each size compiles (seconds with a warm cache).
+            # Dynamo unrolls the per-request loop and specializes on each
+            # request's shapes and strides; can_batch keeps a batch to one shape
+            # signature, and the position ids it reads are contiguous whatever
+            # the prompt length, so this is one graph per (signature, batch
+            # size), each compiling on its first batch (seconds with a warm cache).
             self.transformer.denoise_step_action_batched = torch.compile(
                 self.transformer.denoise_step_action_batched, fullgraph=False, dynamic=False,
             )
@@ -454,8 +457,11 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             "not the count `frame_tokens` gives a layout to size it by"
         )
         # proj_out runs on the generation token block, so shift the joint-sequence
-        # mse indexes to be relative to the generation tokens.
+        # mse indexes to be relative to the generation tokens. The generation
+        # tokens' position ids are stored contiguous: a view of the joint ids has
+        # the prompt length as its stride, and the compiled steps guard on it.
         static["mse_gen_indexes"] = static["vision_mse_loss_indexes"] - static["und_len"]
+        static["gen_position_ids"] = static["position_ids"][:, static["und_len"]:].contiguous()
         if sound_latent_frames is not None:
             static["sound_mse_gen_indexes"] = static["sound_mse_loss_indexes"] - static["und_len"]
         return static
@@ -559,9 +565,11 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             "not the count `frame_tokens` gives a layout to size it by"
         )
         # proj_out runs on the generation token block; shift the joint-sequence
-        # mse indexes to be relative to the [vision | action] generation tokens.
+        # mse indexes to be relative to the [vision | action] generation tokens,
+        # and store their position ids contiguous (see ``_build_static``).
         static["mse_gen_indexes"] = static["vision_mse_loss_indexes"] - static["und_len"]
         static["action_mse_gen_indexes"] = static["action_mse_loss_indexes"] - static["und_len"]
+        static["gen_position_ids"] = static["position_ids"][:, static["und_len"]:].contiguous()
         return static
 
     # ------------------------------------------------------------------
@@ -1004,11 +1012,11 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
     def _slim_statics(cond: dict, uncond: dict | None) -> None:
         """Drop packed-static fields the denoise loop never reads: the token
         ids and und-tower rotary ids ride the prefill node inputs, and the raw
-        joint-sequence mse indexes are superseded by the gen-relative
-        ``*mse_gen_indexes``."""
+        joint-sequence position ids and mse indexes are superseded by the
+        gen-relative ``gen_position_ids`` and ``*mse_gen_indexes``."""
         for s in (cond, uncond) if uncond is not None else (cond,):
             for key in (
-                "input_ids", "text_mrope_ids", "vision_mse_loss_indexes",
+                "input_ids", "text_mrope_ids", "position_ids", "vision_mse_loss_indexes",
                 "sound_mse_loss_indexes", "action_mse_loss_indexes",
             ):
                 s.pop(key, None)
@@ -1123,6 +1131,8 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             ),
             latent_shape=latent_shape,
             action_chunk=action_chunk,
+            # what the compiled batched action step specializes on (can_batch)
+            action_signature=(mode, tuple(latent_shape), action_chunk),
             action_dim=action_dim,
             raw_action_dim=raw_action_dim,
             domain_t=torch.tensor([domain_id], dtype=torch.long, device=device),
@@ -1763,7 +1773,7 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
 
         if not cfg_active:
             velocity, sound_v = self.transformer.denoise_step(
-                latents, vts, st["cond"]["position_ids"][:, st["cond"]["und_len"]:],
+                latents, vts, st["cond"]["gen_position_ids"],
                 st["cond"]["vision_token_shapes"], st["cond"]["vision_noisy_frame_indexes"],
                 st["cond"]["mse_gen_indexes"], COND_LABEL, attn,
                 **self._sound_kwargs(st["cond"], sound_latents, sts),
@@ -1771,8 +1781,8 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         elif self.batched_cfg:
             (cond_v, s_c), (uncond_v, s_u) = self.transformer.denoise_step_batched_cfg(
                 latents, vts,
-                st["cond"]["position_ids"][:, st["cond"]["und_len"]:],
-                st["uncond"]["position_ids"][:, st["uncond"]["und_len"]:],
+                st["cond"]["gen_position_ids"],
+                st["uncond"]["gen_position_ids"],
                 st["cond"]["vision_token_shapes"],
                 st["cond"]["vision_noisy_frame_indexes"],
                 st["cond"]["mse_gen_indexes"], CFG_BATCHED_LABEL, attn,
@@ -1782,13 +1792,13 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             sound_v = s_u + st["gs"] * (s_c - s_u)
         else:
             cond_v, s_c = self.transformer.denoise_step(
-                latents, vts, st["cond"]["position_ids"][:, st["cond"]["und_len"]:],
+                latents, vts, st["cond"]["gen_position_ids"],
                 st["cond"]["vision_token_shapes"], st["cond"]["vision_noisy_frame_indexes"],
                 st["cond"]["mse_gen_indexes"], COND_LABEL, attn,
                 **self._sound_kwargs(st["cond"], sound_latents, sts),
             )
             uncond_v, s_u = self.transformer.denoise_step(
-                latents, vts, st["uncond"]["position_ids"][:, st["uncond"]["und_len"]:],
+                latents, vts, st["uncond"]["gen_position_ids"],
                 st["uncond"]["vision_token_shapes"], st["uncond"]["vision_noisy_frame_indexes"],
                 st["uncond"]["mse_gen_indexes"], UNCOND_LABEL, attn,
                 **self._sound_kwargs(st["uncond"], sound_latents, sts),
@@ -1811,11 +1821,10 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         }
 
     def _denoise_action(self, attn, static, latents, action_latents, vts, ats, domain, label):
-        und_len = static["und_len"]
         return self.transformer.denoise_step(
             latents,
             vts,
-            static["position_ids"][:, und_len:],
+            static["gen_position_ids"],
             static["vision_token_shapes"],
             static["vision_noisy_frame_indexes"],
             static["mse_gen_indexes"],
@@ -1878,8 +1887,8 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             (video_v, action_v), (v_u, a_u) = self.transformer.denoise_step_batched_cfg(
                 latents,
                 vts,
-                st["cond"]["position_ids"][:, st["cond"]["und_len"]:],
-                st["uncond"]["position_ids"][:, st["uncond"]["und_len"]:],
+                st["cond"]["gen_position_ids"],
+                st["uncond"]["gen_position_ids"],
                 st["cond"]["vision_token_shapes"],
                 st["cond"]["vision_noisy_frame_indexes"],
                 st["cond"]["mse_gen_indexes"],
@@ -1958,10 +1967,11 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         if batch.graph_walk in ACTION_WALKS:
             # Action batches when all requests share the guidance regime (all
             # single-branch -- guidance-scale-1 inverse/forward-dynamics and base
-            # policy -- or all two-branch), so one plan covers the batch. Modes
-            # and embodiment domains may differ: each request's masks, scheduler
-            # and domain-aware action projection are applied per request.
-            return len({st["uncond"] is not None for st in sts}) == 1
+            # policy -- or all two-branch), so one plan covers the batch, and the
+            # mode, latent shape and chunk size: the compiled batched step
+            # specializes on each request's shapes, so a mixed batch would compile
+            # per ordered combination. Embodiment domains may differ.
+            return len({(st["uncond"] is not None, st["action_signature"]) for st in sts}) == 1
         return False
 
     def max_batch_size(self, graph_walk: str):
@@ -2060,8 +2070,8 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             reqs.append({
                 "latents": lat,
                 "vision_timesteps": torch.full((st["cond"]["num_noisy_vision_tokens"],), t.item(), device=lat.device),
-                "position_ids_cond": cond["position_ids"][:, cond["und_len"]:],
-                "position_ids_uncond": unc["position_ids"][:, unc["und_len"]:],
+                "position_ids_cond": cond["gen_position_ids"],
+                "position_ids_uncond": unc["gen_position_ids"],
                 "vision_token_shapes": cond["vision_token_shapes"],
                 "vision_noisy_frame_indexes": cond["vision_noisy_frame_indexes"],
                 "vision_mse_loss_indexes": cond["mse_gen_indexes"],
@@ -2113,13 +2123,12 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             # step below.
             t = st["scheduler"].timesteps[min(step_index, n_steps - 1)]
             cond = st["cond"]
-            und = cond["und_len"]
             req = {
                 "latents": lat,
                 "action_latents": act,
                 "vision_timesteps": torch.full((st["cond"]["num_noisy_vision_tokens"],), t.item(), device=lat.device),
                 "action_timesteps": torch.full((st["cond"]["num_noisy_action_tokens"],), t.item(), device=lat.device),
-                "position_ids_cond": cond["position_ids"][:, und:],
+                "position_ids_cond": cond["gen_position_ids"],
                 "vision_token_shapes": cond["vision_token_shapes"],
                 "vision_noisy_frame_indexes": cond["vision_noisy_frame_indexes"],
                 "vision_mse_loss_indexes": cond["mse_gen_indexes"],
@@ -2130,7 +2139,7 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             }
             if with_cfg:
                 unc = st["uncond"]
-                req["position_ids_uncond"] = unc["position_ids"][:, unc["und_len"]:]
+                req["position_ids_uncond"] = unc["gen_position_ids"]
             reqs.append(req)
             meta.append((rid, st, lat, act, ti, t))
 
