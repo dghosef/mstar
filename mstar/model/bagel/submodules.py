@@ -1819,10 +1819,9 @@ class LLMSubmodule(ARNodeSubmodule):
 
     def _sentinels(self, device: torch.device, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
         """The <|vision_start|> and <|vision_end|> embeddings, ``[1, hidden]`` each,
-        embedded once per (device, dtype): the ids' ``torch.tensor(..., device=)`` is
-        a host copy that syncs the stream (holding every image_gen step's
-        prepare_inputs until the step before had finished), and the gather and cast
-        (all-reduced under TP) were redone every step."""
+        embedded once per (device, dtype): building the ids on the device is a host
+        copy that syncs the stream, and the gather and cast (all-reduced under TP)
+        need not repeat every step."""
         assert self.boi_token_id is not None and self.eoi_token_id is not None
         embeds = self._sentinel_embeds.get((device, dtype))
         if embeds is None:
