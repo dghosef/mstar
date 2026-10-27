@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
 from typing import Any
 
 import torch
@@ -41,23 +40,6 @@ from mstar.model.omnilingual_asr.components.wav2vec2 import Wav2Vec2CTC
 from mstar.model.omnilingual_asr.config import ENCODER_ATTN, SAMPLE_RATE, TOKEN_IDS, WAVEFORM
 from mstar.model.submodule_base import ModelInputsFromEngine, NodeInputs, NodeSubmodule
 from mstar.platforms.compile import with_inductor_overrides
-
-
-@contextmanager
-def _full_fp32_matmuls(enabled: bool):
-    """The engine runs fp32 matmuls as TF32 (``set_float32_matmul_precision('high')``);
-    an fp32 deployment of this model asks for full fp32, which is what the
-    reference computes."""
-    if not enabled:
-        yield
-        return
-    previous = torch.get_float32_matmul_precision()
-    torch.set_float32_matmul_precision("highest")
-    try:
-        yield
-    finally:
-        torch.set_float32_matmul_precision(previous)
-
 
 # The packed encoder (layers, final norm, CTC head, argmax) as a piecewise
 # capture region
@@ -82,6 +64,10 @@ class OmniASRCTCSubmodule(NodeSubmodule):
         super().__init__()
         self.model = model
         self.dtype = next(model.parameters()).dtype
+        if self.dtype == torch.float32:
+            # an fp32 deployment computes what the reference does: full fp32
+            # matmuls, not the engine's TF32 default (the engine applies it)
+            self.float32_matmul_precision = "highest"
         self._max_batch_size = max_batch_size
         self._max_batch_samples = int(max_batch_seconds * SAMPLE_RATE)
         self._max_batch_frames = model.frame_lengths([self._max_batch_samples])[0]
@@ -280,10 +266,9 @@ class OmniASRCTCSubmodule(NodeSubmodule):
             for i, row in enumerate(group):
                 batch[i, : lengths[row]] = waveforms[row]
             padded = any(n < longest for n in group_lens)
-            with _full_fp32_matmuls(self.dtype == torch.float32 and batch.is_cuda):
-                logits, frame_lens = self.model(
-                    batch, group_lens if padded else None, features=self._features_fn(batch),
-                )
+            logits, frame_lens = self.model(
+                batch, group_lens if padded else None, features=self._features_fn(batch),
+            )
             ids = logits.argmax(dim=-1)
             for i, (row, n) in enumerate(zip(group, frame_lens, strict=True)):
                 out[row] = ids[i, :n]
