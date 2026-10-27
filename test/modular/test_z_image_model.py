@@ -138,7 +138,6 @@ def test_text_node_pads_prompts_to_the_reference_length():
         rows.append(node.prepare_inputs("encode_text", info, {TEXT_INPUTS: [torch.arange(1, n + 1)]}))
     batch = node.preprocess("encode_text", None, rows)
     assert batch[TEXT_INPUTS].shape == (2, config.text_encoder.max_sequence_length) == batch["text_mask"].shape
-    assert batch["lengths"] == [40, 7]
     assert batch["text_mask"].sum(dim=1).tolist() == [40, 7]
     assert (batch[TEXT_INPUTS][1, 7:] == config.text_encoder.pad_token_id).all()
 

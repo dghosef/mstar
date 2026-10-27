@@ -125,7 +125,8 @@ def _engine_inputs() -> ModelInputsFromEngine:
 def _text_embeds(text: Qwen3TextEncoderSubmodule, walk: str, ids: torch.Tensor) -> torch.Tensor:
     """One prompt's ``text_embeds`` through the node's own padding and forward."""
     row = text.prepare_inputs(walk, None, {TEXT_INPUTS: [ids]})
-    return text.forward(walk, _engine_inputs(), **text.preprocess(walk, _engine_inputs(), [row]))[TEXT_EMBEDS][0]
+    out = text.forward_batched(walk, _engine_inputs(), **text.preprocess(walk, _engine_inputs(), [row]))
+    return text.unpack_packed_outputs(out, ["oracle"], [row.input_seq_len], [row], {})["oracle"][TEXT_EMBEDS][0]
 
 
 def _psnr(a: torch.Tensor, b: torch.Tensor) -> float:

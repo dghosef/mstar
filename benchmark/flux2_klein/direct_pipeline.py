@@ -63,8 +63,10 @@ def generate(model, subs, prompt, height, width, steps, seed, timer: _Timer, ora
     engine_inputs = ModelInputsFromEngine(request_ids=["direct"], per_request_info={})
     row = text.prepare_inputs(IMAGE_GEN_WALK, None, {TEXT_INPUTS: [model.tokenize(prompt)]})
     with torch.inference_mode():
-        embeds = timer.time("text_encoder", text.forward, IMAGE_GEN_WALK, engine_inputs,
-                            **text.preprocess(IMAGE_GEN_WALK, engine_inputs, [row]))[TEXT_EMBEDS][0]
+        packed = timer.time("text_encoder", text.forward_batched, IMAGE_GEN_WALK, engine_inputs,
+                            **text.preprocess(IMAGE_GEN_WALK, engine_inputs, [row]))
+        unpacked = text.unpack_packed_outputs(packed, ["direct"], [row.input_seq_len], [row], {})
+        embeds = unpacked["direct"][TEXT_EMBEDS][0]
         inputs = {TEXT_EMBEDS: [embeds]}
         latents = None
         for k in range(steps):

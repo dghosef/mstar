@@ -76,7 +76,8 @@ class Qwen3TextEncoderSubmodule(NodeSubmodule):
         )
 
     def can_batch(self, batch, model_inputs) -> bool:
-        return len(model_inputs) > 1
+        # one path for any batch size, as a captured B=1 replay already runs it
+        return True
 
     def max_batch_size(self, graph_walk: str):
         return self._max_batch_size
@@ -90,22 +91,20 @@ class Qwen3TextEncoderSubmodule(NodeSubmodule):
         return bool(lengths) and all(n is not None and n < width for n in lengths)
 
     def preprocess(self, graph_walk, engine_inputs, inputs: list[NodeInputs]) -> dict:
-        lengths = [inp.resource_step_info for inp in inputs]
+        width = self.text_config.max_sequence_length
         return {
             TEXT_INPUTS: torch.stack([inp.tensor_inputs[TEXT_INPUTS] for inp in inputs]),
             TEXT_MASK: torch.stack([inp.tensor_inputs[TEXT_MASK] for inp in inputs]),
-            "lengths": lengths,
             # any padded row puts the batch on the masked path, as the reference batches it
-            "padded": any(n < self.text_config.max_sequence_length for n in lengths),
+            "padded": any(inp.resource_step_info < width for inp in inputs),
         }
 
     def _encode(self, ids: torch.Tensor, mask: torch.Tensor, padded: bool | None = None) -> torch.Tensor:
         device = self.get_device()
         return self.encoder(ids.to(device), mask.to(device), padded=padded).to(self.encoder.dtype)
 
-    def forward(self, graph_walk, engine_inputs, text_inputs, text_mask, lengths, padded=None, **kwargs):
-        hidden = self._encode(text_inputs, text_mask, padded)
-        return {TEXT_EMBEDS: [self.request_embeds(hidden, lengths[0])]}
+    def forward(self, *args, **kwargs):
+        raise NotImplementedError("the text encoder runs batched at any size (can_batch is always True)")
 
     def forward_batched(self, graph_walk, engine_inputs, text_inputs, text_mask, padded=None, **kwargs):
         return {self.PACKED_EMBEDS: self._encode(text_inputs, text_mask, padded)}
