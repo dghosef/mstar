@@ -7,7 +7,8 @@ accumulation order does, so the padded length is part of matching the reference.
 Requests of any length then batch together, and the batched forward emits the whole
 ``[B, S, D]`` batch, cut per request after the forward by ``request_embeds``, the one
 thing a model overrides. The forward has fixed shapes and no host syncs, so it is
-captured per power-of-two batch size up to ``max_batch_size``.
+captured at each of ``geometric_batch_sizes(max_batch_size)``: powers of two below
+``max_batch_size``, then ``max_batch_size``.
 
 Only the masked (padded-prompt) path is captured. Whether a prompt has padding is
 ``text_len`` in the step metadata, which the model sets at intake from the prompt
