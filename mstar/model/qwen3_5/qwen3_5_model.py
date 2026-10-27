@@ -738,8 +738,7 @@ class Qwen3_5DenseModel(Model):
             if first_group:
                 picked["pixel_values"].append(pool[index])
                 picked["image_grid_thw"].append(grid_pools[step.modality][index])
-                if index < len(host_pools[step.modality]):
-                    picked_grids.append(tuple(host_pools[step.modality][index]))
+                picked_grids.append(tuple(host_pools[step.modality][index]))
 
         if not order:
             return []
@@ -752,9 +751,6 @@ class Qwen3_5DenseModel(Model):
         # TODO: one walk holds every image and video, so a many-image prompt
         # makes one very wide step. Cap images per walk here and emit several
         # steps, each with its share of `order`.
-        # all or nothing: the nodes fall back to the device grids without them
-        if len(picked_grids) != len(picked["image_grid_thw"]):
-            picked_grids = []
         return [PrefillStep("prefill_vision", picked, tuple(order), tuple(picked_grids))]
 
     def get_initial_forward_pass_args(

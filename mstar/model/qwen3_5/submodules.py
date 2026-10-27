@@ -82,19 +82,11 @@ from mstar.utils.profiler import PHASE_PERIOD, PhaseLaps, phase_record
 logger = logging.getLogger(__name__)
 
 
-def _host_grids(
-    fwd_info: CurrentForwardPassInfo, device_grids: list[torch.Tensor],
-) -> list[tuple[int, int, int]]:
+def _host_grids(fwd_info: CurrentForwardPassInfo) -> list[tuple[int, int, int]]:
     """Each image's or video's (t, h, w), off the step metadata the conductor
     filled from `process_prompt`; reading `image_grid_thw` back from the
-    device instead blocks the host on every kernel queued ahead of it."""
-    host = fwd_info.step_metadata.get(STEP_GRIDS_KEY)
-    if host:
-        return [(int(t), int(h), int(w)) for t, h, w in host]
-    return [
-        (int(t), int(h), int(w))
-        for g in device_grids for t, h, w in g.reshape(-1, 3).tolist()
-    ]
+    device instead would block the host on every kernel queued ahead of it."""
+    return [(int(t), int(h), int(w)) for t, h, w in fwd_info.step_metadata[STEP_GRIDS_KEY]]
 
 
 class LLMSubmodule(ARNodeSubmodule):
@@ -265,7 +257,7 @@ class LLMSubmodule(ARNodeSubmodule):
         device = self.get_device()
         merge = self.vision_config.spatial_merge_size
         texts = inputs.get("text_inputs", [])
-        grids = _host_grids(fwd_info, inputs.get("image_grid_thw", []))
+        grids = _host_grids(fwd_info)
         packed = inputs["vision_embeds"][0].to(device)
         start_embed, end_embed = self._sentinel_embeds()
 
@@ -730,7 +722,7 @@ class VisionEncoderSubmodule(NodeSubmodule):
     ) -> NodeInputs:
         device = self.get_device()
         merge = self.config.spatial_merge_size
-        grid = _host_grids(fwd_info, inputs["image_grid_thw"])
+        grid = _host_grids(fwd_info)
         # Built here, not in the compiled forward: a `.tolist()` there breaks
         # the graph and makes h, w symints inductor cannot codegen from. And
         # built on the host: on the device, the grid upload and the

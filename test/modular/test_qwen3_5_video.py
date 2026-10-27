@@ -389,18 +389,26 @@ class _Embed(nn.Module):
 IMAGE_MARK, VIDEO_MARK = -1.0, -2.0
 
 
+def _host_grids(out) -> dict:
+    """The host grids `process_prompt` hands the conductor, as the schedule gets them."""
+    from mstar.model.qwen3_5.qwen3_5_model import IMAGE_GRIDS_KEY, VIDEO_GRIDS_KEY
+
+    return {key: out.metadata.get(key) for key in (IMAGE_GRIDS_KEY, VIDEO_GRIDS_KEY)}
+
+
 @needs_new_layout
 @pytest.mark.parametrize("layout", list(LAYOUTS))
 def test_vision_walk_matches_get_rope_index(model, processor, rope_model, layout):
     """The schedule and the LLM's `prefill_vision` row, against transformers:
     the row's token order and its 3D positions, plus where decode resumes."""
     from mstar.model.qwen3_5.config import KV_CACHE, ROPE
+    from mstar.model.qwen3_5.qwen3_5_model import STEP_GRIDS_KEY
     from mstar.model.qwen3_5.submodules import LLMSubmodule
 
     _, out, ref = run_both(model, processor, layout)
     tensors = out.new_input_tensors
     modalities, _ = LAYOUTS[layout]
-    (step,) = model._prefill_schedule(modalities, tensors, out.metadata["video_groups"])
+    (step,) = model._prefill_schedule(modalities, tensors, out.metadata["video_groups"], _host_grids(out))
     assert step.walk == "prefill_vision"
 
     # the encoder gets each image and video once, in prompt order
@@ -426,7 +434,9 @@ def test_vision_walk_matches_get_rope_index(model, processor, rope_model, layout
     ]
     llm = LLMSubmodule(_Embed(len(model.tokenizer)), model.config, model.vision_config)
     llm.node_resources = {ROPE: SimpleNamespace(position=lambda rid, label: 0)}
-    fwd_info = SimpleNamespace(request_id="r", step_metadata={"prefill_order": step.order})
+    fwd_info = SimpleNamespace(
+        request_id="r", step_metadata={"prefill_order": step.order, STEP_GRIDS_KEY: step.image_grids},
+    )
     row = llm._vision_inputs(fwd_info, {
         "text_inputs": step.input_tensors["text_inputs"],
         "image_grid_thw": step.input_tensors["image_grid_thw"],
@@ -694,7 +704,7 @@ def test_schedule_and_prompt_share_the_plan(model, processor):
     groups = out.metadata["video_groups"]
     plan = prefill_plan(expand_video_parts(parts, groups))
     tensors = out.new_input_tensors
-    (step,) = model._prefill_schedule(["video", "image", "video", "text"], tensors, groups)
+    (step,) = model._prefill_schedule(["video", "image", "video", "text"], tensors, groups, _host_grids(out))
     kinds = {TEXT: 0, "image": 1, VIDEO: 2}
     assert step.order == tuple(kinds[p.modality] for p in plan)
     assert len(step.input_tensors["text_inputs"]) == len(tensors["text_inputs"])
