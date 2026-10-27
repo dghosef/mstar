@@ -255,8 +255,9 @@ class NemoLogMel:
             # the mean taken as an offset from the first frame: the plain mean up
             # to rounding, and exact for a constant bin, so digital silence stays
             # zero where the reference's rounding amplifies it into noise
-            n = to_device_nonblocking(torch.tensor(frames), device)[:, None, None]
-            valid = torch.arange(mel.shape[2], device=device) < n
+            n_frames = to_device_nonblocking(torch.tensor(frames), device)
+            valid = length_mask(n_frames, mel.shape[2])[:, None, :]
+            n = n_frames[:, None, None]
             ref = mel[:, :, :1]
             mean = ref + ((mel - ref) * valid).sum(dim=2, keepdim=True) / n
             std = (((mel - mean) * valid).pow(2).sum(dim=2, keepdim=True) / (n - 1)).sqrt()
