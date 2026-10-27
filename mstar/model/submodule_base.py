@@ -845,6 +845,22 @@ class NodeSubmodule(torch.nn.Module, ABC):
     def max_batch_size(self, graph_walk: str):
         return None
 
+    def compile_regions(self) -> Mapping[str, Sequence[tuple]]:
+        """Parts of this node the engine compiles on their own, for a node
+        whose ``forward`` is not compiled whole (``disable_torch_compile``, or
+        start-up raises): ``torch.compile`` with dynamic shapes in its default
+        mode, under the platform's inductor settings, before capture, so a
+        region inside a captured graph is compiled there too. Skipped without
+        an accelerator.
+
+        Maps an attribute path from the submodule (a module, whose ``forward``
+        is compiled, or a method: ``"model.merger"``, ``"model.embed"``) to the
+        argument tuples it is called with once at start-up, so its compile
+        does not land on a live request; with none, it compiles on its first
+        call.
+        """
+        return {}
+
     def max_rows_in_combined(self, graph_walk: str) -> int | None:
         """How many rows of this real walk a step mixing it with another walk
         of its combined walk may hold; None is uncapped. For a backend whose

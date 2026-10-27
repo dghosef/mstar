@@ -39,7 +39,6 @@ from mstar.engine.resources.step import Segment, SlotLease, SubmoduleStep
 from mstar.model.omnilingual_asr.components.wav2vec2 import Wav2Vec2CTC
 from mstar.model.omnilingual_asr.config import ENCODER_ATTN, SAMPLE_RATE, TOKEN_IDS, WAVEFORM
 from mstar.model.submodule_base import ModelInputsFromEngine, NodeInputs, NodeSubmodule
-from mstar.platforms.compile import with_inductor_overrides
 
 # The packed encoder (layers, final norm, CTC head, argmax) as a piecewise
 # capture region
@@ -49,7 +48,7 @@ ENCODER_LOOP = "encoder_loop"
 class OmniASRCTCSubmodule(NodeSubmodule):
     # Every request has its own length, so the engine's compile of the whole
     # forward would recompile per shape; the encoder runs eagerly. The conv
-    # feature extractor alone is compiled (below), dynamic from the first call.
+    # feature extractor alone is compiled (``compile_regions``).
     disable_torch_compile = True
     # The model runs in its own dtype end to end, as the reference does (only
     # the conv stack's LayerNorms upcast to fp32), not under autocast.
@@ -71,23 +70,18 @@ class OmniASRCTCSubmodule(NodeSubmodule):
         self._max_batch_size = max_batch_size
         self._max_batch_samples = int(max_batch_seconds * SAMPLE_RATE)
         self._max_batch_frames = model.frame_lengths([self._max_batch_samples])[0]
-        # Eager, each conv layer's channel LayerNorm (in fp32, over a transposed
-        # copy) costs more than the conv: about half the GPU time of a batched
-        # step. Inductor fuses the transposes, the norm and the GELU, under the
-        # platform's inductor settings as the engine's compiles are.
-        self._compiled_features = with_inductor_overrides(
-            torch.compile(model.encoder_frontend.feature_extractor, dynamic=True)
-        )
         self._attn_fns: dict[int, Callable] = {}
 
-    def warm_compile(self, device: str) -> None:
-        """Compile the feature extractor at load rather than on a live request:
-        one graph for a lone clip (size-1 dims specialize) and the dynamic one."""
-        if torch.device(device).type == "cpu":
-            return
-        with torch.no_grad():
-            for rows in (1, 2):
-                self._compiled_features(torch.zeros(rows, SAMPLE_RATE, dtype=self.dtype, device=device))
+    def compile_regions(self) -> dict[str, list[tuple]]:
+        """Eager, each conv layer's channel LayerNorm (in fp32, over a transposed
+        copy) costs more than the conv: about half the GPU time of a batched
+        step, and inductor fuses the transposes, the norm and the GELU. Warmed
+        at start-up for a lone clip (size-1 dims specialize) and the dynamic
+        graph."""
+        device = self.get_device()
+        return {"model.encoder_frontend.feature_extractor": [
+            (torch.zeros(rows, SAMPLE_RATE, dtype=self.dtype, device=device),) for rows in (1, 2)
+        ]}
 
     def prepare_inputs(
         self,
@@ -210,10 +204,6 @@ class OmniASRCTCSubmodule(NodeSubmodule):
         plan per call."""
         return sum(frames) <= self._max_batch_frames
 
-    def _features_fn(self, batch: torch.Tensor):
-        # CPU (tests) stays eager
-        return self._compiled_features if batch.device.type != "cpu" else None
-
     def _transcribe_packed(
         self, waveforms: list[torch.Tensor], attn, engine_inputs: ModelInputsFromEngine,
     ) -> list[torch.Tensor]:
@@ -229,9 +219,7 @@ class OmniASRCTCSubmodule(NodeSubmodule):
             for i, row in enumerate(group):
                 batch[i, : lengths[row]] = waveforms[row]
             padded = any(n < longest for n in group_lens)
-            x, frame_lens, _ = self.model.frontend(
-                batch, group_lens if padded else None, features=self._features_fn(batch),
-            )
+            x, frame_lens, _ = self.model.frontend(batch, group_lens if padded else None)
             for i, (row, n) in enumerate(zip(group, frame_lens, strict=True)):
                 rows[row] = x[i, :n]
         packed = rows[0] if len(rows) == 1 else torch.cat(rows)
@@ -266,9 +254,7 @@ class OmniASRCTCSubmodule(NodeSubmodule):
             for i, row in enumerate(group):
                 batch[i, : lengths[row]] = waveforms[row]
             padded = any(n < longest for n in group_lens)
-            logits, frame_lens = self.model(
-                batch, group_lens if padded else None, features=self._features_fn(batch),
-            )
+            logits, frame_lens = self.model(batch, group_lens if padded else None)
             ids = logits.argmax(dim=-1)
             for i, (row, n) in enumerate(zip(group, frame_lens, strict=True)):
                 out[row] = ids[i, :n]

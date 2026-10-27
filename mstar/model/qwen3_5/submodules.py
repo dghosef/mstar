@@ -74,7 +74,6 @@ from mstar.model.submodule_base import (
     NodeSubmodule,
     TokenStop,
 )
-from mstar.platforms.compile import with_inductor_overrides
 from mstar.utils.h2d import to_device_nonblocking
 from mstar.utils.profiler import PHASE_PERIOD, PhaseLaps, phase_record
 
@@ -667,9 +666,9 @@ class VisionEncoderSubmodule(NodeSubmodule):
     # bookkeeping (each request's slice of the output, the segment lengths)
     # guards on the batch size: every new size recompiled (~0.6 s, on a live
     # request). The tensor stages around the captured block loop are compiled
-    # here instead, dynamic in the patch count from the first call. A step
-    # past the top capture bucket runs the blocks eagerly: compiling that rare
-    # path stalled its first request for seconds.
+    # on their own instead (`compile_regions`), dynamic in the patch count from
+    # the first call. A step past the top capture bucket runs the blocks
+    # eagerly: compiling that rare path stalled its first request for seconds.
     disable_torch_compile = True
 
     def __init__(
@@ -679,7 +678,6 @@ class VisionEncoderSubmodule(NodeSubmodule):
         super().__init__()
         self.model = model
         self.config = config
-        self._compiled: tuple | None = None
         # per-column (mean, std) for byte patches; see `Qwen3_5DenseModel.pixel_normalizer`
         self._pixel_normalizer = pixel_normalizer
 
@@ -750,6 +748,10 @@ class VisionEncoderSubmodule(NodeSubmodule):
 
     def max_batch_size(self, graph_walk: str) -> int | None:
         return self.MAX_BATCH_SIZE
+
+    def compile_regions(self) -> dict[str, list[tuple]]:
+        # compiled on the first image (configs warm it with `warmup_requests`)
+        return {"model.embed": [], "model.merger": []}
 
     def get_piecewise_accelerator_graph_configs(
         self, device: torch.device, autocast_dtype: torch.dtype,
@@ -905,18 +907,11 @@ class VisionEncoderSubmodule(NodeSubmodule):
     ) -> dict[str, NameToTensorList]:
         # One call for every image; the ragged kernel's per-frame segments
         # keep them apart.
-        if self._compiled is None:
-            # under the platform's inductor settings, as the engine's compiles are
-            self._compiled = (
-                with_inductor_overrides(torch.compile(self.model.embed, dynamic=True)),
-                with_inductor_overrides(torch.compile(self.model.merger, dynamic=True)),
-            )
-        embed, merger = self._compiled
-        hidden, cos, sin = embed(pixel_values, indices, weights, position_ids)
+        hidden, cos, sin = self.model.embed(pixel_values, indices, weights, position_ids)
         encoded = self._replay_block_loop(engine_inputs, hidden, cos, sin, seq_lengths)
         if encoded is None:
             encoded = self.model.encode(hidden, cos, sin)
-        embeds = merger(encoded)
+        embeds = self.model.merger(encoded)
         return self._split_rows(engine_inputs.request_ids, embeds, row_tokens)
 
     @staticmethod

@@ -663,11 +663,45 @@ class Engine:
                     node_name, exc_info=True
                 )
 
+    def _compile_regions(self) -> None:
+        """Compile and warm each node's ``compile_regions`` with dynamic=True
+        (a whole-forward compile uses dynamic=None) in torch.compile's default
+        mode: the compile level (``MSTAR_COMPILE_LEVEL``) tunes captured
+        forwards, whose shapes are fixed per bucket."""
+        if not self.device_capability.is_available:
+            return
+        for node_name, submodule_mgmt in self._submodules.items():
+            submodule = submodule_mgmt.submodule
+            regions = submodule.compile_regions()
+            if regions and not submodule.disable_torch_compile:
+                raise ValueError(
+                    f"{node_name} declares compile_regions but its forward is compiled whole; "
+                    "set disable_torch_compile"
+                )
+            for path, examples in regions.items():
+                owner_path, _, name = path.rpartition(".")
+                owner = submodule
+                for part in filter(None, owner_path.split(".")):
+                    owner = getattr(owner, part)
+                target = getattr(owner, name)
+                if isinstance(target, torch.nn.Module):
+                    owner, name, target = target, "forward", target.forward
+                # an instance attribute shadows the method for every caller
+                setattr(owner, name, with_inductor_overrides(torch.compile(target, dynamic=True)))
+                with torch.no_grad(), fp32_precision_scope(submodule_mgmt.fp32_precision), autocast_scope(
+                    self._autocast_dtype_for(submodule), self._device.type,
+                ):
+                    for args in examples:
+                        getattr(owner, name)(*args)
+                logger.info("Engine: torch.compile applied to %s.%s", node_name, path)
+
     def _autocast_dtype_for(self, submodule: NodeSubmodule) -> torch.dtype | None:
         """This node's autocast dtype, or None for one that opted out."""
         return None if submodule.disable_autocast else self._autocast_dtype
 
     def warmup(self) -> None:
+        # before capture: a region inside a captured graph compiles in its warm-up
+        self._compile_regions()
         ag_runners: dict[str, AcceleratorGraphRunner] = {}
         piecewise: dict[str, dict[str, PiecewiseAcceleratorGraphRunner]] = {}
         for node_name, submodule_mgmt in self._submodules.items():

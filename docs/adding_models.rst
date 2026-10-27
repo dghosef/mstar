@@ -976,7 +976,12 @@ methods are:
    class attribute ``disable_torch_compile = True``. Keep the compiled paths
    compile-friendly. If a helper must not be traced, because it uses data-dependent
    Python control flow or forces a host synchronization, exclude it explicitly with
-   ``@torch.compiler.disable``.
+   ``@torch.compiler.disable``. A submodule that disables the whole-forward compile but
+   wants parts of it compiled returns them from ``compile_regions()``: attribute paths
+   (a module, or a method) mapped to example arguments to warm each with at start-up.
+   The engine compiles them, with dynamic shapes and before capture, on an accelerator
+   only; don't call ``torch.compile`` in model code. Qwen3.5's vision encoder and
+   Omnilingual ASR are examples.
 
    Some submodules must run in their own parameter dtype. One example is an fp32 vocoder
    that is numerically sensitive. Such a submodule sets ``disable_autocast = True``. The

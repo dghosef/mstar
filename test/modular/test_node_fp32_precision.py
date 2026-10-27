@@ -456,3 +456,53 @@ def test_capture_cudnn_benchmark_covers_warmup_only(monkeypatch):
     _step(engine, "tuned")
     assert warmups == [("tuned", True), ("plain", False), ("forward", False)]
     assert torch.backends.cudnn.benchmark is False
+
+
+def test_compile_regions_are_compiled_and_warmed(monkeypatch):
+    """A node's ``compile_regions`` are compiled by the engine, a module by its
+    ``forward`` and a method in place, and warmed with their example
+    arguments; without an accelerator nothing is compiled."""
+    events: list = []
+
+    class _Regions(_Recorder):
+        disable_torch_compile = True
+
+        def __init__(self):
+            super().__init__()
+            self.inner = torch.nn.Linear(4, 4)
+
+        def scale(self, x):
+            return 2 * x
+
+        def compile_regions(self):
+            return {"inner": [(torch.ones(1, 4),)], "scale": []}
+
+    def fake_compile(fn, **kwargs):
+        name = fn.__name__
+        events.append(("compile", name, kwargs.get("dynamic")))
+
+        def compiled(*args):
+            events.append(("call", name))
+            return fn(*args)
+        return compiled
+
+    monkeypatch.setattr(torch, "compile", fake_compile)
+    monkeypatch.setattr(engine_module, "with_inductor_overrides", lambda fn, *a, **k: fn, raising=False)
+    node = _Regions()
+    engine = _engine({"n": node})
+    engine._compile_regions()
+    assert events == []   # CPU: nothing compiled
+    with monkeypatch.context() as on_gpu:
+        on_gpu.setattr(engine, "_device_capability", SimpleNamespace(is_available=True))
+        engine._compile_regions()
+    assert events == [("compile", "forward", True), ("call", "forward"), ("compile", "scale", True)]
+    node.inner(torch.ones(1, 4))
+    assert node.scale(torch.ones(1)) == 2 and events[-2:] == [("call", "forward"), ("call", "scale")]
+
+    # regions are for a node whose forward is not compiled whole
+    whole = _Regions()
+    whole.disable_torch_compile = False
+    engine = _engine({"whole": whole})
+    monkeypatch.setattr(engine, "_device_capability", SimpleNamespace(is_available=True))
+    with pytest.raises(ValueError, match="disable_torch_compile"):
+        engine._compile_regions()
