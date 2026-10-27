@@ -455,7 +455,7 @@ def test_higgs_caps_decode_where_its_stop_check_ends_it(max_tokens):
     ), "the cap and the stop check end decode on different iterations"
 
 
-def test_higgs_lays_out_the_prefill_steps_it_schedules():
+def test_higgs_lays_out_the_prefill_step_it_runs():
     from mstar.model.higgs_audio.config import KV_CACHE
 
     model = _higgs()
@@ -464,9 +464,11 @@ def test_higgs_lays_out_the_prefill_steps_it_schedules():
     )
     [layout] = output.metadata["kv_layout"][KV_CACHE].values()
     tensors = output.new_input_tensors
-    schedule = model._build_prefill_schedule({name: tensors[name] for name in tensors})
+    args = model.get_initial_forward_pass_args(
+        "main", ["audio"], ["text"], {name: tensors[name] for name in tensors}, output.metadata,
+    )
 
-    assert [span.walk for span in layout.spans] == [walk for walk, _ in schedule]
+    assert [span.walk for span in layout.spans] == [args.full_metadata.graph_walk]
     audio = sum(model.config.encoder_output_length(n) for n in output.metadata["audio_feature_lens"])
     text = sum(ids.numel() for ids in tensors["text_inputs"])
     assert sum(span.length for span in layout.spans) == text + audio
