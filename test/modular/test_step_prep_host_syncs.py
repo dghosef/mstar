@@ -367,7 +367,6 @@ def test_higgs_loopback_decode_prep_copies_no_pageable_index(monkeypatch):
     that row's token by index: the index goes up through pinned memory, not a blocking copy
     (every request's first decode step takes this path). The meta device stands in for the
     accelerator."""
-    from mstar.engine.resources.sampler import resource as sampler_resource
     from mstar.engine.resources.sampler.resource import SamplerResource
     from mstar.model.higgs_audio.config import SAMPLER, HiggsAudioModelConfig
     from mstar.model.higgs_audio.submodules import HiggsAudioLLMSubmodule
@@ -375,17 +374,12 @@ def test_higgs_loopback_decode_prep_copies_no_pageable_index(monkeypatch):
 
     class _Sampler:
         # the real overlay, over a stand-in for the slot masters
-        loopback_input_ids = SamplerResource.loopback_input_ids
+        overwrite_rows = SamplerResource.overwrite_rows
+        _row_stager = None
 
         def loopback_tokens(self, rids):
             return torch.zeros(len(rids), dtype=torch.long, device="meta")
 
-    # the helper's CUDA path, which pins only for a cuda device
-    monkeypatch.setattr(
-        sampler_resource, "to_device_nonblocking",
-        lambda t, device: t.pin_memory().to(device, non_blocking=True),
-    )
-    monkeypatch.setattr(_T, "pin_memory", lambda self: self)
     sub = HiggsAudioLLMSubmodule(None, HiggsAudioModelConfig())
     sampler = _Sampler()
     engine_inputs = SimpleNamespace(resources={SAMPLER: sampler}, request_ids=["fresh", "looped"])

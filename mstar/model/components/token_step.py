@@ -25,7 +25,7 @@ class TokenStepNode:
     DECODE_LOOP = "decode_loop"
     DECODE_CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64]
     SAMPLER: str
-    MAX_PREFILL_BATCH_SIZE: int
+    MAX_PREFILL_BATCH_SIZE: int | None
 
     def get_accelerator_graph_configs(
         self, device: torch.device, tp_world_size: int = 1,
@@ -45,8 +45,8 @@ class TokenStepNode:
         return True
 
     def max_batch_size(self, graph_walk: str) -> int | None:
-        # the engine caps decode at its largest capture config, and with accelerator
-        # graphs off leaves it uncapped; prefill isn't captured
+        # the base default, which subclasses may narrow: the engine caps decode at
+        # its largest capture config (uncapped with accelerator graphs off)
         return None if graph_walk == self.DECODE_WALK else self.MAX_PREFILL_BATCH_SIZE
 
     def postprocess(
@@ -59,3 +59,14 @@ class TokenStepNode:
         # the decode loop feeds the sampled token back in as text_inputs
         if "new_token" in outputs:
             outputs["text_inputs"] = outputs["new_token"]
+
+    def check_stop(
+        self,
+        request_id: str,
+        request_info: CurrentForwardPassInfo,
+        outputs: dict[str, list[torch.Tensor]],
+    ) -> set[str]:
+        # a batched decode step routes its token as text_inputs alone
+        if "new_token" not in outputs and "text_inputs" in outputs:
+            outputs = {**outputs, "new_token": outputs["text_inputs"]}
+        return super().check_stop(request_id, request_info, outputs)

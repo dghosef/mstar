@@ -83,8 +83,7 @@ class AttentionManager(AttentionResource):
                 f"{AttnBackend.FLASHINFER_MLA.value!r} reads it"
             )
         # `shard` lives on the KVConfig base, so this is unchanged for both.
-        if info.joint_comm_group is not None:
-            kv_config.shard(info.joint_comm_group.world_size)
+        kv_config.shard(info.head_shards)
         if backend == AttnBackend.DENSE:
             # A dense backend needs the FlashAttention-3 kernel; where the
             # wheel does not match the installed torch/CUDA build, degrade to
@@ -131,6 +130,7 @@ class AttentionManager(AttentionResource):
                 backend=spec.config.flashinfer_backend,
                 splits=spec.config.splits,
                 max_rows_in_combined=info.max_rows_in_combined,
+                decode_tensor_cores=spec.config.decode_tensor_cores,
                 sliding_window=spec.config.sliding_window,
             )
 
@@ -198,8 +198,7 @@ class EagerSlotKey(NamedTuple):
     same reason (FlashInfer's plan stages into a pinned buffer per wrapper)."""
     label: str
     slot: int
-    # decode and prefill take different wrapper classes; cross-attention plans
-    # one wrapper per label either way and leaves this False
+    # decode and prefill take different wrapper classes
     is_decode: bool = False
 
 

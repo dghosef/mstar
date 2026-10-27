@@ -14,6 +14,8 @@ import torch
 import triton
 import triton.language as tl
 
+from mstar.utils.attention import _rms_norm_rope
+
 
 @triton.jit
 def _cp_qk_norm_rope_kv_kernel(
@@ -38,18 +40,8 @@ def _cp_qk_norm_rope_kv_kernel(
 
     x_first = tl.load(base + offs).to(tl.float32)
     x_second = tl.load(base + offs + HALF_D).to(tl.float32)
-    sumsq = tl.sum(x_first * x_first, axis=0) + tl.sum(x_second * x_second, axis=0)
-    inv_rms = 1.0 / tl.sqrt(sumsq / D + eps)
-    x_first = x_first * inv_rms * tl.load(w + offs).to(tl.float32)
-    x_second = x_second * inv_rms * tl.load(w + offs + HALF_D).to(tl.float32)
-
     pos = tl.load(Pos + m).to(tl.float32)
-    inv_freq = tl.exp(-tl.log(rope_theta) * (offs.to(tl.float32) * 2.0 / D))
-    angle = pos * inv_freq
-    cos = tl.cos(angle)
-    sin = tl.sin(angle)
-    out_first = x_first * cos - x_second * sin
-    out_second = x_second * cos + x_first * sin
+    out_first, out_second = _rms_norm_rope(x_first, x_second, w, pos, eps, rope_theta, D, HALF_D)
 
     if h < H_Q:
         tl.store(base + offs, out_first.to(QKV.dtype.element_ty))
