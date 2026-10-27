@@ -6,23 +6,29 @@ SigLIP2 ViT for image understanding, and FLUX VAE for image generation.
 The LLM itself serves as the denoiser for rectified flow image generation
 (no separate diffusion model).
 
-Architecture (4 nodes):
+Architecture (4 nodes, 7 with CFG-parallel placement):
     vit_encoder   (enc_dec) - SigLIP2 ViT + connector + pos embed
     vae_encoder   (enc_dec) - VAE encode + patchify + projection
     LLM           (ar)      - Fat node: embed + Qwen2 + lm_head + CFG + Euler
     vae_decoder   (enc_dec) - VAE decode to pixels
+    LLM_cfg_text, LLM_cfg_img, combine_cfg - only when the deployment places
+                  the guidance branches on their own workers (image_gen_cfg)
 
-Graph walks (5):
+Graph walks (5, or 6 with image_gen_cfg):
     prefill_text  - Text token embedding + LLM prefill (causal)
     prefill_vit   - ViT encoding + LLM prefill (bidirectional for images)
     prefill_vae   - VAE encoding + LLM prefill (bidirectional for images)
     decode        - Autoregressive text generation
-    image_gen     - Flow matching loop (3-pass CFG + Euler) + VAE decode
+    image_gen     - Flow matching loop (CFG + Euler) + VAE decode, every
+                    branch in the one LLM node
+    image_gen_cfg - The same loop with one node per guidance branch, the
+                    velocities combined in combine_cfg
 
 The LLM node absorbs text_emb, lm_head, and flow_proj because they are
 always colocated on the same GPU. Keeping them as separate graph nodes
-would add unnecessary IPC overhead. CFG requires 3 LLM forward passes +
-velocity combination, which is easier as one atomic operation.
+would add unnecessary IPC overhead. A denoise step runs the guidance
+branches it needs (one to three LLM passes: a branch whose scale or
+interval leaves it out sits the step out) and combines their velocities.
 
 Output mode is known upfront from the API request's output_modalities
 field (no BOI token detection). Prefill is sequential: text tokens are
@@ -254,18 +260,9 @@ class BagelModel(Model):
     The LLM serves as both the autoregressive text model and the denoiser
     for rectified flow image generation (no separate diffusion model).
 
-    Nodes (4):
-        vit_encoder   (enc_dec) - SigLIP2 ViT + connector + pos embed
-        vae_encoder   (enc_dec) - VAE encode + patchify + projection
-        LLM           (ar)      - Fat node: embed + Qwen2 + lm_head + CFG
-        vae_decoder   (enc_dec) - VAE decode to pixels
-
-    Graph walks (5):
-        prefill_text  - Text token embedding + LLM prefill (causal)
-        prefill_vit   - ViT encoding + LLM prefill (bidirectional)
-        prefill_vae   - VAE encoding + LLM prefill (bidirectional)
-        decode        - Autoregressive text generation
-        image_gen     - Flow matching loop (3-pass CFG + Euler) + VAE decode
+    Nodes and walks: see the module docstring (image_gen_cfg and its three
+    CFG-parallel nodes exist only when a deployment places the guidance
+    branches apart).
 
     Graph walk transitions are schedule-driven (no BOI token detection). The
     output mode is known upfront from the API request's output_modalities.

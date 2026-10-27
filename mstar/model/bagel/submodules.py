@@ -829,16 +829,19 @@ class LLMSubmodule(ARNodeSubmodule):
       - prefill_vit:  BOI + vit_emb + EOI -> LLM forward (bidirectional)
       - prefill_vae:  BOI + vae_emb + EOI -> LLM forward (bidirectional)
       - decode:       embed_tokens -> LLM forward -> lm_head -> argmax
-      - image_gen:    3-pass CFG -> llm2vae -> velocity combine -> Euler step
+      - image_gen:    the step's guidance branches -> llm2vae -> velocity
+                      combine -> Euler step
 
     BOI/EOI tokens (<|vision_start|>, <|vision_end|>) are structural
     delimiters manually inserted around image embeddings during prefill.
     They are NOT predicted by the model (excluded from CE loss during
     training).
 
-    During image_gen, classifier-free guidance requires 3 LLM forward
-    passes with different KV caches (main, cfg_text, cfg_img). The
-    velocities are combined via:
+    During image_gen, classifier-free guidance runs one LLM pass per branch
+    the step needs (``image_gen_step_branches``: main, then cfg_text and
+    cfg_img while their scales and the CFG interval keep them), each over its
+    own KV cache. Under image_gen_cfg each branch is its own node and
+    combine_cfg combines them. With all three the velocities are combined via:
         v_final = v_cfg_img + img_scale * (
             v_cfg_text + text_scale * (v_main - v_cfg_text) - v_cfg_img
         )
@@ -849,7 +852,7 @@ class LLMSubmodule(ARNodeSubmodule):
       - prefill_text: fork main->cfg_text before, forward [main, cfg_img]
       - prefill_vit/vae: forward [main], fork main->cfg_text at commit
       - decode: forward [main, cfg_img]
-      - image_gen: 3-pass CFG with conditional skip and renormalization
+      - image_gen: the step's branches, with renormalization
     The runner drives the declaration (forks, plans, commits); every
     forward call names its label.
     """
