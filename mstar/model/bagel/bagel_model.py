@@ -695,20 +695,17 @@ class BagelModel(Model):
                     )
             result["text_inputs"] = segments
 
-        # Image edit path: both input and output include "image".
-        # request specifies a target width and/or height, resize the input
-        # images to be the largest that fits within that box (preserving
-        # aspect ratio) so the edited output matches the requested size.
+        # Image edit path: both input and output include "image". Resize the
+        # input images to the largest that fits within the requested width x
+        # height (preserving aspect ratio) so the edited output matches it.
         is_image_edit = "image" in input_modalities and "image" in output_modalities
-        max_width = kwargs.get("width")
-        max_height = kwargs.get("height")
         if (
             is_image_edit
             and tensors is not None
             and tensors.get("image_inputs")
         ):
             result["image_inputs"] = [
-                self._resize_to_fit(img, max_width, max_height)
+                self._resize_to_fit(img, params["width"], params["height"])
                 for img in tensors["image_inputs"]
             ]
 
@@ -792,22 +789,15 @@ class BagelModel(Model):
     @staticmethod
     def _resize_to_fit(
         image: torch.Tensor,
-        max_width: int | None,
-        max_height: int | None,
+        max_width: int,
+        max_height: int,
     ) -> torch.Tensor:
         """Resize a c x h x w image to the largest size fitting within
-        max_width x max_height while preserving aspect ratio.
-
-        If only one of max_width / max_height is given, only that dimension
-        constrains the result. Both dimensions are capped at 1024.
+        max_width x max_height while preserving aspect ratio. Both dimensions
+        are capped at 1024.
         """
         _, h, w = image.shape
-        scales = [1024 / w, 1024 / h]
-        if max_width is not None:
-            scales.append(max_width / w)
-        if max_height is not None:
-            scales.append(max_height / h)
-        scale = min(scales)
+        scale = min(1024 / w, 1024 / h, max_width / w, max_height / h)
         new_h = max(1, round(h * scale))
         new_w = max(1, round(w * scale))
         if new_h == h and new_w == w:
@@ -1582,7 +1572,7 @@ class BagelModel(Model):
         params = {k: getattr(self.config, k) for k in keys}
         if model_kwargs:
             for key in keys:
-                if key in model_kwargs:
+                if model_kwargs.get(key) is not None:  # an explicit null is the default
                     params[key] = model_kwargs[key]
         return SamplingConfig(
             vocab_size=self.config.vocab_size,
