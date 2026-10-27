@@ -29,6 +29,11 @@ def _percentile(values: list[float], q: float) -> float:
     return values[min(len(values) - 1, int(round(q * (len(values) - 1))))]
 
 
+def _p99_ms(seconds: list[float]) -> float:
+    """99th percentile latency in milliseconds."""
+    return _percentile(seconds, 99) * 1000
+
+
 class KokoroOnnxEngine:
     """thewh1teagle/kokoro-onnx on onnxruntime (CUDA or CPU execution provider)."""
 

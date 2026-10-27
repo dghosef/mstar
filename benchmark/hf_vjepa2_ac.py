@@ -84,6 +84,11 @@ class BenchmarkResult:
     per_request: list[PerRequestResult] = field(default_factory=list)
 
 
+def _median_ms(seconds: list[float]) -> float:
+    """Median latency in milliseconds."""
+    return _percentile(seconds, 0.5) * 1000
+
+
 def _percentile(values: list[float], p: float) -> float:
     """Linear-interpolation percentile, matches numpy default."""
     if not values:
