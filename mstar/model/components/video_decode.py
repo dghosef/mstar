@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import bisect
 import os
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 import torch
@@ -22,18 +23,30 @@ _MAX_DECODERS = max(1, min(6, (os.cpu_count() or 1) // VIDEO_DECODE_THREADS))
 _pool: ThreadPoolExecutor | None = None
 
 
-def _decode(filepath: str, indices: list[int]) -> torch.Tensor:
+Transform = Callable[[torch.Tensor], torch.Tensor]
+
+
+def _identity(frames: torch.Tensor) -> torch.Tensor:
+    return frames
+
+
+def _decode(filepath: str, indices: list[int], transform: Transform) -> torch.Tensor:
     from torchcodec.decoders import VideoDecoder
 
     decoder = VideoDecoder(filepath, num_ffmpeg_threads=VIDEO_DECODE_THREADS)
-    return decoder.get_frames_at(indices=indices).data
+    return transform(decoder.get_frames_at(indices=indices).data)
 
 
-def decode_frames_at(filepath: str, indices: list[int], decoder=None) -> torch.Tensor:
-    """``[len(indices), C, H, W]`` uint8 frames at ``indices``, in that order.
+def decode_frames_at(
+    filepath: str, indices: list[int], decoder=None, transform: Transform | None = None,
+) -> torch.Tensor:
+    """The frames at ``indices``, in that order: ``[len(indices), C, H, W]``
+    uint8, or what ``transform`` makes of them.
 
     ``decoder``: an open torchcodec ``VideoDecoder`` on ``filepath`` to reuse
-    for its keyframe index.
+    for its keyframe index. ``transform``: a frame-by-frame map of a
+    ``[n, C, H, W]`` uint8 batch (e.g. convert and resize), applied to each
+    group on its decoding thread, so it overlaps the other groups' decode.
     """
     global _pool
     from torchcodec.decoders import VideoDecoder
@@ -48,8 +61,9 @@ def decode_frames_at(filepath: str, indices: list[int], decoder=None) -> torch.T
     for i in order:
         by_gop.setdefault(bisect.bisect_right(keys, i), []).append(i)
     gops = list(by_gop.values())
+    transform = transform or _identity
     if len(gops) < 2:
-        return decoder.get_frames_at(indices=indices).data
+        return transform(decoder.get_frames_at(indices=indices).data)
     workers = min(len(gops), _MAX_DECODERS)
     # contiguous runs of GOPs, balanced by frame count
     groups: list[list[int]] = [[] for _ in range(workers)]
@@ -60,7 +74,7 @@ def decode_frames_at(filepath: str, indices: list[int], decoder=None) -> torch.T
     groups = [grp for grp in groups if grp]
     if _pool is None:
         _pool = ThreadPoolExecutor(_MAX_DECODERS, thread_name_prefix="video_decode")
-    decoded = list(_pool.map(lambda grp: _decode(filepath, grp), groups))
+    decoded = list(_pool.map(lambda grp: _decode(filepath, grp, transform), groups))
     where = {i: (frames, r) for grp, frames in zip(groups, decoded, strict=True) for r, i in enumerate(grp)}
     out = torch.empty((len(indices), *decoded[0].shape[1:]), dtype=decoded[0].dtype)
     for k, i in enumerate(indices):
