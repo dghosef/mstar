@@ -244,11 +244,16 @@ def test_one_chunk_needs_thirteen_poses(model, monkeypatch):
     assert out["camera_poses"][0].shape[0] == 4  # one chunk of latent frames
 
 
-@pytest.mark.parametrize("value", ["false", 0, None])
-def test_reference_numerics_must_be_a_bool(value):
+_NUMERICS_SETTINGS = ("reference_numerics", "vae_decode_fp32", "vae_decode_channels_last", "vae_decode_compile",
+                      "vae_decode_cudnn_benchmark")
+
+
+@pytest.mark.parametrize("setting, value", [(name, value) for name in _NUMERICS_SETTINGS for value in ("false", 0)]
+                         + [("reference_numerics", None)])
+def test_numerics_settings_must_be_bools(setting, value):
     """A yaml "false" is truthy; read as on it would serve the opposite numerics."""
-    with pytest.raises(ValueError, match="reference_numerics"):
-        LingBotWorldModel(skip_weight_loading=True, reference_numerics=value)
+    with pytest.raises(ValueError, match=setting):
+        LingBotWorldModel(skip_weight_loading=True, **{setting: value})
 
 
 def test_mstar_serve_knows_the_model():
@@ -477,7 +482,5 @@ def test_the_decode_settings_are_model_kwargs_and_unknown_ones_are_refused():
     assert fast.config.vae_decode_channels_last is True  # the rest of the preset stays
     exact = LingBotWorldModel(skip_weight_loading=True, vae_decode_fp32=False)
     assert exact.config.vae_decode_fp32 is False and exact.config.reference_numerics
-    with pytest.raises(ValueError, match="vae_decode_compile"):
-        LingBotWorldModel(skip_weight_loading=True, vae_decode_compile="false")
     with pytest.raises(TypeError):
         LingBotWorldModel(skip_weight_loading=True, vae_decode_compiled=False)
