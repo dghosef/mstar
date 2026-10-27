@@ -20,7 +20,7 @@ a long one, and the budget bounds a forward's memory.
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -70,7 +70,6 @@ class OmniASRCTCSubmodule(NodeSubmodule):
         self._max_batch_size = max_batch_size
         self._max_batch_samples = int(max_batch_seconds * SAMPLE_RATE)
         self._max_batch_frames = model.frame_lengths([self._max_batch_samples])[0]
-        self._attn_fns: dict[int, Callable] = {}
 
     def compile_regions(self) -> dict[str, list[tuple]]:
         """Eager, each conv layer's channel LayerNorm (in fp32, over a transposed
@@ -156,16 +155,8 @@ class OmniASRCTCSubmodule(NodeSubmodule):
 
     def _capture_encoder(self, inp: PiecewiseCallInputs) -> dict[str, torch.Tensor]:
         """The captured region: reads the runner's buffer, never rebinds."""
-        attn = self._attn_fn(inp.resources[ENCODER_ATTN])
+        attn = functools.partial(inp.resources[ENCODER_ATTN].run, label="main")
         return {"ids": self.model.encode_packed(inp.static_inputs["hidden"], attn).argmax(dim=-1)}
-
-    def _attn_fn(self, resource) -> Callable:
-        """The resource's attention over the step's segments, one callable per
-        bound resource."""
-        fn = self._attn_fns.get(id(resource))
-        if fn is None:
-            fn = self._attn_fns[id(resource)] = functools.partial(resource.run, label="main")
-        return fn
 
     def max_batch_size(self, graph_walk: str) -> int:
         del graph_walk
@@ -197,6 +188,19 @@ class OmniASRCTCSubmodule(NodeSubmodule):
                 groups.append([row])
         return groups
 
+    def _padded_groups(self, waveforms: list[torch.Tensor]):
+        """Each sub-batch as ``(rows, batch, lengths)``: its waveforms
+        zero-padded to the longest, and their lengths (None when none is
+        padded)."""
+        lengths = [w.shape[0] for w in waveforms]
+        for group in self.sub_batches(lengths):
+            group_lens = [lengths[row] for row in group]
+            longest = max(group_lens)
+            batch = waveforms[group[0]].new_zeros(len(group), longest)
+            for i, row in enumerate(group):
+                batch[i, : lengths[row]] = waveforms[row]
+            yield group, batch, group_lens if any(n < longest for n in group_lens) else None
+
     def _packs(self, frames: list[int]) -> bool:
         """Whether a step's rows encode packed, in one call: their frames fit
         the audio budget. A step over it encodes padded per sub-batch instead,
@@ -210,16 +214,9 @@ class OmniASRCTCSubmodule(NodeSubmodule):
         """Argmax ids per row: the conv frontend runs padded per sub-batch, then
         every row's valid frames go through the encoder packed, in request order
         (the order `declare_step` laid the segments out in)."""
-        lengths = [w.shape[0] for w in waveforms]
         rows: list[torch.Tensor | None] = [None] * len(waveforms)
-        for group in self.sub_batches(lengths):
-            group_lens = [lengths[row] for row in group]
-            longest = max(group_lens)
-            batch = waveforms[group[0]].new_zeros(len(group), longest)
-            for i, row in enumerate(group):
-                batch[i, : lengths[row]] = waveforms[row]
-            padded = any(n < longest for n in group_lens)
-            x, frame_lens, _ = self.model.frontend(batch, group_lens if padded else None)
+        for group, batch, group_lens in self._padded_groups(waveforms):
+            x, frame_lens, _ = self.model.frontend(batch, group_lens)
             for i, (row, n) in enumerate(zip(group, frame_lens, strict=True)):
                 rows[row] = x[i, :n]
         packed = rows[0] if len(rows) == 1 else torch.cat(rows)
@@ -235,7 +232,7 @@ class OmniASRCTCSubmodule(NodeSubmodule):
                 seq_lens=frames,
             ).get("ids")
         else:
-            ids = self.model.encode_packed(packed, self._attn_fn(attn)).argmax(dim=-1)
+            ids = self.model.encode_packed(packed, functools.partial(attn.run, label="main")).argmax(dim=-1)
         return list(ids.split(frames))
 
     def _transcribe(
@@ -247,14 +244,8 @@ class OmniASRCTCSubmodule(NodeSubmodule):
         if attn is not None and self._packs(self.model.frame_lengths(lengths)):
             return self._transcribe_packed(waveforms, attn, engine_inputs)
         out: list[torch.Tensor | None] = [None] * len(waveforms)
-        for group in self.sub_batches(lengths):
-            group_lens = [lengths[row] for row in group]
-            longest = max(group_lens)
-            batch = waveforms[group[0]].new_zeros(len(group), longest)
-            for i, row in enumerate(group):
-                batch[i, : lengths[row]] = waveforms[row]
-            padded = any(n < longest for n in group_lens)
-            logits, frame_lens = self.model(batch, group_lens if padded else None)
+        for group, batch, group_lens in self._padded_groups(waveforms):
+            logits, frame_lens = self.model(batch, group_lens)
             ids = logits.argmax(dim=-1)
             for i, (row, n) in enumerate(zip(group, frame_lens, strict=True)):
                 out[row] = ids[i, :n]
