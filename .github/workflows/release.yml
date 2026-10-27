@@ -31,6 +31,18 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install the pinned Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.2
+      # The licenses of the crates and vendored C/C++ compiled into the wheel,
+      # shipped in its dist-info/licenses (setuptools' default LICEN[CS]E*
+      # glob). Fails on any license rust/about.toml does not accept.
+      - name: Collect third-party licenses
+        run: >-
+          cargo about generate --locked -c rust/about.toml
+          -m rust/server/Cargo.toml rust/about.hbs -o LICENSES-THIRD-PARTY.txt
       - uses: pypa/cibuildwheel@v4.2.1
         env:
           # Version-specific rather than abi3, matching the extension that
