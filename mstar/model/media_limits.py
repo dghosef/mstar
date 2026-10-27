@@ -20,8 +20,9 @@ def video_decode_threads() -> int:
     """FFmpeg threads for one video decode. torchcodec decodes single-threaded
     by default, which dominates a long clip's request latency; frame threading
     is bit-identical. Bounded by the API server's preprocessing pool (torch's
-    intra-op threads, which ``preprocess_torch_threads`` sets), by the CPUs this
-    process may run on, and by 8, so concurrent decodes don't oversubscribe."""
+    intra-op threads, which ``preprocess_torch_threads`` sets), by this
+    process's CPU affinity (its cpuset; a CFS CPU quota is not read), and by 8,
+    so concurrent decodes don't oversubscribe."""
     try:
         cpus = len(os.sched_getaffinity(0))
     except AttributeError:  # no affinity mask to read (macOS)

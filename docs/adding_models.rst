@@ -1698,7 +1698,8 @@ default:
 The setting applies only to the API server process. The conductor and workers keep
 torch's default. It also bounds the FFmpeg threads of each torchcodec video decode that
 asks ``media_limits.video_decode_threads`` (``Model.load_video`` does): at most 8, and no
-more than the CPUs the process may run on.
+more than the CPUs in the process's affinity mask (its cpuset). A CFS CPU quota, such as a
+container's ``--cpus`` limit, is not read.
 
 .. _tensor-parallelism:
 
