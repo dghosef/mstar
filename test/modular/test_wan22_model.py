@@ -997,7 +997,6 @@ def _dit_info(guidance: float) -> CurrentForwardPassInfo:
     (None, 1.0, 1),  # guidance off: the conditional branch alone
     (2, 5.0, 1),     # two ranks split the branches
     (2, 1.0, 1),     # nothing to split: both ranks run the one branch
-    (4, 5.0, 2),     # more ranks than branches: every rank runs both
 ])
 def test_wan22_dit_branches_per_rank(world_size, guidance, branches):
     group = _FakeSPGroup(world_size) if world_size else None
@@ -1009,6 +1008,22 @@ def test_wan22_dit_branches_per_rank(world_size, guidance, branches):
     # latents [1, 4, 2, 2, 2] patchify (1, 2, 2) to 2 * 1 * 1 tokens
     assert layout.video_tokens == 2 and node_inputs.input_seq_len == 2
     assert layout.branches == branches
+
+
+@pytest.mark.parametrize("sp_size,ok", [(None, True), (1, True), (2, True), (3, False), (4, False)])
+def test_wan22_refuses_a_dit_instance_it_cannot_split_cfg_over(sp_size, ok):
+    """CFG parallelism splits two branches; a larger dit instance would serve,
+    every rank recomputing the whole step, unless refused at startup."""
+    group = {"node_names": ["dit"], "ranks": list(range(sp_size or 1))}
+    if sp_size is not None:
+        group["sp_size"] = sp_size
+    config = {"node_groups": [{"node_names": ["text_encoder", "vae_encoder", "vae_decoder"], "ranks": [0]}, group]}
+    model = Wan22Model(model_path_hf="test/wan22")
+    if ok:
+        model.validate_config_yaml(config, "wan.yaml")
+    else:
+        with pytest.raises(ValueError, match="sp_size"):
+            model.validate_config_yaml(config, "wan.yaml")
 
 
 def test_wan22_dit_declares_one_segment_per_branch():

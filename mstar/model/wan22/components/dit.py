@@ -2,9 +2,10 @@
 
 Exact port of diffusers 0.39.0 ``WanTransformer3DModel``, restricted to the
 TI2V-5B checkpoint's configuration: no image-conditioning branch, and the
-per-token timestep path (``expand_timesteps``; the dit submodule feeds one
-timestep per latent frame, which is the same thing since it is constant within
-a frame).
+per-token timestep path (``expand_timesteps``). The dit submodule feeds one
+timestep per latent frame, since it is constant within a frame: the same
+elementwise math on every token, with the timestep embedding's GEMMs over one
+row per frame instead of one per token (which may round differently).
 
 Numerics contract (bf16 weights with fp32 islands):
 
@@ -30,7 +31,6 @@ two-linear MLPs ARE the shared ``components.mlp.MLP``.
 """
 
 import math
-from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
@@ -151,14 +151,6 @@ def _apply_rotary_emb(
     return out.type_as(hidden_states)
 
 
-class Wan22AttentionFns(NamedTuple):
-    """The engine's ragged attention callables for one step, per attention; a
-    None (or no ``Wan22AttentionFns`` at all) runs SDPA, the reference kernel."""
-
-    self_attn: RaggedAttentionFn | None
-    cross_attn: RaggedAttentionFn | None
-
-
 class Wan22DiTAttention(nn.Module):
     """Multi-head attention with across-heads RMSNorm on q/k (the
     checkpoint's ``rms_norm_across_heads``: one 3072-wide norm before the
@@ -222,12 +214,11 @@ class Wan22TimeTextEmbedding(nn.Module):
     def forward(
         self, timestep: torch.Tensor, encoder_hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """``timestep`` ``[B, seq]`` (per-token, ``expand_timesteps``);
-        returns ``temb [B, seq, dim]``, ``timestep_proj [B, seq, 6, dim]``,
+        """``timestep`` ``[B, G]``, one per group of tokens (see ``_groups``);
+        returns ``temb [B, G, dim]``, ``timestep_proj [B, G, 6, dim]``,
         projected text ``[B, 512, dim]`` — all in the text embeds' dtype."""
-        batch, seq_len = timestep.shape
         sincos = _sinusoidal_timestep_embedding(timestep.flatten(), self.freq_dim)
-        temb = self.time_embedder(sincos.unflatten(0, (batch, seq_len)))
+        temb = self.time_embedder(sincos.unflatten(0, timestep.shape))
         temb = temb.type_as(encoder_hidden_states)
         timestep_proj = self.time_proj(F.silu(temb)).unflatten(2, (6, -1))
         return temb, timestep_proj, self.text_embedder(encoder_hidden_states)
@@ -269,7 +260,7 @@ class Wan22DiTBlock(nn.Module):
         encoder_hidden_states: torch.Tensor,
         timestep_proj: torch.Tensor,
         rotary_emb: tuple[torch.Tensor, torch.Tensor],
-        attn_fns: Wan22AttentionFns | None = None,
+        self_attn_fn: RaggedAttentionFn | None = None,
     ) -> torch.Tensor:
         # [1, 1, 6, dim] + [B, G, 6, dim] -> six [B, G, 1, dim] fp32 tensors, one
         # row per group of seq / G consecutive tokens (see _groups).
@@ -280,18 +271,13 @@ class Wan22DiTBlock(nn.Module):
 
         grouped = _groups(hidden_states, groups)
         norm_hidden = (self.norm1(grouped.float()) * (1 + scale_msa) + shift_msa).type_as(hidden_states)
-        attn_output = self.self_attn(
-            norm_hidden.flatten(1, 2), rotary_emb=rotary_emb, attn_fn=attn_fns.self_attn if attn_fns else None,
-        )
+        attn_output = self.self_attn(norm_hidden.flatten(1, 2), rotary_emb=rotary_emb, attn_fn=self_attn_fn)
         hidden_states = (
             (grouped.float() + _groups(attn_output, groups) * gate_msa).type_as(hidden_states).flatten(1, 2)
         )
 
         norm_hidden = self.norm2(hidden_states.float()).type_as(hidden_states)
-        attn_output = self.cross_attn(
-            norm_hidden, encoder_hidden_states=encoder_hidden_states,
-            attn_fn=attn_fns.cross_attn if attn_fns else None,
-        )
+        attn_output = self.cross_attn(norm_hidden, encoder_hidden_states=encoder_hidden_states)
         hidden_states = hidden_states + attn_output
 
         grouped = _groups(hidden_states, groups)
@@ -362,13 +348,14 @@ class Wan22DiT(nn.Module):
         hidden_states: torch.Tensor,
         timestep: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
-        attn_fns: Wan22AttentionFns | None = None,
+        self_attn_fn: RaggedAttentionFn | None = None,
     ) -> torch.Tensor:
         """``hidden_states`` ``[B, C, F, H, W]`` (bf16 latents), ``timestep``
-        ``[B, post-patch seq]`` per-token grid (``expand_timesteps`` — the
-        only timestep form mstar's dit submodule produces), text embeds
+        ``[B, G]``, one per group of consecutive post-patch tokens (per token,
+        or per latent frame as mstar's dit submodule passes it), text embeds
         ``[B, 512, text_dim]`` bf16. Returns ``[B, C_out, F, H, W]`` bf16.
-        ``attn_fns`` routes attention through the engine's ragged resources."""
+        ``self_attn_fn`` runs the self-attention on the engine's ragged
+        resource; without it, and always for the cross-attention, SDPA."""
         batch_size, _, num_frames, height, width = hidden_states.shape
         p_t, p_h, p_w = self.config.patch_size
         grid = (num_frames // p_t, height // p_h, width // p_w)
@@ -388,7 +375,7 @@ class Wan22DiT(nn.Module):
         )
 
         for block in self.blocks:
-            hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, attn_fns)
+            hidden_states = block(hidden_states, encoder_hidden_states, timestep_proj, rotary_emb, self_attn_fn)
 
         # Output head: 2-chunk adaLN in fp32 ([1, 1, 2, dim] island table +
         # bf16 temb promotes), then project and unpatchify.

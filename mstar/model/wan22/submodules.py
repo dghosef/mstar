@@ -30,8 +30,9 @@ from torch import nn
 from mstar.communication.tensors import NameToTensorList
 from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.engine.resources import AttentionStep, Segment, SlotLease, SubmoduleStep
+from mstar.model.components.diffusion.attention import RaggedAttentionFn
+from mstar.model.components.distributed.sequence_parallel import gather_sequence, scatter_sequence
 from mstar.model.submodule_base import ModelInputsFromEngine, NodeInputs, NodeSubmodule
-from mstar.model.wan22.components.dit import Wan22AttentionFns
 from mstar.model.wan22.components.unipc import (
     SOLVER_ORDER,
     UniPCState,
@@ -386,20 +387,15 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
         super().__init__()
         self.transformer = transformer
         self.config = config
-        # CFG parallelism: the node's lockstep group arrives as its sp group, but
-        # nothing splits the sequence. Two ranks split the CFG batch, each running
-        # one branch at batch 1, and the predictions are all-gathered, so the step
-        # costs one branch's forward plus a latent-sized gather. Every rank then runs
-        # the same combine and UniPC step on replicated latents. Any other shape
-        # (guidance off, more ranks) computes the whole batch on every rank, which is
-        # correct but no faster.
+        # CFG parallelism: the node's two-rank lockstep group arrives as its sp
+        # group (Wan22Model.validate_config_yaml refuses any other size), but
+        # nothing splits the sequence. The ranks split the batch-2 CFG stack, each
+        # running one branch at batch 1, and the predictions are all-gathered, so
+        # the step costs one branch's forward plus a latent-sized gather. Every
+        # rank then runs the same combine and UniPC step on replicated latents.
+        # Without guidance both ranks compute the whole step, correct but no faster.
         self.sp_group = sp_group if sp_group is not None and sp_group.world_size > 1 else None
-        if self.sp_group is not None and self.sp_group.world_size != 2:
-            logger.warning(
-                "Wan2.2 dit: sp_size=%d; CFG parallelism needs exactly 2 ranks, so every "
-                "rank computes the whole step.", self.sp_group.world_size,
-            )
-        self._attn_fns: Wan22AttentionFns | None = None
+        self._self_attn_fn: RaggedAttentionFn | None = None
         self._record_fp32_islands()
         # Compile the inner DiT region only (tensors in, tensor out; nothing
         # CPU-resident crosses it), IN PLACE so ``self.transformer`` keeps its
@@ -491,7 +487,7 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
 
         ``guidance_scale`` is request metadata, identical on every rank of the
         instance, so all ranks agree on whether the forward's gather runs."""
-        return guidance_scale > 1.0 and self.sp_group is not None and self.sp_group.world_size == 2
+        return guidance_scale > 1.0 and self.sp_group is not None
 
     def _branches(self, guidance_scale: float) -> int:
         """Guidance branches this rank's forward computes."""
@@ -500,19 +496,18 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
     # attention ------------------------------------------------------------
     def bind_node_resources(self, resources) -> None:
         super().bind_node_resources(resources)
-        self._attn_fns = None  # the memoized callables hold the old resources
+        self._self_attn_fn = None  # the memoized callable holds the old resource
 
-    def _attention_fns(self) -> Wan22AttentionFns | None:
-        """The ragged callables, built once per resource binding, or None to run SDPA."""
-        if self._attn_fns is None:
+    def _attention_fn(self) -> RaggedAttentionFn | None:
+        """The ragged self-attention callable, built once per resource binding, or
+        None to run SDPA."""
+        if self._self_attn_fn is None:
             self_attn = self.node_resources.get(self.SELF_ATTN)
             if self_attn is None:
                 return None
-            self._attn_fns = Wan22AttentionFns(
-                self_attn=functools.partial(self_attn.run, label=self.VIDEO_SPAN), cross_attn=None,
-            )
+            self._self_attn_fn = functools.partial(self_attn.run, label=self.VIDEO_SPAN)
             logger.info("Wan2.2 DiT: self-attention through the engine's ragged attention resource")
-        return self._attn_fns
+        return self._self_attn_fn
 
     def declare_step(
         self, graph_walk: str, request_ids: list[str], inputs: list[NodeInputs],
@@ -630,13 +625,13 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
                     "this resolution now (one-time pause); later requests reuse it.",
                     shape_key,
                 )
-        if cfg_split:
-            # rank 0 the conditional branch, rank 1 the unconditional one
-            encoder_hidden_states = text_embeds_pos if self.sp_group.rank == 0 else text_embeds_neg
-        elif do_cfg:
+        if do_cfg:
             encoder_hidden_states = torch.cat([text_embeds_pos, text_embeds_neg], dim=0)
         else:
             encoder_hidden_states = text_embeds_pos
+        if cfg_split:
+            # this rank's branch of the CFG stack, gathered back after the forward
+            encoder_hidden_states = scatter_sequence(self.sp_group, encoder_hidden_states, [1, 1])
         transformer = self.transformer
         if not compiled and self._eager_forward is not None and self._eager_forward[0] is transformer:
             transformer = self._eager_forward[1]
@@ -644,12 +639,12 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
             hidden_states=hidden_states,
             timestep=timestep,
             encoder_hidden_states=encoder_hidden_states.to(self.transformer.dtype),
-            attn_fns=self._attention_fns(),
+            self_attn_fn=self._attention_fn(),
         )
         if not do_cfg:
             return out
         if cfg_split:
-            out = self.sp_group.all_gather(out.contiguous(), dim=0)
+            out = gather_sequence(self.sp_group, out, [1, 1])
         noise_cond, noise_uncond = out[0:1], out[1:2]
         return noise_uncond + guidance_scale * (noise_cond - noise_uncond)
 

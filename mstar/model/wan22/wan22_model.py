@@ -161,6 +161,18 @@ class Wan22Model(Model):
             ),
         ]
 
+    def validate_config_yaml(self, config: dict, config_path: str) -> None:
+        """Refuse a dit lockstep instance (``sp_size``) of any size but 1 or 2:
+        the dit splits its two CFG branches over the instance and nothing else,
+        so more ranks would only recompute the same step."""
+        for group in config.get("node_groups") or []:
+            size = group.get("sp_size", 1)
+            if "dit" in group.get("node_names", []) and size not in (1, 2):
+                raise ValueError(
+                    f"Wan2.2 runs its dit on one rank or CFG-parallel on two (sp_size: 2); "
+                    f"got sp_size: {size!r} in {config_path}."
+                )
+
     def get_default_sharding_config(self) -> ShardingConfig:
         # CFG-parallel, through the sp slot: the dit's lockstep group (sp_size) is
         # used for guidance, each of two ranks running one CFG branch and
