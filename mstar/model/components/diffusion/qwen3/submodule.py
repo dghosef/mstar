@@ -20,6 +20,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from mstar.engine.accelerator_graph_config import BatchedAcceleratorGraphConfig, geometric_batch_sizes
 from mstar.model.components.diffusion.qwen3.encoder import Qwen3EncoderConfig
 from mstar.model.submodule_base import NodeInputs, NodeSubmodule
 
@@ -44,10 +45,10 @@ class Qwen3TextEncoderSubmodule(NodeSubmodule):
         self.text_config = text_config
         self._max_batch_size = max_batch_size
         self._capture_walk = capture_walk
-        # Powers of two up to the cap: a one-shot encode pads a batch of 3 or
-        # 5-7 to the next graph for a fraction of one batch-4 encode, so it
-        # needs no graph per size the way a denoise step's batch does.
-        self._capture_batch_sizes = [1 << i for i in range(max_batch_size.bit_length()) if 1 << i <= max_batch_size]
+        # Geometric, not every size: a one-shot encode pads a batch of 3 or 5-7
+        # to the next graph for a fraction of one batch-4 encode, so it needs no
+        # graph per size the way a denoise step's batch does.
+        self._capture_batch_sizes = geometric_batch_sizes(max_batch_size)
 
     def request_embeds(self, hidden: torch.Tensor, text_len: int) -> torch.Tensor:
         """One request's ``text_embeds`` from its ``[1, S, D]`` row; all S positions
@@ -121,9 +122,8 @@ class Qwen3TextEncoderSubmodule(NodeSubmodule):
         }
 
     def get_accelerator_graph_configs(self, device: torch.device, tp_world_size: int = 1):
-        if self._capture_walk is None or not self._capture_batch_sizes:
+        if self._capture_walk is None:
             return []
-        from mstar.engine.accelerator_graph_config import BatchedAcceleratorGraphConfig
 
         # a padding row: a one-token prompt, so every query row attends to something
         ids, mask = self._pad_row(torch.zeros(1, dtype=torch.long, device=device))
@@ -135,7 +135,7 @@ class Qwen3TextEncoderSubmodule(NodeSubmodule):
             additional_key_info=True,
             compile=False,
             capture_batch_sizes=list(self._capture_batch_sizes),
-            # batches past the largest capture (or holding an unpadded prompt) run eager
+            # a batch holding an unpadded prompt runs eager
             caps_eager_batch_size=False,
             input_seq_dims={TEXT_INPUTS: 0, TEXT_MASK: 0},
         )]

@@ -44,7 +44,6 @@ from mstar.engine.resources import NodeResourceSpec, RaggedAttentionConfig, Ragg
 from mstar.graph.base import GraphEdge, GraphNode, GraphSection, Loop, Sequential, TensorPointerInfo
 from mstar.graph.special_destinations import EMIT_TO_CLIENT, EMPTY_DESTINATION
 from mstar.model.base import ForwardPassArgs, Model, TensorAndMetadata
-from mstar.model.components.diffusion.decode_utils import VAE_DECODE_BATCH_SIZES
 from mstar.model.components.diffusion.image_io import encode_image, image_output_format
 from mstar.model.components.diffusion.lora import LoraSpec
 from mstar.model.components.diffusion.qwen3.submodule import (
@@ -483,9 +482,6 @@ class Flux2KleinModel(Model):
                 self._vae_module(device), self.config, max_batch_size=self.max_batch_size,
                 compile_decode=self.vae_compile,
                 warmup_grids=[self.config.latent_grid(h, w) for h, w in self.warmup_sizes()],
-                # the VAE compiles four static sizes (each ~30-60 s of autotuning at a cold start) and
-                # splits other batches into them; the dit captures every batch size up to the maximum
-                decode_batch_sizes=[s for s in VAE_DECODE_BATCH_SIZES if s <= self.max_batch_size],
             )
         if node_name == "dit":
             transformer = build_transformer(self.config, self.snapshot, device)

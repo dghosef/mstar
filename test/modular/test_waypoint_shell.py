@@ -28,6 +28,7 @@ import yaml
 sys.path.insert(0, ".")
 
 from mstar.conductor.request_info import CurrentForwardPassInfo
+from mstar.engine.accelerator_graph_config import geometric_batch_sizes
 from mstar.engine.resources import (
     AttentionSpec,
     AttnBackend,
@@ -62,7 +63,6 @@ from mstar.model.waypoint.submodules import (
     ROLLOUT_WALK,
     WaypointDitSubmodule,
     WaypointVaeEncoderSubmodule,
-    _rollout_capture_batch_sizes,
 )
 from mstar.model.waypoint.waypoint_model import (
     DIT_NODE,
@@ -958,11 +958,11 @@ def test_both_dit_walks_are_optional_captures(submodule, config):
         (16, [1, 2, 4, 8, 16]),
     ],
 )
-def test_rollout_capture_batch_sizes_is_geometric(step_batch_size, expected):
+def test_geometric_batch_sizes(step_batch_size, expected):
     """Powers of two up to B, then B itself -- so startup grows with log B, not
     B. B that is itself a power of two ends on it once (no duplicate); a B that
     is not appends the odd top bucket the padding path rounds up to."""
-    assert _rollout_capture_batch_sizes(step_batch_size) == expected
+    assert geometric_batch_sizes(step_batch_size) == expected
 
 
 def test_both_walks_capture_the_same_geometric_buckets(config):

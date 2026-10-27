@@ -191,7 +191,7 @@ def test_vae_decoder_decodes_unwarmed_shapes_eagerly(monkeypatch):
     config = ZImageConfig()
     vae = RecordingVae()
     node = ZImageVaeDecoderSubmodule(vae, config, compile_decode=True, warmup_grids=[config.latent_grid(1024, 1024)],
-                                     decode_batch_sizes=(1, 2))
+                                     max_batch_size=2)
     c, p = config.transformer.in_channels, config.transformer.patch_size
     h, w = config.latent_grid(1024, 1024)
     assert len(vae.compiled) == 2 and vae.eager == []

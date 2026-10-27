@@ -473,7 +473,6 @@ def test_vae_decoder_warmup_and_chunking_use_only_the_configured_batch_sizes(mon
     vae = RecordingVae()
     node = KleinVaeDecoderSubmodule(
         vae, config, compile_decode=True, warmup_grids=[config.latent_grid(1024, 1024)],
-        decode_batch_sizes=(1, 2, 4, 8),
     )
     lc, ph, pw = config.vae.latent_channels, *config.vae.patch_size
     assert vae.shapes == [(bs, lc, 64 * ph, 64 * pw) for bs in (1, 2, 4, 8)]
@@ -489,12 +488,24 @@ def test_vae_decoder_warmup_and_chunking_use_only_the_configured_batch_sizes(mon
     assert eager.shapes == [(5, 1, 1, 1)]
 
 
-def test_vae_decode_sizes_are_the_four_compiled_sizes_clamped_to_the_max_batch():
-    from mstar.model.components.diffusion.decode_utils import VAE_DECODE_BATCH_SIZES
+@pytest.mark.parametrize("max_batch_size, encoder, vae", [(4, [1, 2, 4], (1, 2, 4)), (6, [1, 2, 4, 6], (1, 2, 4, 6)),
+                                                        (16, [1, 2, 4, 8, 16], (1, 2, 4, 8))])
+def test_encoder_graphs_and_vae_compiles_cover_the_max_batch(monkeypatch, max_batch_size, encoder, vae):
+    """Powers of two plus the max batch itself, so a full batch never falls off the
+    largest graph; the VAE stops at its compile cap and splits larger batches."""
+    import mstar.model.flux2_klein.submodules as subs
+    from mstar.model.components.diffusion.qwen3.submodule import Qwen3TextEncoderSubmodule
+    from mstar.model.flux2_klein.submodules import KleinVaeDecoderSubmodule
 
-    assert VAE_DECODE_BATCH_SIZES == (1, 2, 4, 8)
-    small = _make_model(max_batch_size=4, capture_batch_sizes=[1, 2, 3, 4])
-    assert [s for s in VAE_DECODE_BATCH_SIZES if s <= small.max_batch_size] == [1, 2, 4]
+    monkeypatch.setattr(subs, "compile_vae_decode", lambda vae: None)  # no inductor on CPU tests
+
+    config = Flux2KleinConfig()
+    text = Qwen3TextEncoderSubmodule(torch.nn.Identity(), config.text_encoder, max_batch_size=max_batch_size,
+                                     capture_walk=ENCODE_TEXT_WALK)
+    [graph] = text.get_accelerator_graph_configs(torch.device("cpu"))
+    assert graph.capture_batch_sizes == encoder
+    decoder = KleinVaeDecoderSubmodule(torch.nn.Identity(), config, max_batch_size=max_batch_size, compile_decode=True)
+    assert decoder._decode_batch_sizes == vae
 
 
 def test_eager_rounding_is_live_while_tracing_and_does_not_leak(monkeypatch):
@@ -598,7 +609,7 @@ def test_vae_decoder_decodes_unwarmed_shapes_eagerly(monkeypatch):
     config = Flux2KleinConfig()
     vae = RecordingVae()
     node = KleinVaeDecoderSubmodule(vae, config, compile_decode=True, warmup_grids=[config.latent_grid(1024, 1024)],
-                                    decode_batch_sizes=(1, 2))
+                                    max_batch_size=2)
     lc, (ph, pw) = config.vae.latent_channels, config.vae.patch_size
     assert len(vae.compiled) == 2 and vae.eager == []
     vae.compiled.clear()
