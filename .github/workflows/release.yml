@@ -54,6 +54,33 @@ jobs:
           CIBW_ENVIRONMENT_LINUX: PATH="$HOME/.cargo/bin:$PATH"
         with:
           output-dir: wheelhouse
+      - uses: actions/setup-python@v5
+        with:
+          python-version: |
+            3.12
+            3.13
+            3.14
+      # Outside the build container, with no dependencies installed: the
+      # extension imports, the frontend binary runs from the scripts directory
+      # find_server_binary looks in, and the licenses are in the metadata.
+      - name: Check each wheel in a clean venv
+        shell: python
+        run: |
+          import glob, re, subprocess, tempfile
+          check = (
+              "import importlib.metadata as md, mstar_rust, pathlib, subprocess, sysconfig\n"
+              "assert 'LICENSES-THIRD-PARTY.txt' in {f.name for f in md.files('mstar-ai')}\n"
+              "subprocess.run([pathlib.Path(sysconfig.get_path('scripts')) / 'mstar-server', '--help'], check=True)\n"
+          )
+          wheels = sorted(glob.glob("wheelhouse/*.whl"))
+          assert len(wheels) == 3, wheels
+          for whl in wheels:
+              py = "python3." + re.search(r"-cp3(\d+)-", whl).group(1)
+              venv = tempfile.mkdtemp()
+              subprocess.run([py, "-m", "venv", venv], check=True)
+              subprocess.run([f"{venv}/bin/pip", "install", "-q", "--no-deps", whl], check=True)
+              subprocess.run([f"{venv}/bin/python", "-c", check], check=True)
+              print("ok", whl)
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}
