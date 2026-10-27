@@ -15,10 +15,19 @@ from contextvars import ContextVar
 
 import torch
 
-# FFmpeg threads per video decode. torchcodec decodes single-threaded by
-# default, which dominates a long clip's request latency; frame threading is
-# bit-identical. Capped so concurrent requests don't oversubscribe the host.
-VIDEO_DECODE_THREADS = min(8, os.cpu_count() or 1)
+
+def video_decode_threads() -> int:
+    """FFmpeg threads for one video decode. torchcodec decodes single-threaded
+    by default, which dominates a long clip's request latency; frame threading
+    is bit-identical. Bounded by the API server's preprocessing pool (torch's
+    intra-op threads, which ``preprocess_torch_threads`` sets), by the CPUs this
+    process may run on, and by 8, so concurrent decodes don't oversubscribe."""
+    try:
+        cpus = len(os.sched_getaffinity(0))
+    except AttributeError:  # no affinity mask to read (macOS)
+        cpus = os.cpu_count() or 1
+    return max(1, min(8, cpus, torch.get_num_threads()))
+
 
 # PIL's DecompressionBombWarning threshold (about 9459 x 9459 RGB)
 DEFAULT_MAX_IMAGE_PIXELS = 89_478_485

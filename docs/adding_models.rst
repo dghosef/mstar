@@ -1696,7 +1696,9 @@ default:
    preprocess_torch_threads: 4
 
 The setting applies only to the API server process. The conductor and workers keep
-torch's default.
+torch's default. It also bounds the FFmpeg threads of each torchcodec video decode that
+asks ``media_limits.video_decode_threads`` (``Model.load_video`` does): at most 8, and no
+more than the CPUs the process may run on.
 
 .. _tensor-parallelism:
 
