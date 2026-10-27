@@ -125,7 +125,6 @@ class Qwen3TTSTalkerLanguageModel(nn.Module):
         *,
         label: str,
     ) -> torch.Tensor:
-        hidden_states = input_embeds
         # Which of the node's KV streams the layers write (`label`) and which
         # layer of it are cursors on the shared resources: bind the label once,
         # advance the index per layer. Passing them as arguments instead would
@@ -133,16 +132,14 @@ class Qwen3TTSTalkerLanguageModel(nn.Module):
         # module code stays clear of the allocator.
         self.layers[0].self_attn.attend.bind_step(label)
         # Each residual add is deferred into the next norm (one FlashInfer
-        # fused add+RMSNorm instead of an add and a norm). The residual
-        # stream starts as, and is updated in place over, ``input_embeds``.
-        residual = None
+        # fused add+RMSNorm instead of an add and a norm), in place on the
+        # residual stream. The stream starts from a copy: ``input_embeds`` is
+        # the caller's, a packed replay's static input whose padding rows no
+        # copy refreshes.
+        hidden_states, residual = input_embeds.clone(), None
         for layer_idx, layer in enumerate(self.layers):
             layer.self_attn.attend.set_layer_idx(layer_idx)
-            if residual is None:
-                residual = hidden_states
-                h = layer.input_layernorm(hidden_states)
-            else:
-                h, residual = layer.input_layernorm.forward_residual(hidden_states, residual)
+            h, residual = layer.input_layernorm.forward_residual(hidden_states, residual)
             h = layer.self_attn(h)
             h, residual = layer.post_attention_layernorm.forward_residual(h, residual)
             hidden_states = layer.mlp(h)
@@ -305,16 +302,12 @@ class Qwen3TTSCodePredictor(nn.Module):
             raise ValueError("CodePredictor decode expects exactly one token")
         flat_position_ids = position_ids.reshape(-1)
 
-        # Residual adds are deferred into the next norm, as in the Talker;
-        # the residual stream is updated in place over this position's input,
-        # which no caller reads afterwards.
-        residual = None
+        # Residual adds are deferred into the next norm, as in the Talker; the
+        # stream starts from a copy, since the projection is the identity on
+        # 0.6B and its input is the caller's.
+        hidden_states, residual = hidden_states.clone(), None
         for layer_idx, layer in enumerate(self.model.layers):
-            if residual is None:
-                residual = hidden_states
-                hidden_states = layer.input_layernorm(hidden_states)
-            else:
-                hidden_states, residual = layer.input_layernorm.forward_residual(hidden_states, residual)
+            hidden_states, residual = layer.input_layernorm.forward_residual(hidden_states, residual)
             attn = layer.self_attn
             qkv = attn.qkv_proj(hidden_states)
             # q normed and roped in place; k (normed, roped) and v into the

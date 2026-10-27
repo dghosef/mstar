@@ -1353,14 +1353,17 @@ def test_qwen3_tts_talker_preprocess_packs_the_tensors_the_per_row_device_copies
 
 
 class _IdentityNorm(torch.nn.Module):
-    """A CPU stand-in for the FlashInfer RMSNorm, fused residual add included."""
+    """A CPU stand-in for the FlashInfer RMSNorm, fused residual add included:
+    like FlashInfer's, the add updates the residual stream in place."""
 
     def forward(self, hidden_states):
-        return hidden_states
+        return hidden_states.clone()
 
     def forward_residual(self, hidden_states, residual):
-        summed = hidden_states + residual
-        return summed, summed
+        if residual is None:
+            return hidden_states.clone(), hidden_states
+        residual.add_(hidden_states)
+        return residual.clone(), residual
 
 
 def _fake_cp_kernels(monkeypatch, calls=None):
@@ -1424,6 +1427,32 @@ def test_qwen3_tts_code_predictor_projects_wider_talker_inputs(monkeypatch):
         cache_pos=0,
     )
     assert out.shape == (2, 1, 16)
+
+
+def test_qwen3_tts_code_predictor_leaves_its_input_alone(monkeypatch):
+    """The fused add + norm updates the residual stream in place, and on 0.6B
+    the predictor's input projection is the identity: the stream must not be
+    the caller's tensor, which the Talker's captured step reads again."""
+    config = _tiny_model_config()
+    predictor = Qwen3TTSCodePredictor(config)
+    assert isinstance(predictor.small_to_mtp_projection, torch.nn.Identity)
+    for layer in predictor.model.layers:
+        layer.input_layernorm = _IdentityNorm()
+        layer.post_attention_layernorm = _IdentityNorm()
+    predictor.model.norm = _IdentityNorm()
+    _fake_cp_kernels(monkeypatch)
+    cp = config.talker.code_predictor
+    inputs = torch.randn(2, 1, config.talker.hidden_size)
+    before = inputs.clone()
+    predictor.forward_depth_unrolled(
+        inputs_embeds=inputs,
+        position_ids=torch.zeros(2, 1, dtype=torch.long),
+        kv_cache=torch.zeros(
+            cp.num_hidden_layers, 2, 2, config.talker.num_code_groups, cp.num_key_value_heads, cp.head_dim,
+        ),
+        cache_pos=0,
+    )
+    assert torch.equal(inputs, before)
 
 
 def test_qwen3_tts_code_predictor_uses_the_shared_kernels(monkeypatch):

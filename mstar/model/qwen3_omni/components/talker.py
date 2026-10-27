@@ -494,16 +494,12 @@ class Qwen3OmniCodePredictor(nn.Module):
         flat_pos = position_ids.reshape(-1)
 
         # Each residual add rides in the next RMSNorm (FlashInfer's fused
-        # add + norm, in place on the stream's own tensors), so the input
-        # embeddings, which the caller owns, are added out of place first.
-        residual = None
+        # add + norm, in place on the stream), so the stream starts from a copy
+        # of the input embeddings, which the caller owns.
+        hidden_states, residual = hidden_states.clone(), None
         for layer_idx, layer in enumerate(self.model.layers):
             attn = layer.self_attn
-            if residual is None:
-                residual = hidden_states
-                hidden_states = layer.input_layernorm(hidden_states)
-            else:
-                hidden_states, residual = layer.input_layernorm.forward_residual(hidden_states, residual)
+            hidden_states, residual = layer.input_layernorm.forward_residual(hidden_states, residual)
 
             qkv = F.linear(hidden_states, layer.self_attn.qkv_proj.weight)
             q_size = n_q_heads * head_dim
@@ -520,11 +516,7 @@ class Qwen3OmniCodePredictor(nn.Module):
             # Each new token attends causally over the depth positions so far.
             attn_out = cp_attention(q, kv_cache[layer_idx, :, 0], kv_cache[layer_idx, :, 1], cache_pos)
             attn_out = attn.o_proj(attn_out.reshape(bs, seq_len, -1))
-            if layer_idx == 0:
-                residual = residual + attn_out
-                hidden_states = layer.post_attention_layernorm(residual)
-            else:
-                hidden_states, residual = layer.post_attention_layernorm.forward_residual(attn_out, residual)
+            hidden_states, residual = layer.post_attention_layernorm.forward_residual(attn_out, residual)
             hidden_states = layer.mlp(hidden_states)
 
         # Final norm.
