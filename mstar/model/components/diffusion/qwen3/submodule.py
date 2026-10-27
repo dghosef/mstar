@@ -7,7 +7,7 @@ accumulation order does, so the padded length is part of matching the reference.
 Requests of any length then batch together, and the batched forward emits the whole
 ``[B, S, D]`` batch, cut per request after the forward by ``request_embeds``, the one
 thing a model overrides. The forward has fixed shapes and no host syncs, so it is
-captured per batch size (``capture_batch_sizes``).
+captured per power-of-two batch size up to ``max_batch_size``.
 
 Only the masked (padded-prompt) path is captured. Whether a prompt has padding is
 ``text_len`` in the step metadata, which the model sets at intake from the prompt
@@ -16,8 +16,6 @@ unmasked path eagerly.
 """
 
 from __future__ import annotations
-
-from collections.abc import Sequence
 
 import torch
 from torch import nn
@@ -39,14 +37,17 @@ class Qwen3TextEncoderSubmodule(NodeSubmodule):
 
     def __init__(
         self, encoder: nn.Module, text_config: Qwen3EncoderConfig, max_batch_size: int = 16,
-        capture_walk: str | None = None, capture_batch_sizes: Sequence[int] = (),
+        capture_walk: str | None = None,
     ):
         super().__init__()
         self.encoder = encoder
         self.text_config = text_config
         self._max_batch_size = max_batch_size
         self._capture_walk = capture_walk
-        self._capture_batch_sizes = [b for b in capture_batch_sizes if b <= max_batch_size]
+        # Powers of two up to the cap: a one-shot encode pads a batch of 3 or
+        # 5-7 to the next graph for a fraction of one batch-4 encode, so it
+        # needs no graph per size the way a denoise step's batch does.
+        self._capture_batch_sizes = [1 << i for i in range(max_batch_size.bit_length()) if 1 << i <= max_batch_size]
 
     def request_embeds(self, hidden: torch.Tensor, text_len: int) -> torch.Tensor:
         """One request's ``text_embeds`` from its ``[1, S, D]`` row; all S positions

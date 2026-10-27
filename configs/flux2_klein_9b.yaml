@@ -19,7 +19,7 @@ model_kwargs:
   compile_exact_ops: [norms]
   accelerator_graph: true
   capture_sizes: [[1024, 1024]]
-  # the dit's and the text encoder's capture batch sizes (larger encoder batches run eager)
+  # the dit's capture batch sizes (the text encoder captures powers of two up to max_batch_size)
   capture_batch_sizes: [1, 2, 3, 4]
   max_batch_size: 4
   # compiled VAE decode (max-autotune): 3x faster at 1024^2, ~56 dB from the eager decode; the autotuner may pick

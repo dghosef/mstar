@@ -304,7 +304,6 @@ class ZImageModel(Model):
                 build_text_encoder(self.config, self.snapshot, device), self.config,
                 max_batch_size=self.max_batch_size,
                 capture_walk=ENCODE_TEXT_WALK if self.accelerator_graph else None,
-                capture_batch_sizes=self.capture_batch_sizes,
             )
         if node_name == "vae_decoder":
             return ZImageVaeDecoderSubmodule(
