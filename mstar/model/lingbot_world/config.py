@@ -79,8 +79,9 @@ class LingBotWorldConfig:
     # 73 dB of the contiguous eager decode (accumulation order only). The
     # compile is per output size, which follows the conditioning image's
     # aspect, so a new size pauses its first request; the model turns these on
-    # only with reference_numerics False, with cuDNN autotuning (230 ms, conv
-    # algorithms picked per process).
+    # with reference_numerics False, with cuDNN autotuning (230 ms, conv
+    # algorithms picked per process), and model_kwargs of the same names
+    # override either preset.
     vae_decode_channels_last: bool = False
     vae_decode_cudnn_benchmark: bool = False
     vae_decode_compile: bool = False

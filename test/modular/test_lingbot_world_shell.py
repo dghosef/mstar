@@ -466,3 +466,18 @@ def test_the_shipped_config_serves_one_rollout_at_a_time(model):
         with pytest.raises(ValueError, match="max_concurrent_requests: 1") as err:
             model.validate_config_yaml(config, "lingbot.yaml")
     assert "4.7 GiB at 480x832" in str(err.value) and "up to 11.2 GiB" in str(err.value)
+
+
+def test_the_decode_settings_are_model_kwargs_and_unknown_ones_are_refused():
+    """``vae_decode_*`` from a yaml override the ``reference_numerics`` preset
+    (a fast config can still decode eagerly), and a misspelled key is refused
+    rather than ignored."""
+    fast = LingBotWorldModel(skip_weight_loading=True, reference_numerics=False, vae_decode_compile=False)
+    assert fast.config.vae_decode_compile is False
+    assert fast.config.vae_decode_channels_last is True  # the rest of the preset stays
+    exact = LingBotWorldModel(skip_weight_loading=True, vae_decode_fp32=False)
+    assert exact.config.vae_decode_fp32 is False and exact.config.reference_numerics
+    with pytest.raises(ValueError, match="vae_decode_compile"):
+        LingBotWorldModel(skip_weight_loading=True, vae_decode_compile="false")
+    with pytest.raises(TypeError):
+        LingBotWorldModel(skip_weight_loading=True, vae_decode_compiled=False)

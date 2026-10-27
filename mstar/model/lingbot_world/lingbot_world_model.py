@@ -62,20 +62,29 @@ class LingBotWorldModel(Model):
         variant: str = LINGBOT_VARIANT_1_3B,
         skip_weight_loading: bool = False,
         reference_numerics: bool = True,
-        **kwargs,
+        vae_decode_fp32: bool | None = None,
+        vae_decode_channels_last: bool | None = None,
+        vae_decode_compile: bool | None = None,
+        vae_decode_cudnn_benchmark: bool | None = None,
     ):
+        """The ``vae_decode_*`` settings default to ``reference_numerics``'s
+        preset (see ``LingBotWorldConfig``); any one given overrides it."""
         if variant != LINGBOT_VARIANT_1_3B:
             raise NotImplementedError(f"LingBot-World variant {variant!r} is not implemented yet.")
-        # a yaml "false" is truthy: refuse it rather than read it as on
-        if not isinstance(reference_numerics, bool):
-            raise ValueError(f"LingBot-World reference_numerics must be true or false, got {reference_numerics!r}.")
+        fast = not reference_numerics
+        settings = {
+            "reference_numerics": reference_numerics,
+            "vae_decode_fp32": not fast if vae_decode_fp32 is None else vae_decode_fp32,
+            "vae_decode_channels_last": fast if vae_decode_channels_last is None else vae_decode_channels_last,
+            "vae_decode_compile": fast if vae_decode_compile is None else vae_decode_compile,
+            "vae_decode_cudnn_benchmark": fast if vae_decode_cudnn_benchmark is None else vae_decode_cudnn_benchmark,
+        }
         self.config = LINGBOT_CONFIGS[variant]()
-        self.config.reference_numerics = reference_numerics
-        if not reference_numerics:
-            self.config.vae_decode_fp32 = False
-            self.config.vae_decode_channels_last = True
-            self.config.vae_decode_compile = True
-            self.config.vae_decode_cudnn_benchmark = True
+        for name, value in settings.items():
+            # a yaml "false" is truthy: refuse it rather than read it as on
+            if not isinstance(value, bool):
+                raise ValueError(f"LingBot-World {name} must be true or false, got {value!r}.")
+            setattr(self.config, name, value)
         self.model_path_hf = model_path_hf or LINGBOT_HF_REPOS[variant]
         self.cache_dir = cache_dir
         self.skip_weight_loading = skip_weight_loading
