@@ -39,7 +39,9 @@ class MaskedBiLSTM(nn.Module):
         the forward input and state, the second the reversed input and the
         backward state, so the two directions stay independent while their
         time steps advance together. The recurrence is a chain of tiny,
-        latency-bound kernels per step, so this halves the steps' cost.
+        latency-bound kernels per step, so this halves the number of those
+        steps. The result matches the two LSTMs to float rounding, not bit for bit
+        (the wider GEMMs may reduce in another order).
         """
         h, i = self.hidden_size, self.fwd.input_size
         ref = self.fwd.weight_ih_l0
