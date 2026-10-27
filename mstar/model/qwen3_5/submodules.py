@@ -839,13 +839,18 @@ class VisionEncoderSubmodule(NodeSubmodule):
         return segments <= per_request
 
     def _compiled_stages(self) -> tuple:
-        """Embed, block loop and merger, each compiled once, dynamic in the
-        patch count; the block loop keeps the ragged attention in its graph
-        (``compile_op``), so the norms, rope and activations fuse around it."""
+        """Embed, block loop and merger, each compiled for the first patch
+        count and once more, dynamic in it alone, at the second; the block loop
+        keeps the ragged attention in its graph (``compile_op``), so the norms,
+        rope and activations fuse around it.
+
+        Not ``dynamic=True``: that makes every dim symbolic, head dim
+        included, and the rope's index math then ran the block loop ~15%
+        slower on a long video than with only the patch count symbolic."""
         if self._compiled is None:
             # under the platform's inductor settings, as the engine's compiles are
             self._compiled = tuple(
-                with_inductor_overrides(torch.compile(fn, dynamic=True))
+                with_inductor_overrides(torch.compile(fn))
                 for fn in (self.model.embed, self.model.encode, self.model.merger)
             )
         return self._compiled
