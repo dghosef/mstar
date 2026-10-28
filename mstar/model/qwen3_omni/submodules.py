@@ -165,7 +165,7 @@ class AudioEncoderSubmodule(NodeSubmodule):
                 "audio_features": audio_features,
                 "audio_seqlens": audio_seqlens,
             },
-            kwargs={"embed_len": int(_get_feat_extract_output_lengths(frames))},
+            kwargs={"embed_len": int(_get_feat_extract_output_lengths(frames, self.audio_encoder.n_window))},
             input_seq_len=frames,
         )
 
