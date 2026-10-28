@@ -160,8 +160,9 @@ class UpStage(nn.Module):
             ResnetBlock(in_channels if i == 0 else out_channels, out_channels, groups, eps) for i in range(num_layers)
         )
         self.upsample = nn.Conv2d(out_channels, out_channels, 3, padding=1) if upsample else None
-        # set by fold_upsample(): the stride-2 transposed-conv kernel equal to nearest x2 + conv3x3
-        self.upsample_folded: torch.Tensor | None = None
+        # set by fold_upsample(): the stride-2 transposed-conv kernel equal to nearest x2 + conv3x3;
+        # a buffer so it moves with the module, out of the state dict the checkpoint loads
+        self.register_buffer("upsample_folded", None, persistent=False)
 
     def fold_upsample(self) -> None:
         """Precompute the 4x4 stride-2 transposed-conv kernel that equals nearest x2 + the 3x3
