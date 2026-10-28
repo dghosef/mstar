@@ -540,9 +540,12 @@ Qwen3-Omni notes
   later codes at near-ties.
 - The audio encoder takes the clips of up to 16 requests a step and packs
   them along time in request order, starting a new call when the next clip
-  would take it past 300 s of audio, with attention windowed within each clip. A clip's embeddings can differ at the
-  last bit with what it is batched beside, since the packed GEMMs' shapes
-  change with the call's total frames.
+  would take it past 300 s of audio, with attention windowed within each
+  clip. A clip's embeddings can differ at the last bit with what it is
+  batched beside, since the packed GEMMs' shapes change with the call's total
+  frames, and a prefix-cached audio prefix keeps the embeddings it was first
+  computed with, so a later request reusing it inherits that first batch's
+  rounding.
 - The MoE layers route through the fused softmax-top-k kernel
   (``TopKRouter(fused_softmax_topk=True)``), which gives equal probabilities to
   the lower expert id where ``torch.topk`` may pick another.

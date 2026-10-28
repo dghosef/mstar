@@ -17,7 +17,7 @@ import inspect
 import logging
 from collections.abc import Mapping
 from dataclasses import replace
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch import nn
@@ -156,7 +156,7 @@ class AudioEncoderSubmodule(NodeSubmodule):
     ) -> NodeInputs:
         # Edge name from graph walk is "audio_features"
         audio_features = inputs["audio_features"][0]
-        audio_seqlens = inputs.get("audio_seqlens", [None])[0]
+        audio_seqlens = inputs["audio_seqlens"][0]
         # one clip, its valid mel frames packed along time: its length is the
         # tensor's width, known on the host
         frames = audio_features.shape[-1]
@@ -165,7 +165,7 @@ class AudioEncoderSubmodule(NodeSubmodule):
                 "audio_features": audio_features,
                 "audio_seqlens": audio_seqlens,
             },
-            kwargs={"embed_len": int(_get_feat_extract_output_lengths(frames))},
+            kwargs={"embed_len": int(_get_feat_extract_output_lengths(frames, self.audio_encoder.n_window))},
             input_seq_len=frames,
         )
 
@@ -174,7 +174,7 @@ class AudioEncoderSubmodule(NodeSubmodule):
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
         audio_features: torch.Tensor,
-        audio_seqlens: Optional[torch.Tensor] = None,
+        audio_seqlens: torch.Tensor,
         **kwargs,
     ) -> NameToTensorList:
         """Run the audio encoder and return embeddings.
