@@ -587,9 +587,11 @@ class Qwen3_5DenseModel(Model):
         ]
 
         result: NameToTensorList = {"text_inputs": segments}
-        # the grids reach the nodes as host ints (step metadata), not as tensors
-        image_grids = [g for out in images for g in out["image_grid_thw"]]
-        video_grids = [video.grid for video in videos]
+        # Each image's and video's (t, h, w), turned into host ints once here:
+        # the spans are sized from them, and they reach the nodes unchanged as
+        # step metadata, so no node reads a grid off the device.
+        image_grids = [tuple(g.tolist()) for out in images for g in out["image_grid_thw"]]
+        video_grids = [tuple(video.grid.tolist()) for video in videos]
         if images:
             result["pixel_values"] = [out["pixel_values"] for out in images]
             # the raw images are not a graph input (the encoder reads
@@ -607,9 +609,7 @@ class Qwen3_5DenseModel(Model):
             # A span is the merged tokens and two sentinels, and each temporal group of a video
             # is placed like a one-frame image.
             video = step.modality == VIDEO
-            grid = video_grids[owners[step.index]] if video else image_grids[step.index]
-            grid = grid[0] if grid.dim() == 2 else grid
-            t, h, w = (int(v) for v in grid.tolist())
+            t, h, w = video_grids[owners[step.index]] if video else image_grids[step.index]
             grid = torch.tensor((1 if video else t, h, w))
             rows = int(grid.prod()) // merge**2 + 2
             source = (VIDEO, owners[step.index]) if video else ("image", step.index)
@@ -617,16 +617,14 @@ class Qwen3_5DenseModel(Model):
 
         plan = prefill_plan(expand_video_parts(parts, groups))
         layout = LabelLayout(spans=tuple(prompt_spans(plan, segments, walk, media)), growth=(("decode_loop", 1),))
-        def host(grids) -> list[tuple[int, ...]]:
-            return [tuple(int(v) for v in g.reshape(-1).tolist()) for g in grids]
 
         # always set, so a `video_groups` the client sent never reaches the
         # schedule; the grids ride to the nodes as step metadata
         return ProcessPromptOutput(result, {
             "video_groups": groups,
             "kv_layout": {KV_CACHE: {"main": layout}},
-            IMAGE_GRIDS_KEY: host(image_grids),
-            VIDEO_GRIDS_KEY: host(video_grids),
+            IMAGE_GRIDS_KEY: image_grids,
+            VIDEO_GRIDS_KEY: video_grids,
         })
 
     def get_loop_caps(self, **model_kwargs) -> dict[str, int]:
@@ -736,7 +734,7 @@ class Qwen3_5DenseModel(Model):
             )
             if first_group:
                 picked["pixel_values"].append(pool[index])
-                picked_grids.append(tuple(host_pools[step.modality][index]))
+                picked_grids.append(host_pools[step.modality][index])
 
         if not order:
             return []

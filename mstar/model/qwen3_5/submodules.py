@@ -81,13 +81,6 @@ from mstar.utils.profiler import PHASE_PERIOD, PhaseLaps, phase_record
 logger = logging.getLogger(__name__)
 
 
-def _host_grids(fwd_info: CurrentForwardPassInfo) -> list[tuple[int, int, int]]:
-    """Each image's or video's (t, h, w), off the step metadata the conductor
-    filled from `process_prompt`: host ints, so sizing a span never waits on
-    the device."""
-    return [(int(t), int(h), int(w)) for t, h, w in fwd_info.step_metadata[STEP_GRIDS_KEY]]
-
-
 class LLMSubmodule(ARNodeSubmodule):
     # Total tokens of a packed text-prefill step, one captured graph per
     # (bucket, batch size). A prompt past the top bucket prefills eagerly, and
@@ -254,7 +247,7 @@ class LLMSubmodule(ARNodeSubmodule):
         device = self.get_device()
         merge = self.vision_config.spatial_merge_size
         texts = inputs.get("text_inputs", [])
-        grids = _host_grids(fwd_info)
+        grids = fwd_info.step_metadata[STEP_GRIDS_KEY]
         packed = inputs["vision_embeds"][0].to(device)
         start_embed, end_embed = self._sentinel_embeds()
 
@@ -667,7 +660,7 @@ class VisionEncoderSubmodule(NodeSubmodule):
     ) -> NodeInputs:
         device = self.get_device()
         merge = self.config.spatial_merge_size
-        grid = _host_grids(fwd_info)
+        grid = fwd_info.step_metadata[STEP_GRIDS_KEY]
         # Built here, not in the compiled forward: a `.tolist()` there breaks
         # the graph and makes h, w symints inductor cannot codegen from. And
         # built on the host: on the device, the grid upload and the
