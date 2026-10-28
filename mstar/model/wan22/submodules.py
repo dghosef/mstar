@@ -29,9 +29,10 @@ from torch import nn
 
 from mstar.communication.tensors import NameToTensorList
 from mstar.conductor.request_info import CurrentForwardPassInfo
+from mstar.distributed.communication import CommGroup
 from mstar.engine.resources import AttentionStep, Segment, SlotLease, SubmoduleStep
 from mstar.model.components.diffusion.attention import RaggedAttentionFn
-from mstar.model.components.distributed.sequence_parallel import gather_rows, my_rows
+from mstar.model.components.distributed.sequence_parallel import my_rows
 from mstar.model.submodule_base import ModelInputsFromEngine, NodeInputs, NodeSubmodule
 from mstar.model.wan22.components.unipc import (
     SOLVER_ORDER,
@@ -390,13 +391,14 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
         self.transformer = transformer
         self.config = config
         # CFG parallelism: the node's lockstep group arrives as its sp group
-        # (None on one GPU; Wan22Model.validate_config_yaml refuses any size but
-        # 2), but nothing splits the sequence. The ranks split the batch-2 CFG
-        # stack (my_rows / gather_rows), each running one branch at batch 1, so
-        # the step costs one branch's forward plus a latent-sized gather. Every
-        # rank then runs the same combine and UniPC step on replicated latents.
-        # Without guidance both ranks compute the whole step, correct but no faster.
-        self.sp_group = sp_group
+        # (not passed on one GPU, so trivial here; Wan22Model.validate_config_yaml
+        # refuses any size but 2), but nothing splits the sequence. The ranks
+        # split the batch-2 CFG stack (my_rows, then an all-gather), each running
+        # one branch at batch 1, so the step costs one branch's forward plus a
+        # latent-sized gather. Every rank then runs the same combine and UniPC
+        # step on replicated latents. Without guidance both ranks compute the
+        # whole step, correct but no faster.
+        self.sp_group = sp_group or CommGroup.trivial()
         self._self_attn_fn: RaggedAttentionFn | None = None
         self._record_fp32_islands()
         # Compile the inner DiT region only (tensors in, tensor out; nothing
@@ -644,7 +646,7 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
         )
         if not do_cfg:
             return out
-        out = gather_rows(self.sp_group, out)
+        out = self.sp_group.all_gather(out.contiguous(), dim=0)
         noise_cond, noise_uncond = out[0:1], out[1:2]
         return noise_uncond + guidance_scale * (noise_cond - noise_uncond)
 
