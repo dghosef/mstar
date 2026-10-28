@@ -69,6 +69,20 @@ logger = logging.getLogger(__name__)
 REF_RMS_KEY = "output_ref_rms"
 
 
+def output_shaping(kwargs: dict) -> dict:
+    """The request's output-shaping kwargs as ``post_process`` takes them.
+    ``process_prompt`` reads them too, so a bad value fails the request before
+    it generates."""
+    try:
+        return {
+            "pad_duration": float(kwargs.get("pad_duration", 0.1)),
+            "fade_duration": float(kwargs.get("fade_duration", 0.1)),
+            "enabled": bool(kwargs.get("postprocess_output", True)),
+        }
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"pad_duration and fade_duration must be numbers: {exc}") from None
+
+
 class OmniVoiceModel(Model):
     """k2-fsa/OmniVoice."""
 
@@ -78,8 +92,9 @@ class OmniVoiceModel(Model):
 
     UNMASK_LOOP_NAME = UNMASK_LOOP_NAME
     # The canvas length process_prompt settles (it needs the tokenizer and the
-    # duration estimator); it reaches the backbone as step metadata.
-    INTERNAL_KWARGS = (TARGET_LEN,)
+    # duration estimator), which reaches the backbone as step metadata, and a
+    # clone's reference level, which `postprocess` matches.
+    INTERNAL_KWARGS = (TARGET_LEN, REF_RMS_KEY)
 
     def __init__(
         self,
@@ -333,6 +348,7 @@ class OmniVoiceModel(Model):
             raise ValueError("OmniVoice requires a non-empty text prompt")
         if set(output_modalities) != {"audio"}:
             raise ValueError("OmniVoice generates audio only")
+        output_shaping(kwargs)
 
         self._ensure_data_worker_assets()
 
@@ -673,9 +689,7 @@ class OmniVoiceModel(Model):
             # normalisation instead; that is a different code path, not a
             # default value, so it must stay None rather than become 0.
             ref_rms=kw.get(REF_RMS_KEY),
-            pad_duration=float(kw.get("pad_duration", 0.1)),
-            fade_duration=float(kw.get("fade_duration", 0.1)),
-            enabled=bool(kw.get("postprocess_output", True)),
+            **output_shaping(kw),
         )
         return (np.clip(waveform, -1, 1) * 32767).astype(np.int16).tobytes()
 

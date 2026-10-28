@@ -136,3 +136,15 @@ def test_a_clients_value_for_a_model_internal_key_never_reaches_the_model_or_con
     )
     assert kwargs["voice"] == "tara", "the strip dropped the request's own kwargs"
     assert kwargs["from_process_prompt"] == 1, "the model's own metadata never arrived"
+
+
+def test_omnivoice_refuses_a_bad_output_shaping_value_before_it_generates():
+    """``postprocess`` shapes the waveform after the whole unmask loop; a bad
+    value there would fail a request whose generation already ran."""
+    from mstar.model.omnivoice.config import OmniVoiceConfig
+    from mstar.model.omnivoice.omnivoice_model import OmniVoiceModel
+
+    model = object.__new__(OmniVoiceModel)
+    model.config = OmniVoiceConfig()
+    with pytest.raises(ValueError, match="pad_duration"):
+        model.process_prompt("hello", ["text"], ["audio"], pad_duration="soon")
