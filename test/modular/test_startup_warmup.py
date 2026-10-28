@@ -126,6 +126,10 @@ def test_a_failing_warmup_is_logged_and_skipped(caplog) -> None:
     # not a list at all: nothing runs, one warning
     entrypoint._run_warmup_requests(fake, {"text": "x"})
     assert fake.collected == ["warmup-0.0.0", "warmup-2.0.0"]
+    # a failing solo does not keep the copies from running
+    fake = _FakeServer(fail_on="warmup-0.solo")
+    entrypoint._run_warmup_requests(fake, [{"text": "x"}], entrypoint.DataParallelReplicas(2, 1))
+    assert fake.collected == ["warmup-0.solo", "warmup-0.0.0", "warmup-0.0.1"]
 
 
 def test_hf_file_references_resolve_from_the_cache(monkeypatch) -> None:

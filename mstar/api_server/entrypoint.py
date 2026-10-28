@@ -1686,6 +1686,11 @@ def _run_warmup_requests(
                     "warmup request %d/%d failed after %.1f s alone: %s",
                     index + 1, len(specs), time.perf_counter() - t0, getattr(exc, "detail", exc),
                 )
+            else:
+                logger.info(
+                    "warmup request %d/%d (%s) done in %.1f s alone",
+                    index + 1, len(specs), ",".join(request.output_modalities), time.perf_counter() - t0,
+                )
         for level, concurrency in enumerate(request.concurrency):
             t0 = time.perf_counter()
             try:
@@ -2649,8 +2654,8 @@ def main(argv: list[str] | None = None):
         if warmups:
             replicas = _data_parallel_replicas(model, args.config)
             logger.info(
-                "Running %d warmup request(s) before binding, %d at a time (one per replica)",
-                len(warmups), replicas.most,
+                "Running %d warmup request(s) before binding, %s%d copies at a time (one per replica)",
+                len(warmups), "each once alone, then " if replicas.fewest < replicas.most else "", replicas.most,
             )
             _run_warmup_requests(api_server, warmups, replicas)
         if args.enable_metrics:
