@@ -12,6 +12,7 @@ from collections.abc import Callable, Collection
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import cached_property
+from typing import NamedTuple
 
 import torch
 
@@ -166,6 +167,24 @@ class InlineToken:
     value: int
     loop_indices: NestedLoopIndices | None
     modality: str
+
+
+class PreparingInput(NamedTuple):
+    """An input waiting its turn to be handed on, in arrival order: a request
+    whose prepare runs on the preprocess pool, or an append (no ``prepared``)."""
+    input: PreprocessInput | ClientAppend
+    profile: DataWorkerProfile | None = None
+    prepared: Future | None = None
+
+
+def preprocess_workers(model: Model | None, model_config: dict | None) -> int:
+    """``preprocess_workers`` from the serving config, else the model's ``PREPROCESS_WORKERS``."""
+    if model is None:
+        return 1
+    workers = (model_config or {}).get("preprocess_workers", getattr(model, "PREPROCESS_WORKERS", 1))
+    if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
+        raise ValueError(f"preprocess_workers must be a positive integer, got {workers!r}")
+    return workers
 
 
 def unlink_files(file_paths: dict[str, list[str]] | None) -> None:
@@ -634,12 +653,12 @@ class PreprocessWorkerThread:
         self.idle_wait_ms = 20
         # Media load + process_prompt for several requests at once, for models
         # that declare it; requests then wait in `_preparing` instead of in_queue.
-        workers = getattr(model, "PREPROCESS_WORKERS", 1) if model is not None else 1
+        workers = preprocess_workers(model, model_config)
         self._prep_workers = workers
         if workers > 1:
             self._prep_pool = ThreadPoolExecutor(workers, thread_name_prefix="preprocess")
         # inputs in arrival order, each a request's prepare on the pool or an append
-        self._preparing: deque[tuple[PreprocessInput | ClientAppend, DataWorkerProfile | None, Future | None]] = deque()
+        self._preparing: deque[PreparingInput] = deque()
         self._encode_pool = ThreadPoolExecutor(
             max_workers=encode_workers(), thread_name_prefix="mstar-encode",
         )
@@ -1669,14 +1688,15 @@ class PreprocessWorkerThread:
             did_work = True
             for pre_input in inputs:
                 if isinstance(pre_input, ClientAppend):
-                    preparing.append((pre_input, None, None))
+                    preparing.append(PreparingInput(pre_input))
                     continue
                 profile = self._start_profile(pre_input) if self.timing_requested.is_set() else None
                 future = self._prep_pool.submit(self._prepare_input, pre_input)
                 if self.wakeup is not None:
                     self.wakeup.register_future(future)
-                preparing.append((pre_input, profile, future))
-        while preparing and (preparing[0][2] is None or preparing[0][2].done()):
+                preparing.append(PreparingInput(pre_input, profile, future))
+        # as the inline path, nothing goes on to a peer that can't take what was already sent
+        while not sends_pending and preparing and (preparing[0].prepared is None or preparing[0].prepared.done()):
             did_work = True
             self._take_input(*preparing.popleft())
         return did_work

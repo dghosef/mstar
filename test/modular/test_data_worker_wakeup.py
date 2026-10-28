@@ -7,6 +7,7 @@ import queue
 import select
 import threading
 import time
+from collections import deque
 from concurrent.futures import Future
 from types import SimpleNamespace
 
@@ -254,3 +255,23 @@ def test_pooled_preprocessing_overlaps_requests_and_keeps_arrival_order():
     wakeup.signal()
     t.join(timeout=2.0)
     assert not t.is_alive()
+
+
+def test_a_prepared_request_waits_while_a_peer_cannot_take_more():
+    """As on the inline path, nothing is handed on to the conductor while
+    earlier sends are still queued for a peer that is backed up."""
+    from mstar.api_server.data_worker import PreparingInput
+    from mstar.api_server.request_types import PreprocessInput
+
+    worker = PreprocessWorkerThread.__new__(PreprocessWorkerThread)
+    worker._prep_workers, worker.in_queue = 2, queue.Queue()
+    done = Future()
+    done.set_result(({}, {}, {}))
+    worker._preparing = deque([PreparingInput(PreprocessInput("r", "r", None, [], ["text"], {}), None, done)])
+    taken = []
+    worker._take_input = lambda *entry: taken.append(entry[0].request_id)
+
+    PreprocessWorkerThread._pump_preprocess_pool(worker, sends_pending=True)
+    assert taken == [], "a prepared request was sent to a peer that can't take what it was already sent"
+    PreprocessWorkerThread._pump_preprocess_pool(worker, sends_pending=False)
+    assert taken == ["r"]
