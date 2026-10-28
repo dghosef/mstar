@@ -110,7 +110,8 @@ def _(x, weight, bias, num_groups, eps, silu):
 def norm_act(norm: torch.nn.GroupNorm, x: torch.Tensor, act: torch.nn.Module | None) -> torch.Tensor:
     """``act(norm(x))``: the split-reduction kernel inside a compiled CUDA forward, else the
     modules themselves (eager stays the reference's kernels)."""
-    if torch.compiler.is_compiling() and _fits(x, norm.weight, norm.bias, norm.num_groups):
+    fusable = act is None or type(act) is torch.nn.SiLU  # the kernel fuses SiLU only
+    if fusable and torch.compiler.is_compiling() and _fits(x, norm.weight, norm.bias, norm.num_groups):
         return group_norm_silu(x, norm.weight, norm.bias, norm.num_groups, norm.eps, act is not None)
     x = norm(x)
     return act(x) if act is not None else x

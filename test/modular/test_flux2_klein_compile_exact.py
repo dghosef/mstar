@@ -88,6 +88,18 @@ def test_split_group_norm_silu_matches_fp32_group_norm(channels_last):
     torch.testing.assert_close(got.float(), ref, rtol=2 ** -7, atol=2 ** -6)  # bf16 output rounding
 
 
+def test_norm_act_fuses_only_silu(monkeypatch):
+    """The fused kernel applies SiLU or nothing; any other activation runs as its module."""
+    from mstar.model.components.diffusion import group_norm
+
+    monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+    monkeypatch.setattr(group_norm, "_fits", lambda *a: True)
+    monkeypatch.setattr(group_norm, "group_norm_silu", lambda x, w, b, g, eps, silu: torch.full_like(x, float(silu)))
+    norm, x = nn.GroupNorm(2, 4), torch.randn(1, 4, 3, 3)
+    assert torch.equal(group_norm.norm_act(norm, x, nn.SiLU()), torch.ones_like(x))
+    torch.testing.assert_close(group_norm.norm_act(norm, x, nn.GELU()), nn.functional.gelu(norm(x)))
+
+
 def test_scaled_rmsnorm_opts_in_by_attribute():
     norm = ScaledRMSNorm(6, 1e-5)
     assert ScaledRMSNorm.compile_exact_op is True
