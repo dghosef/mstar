@@ -20,7 +20,7 @@ import types
 import pytest
 import torch
 
-from mstar.conductor.request_info import CurrentForwardPassInfo
+from mstar.conductor.request_info import DEFAULT_PARTITION, CurrentForwardPassInfo
 from mstar.engine.resources import KVStep, PositionStep
 from mstar.model.bagel.config import BagelAutoEncoderConfig, BagelModelConfig, BagelViTConfig
 from mstar.model.bagel.submodules import (
@@ -333,6 +333,32 @@ def test_only_a_varying_branch_count_reads_the_loop_counter():
         branches(IMAGE_GEN, None, 3, True)      # seeded latents but counter says step 3
 
 
+def _pointer(uuid):
+    from mstar.graph.base import TensorPointerInfo
+
+    return TensorPointerInfo(dims=[1], dtype=torch.float32, nbytes=4, address=0, stride=[1], uuid=uuid,
+                             source_session_id="", source_entity="worker_0")
+
+
+def _image_request_intake(kwargs, cfg_parallel=True):
+    """A text-to-image request through BAGEL's intake: the model, the request's
+    `CFGWindow`, the kwargs process_prompt hands on, and its first forward."""
+    from mstar.model.bagel.bagel_model import CFG_WINDOW, BagelModel
+
+    model = BagelModel.__new__(BagelModel)
+    model.config = CONFIG
+    model._has_cfg_parallel = cfg_parallel
+    model._has_llm_disaggregation = False
+    model._image_gen_remote_handoff = False
+    params = model._request_params(["text"], ["image"], kwargs)
+    window = cfg_window(N, SHIFT, tuple(params["cfg_interval"]), params["cfg_text_scale"], params["cfg_img_scale"])
+    model_kwargs = {**kwargs, CFG_WINDOW: tuple(window)}
+    fwd = model.get_initial_forward_pass_args(
+        DEFAULT_PARTITION, ["text"], ["image"], {"text_inputs": [_pointer(0)]}, model_kwargs,
+    )
+    return model, window, model_kwargs, fwd
+
+
 @pytest.mark.parametrize("kwargs,walks", [
     ({}, ["image_gen_cfg2", IMAGE_GEN]),
     ({"cfg_interval": [0.0, 1.0], "cfg_img_scale": 2.0}, ["image_gen_cfg3", IMAGE_DECODE]),
@@ -344,27 +370,8 @@ def test_conductor_walks_a_cfg_parallel_request_through_its_phases(kwargs, walks
     its phases in order, each loop capped at its steps, each walk after the
     first fed the previous one's persisted latents and time_index on every
     node that reads them, and the request ends after the decode."""
-    from mstar.conductor.request_info import DEFAULT_PARTITION
-    from mstar.graph.base import TensorPointerInfo
-    from mstar.model.bagel.bagel_model import CFG_WINDOW, BagelModel
-
-    def pointer(uuid):
-        return TensorPointerInfo(dims=[1], dtype=torch.float32, nbytes=4, address=0, stride=[1], uuid=uuid,
-                                 source_session_id="", source_entity="worker_0")
-
-    model = BagelModel.__new__(BagelModel)
-    model.config = CONFIG
-    model._has_cfg_parallel = True
-    model._has_llm_disaggregation = False
-    model._image_gen_remote_handoff = False
+    model, window, model_kwargs, fwd = _image_request_intake(kwargs)
     graphs = model.get_graph_walk_graphs()
-    params = model._request_params(["text"], ["image"], kwargs)
-    window = cfg_window(N, SHIFT, tuple(params["cfg_interval"]), params["cfg_text_scale"], params["cfg_img_scale"])
-    model_kwargs = {**kwargs, CFG_WINDOW: tuple(window)}
-
-    fwd = model.get_initial_forward_pass_args(
-        DEFAULT_PARTITION, ["text"], ["image"], {"text_inputs": [pointer(0)]}, model_kwargs,
-    )
     metadata, persist, seen, loops = fwd.full_metadata, {}, [], []
     while not (fwd := model.get_partition_forward_pass_args(DEFAULT_PARTITION, metadata, persist)).request_done:
         walk = metadata.graph_walk
@@ -392,10 +399,35 @@ def test_conductor_walks_a_cfg_parallel_request_through_its_phases(kwargs, walks
             assert phase.branches is not None
         seen.append(walk)
         # the walk's loop persists where it left off, appended as the conductor does
-        persist.setdefault("latents", []).append(pointer(100 * len(seen)))
-        persist.setdefault("time_index", []).append(pointer(100 * len(seen) + 1))
+        persist.setdefault("latents", []).append(_pointer(100 * len(seen)))
+        persist.setdefault("time_index", []).append(_pointer(100 * len(seen) + 1))
     assert seen == walks
     phases = model._image_gen_phases(window)
     assert [p.walk for p in phases] == walks
     caps = model.get_loop_caps(**model_kwargs)
     assert {name: caps[name] for name in loops} == {denoise_loop(p.walk): p.steps for p in phases if p.steps}
+
+
+_TEXT_ONLY = {("LLM", "prefill_text"): ["cfg_text"], ("LLM", "prefill_vit"): ["cfg_text"],
+              ("LLM", "prefill_vae"): ["cfg_text"]}
+_BOTH = {("LLM", "prefill_text"): ["cfg_text", "cfg_img"], ("LLM", "prefill_vit"): ["cfg_text"],
+         ("LLM", "prefill_vae"): ["cfg_text"]}
+
+
+@pytest.mark.parametrize("kwargs,cfg_parallel,published,final", [
+    ({}, True, _TEXT_ONLY, {}),
+    ({"cfg_interval": [0.0, 1.0], "cfg_img_scale": 2.0}, True, _BOTH, {("LLM", "decode"): ["cfg_img"]}),
+    ({"cfg_interval": [0.5, 0.5]}, True, {}, {}),
+    # one node runs every branch: what it publishes is unchanged
+    ({}, False, _BOTH, {("LLM", "decode"): ["cfg_img"]}),
+], ids=["t2i", "edit_scales", "empty_window", "single_node"])
+def test_a_guided_request_publishes_only_the_kv_its_cfg_walk_reads(kwargs, cfg_parallel, published, final):
+    """On a CFG-parallel deployment the branch labels' readers are the CFG
+    walk's branch nodes, so the main LLM exports only those, and nothing for a
+    guided request whose window has no step."""
+
+    model, _, model_kwargs, fwd = _image_request_intake(kwargs, cfg_parallel)
+    assert fwd.full_metadata.kwargs["requires_cfg"]
+    kv = model.get_request_resource_configs({DEFAULT_PARTITION: fwd}, model_kwargs)["kv"]
+    assert kv.publish_labels_per_node_walk == published
+    assert kv.final_publish_labels_per_node_walk == final

@@ -82,6 +82,7 @@ from mstar.model.bagel.components.tokenization import BagelTokenizer, add_specia
 from mstar.model.bagel.components.vit_encoder import VIT_ATTN, BagelVisionModel
 from mstar.model.bagel.config import MIXED_TEXT, load_bagel_config
 from mstar.model.bagel.submodules import (
+    CFG_WALKS,
     DENOISE_WALKS,
     IMAGE_ADVANCE,
     IMAGE_DECODE,
@@ -965,12 +966,22 @@ class BagelModel(Model):
         publish_labels: dict[tuple[str, str], list[str]] = {}
         final_publish_labels: dict[tuple[str, str], list[str]] = {}
         if cfg:
-            publish_labels.update({
+            branch_labels = ["cfg_text", "cfg_img"]
+            if self._has_cfg_parallel and not self._has_llm_disaggregation:
+                # The branch labels' only readers are the CFG walk's branch nodes, one
+                # label each: none without a window. (A remote LLM, on a split
+                # deployment, runs single-node walks that read both.)
+                cfg_walk = next((p.walk for p in request["image_gen_phases"] if p.walk in CFG_WALKS), None)
+                branch_labels = list(NODE_TO_CFG_LABEL.values())[1:CFG_WALKS[cfg_walk]] if cfg_walk else []
+            for (node, walk), labels in {
                 ("LLM", "prefill_text"): ["cfg_text", "cfg_img"],
                 ("LLM", "prefill_vit"): ["cfg_text"],
                 ("LLM", "prefill_vae"): ["cfg_text"],
-            })
-            final_publish_labels[("LLM", "decode")] = ["cfg_img"]
+            }.items():
+                if labels := [label for label in labels if label in branch_labels]:
+                    publish_labels[(node, walk)] = labels
+            if "cfg_img" in branch_labels:
+                final_publish_labels[("LLM", "decode")] = ["cfg_img"]
 
         if self._has_llm_disaggregation:
             # Any prefill walk can be the last one before a remote decode or
@@ -994,7 +1005,8 @@ class BagelModel(Model):
                     for walk in LLM_GRAPH_WALKS
                 },
                 # Only the main LLM instance creates cache branches consumed
-                # by the remote CFG replicas. Text-only requests export
+                # by the remote CFG replicas, and it exports only the ones the
+                # request's CFG walk reads. Text-only requests export
                 # nothing. Think-then-image exports cfg_img once after decode
                 # stops, so the CFG walks see the final KV without rewriting
                 # the SHM payload on every token. Disaggregated LLM placements
