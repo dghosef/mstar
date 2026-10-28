@@ -293,13 +293,16 @@ class DenseAttentionManager(AttentionManager):
             # FA3's dense kernel, one call per segment, is faster than its
             # varlen kernel over the packed segments (Cosmos3 denoise shapes)
             # and gives the same result
+            if q.dtype != k.dtype:
+                q = q.to(k.dtype)
             outs = []
             offset = 0
             for segment in plan.segments:
                 k_seg, v_seg = k[offset:offset + segment.q_len], v[offset:offset + segment.q_len]
                 if segment.prefix_len:
                     k_pref, v_pref = self._prefix_kv(segment, layer_idx, kv_cache_layer)
-                    k_seg, v_seg = torch.cat([k_pref, k_seg]), torch.cat([v_pref, v_seg])
+                    k_seg = torch.cat([k_pref.to(k.dtype), k_seg])
+                    v_seg = torch.cat([v_pref.to(v.dtype), v_seg])
                 o = flash_attn_func(
                     q[None, offset:offset + segment.q_len], k_seg[None], v_seg[None], causal=plan.causal,
                 )
