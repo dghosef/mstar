@@ -69,6 +69,17 @@ class DecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         return residual + hidden_states
 
+    def forward_mlp_residual(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor,
+        next_norm: nn.Module, comm_group=None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The layer after attention, through ``next_norm`` (the next layer's
+        input norm, or the stack's final norm): add+norm, MLP, add+norm. Returns
+        ``next_norm``'s output and the residual stream. One function, holding no
+        layer index, so a compiled stack runs one frame per layer here."""
+        h, residual = self.post_attention_layernorm.forward_residual(hidden_states, residual, comm_group)
+        return next_norm.forward_residual(self.mlp(h), residual, comm_group)
+
 
 def run_layers(
     layers: nn.ModuleList, hidden_states: torch.Tensor, norm: nn.Module,
@@ -83,22 +94,20 @@ def run_layers(
 
     By default layer ``i`` attends through its engine attention, its layer
     cursor moved to ``i`` first; ``attend(i, self_attn, h)`` replaces that. It
-    is called from this loop, not from a per-layer function, so that an opaque
-    ``attend`` (a code predictor's) sends the loop to eager and no compiled frame
-    specializes on the ints it binds; the norms and MLPs still compile.
+    is called from this loop, not from a per-layer function, so that the loop
+    runs eager and no compiled frame specializes on ``i`` or the ints ``attend``
+    binds; an ``attend`` must not compile a frame of its own that reads them.
     """
-    residual = None
+    h, residual = layers[0].input_layernorm.forward_residual(hidden_states, None, comm_group)
     for i, layer in enumerate(layers):
-        h, residual = layer.input_layernorm.forward_residual(hidden_states, residual, comm_group)
         if attend is None:
             layer.self_attn.attend.set_layer_idx(i)
             h = layer.self_attn(h)
         else:
             h = attend(i, layer.self_attn, h)
-        h, residual = layer.post_attention_layernorm.forward_residual(h, residual, comm_group)
-        hidden_states = layer.mlp(h)
-    normed, _ = norm.forward_residual(hidden_states, residual, comm_group)
-    return normed
+        next_norm = layers[i + 1].input_layernorm if i + 1 < len(layers) else norm
+        h, residual = layer.forward_mlp_residual(h, residual, next_norm, comm_group)
+    return h
 
 
 class GatedDecoderLayer(nn.Module):

@@ -167,6 +167,51 @@ def test_prefill_and_decode_logits_match_hf():
         rope.next_pos += 1
 
 
+def _graph_calls(fn, *args) -> int:
+    """Compiled graphs one call of ``torch.compile(fn)`` runs, after a first
+    call that compiles them."""
+    calls = [0]
+
+    def backend(gm, example_inputs):
+        def run(*inputs):
+            calls[0] += 1
+            return gm.forward(*inputs)
+        return run
+
+    torch._dynamo.reset()
+    try:
+        compiled = torch.compile(fn, backend=backend, dynamic=False)
+        with torch.no_grad():
+            compiled(*args)
+            calls[0] = 0
+            compiled(*args)
+    finally:
+        torch._dynamo.reset()
+    return calls[0]
+
+
+def test_layer_stack_runs_one_compiled_frame_per_layer_besides_attention():
+    """``run_layers`` runs eager (its loop breaks at the layer cursor), so each
+    compiled frame it calls per layer is dispatched on every uncaptured forward:
+    the norms and the MLP must be one frame."""
+
+    def lm(num_layers):
+        torch.manual_seed(0)
+        config = Qwen3LMConfig.from_hf(dict(TINY, num_hidden_layers=num_layers))
+        ours = Qwen3DenseLM(config, attn_key=ATTN, kv_key=KV, pos_key=POS).eval()
+        fake, rope = _FakeKVAttention(), _FakeRope()
+        for module in ours.modules():
+            if hasattr(module, "bind_resources") and module is not ours:
+                module.bind_resources({ATTN: fake, KV: fake, POS: rope})
+        return ours
+
+    x = torch.randn(3, TINY["hidden_size"])
+    two, four = lm(2), lm(4)
+    per_layer = (_graph_calls(lambda h: four(h, label="main"), x)
+                 - _graph_calls(lambda h: two(h, label="main"), x)) // 2
+    assert per_layer <= _graph_calls(two.layers[0].self_attn, x) + 1
+
+
 @pytest.mark.parametrize("overrides,head_dim,fusable", [
     ({}, 128, True),
     ({"rotary_dim": 128}, 128, True),
