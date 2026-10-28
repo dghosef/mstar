@@ -19,6 +19,22 @@ def test_rms_norm_portable_kernel_matches_reference():
     torch.testing.assert_close(actual, expected)
 
 
+@pytest.mark.parametrize("gemma_mode", [False, True])
+def test_fused_add_rms_norm_portable_kernel_is_the_unfused_add_and_norm(gemma_mode):
+    torch.manual_seed(0)
+    x, residual, weight = torch.randn(3, 8), torch.randn(3, 8), torch.randn(8)
+    eps = 1e-6
+    total = x + residual
+    expected = total * torch.rsqrt(total.square().mean(dim=-1, keepdim=True) + eps) * (
+        1 + weight if gemma_mode else weight
+    )
+
+    torch.ops.mstar.fused_add_rms_norm(x, residual, weight, eps, gemma_mode)
+
+    assert torch.equal(residual, total)
+    torch.testing.assert_close(x, expected)
+
+
 def test_rms_norm_operator_has_backend_neutral_name():
     assert hasattr(torch.ops.mstar, "rms_norm")
 
