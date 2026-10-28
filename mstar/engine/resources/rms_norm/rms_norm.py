@@ -122,6 +122,9 @@ def fused_add_rms_norm(
     """In place: ``residual += x``, then ``x = rms_norm(residual)`` (Gemma's
     ``(1 + weight)`` when ``gemma_mode``). Portable fallback: the add, then
     ``mstar::rms_norm``."""
+    # The portable fallback (XPU, and CUDA in fp32). Inductor can't
+    # fuse the add across the op boundary; if an XPU model adopts ``run_layers``,
+    # register a fused XPU kernel for this op as CUDA does below.
     _unfused_add_rms_norm(x, residual, weight, eps, gemma_mode)
 
 

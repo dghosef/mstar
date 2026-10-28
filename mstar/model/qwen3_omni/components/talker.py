@@ -334,7 +334,7 @@ class Qwen3OmniCodePredictor(nn.Module):
         talker.code_predictor.lm_head.{0-30}.weight
 
     The Code Predictor runs 15 autoregressive steps (for residual codebooks
-    1..15) in float32 for precision.
+    1..15).
 
     ``forward_depth_unrolled(...)`` runs every layer with per-token position
     IDs over a static dense KV cache tensor; the unrolled CUDA graph captures it.
@@ -413,8 +413,8 @@ class Qwen3OmniCodePredictor(nn.Module):
             position_ids: ``[bs, seq_len]`` int tensor with the absolute
                 position of each input token within the depth sequence.
             kv_cache: ``[n_layers, bs, 2, max_seq_len, n_kv_heads, head_dim]``
-                dense tensor preallocated by the runner. The runner zeroes it
-                at the start of every graph replay so stale state cannot leak.
+                dense tensor preallocated by the runner. It is not cleared between
+                steps: every position a step reads is written earlier in the same step.
             cache_pos: write offset into ``kv_cache``'s seq-len axis. The new
                 K/V tokens land at ``[cache_pos : cache_pos + seq_len]``.
 
