@@ -233,14 +233,17 @@ def cfg_branch_skipped(label: str, n_branches: int) -> bool:
     return CFG_BRANCH_LABELS.index(label) >= n_branches
 
 
-def sat_out_velocity(latents: torch.Tensor) -> torch.Tensor:
-    """What a parallel-CFG node sends for a step it sits out: a zero-row velocity.
+def sat_out_velocity(config: BagelModelConfig, device) -> torch.Tensor:
+    """What a parallel-CFG node sends for a step it sits out: a zero-row velocity,
+    in the latents' width and dtype (``_init_latents_and_time_index``).
 
     Each node counts the step's branches from its own worker's loop counter, so
     ``combine_cfg`` checks this on the host rather than trusting the counts agree;
     a placeholder of the velocity's shape would pass for a computed one.
     """
-    return latents.new_empty((0, latents.shape[-1]))
+    dtype = torch.get_autocast_gpu_dtype() if torch.is_autocast_enabled() else torch.float32
+    width = config.vae_config.z_channels * config.latent_patch_size ** 2
+    return torch.empty((0, width), dtype=dtype, device=device)
 
 
 def combine_cfg_velocity(
@@ -845,12 +848,9 @@ class LLMSubmodule(ARNodeSubmodule):
     forward call names its label.
     """
 
-    # Node name → cache label mapping for image_gen_cfg
     # Plan label the three CFG branches share when they run as one
     # combined plan; see declare_step.
     CFG_BATCHED_LABEL = "_cfg_batched"
-
-    _NODE_TO_CFG_LABEL = NODE_TO_CFG_LABEL
 
     def _sample_tokens(
         self, request_ids: list[str], logits: torch.Tensor,
@@ -1072,11 +1072,15 @@ class LLMSubmodule(ARNodeSubmodule):
             node_inputs.tensor_inputs = self._get_text_vae_idxs(seq_len, device)
 
         if graph_walk in ("image_gen", "image_gen_cfg"):
+            first_iter = "latents" not in inputs or len(inputs["latents"]) == 0
+            node_inputs.kwargs[CFG_BRANCHES] = image_gen_step_branches(self.config, fwd_info, first_iter)
+            if graph_walk == "image_gen_cfg" and self._sits_out(node_inputs.kwargs[CFG_BRANCHES]):
+                # the forward sends a zero-row velocity and reads nothing else
+                return node_inputs
             H = fwd_info.step_metadata.get("height", 1024)
             W = fwd_info.step_metadata.get("width", 1024)
             shape_inputs = self._image_gen_shape_inputs(H, W, device)
             tensor_inputs = {"vae_position_ids": shape_inputs["vae_position_ids"]}
-            first_iter = "latents" not in inputs or len(inputs["latents"]) == 0
             if first_iter:
                 node_inputs.input_embeds, tensor_inputs["time_index"] = _init_latents_and_time_index(
                     self.config, device, seed=fwd_info.random_seed, H=H, W=W
@@ -1084,8 +1088,6 @@ class LLMSubmodule(ARNodeSubmodule):
             else:
                node_inputs.input_embeds = inputs["latents"][0]
                tensor_inputs["time_index"] = inputs["time_index"][0]
-
-            node_inputs.kwargs[CFG_BRANCHES] = image_gen_step_branches(self.config, fwd_info, first_iter)
 
             tensor_inputs["empty_combined_emb"] = self._sentinel_frame(
                 node_inputs.input_embeds.shape[0], node_inputs.input_embeds.dtype, device,
@@ -1146,10 +1148,7 @@ class LLMSubmodule(ARNodeSubmodule):
         the batch runs them rides in on ``NodeInputs.resource_step_info`` from
         ``prepare_inputs``.
         """
-        if graph_walk == "image_gen_cfg" and all(
-            cfg_branch_skipped(NODE_TO_CFG_LABEL.get(self.node_name, "main"), inp.kwargs[CFG_BRANCHES])
-            for inp in inputs
-        ):
+        if graph_walk == "image_gen_cfg" and all(self._sits_out(inp.kwargs[CFG_BRANCHES]) for inp in inputs):
             # this branch sits the step out (`cfg_branches`): no plan, no attention
             return None
         requires_cfg = requires_cfg_for_inputs(inputs)
@@ -1348,6 +1347,9 @@ class LLMSubmodule(ARNodeSubmodule):
         elif graph_walk == "image_gen":
             return self._forward_image_gen(**kwargs)
         elif graph_walk == "image_gen_cfg":
+            if self._sits_out(kwargs[CFG_BRANCHES]):
+                # `prepare_inputs` built nothing else; the edge still carries a tensor
+                return {f"v_{self._cfg_label}": [sat_out_velocity(self.config, self.get_device())]}
             return self._forward_image_gen_single_branch(**kwargs)
 
         if graph_walk == "prefill_text":
@@ -1670,18 +1672,10 @@ class LLMSubmodule(ARNodeSubmodule):
         kwargs.pop("cfg_renorm_type", None)
         kwargs.pop("cfg_interval", None)
         kwargs.pop("cfg_renorm_min", None)
-        n_branches = kwargs.pop(CFG_BRANCHES)
+        kwargs.pop(CFG_BRANCHES)
 
         latents = input_embeds
-        output_name = {
-            "LLM": "v_main",
-            "LLM_cfg_text": "v_cfg_text",
-            "LLM_cfg_img": "v_cfg_img",
-        }.get(self.node_name, "v_main")
-        if cfg_branch_skipped(self._NODE_TO_CFG_LABEL.get(self.node_name, "main"), n_branches):
-            # sits this step out (`cfg_branches`); the edge still carries a tensor
-            return {output_name: [sat_out_velocity(latents)]}
-
+        label = self._cfg_label
         # See _forward_image_gen: tie the separately-passed sequence dims so
         # torch.compile's dynamic shapes can prove the adds below line up.
         n_latent = latents.shape[0]
@@ -1700,7 +1694,6 @@ class LLMSubmodule(ARNodeSubmodule):
         latents_ = self.vae2llm(latents) + timestep_embeds + pos_embed
         empty_combined_emb[1:-1] = latents_
 
-        label = self._NODE_TO_CFG_LABEL.get(self.node_name, "main")
         hidden = self.language_model(
             empty_combined_emb, mode="gen",
             label=label,
@@ -1714,10 +1707,19 @@ class LLMSubmodule(ARNodeSubmodule):
 
         # Output velocity. Main LLM also passes through latents/time_index
         # for the combine_cfg node.
-        result: NameToTensorList = {output_name: [projected]}
+        result: NameToTensorList = {f"v_{label}": [projected]}
         if self.node_name == "LLM":
             result["time_index"] = [time_index]
         return result
+
+    @property
+    def _cfg_label(self) -> str:
+        """This node's CFG branch, and its velocity edge ``v_<label>``, under image_gen_cfg."""
+        return NODE_TO_CFG_LABEL.get(self.node_name, "main")
+
+    def _sits_out(self, n_branches: int) -> bool:
+        """Whether this image_gen_cfg branch node sits out a step running ``n_branches``."""
+        return cfg_branch_skipped(self._cfg_label, n_branches)
 
     def _batch_get_requires_cfg(self, per_request_info: dict[str, CurrentForwardPassInfo]):
         return any(

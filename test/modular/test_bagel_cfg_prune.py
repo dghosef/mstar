@@ -283,6 +283,35 @@ def test_parallel_branch_nodes_sit_out_the_branches_a_step_does_not_read():
     assert [cfg_branch_skipped("cfg_img", n) for n in (1, 2, 3)] == [True, True, False]
 
 
+@pytest.mark.parametrize("first_iter", [True, False])
+def test_a_branch_node_sitting_out_builds_only_what_its_forward_reads(first_iter):
+    """t2i never runs cfg_img: its node builds no latents, frame, positions or
+    shape inputs, declares nothing, and sends the zero-row velocity."""
+    from mstar.model.bagel.submodules import LLMSubmodule
+
+    llm = LLMSubmodule(
+        language_model=types.SimpleNamespace(model=types.SimpleNamespace(embed_tokens=None), lm_head=None),
+        llm2vae=None, vae2llm=None, time_embedder=None, latent_pos_embed=None, config=CONFIG,
+        node_name="LLM_cfg_img",
+    )
+    llm._cached_device = torch.device("cpu")
+    k = 0 if first_iter else 1
+    info = _info(
+        graph_walk="image_gen_cfg", step_metadata={"requires_cfg": True},
+        dynamic_loop_iter_counts={IMAGE_GEN_LOOP: k},
+    )
+    inputs = {} if first_iter else {"latents": [torch.zeros(16, 64)], "time_index": [torch.full((16,), 1.0)]}
+    row = llm.prepare_inputs("image_gen_cfg", info, inputs)
+    assert row.kwargs == {CFG_BRANCHES: 2}
+    assert row.input_embeds is None and row.custom_pos_ids is None and not row.tensor_inputs
+    assert llm.declare_step("image_gen_cfg", ["r0"], [row]) is None
+    engine_inputs = ModelInputsFromEngine(request_ids=["r0"], per_request_info={"r0": info})
+    out = llm.forward("image_gen_cfg", engine_inputs, **llm.preprocess("image_gen_cfg", engine_inputs, [row]))
+    (v,) = out["v_cfg_img"]
+    width = CONFIG.vae_config.z_channels * CONFIG.latent_patch_size ** 2
+    assert v.shape == (0, width) and v.dtype == torch.float32
+
+
 def _combine_inputs(k: int, sat_out: tuple[str, ...], counter: int | None = None):
     """combine_cfg's prepare_inputs at step ``k`` of a t2i request, with the named
     branch nodes having sat the step out and the combine's loop counter reading
@@ -292,7 +321,7 @@ def _combine_inputs(k: int, sat_out: tuple[str, ...], counter: int | None = None
     g = torch.Generator().manual_seed(0)
     latents = torch.randn(16, 8, generator=g)
     inputs = {
-        name: [sat_out_velocity(latents) if name[2:] in sat_out else torch.randn(16, 8, generator=g)]
+        name: [sat_out_velocity(CONFIG, "cpu") if name[2:] in sat_out else torch.randn(16, 8, generator=g)]
         for name in ("v_main", "v_cfg_text", "v_cfg_img")
     }
     inputs.update(latents=[latents], time_index=[torch.full((16,), float(k))])
