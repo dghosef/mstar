@@ -576,6 +576,11 @@ Qwen3-Omni notes
   beside, since the packed GEMMs' shapes change with the pass's total rows,
   and a prefix-cached audio prefix keeps the embeddings it was first computed
   with, so a later request reusing it inherits that first batch's rounding.
+- The Thinker's text and audio prefill replay captured graphs on the ladder
+  ``128 ... 8192`` tokens (with 6144), so a burst of new prompts that batches
+  into one step of a few thousand tokens still replays; a longer step runs
+  eagerly. ``model_kwargs: prefill_token_buckets: [...]`` sets a deployment's
+  own ladder; each bucket adds captures and startup time.
 - The MoE layers route through the fused softmax-top-k kernel
   (``TopKRouter(fused_softmax_topk=True)``), which gives equal probabilities to
   the lower expert id where ``torch.topk`` may pick another.

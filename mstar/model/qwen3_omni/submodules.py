@@ -498,10 +498,13 @@ class ThinkerSubmodule(ARNodeSubmodule):
         self,
         thinker_model: nn.Module,
         config: Qwen3OmniModelConfig,
+        prefill_token_buckets: list[int] | None = None,
     ):
         super().__init__()
         self.model = thinker_model  # Qwen3OmniThinkerModel
         self.config = config
+        if prefill_token_buckets:
+            self.PREFILL_TOKEN_BUCKETS = sorted(int(n) for n in prefill_token_buckets)
         # only a decode row's token ends the loop; a prefill is not in it yet
         self.token_stop = TokenStop(
             loop="thinker_decode_loop", buffer="new_token", stop_ids=frozenset({config.im_end_token_id}),
@@ -1005,7 +1008,8 @@ class ThinkerSubmodule(ARNodeSubmodule):
         return len(model_inputs) > 1
 
     # through 8192: a burst of new prompts batches into one prefill step (5101
-    # tokens for 32 ShareGPT prompts), which otherwise ran eagerly and recompiled
+    # tokens for 32 ShareGPT prompts), which otherwise ran eagerly and recompiled.
+    # A deployment sets its own with `model_kwargs.prefill_token_buckets`.
     PREFILL_TOKEN_BUCKETS = [128, 256, 512, 1024, 2048, 4096, 6144, 8192]
     # past 4 for thinker_mixed, whose decode rows ride in these captures
     PREFILL_CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16, 32]
