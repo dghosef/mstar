@@ -58,6 +58,7 @@ if "triton" not in sys.modules:
 class DynamoCounts(NamedTuple):
     compiles: int  # frames Dynamo compiled, recompiles and empty graphs included
     graph_calls: int  # compiled graphs one call runs once everything is compiled
+    traced: frozenset[int]  # data_ptrs of the tensors the compiled graphs take
 
 
 @pytest.fixture
@@ -69,12 +70,14 @@ def dynamo_counts():
     from torch._dynamo.callback import callback_handler
 
     def count(fn, *args) -> DynamoCounts:
-        compiles, calls = [0], [0]
+        compiles, calls, traced = [0], [0], set()
 
         def on_start(*_args):
             compiles[0] += 1
 
         def backend(gm, example_inputs):
+            traced.update(t.data_ptr() for t in example_inputs if isinstance(t, torch.Tensor))
+
             def run(*inputs):
                 calls[0] += 1
                 return gm.forward(*inputs)
@@ -91,7 +94,7 @@ def dynamo_counts():
         finally:
             callback_handler.remove_start_callback(on_start)
             torch._dynamo.reset()
-        return DynamoCounts(compiles[0], calls[0])
+        return DynamoCounts(compiles[0], calls[0], frozenset(traced))
 
     return count
 
