@@ -368,6 +368,10 @@ def test_conductor_walks_a_cfg_parallel_request_through_its_phases(kwargs, walks
     while not (fwd := model.get_partition_forward_pass_args(DEFAULT_PARTITION, metadata, persist)).request_done:
         walk = metadata.graph_walk
         fed = {(edge.next_node, edge.name): [info.uuid for info in edge.tensor_info] for edge in fwd.inputs}
+        # the conductor drops what a walk unpersists from the request's persist signals
+        unpersisted = {info.uuid for info in fwd.unpersist_tensors}
+        assert {uuid for uuids in fed.values() for uuid in uuids} <= unpersisted
+        persist = {name: [i for i in infos if i.uuid not in unpersisted] for name, infos in persist.items()}
         expected = [] if not seen else [100 * len(seen) + i for i in range(2)]
         if walk == IMAGE_DECODE:
             assert fed == {("vae_decoder", "latents"): expected[:1]}
@@ -386,8 +390,9 @@ def test_conductor_walks_a_cfg_parallel_request_through_its_phases(kwargs, walks
         if walk in DENOISE_WALKS:
             assert phase.branches is not None
         seen.append(walk)
-        # the walk's loop persists where it left off; the conductor unpersists what it fed
-        persist = {"latents": [pointer(100 * len(seen))], "time_index": [pointer(100 * len(seen) + 1)]}
+        # the walk's loop persists where it left off, appended as the conductor does
+        persist.setdefault("latents", []).append(pointer(100 * len(seen)))
+        persist.setdefault("time_index", []).append(pointer(100 * len(seen) + 1))
     assert seen == walks
     phases = model._image_gen_phases(window)
     assert [p.walk for p in phases] == walks
