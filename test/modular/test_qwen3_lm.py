@@ -207,9 +207,8 @@ def test_layer_stack_runs_one_compiled_frame_per_layer_besides_attention():
 
     x = torch.randn(3, TINY["hidden_size"])
     two, four = lm(2), lm(4)
-    per_layer = (_graph_calls(lambda h: four(h, label="main"), x)
-                 - _graph_calls(lambda h: two(h, label="main"), x)) // 2
-    assert per_layer <= _graph_calls(two.layers[0].self_attn, x) + 1
+    extra = _graph_calls(lambda h: four(h, label="main"), x) - _graph_calls(lambda h: two(h, label="main"), x)
+    assert extra <= 2 * (_graph_calls(two.layers[0].self_attn, x) + 1)
 
 
 @pytest.mark.parametrize("overrides,head_dim,fusable", [
