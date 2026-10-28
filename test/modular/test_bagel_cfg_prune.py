@@ -309,7 +309,7 @@ def test_a_branch_node_sitting_out_builds_only_what_its_forward_reads(first_iter
     out = llm.forward("image_gen_cfg", engine_inputs, **llm.preprocess("image_gen_cfg", engine_inputs, [row]))
     (v,) = out["v_cfg_img"]
     width = CONFIG.vae_config.z_channels * CONFIG.latent_patch_size ** 2
-    assert v.shape == (0, width) and v.dtype == torch.float32
+    assert v.shape == (0, width)
 
 
 def _combine_inputs(k: int, sat_out: tuple[str, ...], counter: int | None = None):

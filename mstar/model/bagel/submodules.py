@@ -234,16 +234,16 @@ def cfg_branch_skipped(label: str, n_branches: int) -> bool:
 
 
 def sat_out_velocity(config: BagelModelConfig, device) -> torch.Tensor:
-    """What a parallel-CFG node sends for a step it sits out: a zero-row velocity,
-    in the latents' width and dtype (``_init_latents_and_time_index``).
+    """What a parallel-CFG node sends for a step it sits out: a zero-row velocity
+    of the latents' width.
 
     Each node counts the step's branches from its own worker's loop counter, so
-    ``combine_cfg`` checks this on the host rather than trusting the counts agree;
-    a placeholder of the velocity's shape would pass for a computed one.
+    ``combine_cfg`` checks the row count on the host rather than trusting the
+    counts agree; a placeholder of the velocity's shape would pass for a computed
+    one. Nothing reads its values or dtype.
     """
-    dtype = torch.get_autocast_gpu_dtype() if torch.is_autocast_enabled() else torch.float32
     width = config.vae_config.z_channels * config.latent_patch_size ** 2
-    return torch.empty((0, width), dtype=dtype, device=device)
+    return torch.empty((0, width), device=device)
 
 
 def combine_cfg_velocity(
