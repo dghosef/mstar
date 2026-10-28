@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import bisect
 import functools
+import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
@@ -19,14 +20,25 @@ import torch
 from mstar.model.media_limits import video_decode_threads
 from mstar.utils.cpus import usable_cpus
 
-_pool: ThreadPoolExecutor | None = None
-
 
 @functools.cache
 def _max_decoders() -> int:
     """Concurrent decoders per request, each with ``video_decode_threads()``
     FFmpeg threads, within the CPUs this process may use."""
     return max(1, min(6, usable_cpus() // video_decode_threads()))
+
+
+_pool: ThreadPoolExecutor | None = None
+_pool_lock = threading.Lock()
+
+
+def _decode_pool() -> ThreadPoolExecutor:
+    """One pool for the process's concurrent preprocesses, so they share the decoder cap."""
+    global _pool
+    with _pool_lock:
+        if _pool is None:
+            _pool = ThreadPoolExecutor(_max_decoders(), thread_name_prefix="video_decode")
+        return _pool
 
 
 Transform = Callable[[torch.Tensor], torch.Tensor]
@@ -54,7 +66,6 @@ def decode_frames_at(
     ``[n, C, H, W]`` uint8 batch (e.g. convert and resize), applied to each
     group on its decoding thread, so it overlaps the other groups' decode.
     """
-    global _pool
     from torchcodec.decoders import VideoDecoder
 
     if decoder is None:
@@ -78,9 +89,7 @@ def decode_frames_at(
         groups[min(int((done + len(gop) / 2) / target), workers - 1)].extend(gop)
         done += len(gop)
     groups = [grp for grp in groups if grp]
-    if _pool is None:
-        _pool = ThreadPoolExecutor(_max_decoders(), thread_name_prefix="video_decode")
-    decoded = list(_pool.map(lambda grp: _decode(filepath, grp, transform), groups))
+    decoded = list(_decode_pool().map(lambda grp: _decode(filepath, grp, transform), groups))
     where = {i: (frames, r) for grp, frames in zip(groups, decoded, strict=True) for r, i in enumerate(grp)}
     out = torch.empty((len(indices), *decoded[0].shape[1:]), dtype=decoded[0].dtype)
     for k, i in enumerate(indices):
