@@ -35,6 +35,7 @@ def _force_cpu_flashinfer(monkeypatch):
 
 from request_walks import run_walks  # noqa: E402
 
+from mstar.engine.engine import Engine  # noqa: E402
 from mstar.engine.resources import StepContext  # noqa: E402
 from mstar.model.glm52._testing import (  # noqa: E402
     build_cpu_resources,
@@ -50,7 +51,7 @@ from mstar.model.glm52.config import (  # noqa: E402
 )
 from mstar.model.glm52.glm52_model import Glm52Model  # noqa: E402
 from mstar.model.glm52.submodules import Glm52LLMSubmodule  # noqa: E402
-from mstar.model.submodule_base import ModelInputsFromEngine  # noqa: E402
+from mstar.model.submodule_base import BatchedModelOutput, ModelInputsFromEngine  # noqa: E402
 from mstar.model.utils import process_weights_after_loading  # noqa: E402
 
 
@@ -102,8 +103,15 @@ class _Driver:
         kw = self.sub.preprocess(walk, engine_inputs, inputs)
         outs = per_request_outputs(self.sub.forward_batched(walk, engine_inputs, **kw), rids)
         self.runner.commit(step)
-        for rid, (info, _) in batch.items():
-            self.sub.postprocess(rid, info, outs[rid])
+        failures = {}
+        executing = SimpleNamespace(
+            node_name="llm", request_ids=rids, inputs=inputs,
+            per_request_info_wrapped={rid: info for rid, (info, _) in batch.items()},
+            failed_requests=failures, register_failure=failures.__setitem__, step_context=ctx,
+        )
+        engine = SimpleNamespace(_submodules={"llm": SimpleNamespace(submodule=self.sub, piecewise_runners={})})
+        Engine._postprocess_batch(engine, executing, BatchedModelOutput(per_rid_outputs=outs))
+        assert not failures, failures
         return outs
 
 

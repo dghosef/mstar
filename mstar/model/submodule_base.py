@@ -66,9 +66,9 @@ class TokenStop(NamedTuple):
     generated_key: str | None = None
     # walks that sample the reply's first token before the loop runs. A stop
     # id sampled there has no loop to stop, so the reply ends at the loop's
-    # first step (``ARNodeSubmodule.ended_at_prefill``; postprocess drops that
-    # step's token), and the loop count includes the prefill's token (a
-    # ``generated_key`` counter has to count it itself)
+    # first step (``ARNodeSubmodule.ended_at_prefill``), whose ``buffer`` the
+    # engine drops after postprocess. The loop count includes the prefill's
+    # token (a ``generated_key`` counter has to count it itself)
     prefill_walks: frozenset[str] = frozenset()
 
 

@@ -211,6 +211,3 @@ class CommandAPlusLLMSubmodule(ARNodeSubmodule):
                 outputs["decode_input"] = outputs["new_token"]
             return
         outputs["text_inputs"] = outputs["new_token"]
-        if self.ended_at_prefill(request_id):
-            # The reply ended on its first token; this step only stops the loop.
-            del outputs["new_token"]

@@ -374,6 +374,3 @@ class Glm52LLMSubmodule(ARNodeSubmodule):
         if "new_token" not in outputs:
             return
         outputs["text_inputs"] = outputs["new_token"]
-        if self.ended_at_prefill(request_id):
-            # the reply already ended: this step only closes the decode loop
-            del outputs["new_token"]
