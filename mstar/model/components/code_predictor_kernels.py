@@ -176,8 +176,9 @@ def cp_attend(
     depth positions ``cache_pos .. cache_pos + S - 1``, each token attending over
     the positions so far. ``pos`` holds one position per token. Bind the cache
     arguments with ``functools.partial`` to get ``run_layers``' ``attend(i,
-    self_attn, h)``. Eager, projections included: at decode width they are
-    cuBLAS GEMMs either way."""
+    self_attn, h)``. Eager, projections included: up to -O1 compiled ones are
+    cuBLAS GEMMs as well; at -O2, max-autotune may have picked a Triton
+    template for them."""
     bs, seq_len, _ = h.shape
     qkv = attn.qkv_proj(h)
     # q normed and roped in place; k (normed, roped) and v into the cache
