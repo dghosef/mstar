@@ -156,7 +156,7 @@ def to_device_nonblocking(
     pinned buffer with one memcpy on the calling thread (``copy_`` would split it
     over the intra-op pool, where a descheduled thread holds up the GPU thread),
     so the device tensor is bit-identical to a pageable copy. An already-pinned
-    tensor is copied from in place, so don't write to it until the copy lands;
+    contiguous tensor is copied from in place, so don't write to it until the copy lands;
     stage a reused buffer through :class:`PinnedStager` instead. The result is valid on the
     stream the copy was issued on; another stream has to wait on it, as for any
     async copy. Where the device takes no pinned memory (a CPU device), the result
@@ -171,7 +171,7 @@ def to_device_nonblocking(
         raise ValueError("dtype is for a sequence; convert the tensor before staging it")
     if not pin or data.device.type != "cpu":
         return data.to(device)
-    if data.is_pinned():
+    if data.is_pinned() and data.is_contiguous():
         return data.to(device, non_blocking=True)
     source = data if data.is_contiguous() else data.contiguous()
     host = torch.empty(source.shape, dtype=source.dtype, pin_memory=True)
