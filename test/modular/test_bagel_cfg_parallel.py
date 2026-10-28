@@ -573,13 +573,13 @@ def test_shm_read_failure_is_latched_to_one_request(tmp_path):
     )
 
     broken = manager.admit_retrieve(
-        "broken", "LLM_cfg_text", "image_gen_cfg", broken_publish,
+        "broken", "LLM_cfg_text", "image_gen_cfg2", broken_publish,
     )
     broken_again = manager.admit_retrieve(
-        "broken", "LLM_cfg_text", "image_gen_cfg", broken_publish,
+        "broken", "LLM_cfg_text", "image_gen_cfg2", broken_publish,
     )
     healthy = manager.admit_retrieve(
-        "healthy", "LLM_cfg_text", "image_gen_cfg", healthy_publish,
+        "healthy", "LLM_cfg_text", "image_gen_cfg2", healthy_publish,
     )
 
     healthy_page = manager._streams["healthy"]["main"].page_indices[0]

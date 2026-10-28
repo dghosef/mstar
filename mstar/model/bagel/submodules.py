@@ -464,7 +464,7 @@ class ViTEncoderSubmodule(NodeSubmodule):
 
         # not `torch.tensor(..., device=)`: that syncs the stream, which held this request's
         # prepare until the in-flight decode steps of others had finished
-        cu_seqlens = to_device_nonblocking(torch.tensor([0, num_tokens], dtype=torch.int32), device)
+        cu_seqlens = to_device_nonblocking([0, num_tokens], device, dtype=torch.int32)
 
         return NodeInputs(
             tensor_inputs={
@@ -1000,9 +1000,7 @@ class LLMSubmodule(ARNodeSubmodule):
         self, seq_len: int, device: str
     ):
         tensor_inputs = {}
-        tensor_inputs["text_indexes"] = to_device_nonblocking(
-            torch.tensor([0, seq_len-1], dtype=torch.long), device
-        )
+        tensor_inputs["text_indexes"] = to_device_nonblocking([0, seq_len - 1], device, dtype=torch.long)
         tensor_inputs["vae_token_indexes"] = torch.arange(
             1, seq_len-1,
             dtype=torch.long, device=device
