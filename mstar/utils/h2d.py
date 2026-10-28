@@ -151,7 +151,9 @@ def to_device_nonblocking(
     dtype=dtype)`` would build it, so it costs one host allocation; a CPU
     tensor is pinned unless it already is. The caching host allocator holds a
     pinned source until the copy that reads it has completed, so the caller
-    need not keep it. Where the device takes no pinned memory (a CPU device),
+    need not keep it. An already-pinned tensor is copied from in place, so
+    don't write to it until the copy lands; stage a reused buffer through
+    :class:`PinnedStager` instead. Where the device takes no pinned memory (a CPU device),
     the result is a plain ``.to(device)``.
     """
     device = torch.device(device)
