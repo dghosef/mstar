@@ -17,6 +17,7 @@ whoever owns the resource, not per layer.
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable
 
 import torch
@@ -24,6 +25,37 @@ import torch.nn.functional as F
 
 # ``(q, k, v) -> out`` over packed ``[total_tokens, H, D]`` tensors, one segment per request.
 RaggedAttentionFn = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]
+
+
+class RaggedAttentionMixin:
+    """:meth:`ragged_for` for a ``NodeSubmodule`` whose layers attend through the ragged
+    attention resource named ``attn_resource_key`` (None: SDPA everywhere)."""
+
+    attn_resource_key: str | None = None
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # One callable per attention label for the life of a binding.
+        self._ragged_fns: dict[str, RaggedAttentionFn] = {}
+
+    def bind_node_resources(self, resources) -> None:
+        super().bind_node_resources(resources)
+        self._ragged_fns.clear()  # the memoized callables hold the old resource
+
+    def ragged_for(self, label: str) -> RaggedAttentionFn | None:
+        """``(q, k, v) -> out`` over the segments declared under ``label``, or None
+        when no ragged resource is bound (layers then fall back to SDPA).
+
+        The resource's ``run`` with the label bound, built once per label for the life
+        of the binding rather than per step."""
+        if self.attn_resource_key is None:
+            return None
+        if label not in self._ragged_fns:
+            resource = self.node_resources.get(self.attn_resource_key)
+            if resource is None:
+                return None
+            self._ragged_fns[label] = functools.partial(resource.run, label=label)
+        return self._ragged_fns[label]
 
 
 def sdpa_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:

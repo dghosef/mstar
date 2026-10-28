@@ -44,7 +44,6 @@ Conventions the base fixes:
 
 from __future__ import annotations
 
-import functools
 import logging
 from collections import OrderedDict
 from collections.abc import Hashable, Mapping, Sequence
@@ -55,7 +54,7 @@ import torch
 from mstar.communication.tensors import NameToTensorList
 from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.engine.resources import AttentionStep, Segment, SlotLease, SubmoduleStep
-from mstar.model.components.diffusion.attention import RaggedAttentionFn
+from mstar.model.components.diffusion.attention import RaggedAttentionFn, RaggedAttentionMixin
 from mstar.model.components.diffusion.flow_match import FlowMatchSchedule
 from mstar.model.components.diffusion.noise import NoiseStager
 from mstar.model.submodule_base import ModelInputsFromEngine, NodeInputs, NodeSubmodule
@@ -80,7 +79,7 @@ class StepScalar(NamedTuple):
     capture_fill: float = 1.0  # placeholder value for a graph capture's dummy rows
 
 
-class DenoiseLoopSubmodule(NodeSubmodule):
+class DenoiseLoopSubmodule(RaggedAttentionMixin, NodeSubmodule):
     """Base class for the ``dit`` node of an image/video flow model (see module docstring)."""
 
     # The engine's blanket compile is off: the model compiles its transformer region
@@ -141,9 +140,6 @@ class DenoiseLoopSubmodule(NodeSubmodule):
         # Pinned staging rings for the seeded noise, one per dtype, built on first
         # use (a stager allocates nothing until it stages something).
         self._noise_stagers: dict[torch.dtype, NoiseStager] = {}
-        # One callable per attention label for the life of a binding; see
-        # :meth:`ragged_for`.
-        self._ragged_fns: dict[str, RaggedAttentionFn] = {}
 
     @property
     def loop_back_names(self) -> tuple[str, ...]:
@@ -283,25 +279,6 @@ class DenoiseLoopSubmodule(NodeSubmodule):
     def _ragged(self) -> RaggedAttentionFn | None:
         """The attention callable for the ``"main"`` span, or None (SDPA)."""
         return self.ragged_for(self.MAIN_SPAN)
-
-    def bind_node_resources(self, resources) -> None:
-        super().bind_node_resources(resources)
-        self._ragged_fns.clear()  # the memoized callables hold the old resource
-
-    def ragged_for(self, label: str) -> RaggedAttentionFn | None:
-        """``(q, k, v) -> out`` over the segments declared under ``label``, or None
-        when no ragged resource is bound (layers then fall back to SDPA).
-
-        The resource's ``run`` with the label bound, built once per label for the life
-        of the binding rather than per step."""
-        if self.attn_resource_key is None:
-            return None
-        if label not in self._ragged_fns:
-            resource = self.node_resources.get(self.attn_resource_key)
-            if resource is None:
-                return None
-            self._ragged_fns[label] = functools.partial(resource.run, label=label)
-        return self._ragged_fns[label]
 
     # --------------------------------------------------------- engine contract
     def prepare_inputs(

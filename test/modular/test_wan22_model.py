@@ -1048,12 +1048,10 @@ def test_wan22_cfg_parallel_rank_runs_its_branch_and_matches_one_gpu(rank, guida
     latents, ts = torch.zeros(1, 4, 2, 2, 2), torch.zeros(2)
     pos, neg = torch.full((1, 8, 16), 3.0), torch.full((1, 8, 16), 1.0)
     one_gpu = Wan22DitSubmodule(transformer=_BranchEcho(), config=Wan22Config(compile_dit=False))
-    one_gpu._self_attn_fn = object()
     expected = one_gpu._noise_prediction(latents, ts, pos, neg, guidance)
     full = _BranchEcho()(latents.repeat(2, 1, 1, 1, 1), None, torch.cat([pos, neg]), None)
     group = _TwoRankGroup(rank, full)
     pair = Wan22DitSubmodule(transformer=_BranchEcho(), config=Wan22Config(compile_dit=False), sp_group=group)
-    pair._self_attn_fn = object()
     assert torch.equal(pair._noise_prediction(latents, ts, pos, neg, guidance), expected)
     assert group.gathers == (1 if guidance > 1.0 else 0)
 
