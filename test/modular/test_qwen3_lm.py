@@ -190,6 +190,14 @@ def test_layer_stack_runs_one_compiled_frame_per_layer_besides_attention(dynamo_
     assert extra <= 2 * (dynamo_counts(two.layers[0].self_attn, x).graph_calls + 1)
 
 
+def test_an_empty_layer_stack_is_the_final_norm():
+    from mstar.model.components import RMSNorm
+    from mstar.model.components.decoder_layer import run_layers
+
+    norm, x = RMSNorm(8), torch.randn(3, 8)
+    assert torch.equal(run_layers(torch.nn.ModuleList(), x.clone(), norm), norm(x))
+
+
 class _StubCursor:
     @torch.compiler.disable
     def bind_step(self, label):

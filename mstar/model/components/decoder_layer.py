@@ -98,7 +98,8 @@ def run_layers(
     runs eager and no compiled frame specializes on ``i`` or the ints ``attend``
     binds; an ``attend`` must not compile a frame of its own that reads them.
     """
-    h, residual = layers[0].input_layernorm.forward_residual(hidden_states, None, comm_group)
+    first_norm = layers[0].input_layernorm if len(layers) else norm
+    h, residual = first_norm.forward_residual(hidden_states, None, comm_group)
     for i, layer in enumerate(layers):
         if attend is None:
             layer.self_attn.attend.set_layer_idx(i)
