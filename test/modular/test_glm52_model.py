@@ -285,10 +285,10 @@ def _make_submodule(config) -> Glm52LLMSubmodule:
     return Glm52LLMSubmodule(language_model, config)
 
 
-def _fwd_info(max_tokens=100, ignore_eos=False, iters=0) -> CurrentForwardPassInfo:
+def _fwd_info(max_tokens=100, ignore_eos=False, iters=0, walk="decode") -> CurrentForwardPassInfo:
     return CurrentForwardPassInfo(
         request_id="r0",
-        graph_walk="decode",
+        graph_walk=walk,
         fwd_index=0,
         random_seed=0,
         max_tokens=max_tokens,
@@ -345,6 +345,25 @@ def test_glm52_check_stop_batched_agrees_with_check_stop():
     assert batched == per_request == {
         "eos": {"decode_loop"}, "budget": {"decode_loop"}, "ended": {"decode_loop"},
     }
+
+
+@pytest.mark.parametrize("ignore_eos", [False, True])
+def test_glm52_stop_id_at_prefill_ends_the_reply_at_the_first_decode_step(ignore_eos):
+    """The prefill walk has no loop to stop, so a stop id it samples ends the reply at the
+    first decode step, whose token postprocess drops; both stop checks agree on it."""
+    from mstar.model.submodule_base import HostRows
+
+    sub = _make_submodule(Glm52ModelConfig())
+    prefill = _fwd_info(ignore_eos=ignore_eos, walk="prefill")
+    assert sub.check_stop("r0", prefill, {"new_token": [torch.tensor([154820])]}) == set()
+    decode = _fwd_info(ignore_eos=ignore_eos)
+    outputs = {"new_token": [torch.tensor([42])]}
+    sub.postprocess("r0", decode, outputs)
+    expected = set() if ignore_eos else {"decode_loop"}
+    assert ("new_token" in outputs) == ignore_eos
+    assert sub.check_stop("r0", decode, outputs) == expected
+    batched = sub.check_stop_batched(["r0"], {"r0": decode}, HostRows(("r0",), {"new_token": torch.tensor([42])}))
+    assert batched.get("r0", set()) == expected
 
 
 # ── submodule: graph configs ──
