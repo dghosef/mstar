@@ -161,7 +161,7 @@ class HiggsAudioEncoderSubmodule(NodeSubmodule):
             # a short clip is one chunk; its mask sum can be one past its mel
             # width, and the slice below counts from the mask sum too
             out["valid_frames"] = to_device_nonblocking(
-                torch.tensor([inp.kwargs["frames"][0] for inp in inputs], dtype=torch.long), self.get_device(),
+                [inp.kwargs["frames"][0] for inp in inputs], self.get_device(), dtype=torch.long,
             )
         return out
 
