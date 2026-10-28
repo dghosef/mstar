@@ -609,34 +609,13 @@ def test_qwen_schedule_walks_the_plan():
     }
     schedule = Qwen3OmniModel._build_thinker_prefill_schedule(model, mods, signals)
     assert [walk for walk, _ in schedule] == [
-        "prefill_text", "prefill_vision", "prefill_text", "prefill_vision", "prefill_audio",
+        "prefill_text", "prefill_vision", "prefill_text", "prefill_vision",
+        "prefill_text", "prefill_audio", "prefill_text",
     ]
     # Each vision walk carries its own image, in order.
     vision = [entry for walk, entry in schedule if walk == "prefill_vision"]
     assert [e["pixel_values"] for e in vision] == ["px0", "px1"]
     assert [e["image_grid_thw"] for e in vision] == ["g0", "g1"]
-    # The audio walk prefills the text either side of its clip.
-    assert schedule[-1][1] == {
-        "audio_features": "af0", "audio_seqlens": "as0", "text_before": "t2", "text_after": "t3",
-    }
-
-
-def test_two_clips_share_no_text_span():
-    pytest.importorskip("flashinfer")  # imported by Qwen3OmniModel's submodules
-    from mstar.model.qwen3_omni.qwen3_omni_model import Qwen3OmniModel
-
-    model = Qwen3OmniModel.__new__(Qwen3OmniModel)
-    signals = {
-        "text_inputs": ["t0", "t1", "t2"],
-        "audio_features": ["af0", "af1"],
-        "audio_seqlens": ["as0", "as1"],
-    }
-    schedule = Qwen3OmniModel._build_thinker_prefill_schedule(
-        model, ["text", "audio", "text", "audio", "text"], signals,
-    )
-    assert [(walk, entry.get("text_before"), entry.get("text_after")) for walk, entry in schedule] == [
-        ("prefill_audio", "t0", "t1"), ("prefill_audio", None, "t2"),
-    ]
 
 
 def test_qwen_placeholder_ids_come_from_the_tokenizer():

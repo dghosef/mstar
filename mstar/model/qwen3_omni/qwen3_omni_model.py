@@ -105,36 +105,6 @@ from mstar.streaming.topology import Connection, PartitionTopology, StreamingGra
 
 logger = logging.getLogger(__name__)
 
-
-class ThinkerPrefillStep(NamedTuple):
-    """One Thinker prefill walk: a plan part, plus for an audio clip the text spans either side of it."""
-
-    part: PromptPart
-    before: PromptPart | None = None
-    after: PromptPart | None = None
-
-
-def thinker_prefill_steps(plan: list[PromptPart]) -> list[ThinkerPrefillStep]:
-    """Group a prefill plan into Thinker prefill walks.
-
-    An audio clip's walk also prefills the text span right before it and the
-    one right after it, unless another clip took that span already: audio sits
-    at text positions, so the three pieces are one contiguous span, and each
-    walk the request saves is a full pass over the Thinker's experts plus a
-    conductor round trip before the first token.
-    """
-    steps: list[ThinkerPrefillStep] = []
-    for part in plan:
-        last = steps[-1] if steps else None
-        if part.modality == "audio":
-            before = steps.pop().part if last is not None and last.part.modality == TEXT else None
-            steps.append(ThinkerPrefillStep(part, before))
-        elif part.modality == TEXT and last is not None and last.part.modality == "audio" and last.after is None:
-            steps[-1] = last._replace(after=part)
-        else:
-            steps.append(ThinkerPrefillStep(part))
-    return steps
-
 # Code2Wav streaming knobs a deployment YAML's ``model_kwargs`` may set; the
 # rest of the Code2Wav config comes from the checkpoint.
 CODE2WAV_SERVING_OVERRIDES = ("codec_chunk_schedule", "codec_chunk_frames", "codec_left_context_frames")
@@ -451,8 +421,7 @@ class Qwen3OmniModel(Model):
             ),
             GraphNode(
                 name="Thinker",
-                # the text spans either side of the clip, from the conductor (see `thinker_prefill_steps`)
-                input_names=["audio_embeds", "text_before", "text_after"],
+                input_names=["audio_embeds"],
                 outputs=[
                     GraphEdge(
                         next_node=EMIT_TO_CLIENT,
@@ -857,21 +826,17 @@ class Qwen3OmniModel(Model):
         # ``check_plan`` already failed a mismatch at intake, where a 400 can
         # still be returned; skipping here keeps one that slipped through from
         # raising inside the conductor instead.
-        for step in thinker_prefill_steps(prefill_plan(parts_from_modalities(input_modalities))):
-            part = step.part
-            if part.modality == TEXT:
-                if part.index < len(texts):
-                    schedule.append(("prefill_text", {"text_inputs": texts[part.index]}))
+        for step in prefill_plan(parts_from_modalities(input_modalities)):
+            if step.modality == TEXT:
+                if step.index < len(texts):
+                    schedule.append(("prefill_text", {"text_inputs": texts[step.index]}))
                 continue
-            walk, signal_names = self._MM_WALKS[part.modality]
+            walk, signal_names = self._MM_WALKS[step.modality]
             entry = {
-                name: input_signals[key][part.index]
+                name: input_signals[key][step.index]
                 for name, key in signal_names.items()
-                if part.index < len(input_signals.get(key, []))
+                if step.index < len(input_signals.get(key, []))
             }
-            for name, text in (("text_before", step.before), ("text_after", step.after)):
-                if text is not None and text.index < len(texts):
-                    entry[name] = texts[text.index]
             if entry:
                 schedule.append((walk, entry))
         return schedule
@@ -903,25 +868,20 @@ class Qwen3OmniModel(Model):
         else:
             raise ValueError(f"Unrecognized prefill walk: {walk_name}")
 
-        # The Thinker's own inputs in the walk, an edge each whether the step has the tensor or not.
-        # ``image_grid_thw`` goes to the vision encoder as well.
-        thinker_inputs = {
-            "prefill_audio": ("text_before", "text_after"),
-            "prefill_vision": ("image_grid_thw", "video_second_per_grid"),
-        }.get(walk_name, ())
         edges: list[GraphEdge] = []
         for input_name, tensor_info in tensor_dict.items():
-            if input_name in ("text_before", "text_after", "video_second_per_grid"):
-                continue
+            if input_name == "video_second_per_grid":
+                continue # goes directly to Thinker
             edge = GraphEdge(next_node=target_node, name=input_name)
             edge.tensor_info = [tensor_info]
             edges.append(edge)
 
-        for key in thinker_inputs:
-            edge = GraphEdge(next_node="Thinker", name=key)
-            if key in tensor_dict:
-                edge.tensor_info = [tensor_dict[key]]
-            edges.append(edge)
+        if walk_name == "prefill_vision":
+            for key in ["image_grid_thw", "video_second_per_grid"]:
+                edge = GraphEdge(next_node="Thinker", name=key)
+                if key in tensor_dict:
+                    edge.tensor_info = [tensor_dict[key]]
+                edges.append(edge)
         return edges
 
     # -----------------------------------------------------------------------
@@ -1369,41 +1329,35 @@ class Qwen3OmniModel(Model):
 
         merge = self.config.vision.spatial_merge_size
         thinker, talker, position = [], [], 0
-        for prefill in thinker_prefill_steps(plan):
-            walk = self._MM_WALKS[prefill.part.modality][0] if prefill.part.modality != TEXT else "prefill_text"
-            kept = 0
-            for step in (prefill.before, prefill.part, prefill.after):
-                if step is None:
-                    continue
-                if step.modality == TEXT:
-                    ids = tensors["text_inputs"][step.index]
-                    span = Span("ids", walk, len(ids), len(ids), "text_inputs")
-                    kept += int(talker_text_mask(ids, self.config).sum())
-                elif step.modality == "audio":
-                    # the encoder's rows between two sentinels
-                    rows = int(self._audio_frames(tensors["audio_seqlens"][step.index])) + 2
-                    span = Span("digest", walk, rows, rows, ("audio", step.index))
-                    kept += rows
-                elif step.modality == "image":
-                    image = image_span(tensors["image_grid_thw"][step.index], merge)
-                    span = Span("digest", walk, image.length, image.advance, ("image", step.index))
-                    kept += image.length
-                else:
-                    grid = tensors["video_grid_thw"][step.index]
-                    per_grid = tensors["video_second_per_grid"][step.index].item()
-                    rows = int(grid.prod()) // merge ** 2 + 2
-                    # the walk moves the counter one past its end sentinel, which follows the grid's largest position
-                    positions = get_rope_index_vision(
-                        grid, position + 1, self.config.thinker.position_id_per_seconds,
-                        spatial_merge_size=merge, seconds_per_grid=per_grid,
-                    )
-                    advance = int(positions.max()) + 2 - position
-                    span = Span("digest", walk, rows, advance, ("video", step.index))
-                    kept += rows
-                thinker.append(span)
-                position += span.advance
-            # the Talker prefills each Thinker step's kept rows as one chunk
+        for step in plan:
+            if step.modality == TEXT:
+                ids = tensors["text_inputs"][step.index]
+                span = Span("ids", "prefill_text", len(ids), len(ids), "text_inputs")
+                kept = int(talker_text_mask(ids, self.config).sum())
+            elif step.modality == "audio":
+                # the encoder's rows between two sentinels
+                rows = int(self._audio_frames(tensors["audio_seqlens"][step.index])) + 2
+                span = Span("digest", "prefill_audio", rows, rows, ("audio", step.index))
+                kept = rows
+            elif step.modality == "image":
+                image = image_span(tensors["image_grid_thw"][step.index], merge)
+                span = Span("digest", "prefill_vision", image.length, image.advance, ("image", step.index))
+                kept = image.length
+            else:
+                grid = tensors["video_grid_thw"][step.index]
+                per_grid = tensors["video_second_per_grid"][step.index].item()
+                rows = int(grid.prod()) // merge ** 2 + 2
+                # the walk moves the counter one past its end sentinel, which follows the grid's largest position
+                positions = get_rope_index_vision(
+                    grid, position + 1, self.config.thinker.position_id_per_seconds,
+                    spatial_merge_size=merge, seconds_per_grid=per_grid,
+                )
+                advance = int(positions.max()) + 2 - position
+                span = Span("digest", "prefill_vision", rows, advance, ("video", step.index))
+                kept = rows
+            thinker.append(span)
             talker.append(Span("rows", "talker_prefill", kept, kept, "thinker_states"))
+            position += span.advance
         prefix = TalkerSubmodule.TALKER_LAST_PREFILL_TOKENS_PER_REQ
         # A prompt with a video keys only its leading text, since keying past it has never been run or tested.
         video = any(step.modality == "video" for step in plan)
