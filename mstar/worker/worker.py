@@ -317,7 +317,7 @@ _HOST_ROWS_RING = 4
 _HOST_SPANS_PURPOSE = tuple(f"output_spans{slot}" for slot in range(_HOST_ROWS_RING))
 
 
-class _LazyPerRid:
+class _LazyPerRid(Mapping):
     """``Worker._rows_to_per_rid`` on demand: the per-rid host dicts are built
     the first time a consumer reads them. The batched stop check, the row store
     and the inline emit read the rows directly, so in the common decode step
@@ -335,14 +335,8 @@ class _LazyPerRid:
             self._built = Worker._rows_to_per_rid(self._host, self._request_ids)
         return self._built
 
-    def get(self, key, default=None):
-        return self._dict().get(key, default)
-
     def __getitem__(self, key):
         return self._dict()[key]
-
-    def __contains__(self, key) -> bool:
-        return key in self._dict()
 
     def __iter__(self):
         return iter(self._dict())
@@ -350,9 +344,7 @@ class _LazyPerRid:
     def __len__(self) -> int:
         return len(self._request_ids)
 
-    def __bool__(self) -> bool:
-        return bool(self._request_ids)
-
+    # the built dict's own views, rather than Mapping's per-key lookups
     def items(self):
         return self._dict().items()
 
@@ -363,7 +355,7 @@ class _LazyPerRid:
         return self._dict().values()
 
 
-class _LazyHostOutputs:
+class _LazyHostOutputs(Mapping):
     """Per-rid host copies of a step's outputs, copied one output name at a time
     on first read (``copy_name(name) -> {rid: host value}``).
 
@@ -403,26 +395,11 @@ class _LazyHostOutputs:
         row = self._source[rid]
         return _LazyHostRow(self, rid, row) if isinstance(row, dict) else row
 
-    def __contains__(self, rid) -> bool:
-        return rid in self._source
-
     def __iter__(self):
         return iter(self._source)
 
     def __len__(self) -> int:
         return len(self._source)
-
-    def __bool__(self) -> bool:
-        return bool(self._source)
-
-    def keys(self):
-        return self._source.keys()
-
-    def items(self):
-        return ((rid, self[rid]) for rid in self._source)
-
-    def values(self):
-        return (self[rid] for rid in self._source)
 
 
 class _LazyHostRow(Mapping):
