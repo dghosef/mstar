@@ -613,6 +613,10 @@ class VJepa2Model(Model):
         8 frames rather than 64 for it. The returned tensor is empty; the
         indices and the file path travel in the metadata. ``device`` is
         ignored: decode and preprocessing stay on the host.
+
+        The header's charge (``VideoBudget``, every sampled frame) is the
+        request's only media-budget check: the decode in ``process_prompt``
+        runs outside ``RequestMediaBudget.file()`` and charges nothing.
         """
         from torchcodec.decoders import VideoDecoder
 
@@ -671,13 +675,13 @@ class VJepa2Model(Model):
         tensors: NameToTensorList | None = None,
         **kwargs,
     ) -> ProcessPromptOutput:
-        """Pre-process raw video (and optional AC inputs) for the first forward pass.
+        """Decode and pre-process the video (and optional AC inputs) for the first forward pass.
 
-        Expects the data worker to have populated ``tensors["video_inputs"]``
-        via :meth:`Model.load_video` (returns ``[T, C, H, W]`` float in
-        ``[0, 1]``).  We run HF-style resize + center crop (the official
-        repo's central square for AC) + ImageNet normalization to produce the
-        ``video_frames`` edge the encoder wants.
+        :meth:`load_video` decoded nothing: its metadata carries the sampled
+        frame indices and the file path. This decodes the frames the request's
+        walk reads and runs HF-style resize + center crop (the official repo's
+        central square for AC) + ImageNet normalization on each decode group
+        as it lands, producing the ``video_frames`` edge the encoder wants.
 
         For V-JEPA 2-AC, callers pass per-timestep ``actions``, ``states``
         (and optionally ``extrinsics``) through ``**kwargs``.
