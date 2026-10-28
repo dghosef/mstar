@@ -164,6 +164,15 @@ class StreamBuffer:
             self._held_since = now
         return self._held_since
 
+    @property
+    def held(self) -> bool:
+        """Whether a ``ChunkBatchHold`` is keeping the ready chunk back: every
+        path that pops a chunk (``Worker._pop_streaming_edge``) leaves it."""
+        return self._held_since is not None
+
+    def release_hold(self) -> None:
+        self._held_since = None
+
     def pop_chunk(self) -> StreamChunk:
         """Pop the next chunk. Only call when has_chunk_ready() is True.
 

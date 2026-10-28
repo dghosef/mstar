@@ -797,13 +797,14 @@ class Worker:
         self._stream_partition: dict[str, str] = {
             conn.edge_name: conn.to_partition for conn in self._my_consumer_connections
         }
-        # edge_name -> how long its ready chunks may wait to batch. Not for a
-        # lockstep-parallel consumer: a hold decided on this rank's clock would
-        # let its ranks ingest the same chunk at different steps.
+        # edge_name -> how long its ready chunks may wait to batch. A lockstep
+        # consumer's leader holds and its followers ingest at once: the leader
+        # picks every step's rows, and a follower waits for a row's chunk.
+        followed = self.parallel_nodes - self.parallel_leader_nodes
         self._stream_holds: dict[str, ChunkBatchHold] = {
             conn.edge_name: conn.batch_hold for conn in self._my_consumer_connections
             if conn.batch_hold is not None
-            and self._consumer_node_cache.get(conn.edge_name) not in self.parallel_nodes
+            and self._consumer_node_cache.get(conn.edge_name) not in followed
         }
 
         # (graph_walk, node) -> innermost enclosing loop, for ending a
@@ -1440,6 +1441,9 @@ class Worker:
         waiting = sbuf.pop_waiting_edge()
         if waiting is not None:
             return waiting
+        if sbuf.held:
+            # `_poll_stream_buffers` decided to hold it; a speculative build waits too
+            return None
         if sbuf.has_chunk_ready():
             chunk = sbuf.pop_chunk()
             chunk_tensor = chunk.data.get("data")
@@ -1550,21 +1554,24 @@ class Worker:
         A connection with a ``ChunkBatchHold`` keeps its holdable chunks back
         until enough are ready or the oldest has waited long enough, so they
         reach the consumer as one batch; ``idle`` (nothing in flight) releases
-        them at once, since holding then only delays the work.
+        them at once, since holding then only delays the work. The decision
+        lands on each buffer (``StreamBuffer.held``), so the speculative
+        build's poll, later in the pass, holds the same chunks.
         """
         # Every ready chunk is popped first and ingested in one call (and one
         # Python <> Rust roundtrip)
         polled: list[tuple[int, StreamingEdge]] = []
-        holds = self._stream_holds if not idle else None
+        holds = self._stream_holds
         held: dict[str, list[tuple[int, StreamBuffer, float]]] = {}
         now = _time.monotonic()
         for request_id, req_info in list(self.request_state.per_request_info.items()):
             for edge_name, sbuf in req_info.stream_buffers.items():
                 if holds and edge_name in holds:
-                    since = sbuf.holdable_since(now)
+                    since = None if idle else sbuf.holdable_since(now)
                     if since is not None:
                         held.setdefault(edge_name, []).append((request_id, sbuf, since))
                         continue
+                    sbuf.release_hold()
                 streaming_edge = self._pop_streaming_edge(sbuf, edge_name, request_id)
                 if streaming_edge is not None:
                     polled.append((request_id, streaming_edge))
@@ -1573,6 +1580,7 @@ class Worker:
             if len(chunks) < hold.min_chunks and min(c[2] for c in chunks) > now - hold.max_wait_s:
                 continue
             for request_id, sbuf, _ in chunks:
+                sbuf.release_hold()
                 streaming_edge = self._pop_streaming_edge(sbuf, edge_name, request_id)
                 if streaming_edge is not None:
                     polled.append((request_id, streaming_edge))

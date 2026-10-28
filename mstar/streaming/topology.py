@@ -30,7 +30,8 @@ class ChunkBatchHold:
     the connection are ready across requests, or the oldest has waited
     ``max_wait_s``. A stream's first chunk (time to first output), a chunk
     after the producer is done (end of the request) and any chunk while the
-    worker has nothing in flight are never held.
+    worker has nothing in flight are never held. Under lockstep parallelism
+    the leader rank holds; followers take each chunk as it arrives.
     """
     max_wait_s: float
     min_chunks: int

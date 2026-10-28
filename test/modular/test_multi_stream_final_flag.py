@@ -202,8 +202,8 @@ def test_stream_polls_are_skipped_only_when_no_request_owns_a_buffer():
 
 def test_a_batch_hold_keeps_later_chunks_back_until_enough_are_ready():
     """``ChunkBatchHold``: a stream's first chunk goes at once; later ones wait
-    until ``min_chunks`` are ready across requests, and nothing waits while the
-    worker is idle."""
+    until ``min_chunks`` are ready across requests, also from a speculative
+    build's poll, and nothing waits while the worker is idle."""
     import torch
 
     from mstar.streaming.topology import ChunkBatchHold
@@ -217,7 +217,8 @@ def test_a_batch_hold_keeps_later_chunks_back_until_enough_are_ready():
     ingested = []
     worker = SimpleNamespace(
         request_state=SimpleNamespace(per_request_info={
-            rid: SimpleNamespace(stream_buffers={"codes": buf}) for rid, buf in buffers.items()
+            rid: SimpleNamespace(stream_buffers={"codes": buf}, stream_buffers_by_consumer={"vocoder": {"codes": buf}})
+            for rid, buf in buffers.items()
         }),
         _stream_holds={"codes": ChunkBatchHold(max_wait_s=60.0, min_chunks=3)},
         _consumer_node_cache={"codes": "vocoder"},
@@ -243,6 +244,9 @@ def test_a_batch_hold_keeps_later_chunks_back_until_enough_are_ready():
     push("b", 1)
     Worker._poll_stream_buffers(worker, idle=False)
     assert ingested == ["a", "b"], "a's second chunk waits; b's first does not"
+    assert Worker._poll_stream_buffers_for_speculation(worker, "a", "vocoder") == [], (
+        "a speculative build took the chunk the hold keeps back"
+    )
     push("b", 1)
     Worker._poll_stream_buffers(worker, idle=False)
     assert ingested == ["a", "b"]
