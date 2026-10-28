@@ -12,9 +12,9 @@ both code predictors hand ``run_layers``.
 
 A captured forward compiles with static ints, so any compiled frame that holds a
 depth step's ``cache_pos`` (or passes it on) recompiles at every depth position.
-The launchers and ``cp_attend`` are opaque to Dynamo, ``run_layers`` runs eager
-around an opaque ``attend``, and ``forward_depth_unrolled`` skips its own frame:
-only the norms and MLPs compile.
+The launchers are opaque to Dynamo, and ``cp_attend``, ``run_layers`` and
+``forward_depth_unrolled`` run their own frames eager: only the projections,
+norms and MLPs compile, as frames of their own.
 """
 from __future__ import annotations
 
@@ -166,7 +166,7 @@ def cp_attention(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, 
     return out
 
 
-@torch.compiler.disable
+@torch.compiler.disable(recursive=False)
 def cp_attend(
     kv_cache: torch.Tensor, pos: torch.Tensor, cache_pos: int,
     layer_idx: int, attn: torch.nn.Module, h: torch.Tensor,
@@ -176,9 +176,9 @@ def cp_attend(
     depth positions ``cache_pos .. cache_pos + S - 1``, each token attending over
     the positions so far. ``pos`` holds one position per token. Bind the cache
     arguments with ``functools.partial`` to get ``run_layers``' ``attend(i,
-    self_attn, h)``. Eager, projections included: up to -O1 compiled ones are
-    cuBLAS GEMMs as well; at -O2, max-autotune may have picked a Triton
-    template for them."""
+    self_attn, h)``. This frame binds the ints, so it runs eager; the qkv and
+    o projections compile as frames of their own (at -O1 a one-row GEMM becomes
+    a fused Triton reduction)."""
     bs, seq_len, _ = h.shape
     qkv = attn.qkv_proj(h)
     # q normed and roped in place; k (normed, roped) and v into the cache

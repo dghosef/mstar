@@ -1583,6 +1583,29 @@ def test_code_predictor_depth_loop_compiles_no_frame_per_position(model, monkeyp
     assert dynamo_counts(fn4, *args4).compiles == dynamo_counts(fn2, *args2).compiles
 
 
+@pytest.mark.parametrize("model", ["qwen3_tts", "qwen3_omni"])
+def test_code_predictor_attention_projections_compile(model, monkeypatch):
+    """``cp_attend``'s own frame runs eager (it binds the depth ints), but its
+    qkv and o projections must compile: at -O1 Inductor turns a one-row GEMM
+    into a fused reduction, which eager cuBLAS misses."""
+    predictor, walk = _depth_loop(model, monkeypatch)
+    attn = predictor.model.layers[0].self_attn
+    traced: set[int] = set()
+
+    def backend(gm, example_inputs):
+        traced.update(t.data_ptr() for t in example_inputs if isinstance(t, torch.Tensor))
+        return gm.forward
+
+    fn, args = walk(2)
+    torch._dynamo.reset()
+    try:
+        with torch.no_grad():
+            torch.compile(fn, backend=backend, dynamic=False)(*args)
+    finally:
+        torch._dynamo.reset()
+    assert {attn.qkv_proj.weight.data_ptr(), attn.o_proj.weight.data_ptr()} <= traced
+
+
 def test_qwen3_tts_per_request_sampler_configs_drive_code_predictor():
     """Residual groups are configured through the code predictor's own sampler
     resource, which the engine opens per-request buffers for."""
