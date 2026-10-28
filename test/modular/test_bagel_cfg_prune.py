@@ -30,7 +30,6 @@ from mstar.model.bagel.submodules import (
     IMAGE_DECODE,
     IMAGE_GEN,
     IMAGE_GEN_HEAD,
-    IMAGE_GEN_LOOP,
     LLMSubmodule,
     apply_timestep_shift,
     cfg_branches,
@@ -42,6 +41,8 @@ from mstar.model.bagel.submodules import (
     image_gen_timestep,
 )
 from mstar.model.submodule_base import ARNodeInputs, ModelInputsFromEngine
+
+IMAGE_GEN_LOOP = denoise_loop(IMAGE_GEN)
 
 CONFIG = BagelModelConfig(vae_config=BagelAutoEncoderConfig(), vit_config=BagelViTConfig())
 N = CONFIG.num_timesteps

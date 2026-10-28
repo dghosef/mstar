@@ -79,6 +79,7 @@ DENOISE_WALKS = {
     "image_gen_cfg3": DenoiseWalk(branches=3, decode=False),
 }
 CFG_WALKS = {walk: d.branches for walk, d in DENOISE_WALKS.items() if d.branches > 1}
+CFG_WALK_BY_BRANCHES = {branches: walk for walk, branches in CFG_WALKS.items()}
 # the walks whose one LLM node runs the step's branches (`image_gen_step_branches`)
 SINGLE_NODE_DENOISE_WALKS = frozenset(walk for walk, d in DENOISE_WALKS.items() if d.branches == 1)
 
@@ -88,8 +89,6 @@ def denoise_loop(walk: str) -> str:
     (`get_loop_caps`) and the step's loop counter each name one phase."""
     return f"{walk}_loop"
 
-
-IMAGE_GEN_LOOP = denoise_loop(IMAGE_GEN)
 
 # The LLM nodes' walks, and the CFG branch each node owns. Module level
 # because both the submodule (per step) and the model (per request, in
@@ -274,7 +273,7 @@ def image_gen_phases(window: CFGWindow, num_timesteps: int, cfg_parallel: bool) 
     phases = []
     if window.start > 0:
         phases.append(ImageGenPhase(IMAGE_GEN_HEAD, window.start, 1))
-    phases.append(ImageGenPhase(f"image_gen_cfg{window.branches}", window.stop - window.start, window.branches))
+    phases.append(ImageGenPhase(CFG_WALK_BY_BRANCHES[window.branches], window.stop - window.start, window.branches))
     if window.stop < n:
         phases.append(ImageGenPhase(IMAGE_GEN, n - window.stop, 1))
     else:
