@@ -17,13 +17,15 @@ rewrite beyond the standard fused Q/K/V and gate/up rules.
 
 from __future__ import annotations
 
+from functools import partial
+
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from mstar.distributed.communication import CommGroup
 from mstar.model.components import RMSNorm
-from mstar.model.components.code_predictor_kernels import cp_attention, cp_qk_norm_rope_kv_write
+from mstar.model.components.code_predictor_kernels import cp_attend
 from mstar.model.components.decoder_layer import DecoderLayer, run_layers
 from mstar.model.components.distributed import ParallelAttention, ParallelGatedMLP
 from mstar.model.qwen3_tts.config import (
@@ -153,11 +155,9 @@ class Qwen3TTSTalkerModel(nn.Module):
 # ---------------------------------------------------------------------------
 # CodePredictor: autoregression across codec groups within one frame
 # ---------------------------------------------------------------------------
-# Qwen3-Omni has the same high-level residual-code loop, but currently uses a
-# different attention primitive, checkpoint/config namespace, sampling policy,
-# and CUDA-graph capture path.  Sharing the loop before the auxiliary-sampler
-# work tracked in #199 would couple two independently validated model ports;
-# factor the common implementation after that engine interface is available.
+# Qwen3-Omni's code predictor runs the same layers through the same kernels
+# (``run_layers`` with ``cp_attend``); its checkpoint namespace, sampling and
+# capture differ.
 
 
 class Qwen3TTSCodePredictorLayer(DecoderLayer):
@@ -267,26 +267,9 @@ class Qwen3TTSCodePredictor(nn.Module):
         hidden state is ``[batch, 1, predictor_hidden]``.
         """
         hidden_states = self.small_to_mtp_projection(inputs_embeds)
-        batch_size, seq_len, _ = hidden_states.shape
-        if seq_len != 1:
+        if hidden_states.shape[1] != 1:
             raise ValueError("CodePredictor decode expects exactly one token")
-        flat_position_ids = position_ids.reshape(-1)
-
-        def attend(layer_idx: int, attn: nn.Module, h: torch.Tensor) -> torch.Tensor:
-            qkv = attn.qkv_proj(h)
-            # q normed and roped in place; k (normed, roped) and v into the
-            # frame-local cache at this depth position
-            cp_qk_norm_rope_kv_write(
-                qkv.view(batch_size * seq_len, -1), attn.q_norm.weight, attn.k_norm.weight,
-                flat_position_ids, kv_cache[layer_idx], cache_pos, seq_len,
-                attn.q_norm.variance_epsilon, attn.k_norm.variance_epsilon,
-                float(attn.rope_theta), attn.num_heads, attn.num_kv_heads, attn.head_dim,
-            )
-            q = qkv[..., :attn.num_heads * attn.head_dim].view(batch_size, seq_len, attn.num_heads, attn.head_dim)
-            # attend over the prefix already generated within the same codec frame
-            attn_output = cp_attention(q, kv_cache[layer_idx, :, 0], kv_cache[layer_idx, :, 1], cache_pos)
-            return attn.o_proj(attn_output.reshape(batch_size, seq_len, -1))
-
+        attend = partial(cp_attend, kv_cache, position_ids.reshape(-1), cache_pos)
         # the stream starts from a copy, since the projection is the identity
         # on 0.6B and its input is the caller's
         return run_layers(self.model.layers, hidden_states.clone(), self.model.norm, attend)

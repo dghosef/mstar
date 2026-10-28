@@ -1393,7 +1393,7 @@ def _fake_cp_kernels(monkeypatch, calls=None):
     """The code predictor's Triton kernels on CPU: the prologue writes k and v
     into the cache without norm or rope, and attention is SDPA over the depth
     positions so far."""
-    import mstar.model.qwen3_tts.components.talker as talker_module
+    import mstar.model.components.code_predictor_kernels as kernels
 
     def prologue(qkv, wq, wk, pos, kv_layer, cache_pos, seq_len, eps_q, eps_k, theta, hq, hkv, d):
         k, v = qkv[:, hq * d:].view(-1, seq_len, 2, hkv, d).unbind(2)
@@ -1408,8 +1408,8 @@ def _fake_cp_kernels(monkeypatch, calls=None):
             q.transpose(1, 2), k_cache[:, :n].transpose(1, 2), v_cache[:, :n].transpose(1, 2), enable_gqa=True,
         ).transpose(1, 2)
 
-    monkeypatch.setattr(talker_module, "cp_qk_norm_rope_kv_write", prologue)
-    monkeypatch.setattr(talker_module, "cp_attention", attention)
+    monkeypatch.setattr(kernels, "cp_qk_norm_rope_kv_write", prologue)
+    monkeypatch.setattr(kernels, "cp_attention", attention)
 
 
 def test_qwen3_tts_code_predictor_projects_wider_talker_inputs(monkeypatch):

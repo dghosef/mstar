@@ -7,6 +7,8 @@ and depth step, q and k normed and roped and k and v copied into the cache had
 been six launches of a few microseconds around a ~1 us job.
 ``cp_attention`` attends over the depth positions so far, and
 ``cp_embed_accumulate`` records a depth step's codes and sums their embeddings.
+``cp_attend`` is a layer's attention built from the first two, the ``attend``
+both code predictors hand ``run_layers``.
 
 The launchers are opaque to Dynamo, as the ops they replace were: a captured
 forward compiles with static ints, so a traced launcher would recompile for
@@ -160,3 +162,27 @@ def cp_attention(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, 
         GROUP=hq // hkv, D=d, BLOCK_N=triton.next_power_of_2(max_depth), num_warps=4,
     )
     return out
+
+
+def cp_attend(
+    kv_cache: torch.Tensor, pos: torch.Tensor, cache_pos: int,
+    layer_idx: int, attn: torch.nn.Module, h: torch.Tensor,
+) -> torch.Tensor:
+    """Layer ``layer_idx``'s attention for the normed ``h (bs, S, hidden)`` over the
+    frame-local ``kv_cache (layers, bs, 2, max_depth, Hkv, D)``: k and v written at
+    depth positions ``cache_pos .. cache_pos + S - 1``, each token attending over
+    the positions so far. ``pos`` holds one position per token. Bind the cache
+    arguments with ``functools.partial`` to get ``run_layers``' ``attend(i,
+    self_attn, h)``. Plain Python: the projections compile, the launchers do not."""
+    bs, seq_len, _ = h.shape
+    qkv = attn.qkv_proj(h)
+    # q normed and roped in place; k (normed, roped) and v into the cache
+    cp_qk_norm_rope_kv_write(
+        qkv.view(bs * seq_len, -1), attn.q_norm.weight, attn.k_norm.weight,
+        pos, kv_cache[layer_idx], cache_pos, seq_len,
+        attn.q_norm.variance_epsilon, attn.k_norm.variance_epsilon,
+        float(attn.rope_theta), attn.num_heads, attn.num_kv_heads, attn.head_dim,
+    )
+    q = qkv[..., :attn.num_heads * attn.head_dim].view(bs, seq_len, attn.num_heads, attn.head_dim)
+    out = cp_attention(q, kv_cache[layer_idx, :, 0], kv_cache[layer_idx, :, 1], cache_pos)
+    return attn.o_proj(out.reshape(bs, seq_len, -1))

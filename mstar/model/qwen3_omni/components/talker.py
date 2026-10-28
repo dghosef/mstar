@@ -15,13 +15,15 @@ Weight prefix: ``talker.``
 
 from __future__ import annotations
 
+from functools import partial
+
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from mstar.distributed.communication import CommGroup
 from mstar.model.components import ParallelSparseMoeBlockWithSharedExpert, RMSNorm, TopKRouter
-from mstar.model.components.code_predictor_kernels import cp_attention, cp_qk_norm_rope_kv_write
+from mstar.model.components.code_predictor_kernels import cp_attend
 from mstar.model.components.decoder_layer import DecoderLayer, run_layers
 from mstar.model.components.distributed import ParallelGatedMLP
 from mstar.model.qwen3_omni.components.attention import Qwen3OmniAttention
@@ -451,34 +453,7 @@ class Qwen3OmniCodePredictor(nn.Module):
             predictor's 5 layers + final RMSNorm. The caller is responsible
             for applying the per-codebook LM head.
         """
-        hidden_states = inputs_embeds
-        bs, seq_len, hidden_size = hidden_states.shape
-
-        first_attn = self.model.layers[0].self_attn
-        n_kv_heads = first_attn.num_kv_heads
-        n_q_heads = first_attn.num_heads
-        head_dim = first_attn.head_dim
-
-        # FlashInfer's rope kernels require bf16; the rest of the code
-        # predictor runs at the weights' native dtype (fp32 for quality per
-        # the KVCacheEngine.has_autocast=False invariant).
-        flat_pos = position_ids.reshape(-1)
-
-        def attend(layer_idx: int, attn: nn.Module, h: torch.Tensor) -> torch.Tensor:
-            qkv = F.linear(h, attn.qkv_proj.weight)
-            # q normed and roped in place; k (normed, roped) and v into the cache
-            # at cache_pos .. cache_pos + seq_len.
-            cp_qk_norm_rope_kv_write(
-                qkv.view(bs * seq_len, -1), attn.q_norm.weight, attn.k_norm.weight,
-                flat_pos, kv_cache[layer_idx], cache_pos, seq_len,
-                attn.q_norm.variance_epsilon, attn.k_norm.variance_epsilon,
-                float(attn.rope_theta), n_q_heads, n_kv_heads, head_dim,
-            )
-            q = qkv[..., :n_q_heads * head_dim].view(bs, seq_len, n_q_heads, head_dim)
-            # Each new token attends causally over the depth positions so far.
-            attn_out = cp_attention(q, kv_cache[layer_idx, :, 0], kv_cache[layer_idx, :, 1], cache_pos)
-            return attn.o_proj(attn_out.reshape(bs, seq_len, -1))
-
+        attend = partial(cp_attend, kv_cache, position_ids.reshape(-1), cache_pos)
         # the residual stream is updated in place, so it starts from a copy of
         # the input embeddings, which the caller owns
-        return run_layers(self.model.layers, hidden_states.clone(), self.model.norm, attend)
+        return run_layers(self.model.layers, inputs_embeds.clone(), self.model.norm, attend)
