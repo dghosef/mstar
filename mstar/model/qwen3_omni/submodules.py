@@ -138,12 +138,6 @@ class AudioEncoderSubmodule(NodeSubmodule):
     TOKEN_BUCKETS = [256, 512, 1024, 2048, 4096, 8192]
     # attention windows a step: 8192 rows is 79 full windows, plus a short last one per clip
     MAX_WINDOWS = 128
-    # Packed rows a step, the bound on one pass's memory: a step past the
-    # largest bucket runs the same pass eagerly, and only past this does each
-    # clip run alone. Estimated peak (bf16) ~1.2 GB, mostly three copies of the
-    # frontend's conv output (7680 wide) over chunks padded to 2048, as much
-    # as one 30 min clip, the longest media_io decodes, takes alone.
-    MAX_STEP_ROWS = 2 * TOKEN_BUCKETS[-1]
     # clips per encoder step
     MAX_BATCH_SIZE = 16
 
@@ -300,7 +294,10 @@ class AudioEncoderSubmodule(NodeSubmodule):
         return enc.proj2(enc.act(enc.proj1(hidden)))
 
     def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
-        return sum(inp.input_seq_len for inp in model_inputs) <= self.MAX_STEP_ROWS
+        # A step's clips run as one pass only within the largest capture, which
+        # bounds its memory; a larger step runs each clip as its own pass, which
+        # still leases and replays the capture when the clip fits it.
+        return self._fits_capture(model_inputs)
 
     def max_batch_size(self, graph_walk: str) -> int:
         return self.MAX_BATCH_SIZE

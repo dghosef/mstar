@@ -345,15 +345,14 @@ def test_packed_clips_split_by_the_encoder_s_own_window():
         torch.testing.assert_close(packed[rid]["audio_embeds"][0], ref, rtol=1e-4, atol=1e-4)
 
 
-def test_clips_pack_into_one_pass_up_to_the_step_row_budget():
-    """A step past the largest capture still packs its clips into one (eager)
-    pass; only past the step's row budget does each clip run as its own pass."""
+def test_clips_past_the_largest_capture_run_one_per_pass():
+    """A step's clips pack into one encoder pass only while they fit the
+    largest capture bucket, which bounds the pass's memory."""
     audio = AudioEncoderSubmodule(SimpleNamespace(n_window=50, n_window_infer=400), config=None)
-    # 40k mel frames, ~5.2k encoder rows: two pass the 8192-row bucket, four pass the budget
-    clips = [audio.prepare_inputs("prefill_audio", None, {"audio_features": [torch.zeros(1, 40_000)]})] * 4
-    assert not audio._fits_capture(clips[:2])
-    assert audio.can_batch(None, clips[:2]), "two clips past the largest capture ran one pass each"
-    assert not audio.can_batch(None, clips), "four long clips were packed past the step's row budget"
+    # 40k mel frames, ~5.2k encoder rows: one fits the 8192-row bucket, two don't
+    clips = [audio.prepare_inputs("prefill_audio", None, {"audio_features": [torch.zeros(1, 40_000)]})] * 2
+    assert audio.can_batch(None, clips[:1])
+    assert not audio.can_batch(None, clips), "two long clips were packed past the largest capture into one pass"
 
 
 @requires_cuda
