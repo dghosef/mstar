@@ -621,6 +621,7 @@ def test_video_decodes_thread_within_the_usable_cpus(monkeypatch, cpus, expected
 
     monkeypatch.setattr(torch, "get_num_threads", lambda: 1)
     monkeypatch.setattr(media_limits, "usable_cpus", lambda: cpus)
+    media_limits.video_decode_threads.cache_clear()  # read once per process
     monkeypatch.setenv("MSTAR_MAX_VIDEO_PIXELS", str(64 * 64 * 4))
     opened = []
     _fake_torchcodec(monkeypatch, [], opened=opened)
@@ -629,6 +630,7 @@ def test_video_decodes_thread_within_the_usable_cpus(monkeypatch, cpus, expected
     for load in (lambda: Model.load_video(None, "clip.mp4", "cpu"), lambda: vjepa2.load_video("clip.mp4", "cpu")):
         with pytest.raises(ValueError, match="MSTAR_MAX_VIDEO_PIXELS"):
             load()
+    media_limits.video_decode_threads.cache_clear()
     assert [kw["num_ffmpeg_threads"] for kw in opened] == [expected, expected]
 
 
