@@ -313,7 +313,9 @@ def test_packed_clips_split_by_the_encoder_s_own_window():
     would claim 14 embeddings where a 52-frame window gives 13."""
     audio = _audio(n_window=52)
     prepared = [
-        audio.prepare_inputs("audio", None, {"audio_features": [clip], "audio_seqlens": [torch.tensor([clip.shape[-1]])]})
+        audio.prepare_inputs(
+            "audio", None, {"audio_features": [clip], "audio_seqlens": [torch.tensor([clip.shape[-1]])]},
+        )
         for clip in (torch.randn(128, 104), torch.randn(128, 60))
     ]
     engine_inputs = SimpleNamespace(request_ids=["a", "b"])
