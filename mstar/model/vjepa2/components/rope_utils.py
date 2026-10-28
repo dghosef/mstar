@@ -10,6 +10,8 @@ would break the pretrained weights.
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import torch
 
 
@@ -45,8 +47,7 @@ def rotate_queries_or_keys(x: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
 def rope_tables_BNHD(
     pos: torch.Tensor, dim: int, dtype: torch.dtype, device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``(sin, cos)`` for ``apply_rope_BNHD`` over the last ``dim`` dims, so callers
-    can build them once per step and reuse them across heads, q/k and layers."""
+    """``(sin, cos)`` for ``apply_rope_BNHD`` over the last ``dim`` dims."""
     omega = torch.arange(dim // 2, dtype=dtype, device=device)
     omega /= dim / 2.0
     omega = 1.0 / 10000**omega
@@ -66,3 +67,11 @@ def apply_rope_BNHD(x: torch.Tensor, emb_sin: torch.Tensor, emb_cos: torch.Tenso
     y1, y2 = y.unbind(dim=-1)
     y = torch.stack((-y2, y1), dim=-1).flatten(-2)
     return (x * emb_cos) + (y * emb_sin)
+
+
+class RopeTables(NamedTuple):
+    """One cached step's ``(sin, cos)`` (``ACRoPEAttention.rope_tables``): built
+    once from the step's positions and shared by every block, q and k."""
+
+    spatial: tuple[torch.Tensor, torch.Tensor]  # d/h/w side by side over the head dim
+    time: tuple[torch.Tensor, torch.Tensor] | None  # action tokens, over the d dims

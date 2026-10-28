@@ -82,5 +82,5 @@ def test_cosmos3_fast_decode_compiles_only_its_decoder_step(compiles, monkeypatc
     monkeypatch.delenv("COSMOS3_COMPILE_VAE", raising=False)
     # Its own VAE: the fast path casts and converts the node's instance in place.
     sub = Cosmos3VAEDecoderSubmodule(_tiny_vae(), Cosmos3Config(vae_decode_fast=True))
-    assert sub._fast_step is not None
+    assert sub._whole_clip is not None
     assert len(compiles) == 1 and _padding_off(compiles[0])

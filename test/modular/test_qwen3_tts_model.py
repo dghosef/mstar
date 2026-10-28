@@ -47,6 +47,7 @@ from mstar.model.submodule_base import (
     HostRows,
     InputMetadata,
     ModelInputsFromEngine,
+    NodeSubmodule,
 )
 from mstar.streaming.chunk_policy import ScheduledLeftContextChunkPolicy
 from mstar.streaming.stream_buffer import StreamBuffer, StreamChunkInfo
@@ -970,7 +971,7 @@ def test_qwen3_tts_prefill_frame_counts_toward_generation_limit():
         config,
     )
     submodule.request_state("request").add("generated_frames", 0)
-    outputs = {"new_token": [torch.tensor(1)]}
+    outputs = {"layer0_codes": [torch.tensor(1)]}
     request_info = SimpleNamespace(
         graph_walk="talker_decode",
         step_metadata={},
@@ -1019,7 +1020,7 @@ def test_qwen3_tts_honors_ignore_eos_for_fixed_length_benchmarks():
         config,
     )
     submodule.request_state("request").add("generated_frames", 0)
-    outputs = {"new_token": [torch.tensor(
+    outputs = {"layer0_codes": [torch.tensor(
         config.talker.codec_eos_token_id
     )]}
     request_info = SimpleNamespace(
@@ -1056,7 +1057,7 @@ def test_qwen3_tts_batched_stop_check_agrees_with_the_per_request_one():
     infos = {rid: info(ignore, limit) for rid, (_, ignore, limit, _) in cases.items()}
     for rid, (code, _, _, frames) in cases.items():
         submodule.request_state(rid).add("generated_frames", frames)
-        submodule.postprocess(rid, infos[rid], {"new_token": [torch.tensor(code)]})
+        submodule.postprocess(rid, infos[rid], {"layer0_codes": [torch.tensor(code)]})
     expected = {
         rid: stop for rid in cases
         if (stop := submodule.check_stop(
@@ -1068,7 +1069,30 @@ def test_qwen3_tts_batched_stop_check_agrees_with_the_per_request_one():
     order = list(reversed(cases))
     codes = torch.tensor([cases[rid][0] for rid in order] + [eos])
     host_rows = HostRows(tuple(order), {"layer0_codes": codes})
-    assert submodule.check_stop_batched(list(cases), infos, host_rows, "talker_decode") == expected
+    assert submodule.check_stop_batched(list(cases), infos, host_rows) == expected
+
+
+def test_qwen3_tts_depth_loop_replays_only_on_a_step_that_leased_it():
+    """``declare_step`` leaves the depth loop's sampler to the region only when
+    the step leased it, so the forward replays the region exactly then: a
+    runner that could take the batch is not enough."""
+    from mstar.model.qwen3_tts.submodules import DEPTH_LOOP_REGION
+
+    runs = []
+    runner = SimpleNamespace(
+        can_run=lambda **kwargs: True,
+        run=lambda **kwargs: runs.append(kwargs) or {"all_codes": "codes", "codec_embed_sum": "sum"},
+    )
+    hidden, codes = torch.zeros(2, 4), torch.zeros(2, dtype=torch.long)
+
+    def step(leases):
+        engine_inputs = SimpleNamespace(
+            piecewise_runners={DEPTH_LOOP_REGION: runner}, piecewise_leases=leases, request_ids=["a", "b"],
+        )
+        return TalkerSubmodule._run_depth_loop_piecewise(None, engine_inputs, hidden, codes)
+
+    assert step({}) is None and runs == []
+    assert step({DEPTH_LOOP_REGION: object()}) == ("codes", "sum") and len(runs) == 1
 
 
 def test_qwen3_tts_talker_returns_row_outputs_except_for_the_clone_prefill():
@@ -1080,7 +1104,7 @@ def test_qwen3_tts_talker_returns_row_outputs_except_for_the_clone_prefill():
     frame = {
         "talker_input_embeds": torch.zeros(2, 16),
         "codec_tokens": torch.arange(2 * groups).view(2, groups),
-        "new_token": torch.tensor([3, 4]),
+        "layer0_codes": torch.tensor([3, 4]),
     }
     submodule._run_frame = lambda *args: frame
     engine_inputs = ModelInputsFromEngine(request_ids=["a", "b"], per_request_info={})
@@ -1088,13 +1112,15 @@ def test_qwen3_tts_talker_returns_row_outputs_except_for_the_clone_prefill():
     out = submodule.forward_batched("talker_decode", engine_inputs, *tensors)
     assert isinstance(out, BatchedModelOutput)
     assert out.row_outputs is frame
-    assert torch.equal(out.check_stop_buffers["layer0_codes"], frame["new_token"])
+    # the stop check reads the row output's own clone: one copy of the codes a step
+    rows = out.clone_row_outputs(2)
+    assert out.clone_check_stop_buffers(reuse=rows)["layer0_codes"] is rows["layer0_codes"]
     # The clone prefill returns rows too; postprocess leads its codec items
     # with the reference tail, so the captured forward serves it as well.
     assert isinstance(submodule.forward_batched("talker_prefill_clone", engine_inputs, *tensors), BatchedModelOutput)
     reference = torch.arange(3 * groups).view(3, groups)
     submodule.request_state("a").add_all(reference_frames=reference, generated_frames=0)
-    row = {"codec_tokens": [frame["codec_tokens"][0:1]], "new_token": [frame["new_token"][0:1]]}
+    row = {"codec_tokens": [frame["codec_tokens"][0:1]], "layer0_codes": [frame["layer0_codes"][0:1]]}
     submodule.postprocess("a", SimpleNamespace(graph_walk="talker_prefill_clone"), row)
     left = config.codec.left_context_frames
     assert [item.shape for item in row["codec_tokens"]] == [(1, groups)] * (min(left, 3) + 1)
@@ -1352,17 +1378,60 @@ def test_qwen3_tts_talker_preprocess_packs_the_tensors_the_per_row_device_copies
 
 
 class _IdentityNorm(torch.nn.Module):
-    """A CPU stand-in for the FlashInfer RMSNorm, fused residual add included."""
+    """A CPU stand-in for the FlashInfer RMSNorm, fused residual add included:
+    like FlashInfer's, the add updates the residual stream in place."""
 
     def forward(self, hidden_states):
-        return hidden_states
+        return hidden_states.clone()
 
-    def forward_residual(self, hidden_states, residual):
-        summed = hidden_states + residual
-        return summed, summed
+    def forward_residual(self, hidden_states, residual, comm_group=None):
+        if residual is None:
+            return hidden_states.clone(), hidden_states
+        residual.add_(hidden_states)
+        return residual.clone(), residual
 
 
-def test_qwen3_tts_code_predictor_projects_wider_talker_inputs():
+def _fake_cp_kernels(monkeypatch, calls=None):
+    """The code predictor's Triton kernels on CPU: the prologue writes k and v
+    into the cache without norm or rope, and attention is SDPA over the depth
+    positions so far."""
+    import mstar.model.components.code_predictor_kernels as kernels
+
+    def prologue(qkv, wq, wk, pos, kv_layer, cache_pos, seq_len, eps_q, eps_k, theta, hq, hkv, d):
+        k, v = qkv[:, hq * d:].view(-1, seq_len, 2, hkv, d).unbind(2)
+        kv_layer[:, 0, cache_pos:cache_pos + seq_len] = k
+        kv_layer[:, 1, cache_pos:cache_pos + seq_len] = v
+
+    def attention(q, k_cache, v_cache, cache_pos):
+        n = cache_pos + q.shape[1]
+        if calls is not None:
+            calls.append((q.shape, k_cache.shape, v_cache.shape, n))
+        return torch.nn.functional.scaled_dot_product_attention(
+            q.transpose(1, 2), k_cache[:, :n].transpose(1, 2), v_cache[:, :n].transpose(1, 2), enable_gqa=True,
+        ).transpose(1, 2)
+
+    monkeypatch.setattr(kernels, "cp_qk_norm_rope_kv_write", prologue)
+    monkeypatch.setattr(kernels, "cp_attention", attention)
+
+
+def _cpu_predictor(monkeypatch, config=None, bs=2, calls=None):
+    """A code predictor with identity norms over the fake kernels, a zeroed
+    depth KV cache for ``bs`` rows, and one depth step's input."""
+    config = config or _tiny_model_config()
+    predictor = Qwen3TTSCodePredictor(config)
+    for layer in predictor.model.layers:
+        layer.input_layernorm = _IdentityNorm()
+        layer.post_attention_layernorm = _IdentityNorm()
+    predictor.model.norm = _IdentityNorm()
+    _fake_cp_kernels(monkeypatch, calls)
+    cp = config.talker.code_predictor
+    kv_cache = torch.zeros(
+        cp.num_hidden_layers, bs, 2, config.talker.num_code_groups, cp.num_key_value_heads, cp.head_dim,
+    )
+    return predictor, kv_cache, torch.randn(bs, 1, config.talker.hidden_size)
+
+
+def test_qwen3_tts_code_predictor_projects_wider_talker_inputs(monkeypatch):
     """1.7B: Talker width 2048 vs predictor width 1024 -> biased projection on
     every depth input; 0.6B (equal widths) -> identity, no extra parameters."""
     narrow = _tiny_model_config()
@@ -1372,7 +1441,7 @@ def test_qwen3_tts_code_predictor_projects_wider_talker_inputs():
 
     wide = _tiny_model_config()
     wide.talker.hidden_size = 32
-    predictor = Qwen3TTSCodePredictor(wide)
+    predictor, kv_cache, x = _cpu_predictor(monkeypatch, wide)
     projection = predictor.small_to_mtp_projection
     assert isinstance(projection, torch.nn.Linear)
     assert projection.weight.shape == (16, 32)
@@ -1384,72 +1453,145 @@ def test_qwen3_tts_code_predictor_projects_wider_talker_inputs():
         dict(predictor.named_parameters())
     )
 
-    for layer in predictor.model.layers:
-        layer.input_layernorm = _IdentityNorm()
-        layer.post_attention_layernorm = _IdentityNorm()
-    predictor.model.norm = _IdentityNorm()
-    cp = wide.talker.code_predictor
-    out = predictor.forward_depth_unrolled(
-        inputs_embeds=torch.randn(2, 1, 32),
-        kv_cache=torch.zeros(
-            cp.num_hidden_layers, 2, 2, wide.talker.num_code_groups,
-            cp.num_key_value_heads, cp.head_dim,
-        ),
-        cache_pos=0,
-    )
+    predictor.depth.bind_step(kv_cache, torch.zeros(2, 1, dtype=torch.long), cache_pos=0)
+    out = predictor.forward_depth_unrolled(x)
     assert out.shape == (2, 1, 16)
 
 
-def test_qwen3_tts_code_predictor_uses_depth_decode_attention(monkeypatch):
-    config = _tiny_model_config()
-    predictor = Qwen3TTSCodePredictor(config)
-    # FlashInfer RMSNorm is CUDA-only; the depth attention has a torch path.
+def test_qwen3_tts_code_predictor_leaves_its_input_alone(monkeypatch):
+    """The fused add + norm updates the residual stream in place, and on 0.6B
+    the predictor's input projection is the identity: the stream must not be
+    the caller's tensor, which the Talker's captured step reads again."""
+    predictor, kv_cache, inputs = _cpu_predictor(monkeypatch)
+    assert isinstance(predictor.small_to_mtp_projection, torch.nn.Identity)
+    before = inputs.clone()
+    predictor.depth.bind_step(kv_cache, torch.zeros(2, 1, dtype=torch.long), cache_pos=0)
+    predictor.forward_depth_unrolled(inputs)
+    assert torch.equal(inputs, before)
+
+
+def test_qwen3_tts_code_predictor_uses_the_shared_kernels(monkeypatch):
+    # FlashInfer RMSNorm and the Triton kernels are CUDA-only, so replace them
+    # without changing attention geometry.
+    config, calls = _tiny_model_config(), []
+    predictor, kv_cache, x = _cpu_predictor(monkeypatch, config, bs=1, calls=calls)
+    predictor.depth.bind_step(kv_cache, torch.zeros(1, 1, dtype=torch.long), cache_pos=0)
+    output = predictor.forward_depth_unrolled(x)
+
+    query_shape, key_shape, value_shape, cache_len = calls[0]
+    assert output.shape == (1, 1, config.talker.hidden_size)
+    assert query_shape[2] == config.talker.code_predictor.num_attention_heads
+    assert key_shape[2] == config.talker.code_predictor.num_key_value_heads
+    assert value_shape[2] == config.talker.code_predictor.num_key_value_heads
+    assert key_shape[1] == config.talker.num_code_groups
+    assert cache_len == 1
+    assert len(calls) == config.talker.code_predictor.num_hidden_layers
+
+
+def test_code_predictor_depth_step_is_bound_once_per_pass(monkeypatch):
+    """A pass whose step was not bound must fail, not write and attend over
+    the previous step's depth positions."""
+    predictor, kv_cache, x = _cpu_predictor(monkeypatch)
+    predictor.depth.bind_step(kv_cache, torch.zeros(2, 1, dtype=torch.long), cache_pos=0)
+    predictor.forward_depth_unrolled(x)
+    with pytest.raises(ValueError, match="bind_step"):
+        predictor.forward_depth_unrolled(x)
+
+
+def test_code_predictor_attention_keeps_its_depth_kv_when_the_node_binds(monkeypatch):
+    """The engine binds the node's resources into every module; the code
+    predictor's attention attends through its own ``DepthKV`` regardless."""
+    predictor, kv_cache, x = _cpu_predictor(monkeypatch)
+    NodeSubmodule.bind_node_resources(predictor, {"attn": object(), "kv": object(), "rope": object()})
+    assert all(layer.self_attn.attend is predictor.depth for layer in predictor.model.layers)
+    predictor.depth.bind_step(kv_cache, torch.zeros(2, 1, dtype=torch.long), cache_pos=0)
+    predictor.forward_depth_unrolled(x)
+
+
+@torch.compiler.disable
+def _opaque_launch(*args, **kwargs):
+    pass
+
+
+class _OpaqueKernel:
+    """A Triton kernel as Dynamo sees its launch: a call it cannot trace."""
+
+    def __getitem__(self, grid):
+        return _opaque_launch
+
+
+def _depth_loop(model, monkeypatch):
+    """The code predictor, and ``n -> (fn, args)``: the talker's captured depth
+    loop over ``n`` steps."""
+    import mstar.model.components.code_predictor_kernels as kernels
+
+    monkeypatch.setattr(kernels, "_cp_qk_norm_rope_kv_kernel", _OpaqueKernel())
+    monkeypatch.setattr(kernels, "_cp_attn_kernel", _OpaqueKernel())
+    if model == "qwen3_tts":
+        config = _tiny_model_config()
+        predictor = Qwen3TTSCodePredictor(config)
+        cp, hidden = config.talker.code_predictor, config.talker.hidden_size
+    else:
+        from mstar.model.qwen3_omni.components.talker import Qwen3OmniCodePredictor
+        from mstar.model.qwen3_omni.config import CodePredictorConfig, Qwen3OmniModelConfig
+
+        cp = CodePredictorConfig(
+            vocab_size=32, hidden_size=16, intermediate_size=32, num_hidden_layers=2,
+            num_attention_heads=1, num_key_value_heads=1, head_dim=16, num_code_groups=4,
+        )
+        predictor = Qwen3OmniCodePredictor(Qwen3OmniModelConfig(code_predictor=cp))
+        hidden = cp.hidden_size
     for layer in predictor.model.layers:
         layer.input_layernorm = _IdentityNorm()
         layer.post_attention_layernorm = _IdentityNorm()
     predictor.model.norm = _IdentityNorm()
-    calls = []
-    import mstar.utils.attention as attention_module
+    bs, max_depth = 2, 5
+    kv_cache = torch.zeros(cp.num_hidden_layers, bs, 2, max_depth, cp.num_key_value_heads, cp.head_dim)
+    pos = torch.arange(max_depth, dtype=torch.int32)[:, None, None].expand(max_depth, bs, 1).contiguous()
+    pair_pos = torch.arange(2, dtype=torch.int32).expand(bs, 2).contiguous()
 
-    def capture(q, k, v, qw, kw, eps, theta, k_cache, v_cache, pos):
-        calls.append((q.shape, k.shape, k_cache.shape, pos))
-        return attention_module._depth_decode_attention_torch(q, k, v, qw, kw, eps, theta, k_cache, v_cache, pos)
+    def walk(n):
+        def depth_loop(x, pos, pair_pos, kv_cache):
+            if model == "qwen3_tts":
+                for cache_pos in range(n):
+                    predictor.depth.bind_step(kv_cache, pos[cache_pos], cache_pos=cache_pos)
+                    predictor.forward_depth_unrolled(x)
+            else:
+                # Qwen3-Omni opens with a two-token pass at cache_pos 0
+                predictor.depth.bind_step(kv_cache, pair_pos, cache_pos=0)
+                predictor.forward_depth_unrolled(torch.cat([x, x], dim=1))
+                for cache_pos in range(2, n + 1):
+                    predictor.depth.bind_step(kv_cache, pos[cache_pos], cache_pos=cache_pos)
+                    predictor.forward_depth_unrolled(x)
 
-    monkeypatch.setattr("mstar.model.qwen3_tts.components.talker.depth_decode_attention", capture)
-    cp = config.talker.code_predictor
-    output = predictor.forward_depth_unrolled(
-        inputs_embeds=torch.randn(1, 1, config.talker.hidden_size),
-        kv_cache=torch.zeros(cp.num_hidden_layers, 1, 2, config.talker.num_code_groups,
-                             cp.num_key_value_heads, cp.head_dim),
-        cache_pos=3,
-    )
-    assert output.shape == (1, 1, config.talker.hidden_size)
-    assert len(calls) == cp.num_hidden_layers
-    query_shape, key_shape, cache_shape, pos = calls[0]
-    assert query_shape == (1, cp.num_attention_heads, cp.head_dim)
-    assert key_shape == (1, cp.num_key_value_heads, cp.head_dim)
-    assert cache_shape == (1, config.talker.num_code_groups, cp.num_key_value_heads, cp.head_dim) and pos == 3
+        return depth_loop, (torch.randn(bs, 1, hidden), pos, pair_pos, kv_cache)
+
+    return predictor, walk
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA (Triton kernel)")
-def test_depth_decode_attention_kernel_matches_torch_over_a_frame():
-    """The fused kernel against its torch form over every depth position:
-    the cached keys/values and the outputs agree to bf16 rounding."""
-    from mstar.utils.attention import _depth_decode_attention_torch, depth_decode_attention
+@pytest.mark.parametrize("model", ["qwen3_tts", "qwen3_omni"])
+def test_code_predictor_depth_loop_compiles_no_frame_per_position(model, monkeypatch, dynamo_counts):
+    """The engine compiles a captured forward with static ints, so a compiled
+    frame that holds a depth step's ``cache_pos`` recompiles at every depth
+    position (and batch bucket) until the recompile limit: four steps must
+    compile no more frames than two."""
+    _, walk = _depth_loop(model, monkeypatch)
+    fn4, args4 = walk(4)
+    fn2, args2 = walk(2)
+    assert dynamo_counts(fn4, *args4).compiles == dynamo_counts(fn2, *args2).compiles
 
-    torch.manual_seed(0)
-    batch, hq, hkv, dim, depth = 8, 16, 8, 128, 16
-    caches = [torch.zeros(batch, depth, hkv, dim, device="cuda", dtype=torch.bfloat16) for _ in range(4)]
-    qw, kw = (torch.randn(dim, device="cuda", dtype=torch.bfloat16) * 0.1 + 1 for _ in range(2))
-    for pos in range(depth):
-        qkv = torch.randn(batch, (hq + 2 * hkv) * dim, device="cuda", dtype=torch.bfloat16)
-        q, k, v = qkv.split((hq * dim, hkv * dim, hkv * dim), dim=-1)
-        args = (q.view(batch, hq, dim), k.view(batch, hkv, dim), v.view(batch, hkv, dim), qw, kw, 1e-6, 1e6)
-        got = depth_decode_attention(*args, caches[0], caches[1], pos)
-        want = _depth_decode_attention_torch(*args, caches[2], caches[3], pos)
-        torch.testing.assert_close(got, want, atol=2e-2, rtol=2e-2)
-    torch.testing.assert_close(caches[0], caches[2], atol=1e-2, rtol=1e-2)
-    assert torch.equal(caches[1], caches[3])
+
+@pytest.mark.parametrize("model", ["qwen3_tts", "qwen3_omni"])
+def test_code_predictor_attention_projections_compile(model, monkeypatch, dynamo_counts):
+    """``DepthKV`` runs eager (it holds the depth ints), but the qkv and o
+    projections around it must compile: at -O1 Inductor turns a one-row GEMM
+    into a fused reduction, which eager cuBLAS misses."""
+    predictor, walk = _depth_loop(model, monkeypatch)
+    attn = predictor.model.layers[0].self_attn
+    fn, args = walk(2)
+    traced = dynamo_counts(fn, *args).traced
+    assert {attn.qkv_proj.weight.data_ptr(), attn.o_proj.weight.data_ptr()} <= traced
+
 
 def test_qwen3_tts_per_request_sampler_configs_drive_code_predictor():
     """Residual groups are configured through the code predictor's own sampler
@@ -1907,7 +2049,9 @@ def test_qwen3_tts_fused_snake_matches_the_reference_activation():
         alpha=torch.randn(6) * 0.3, beta=torch.randn(6) * 0.3, no_div_by_zero=1e-9,
     )
     fused = FusedSnakeBeta(snake).cuda()
-    x = torch.randn(3, 6, 1000, device="cuda")
+    # large activations too, where an approximate hardware sine drifts from torch.sin
+    scale = torch.tensor([1.0, 1.0, 1.0, 50.0, 50.0, 300.0], device="cuda")[:, None]
+    x = torch.randn(3, 6, 1000, device="cuda") * scale
     alpha = torch.exp(snake.alpha).cuda()[None, :, None]
     beta = torch.exp(snake.beta).cuda()[None, :, None]
     expected = x + (1.0 / (beta + snake.no_div_by_zero)) * torch.pow(torch.sin(x * alpha), 2)

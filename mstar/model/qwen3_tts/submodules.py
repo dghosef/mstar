@@ -556,9 +556,8 @@ class TalkerSubmodule(ARNodeSubmodule):
         CODE_PRED_SAMPLER belongs to whoever runs the depth loop. The region
         declares it whenever it holds a slot for this step, so declaring it
         here too would plan and commit it twice; when the region has no slot
-        the loop runs inline and this step owns it. Keyed off the lease rather
-        than the walk, which disagreed with ``_run_frame`` — that picks inline
-        vs piecewise from what the runner can actually serve.
+        the loop runs inline and this step owns it. The forward replays the
+        region exactly when it holds this lease (``_run_depth_loop_piecewise``).
         """
         del slot_lease
         steps = {
@@ -619,7 +618,7 @@ class TalkerSubmodule(ARNodeSubmodule):
         return {
             "talker_input_embeds": codec_embed_sum,
             "codec_tokens": all_codes,
-            "new_token": layer0_codes,
+            "layer0_codes": layer0_codes,
         }
 
     def _depth_loop(
@@ -644,14 +643,17 @@ class TalkerSubmodule(ARNodeSubmodule):
         codec_embed_sum = codec_embed.clone()
 
         cp_cache = self._get_cp_kv_cache(batch_size)
+        pos = torch.zeros(batch_size, 1, dtype=torch.int32, device=device)
         # Position 0 conditions the depth decoder on the Talker hidden state.
         # Each following position consumes the previous group's embedding.
-        self.code_predictor.forward_depth_unrolled(
-            last_hidden.unsqueeze(1), cp_cache, cache_pos=0
-        )
+        depth = self.code_predictor.depth
+        depth.bind_step(cp_cache, pos, cache_pos=0)
+        self.code_predictor.forward_depth_unrolled(last_hidden.unsqueeze(1))
         for group_idx in range(1, self.num_codes):
+            pos.fill_(group_idx)
+            depth.bind_step(cp_cache, pos, cache_pos=group_idx)
             cp_hidden = self.code_predictor.forward_depth_unrolled(
-                codec_embed.unsqueeze(1), cp_cache, cache_pos=group_idx
+                codec_embed.unsqueeze(1)
             ).squeeze(1)
             cp_logits = torch.matmul(
                 cp_hidden,
@@ -694,12 +696,12 @@ class TalkerSubmodule(ARNodeSubmodule):
         ``talker_prefill``, which is eager because it is variable-length. Left
         eager, this loop costs ~4x its captured time.
         """
-        runner = engine_inputs.piecewise_runners.get(DEPTH_LOOP_REGION)
-        batch_size = layer0_codes.shape[0]
-        if runner is None or not runner.can_run(batch_size=batch_size):
+        # a step replays the region exactly when it leased it, which is when
+        # the region (not ``declare_step``) declared CODE_PRED_SAMPLER
+        if DEPTH_LOOP_REGION not in engine_inputs.piecewise_leases:
             return None
-
-        output = runner.run(
+        batch_size = layer0_codes.shape[0]
+        output = engine_inputs.piecewise_runners[DEPTH_LOOP_REGION].run(
             static_inputs={
                 "last_hidden": last_hidden,
                 "layer0_codes": layer0_codes,
@@ -745,7 +747,7 @@ class TalkerSubmodule(ARNodeSubmodule):
         return {
             "talker_input_embeds": [output["talker_input_embeds"]],
             "codec_tokens": [output["codec_tokens"][:1]],
-            "new_token": [output["new_token"]],
+            "layer0_codes": [output["layer0_codes"]],
         }
 
     def forward_batched(
@@ -764,10 +766,12 @@ class TalkerSubmodule(ARNodeSubmodule):
         del graph_walk
         # One frame per row: the engine clones each batch tensor once and the
         # stop check copies one host buffer, rather than three of each per
-        # request. A clone prefill's reference frames join in ``postprocess``.
+        # request; the stop buffer is the row output of the same name, so it
+        # shares that clone. A clone prefill's reference frames join in
+        # ``postprocess``.
         return BatchedModelOutput(
             row_outputs=output,
-            check_stop_buffers={"layer0_codes": output["new_token"]},
+            check_stop_buffers={"layer0_codes": output["layer0_codes"]},
         )
 
     def postprocess(
@@ -779,7 +783,7 @@ class TalkerSubmodule(ARNodeSubmodule):
     ) -> None:
         """Expose the stop token and advance metadata without a GPU sync.
 
-        Whole-graph replay and eager execution normally retain ``new_token``.
+        Whole-graph replay and eager execution normally retain ``layer0_codes``.
         ``codec_tokens`` is the routed output, though, so use its first codebook
         as a fallback.  This keeps EOS detection correct even if an execution
         path filters the sampler-only output before slow-path ``check_stop``.
@@ -789,9 +793,7 @@ class TalkerSubmodule(ARNodeSubmodule):
             outputs["codec_tokens"] = self._codec_stream_items(
                 request_info.graph_walk, request_id, outputs["codec_tokens"][-1],
             )
-        if "new_token" in outputs:
-            outputs["layer0_codes"] = outputs.pop("new_token")
-        elif "layer0_codes" not in outputs and "codec_tokens" in outputs:
+        if "layer0_codes" not in outputs and "codec_tokens" in outputs:
             codec_tokens = outputs["codec_tokens"][-1]
             outputs["layer0_codes"] = [codec_tokens.reshape(-1)[0]]
         if "layer0_codes" in outputs:

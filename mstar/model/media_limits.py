@@ -9,16 +9,27 @@ The pixel and audio caps hold for a whole request: while the data worker loads
 a request's files inside :class:`RequestMediaBudget`, every check also counts
 against what the request's earlier files used.
 """
+import functools
 import os
 from contextlib import contextmanager
 from contextvars import ContextVar
 
 import torch
 
-# FFmpeg threads per video decode. torchcodec decodes single-threaded by
-# default, which dominates a long clip's request latency; frame threading is
-# bit-identical. Capped so concurrent requests don't oversubscribe the host.
-VIDEO_DECODE_THREADS = min(8, os.cpu_count() or 1)
+from mstar.utils.cpus import usable_cpus
+
+
+@functools.cache
+def video_decode_threads() -> int:
+    """FFmpeg threads for one video decode. torchcodec decodes single-threaded
+    by default, which dominates a long clip's request latency; frame threading
+    is bit-identical. Bounded by the CPUs this process may use (its affinity and
+    cgroup quota) and by 8, so concurrent decodes don't oversubscribe. Not tied
+    to torch's intra-op pool: FFmpeg's threads are its own, and that pool is
+    kept small for fork-join ops a decode doesn't run. Read once per process,
+    as ``image_io.PNG_WORKERS`` is."""
+    return min(8, usable_cpus())
+
 
 # PIL's DecompressionBombWarning threshold (about 9459 x 9459 RGB)
 DEFAULT_MAX_IMAGE_PIXELS = 89_478_485
@@ -365,7 +376,8 @@ def _on_white(image: torch.Tensor) -> torch.Tensor:
 
 
 def read_image(filepath: str, *, rgb: bool = False) -> torch.Tensor:
-    """A request image as uint8 ``[C, H, W]``, refused first if it is too large.
+    """A request image as uint8 ``[C, H, W]``, refused first if it is too large
+    (a ``ValueError``, as is a file that does not decode).
 
     ``rgb`` forces three channels, with any transparency composited on white
     as the Qwen-VL reference preprocessing does for RGBA (dropping the alpha
@@ -378,22 +390,25 @@ def read_image(filepath: str, *, rgb: bool = False) -> torch.Tensor:
     import torchvision
 
     fmt, animated, pil_mode, transparent = _check_image_header(filepath, IMAGE_FORMATS)
-    # torchvision ignores a tRNS color on a gray or RGB PNG; Pillow applies it
-    trns_color = rgb and transparent and pil_mode in ("L", "RGB")
-    if fmt == "GIF" or (fmt == "WEBP" and animated) or trns_color:
-        import numpy as np
-        from PIL import Image
+    try:
+        # torchvision ignores a tRNS color on a gray or RGB PNG; Pillow applies it
+        trns_color = rgb and transparent and pil_mode in ("L", "RGB")
+        if fmt == "GIF" or (fmt == "WEBP" and animated) or trns_color:
+            import numpy as np
+            from PIL import Image
 
-        with Image.open(filepath) as image:
-            array = np.array(image.convert("RGBA"))
-        return _on_white(torch.from_numpy(array).permute(2, 0, 1))
-    if not rgb:
-        mode = torchvision.io.ImageReadMode.UNCHANGED
-    else:
-        # only a file with transparency is read with alpha: a CMYK JPEG's
-        # four channels are not RGBA
-        mode = torchvision.io.ImageReadMode.RGB_ALPHA if transparent else torchvision.io.ImageReadMode.RGB
-    image = torchvision.io.decode_image(filepath, mode=mode)
+            with Image.open(filepath) as image:
+                array = np.array(image.convert("RGBA"))
+            return _on_white(torch.from_numpy(array).permute(2, 0, 1))
+        if not rgb:
+            mode = torchvision.io.ImageReadMode.UNCHANGED
+        else:
+            # only a file with transparency is read with alpha: a CMYK JPEG's
+            # four channels are not RGBA
+            mode = torchvision.io.ImageReadMode.RGB_ALPHA if transparent else torchvision.io.ImageReadMode.RGB
+        image = torchvision.io.decode_image(filepath, mode=mode)
+    except (RuntimeError, OSError) as exc:  # torchvision's decoders raise RuntimeError, Pillow's OSError
+        raise ValueError("could not decode image: the file is corrupt or truncated") from exc
     if image.dtype == torch.uint16:
         # a 16-bit PNG: its high byte, as Pillow reads a 16-bit RGB PNG
         image = (image.to(torch.int32) >> 8).to(torch.uint8)

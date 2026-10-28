@@ -120,8 +120,8 @@ class OmniVoiceConfig:
     # Replay the backbone's layer stack from CUDA graphs, one per (requests,
     # packed-token bucket), with attention through the engine's ragged
     # resource. Eager, a step is launch-bound: ~400 kernels for ~2 ms of GPU
-    # work. ``model_kwargs: {backbone_graphs: false}`` runs the reference's
-    # own packed attention eagerly instead.
+    # work. ``model_kwargs: {backbone_graphs: false}`` captures nothing and
+    # runs the same layer loop eagerly.
     backbone_graphs: bool = True
     backbone_capture_batch_sizes: list[int] = field(default_factory=lambda: [1, 2, 4, 8, 16])
     # Packed tokens per step (both CFG documents of every request); a step

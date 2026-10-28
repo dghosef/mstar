@@ -4,195 +4,178 @@ import triton.language as tl
 
 
 @triton.jit
-def _qk_norm_rope_kernel(
-    X_ptr, W_norm_ptr, Pos_ptr,
-    eps, rope_theta,
-    sx_m, sx_h, sx_d,
+def rms_norm_rope(
+    x_first, x_second, w_ptr, pos, eps, rope_theta,
+    D: tl.constexpr,
+    HALF_D: tl.constexpr,
+):
+    """One head, given as its two halves in fp32: RMSNorm by the weight at
+    ``w_ptr``, then rotate-half RoPE at position ``pos`` over the full head
+    dim. Returns the two rotated halves. Shared by the kernels here and the
+    code predictors' (``model/components/code_predictor_kernels.py``)."""
+    offs_half = tl.arange(0, HALF_D)
+    sumsq = tl.sum(x_first * x_first, axis=0) + tl.sum(x_second * x_second, axis=0)
+    inv_rms = 1.0 / tl.sqrt(sumsq / D + eps)
+    x_first = x_first * inv_rms * tl.load(w_ptr + offs_half).to(tl.float32)
+    x_second = x_second * inv_rms * tl.load(w_ptr + offs_half + HALF_D).to(tl.float32)
+    inv_freq = tl.exp(-tl.log(rope_theta) * (offs_half.to(tl.float32) * 2.0 / D))
+    angle = pos * inv_freq
+    cos = tl.cos(angle)
+    sin = tl.sin(angle)
+    return x_first * cos - x_second * sin, x_second * cos + x_first * sin
+
+
+# ============================================================================
+# Per-head q/k RMSNorm + 1D RoPE for q and k together, in place: one launch
+# over every q and k head (grid M x (H_q + H_kv)). Behind a custom op so
+# inductor does not functionalize the in-place writes into strided slices of
+# the qkv projection, which it gets wrong for a bare Triton kernel.
+# ============================================================================
+
+@triton.jit
+def _qk_pair_norm_rope_kernel(
+    Q_ptr, K_ptr, WQ_ptr, WK_ptr, Pos_ptr,
+    q_eps, k_eps, rope_theta,
+    sq_m, sq_h, sk_m, sk_h,
+    H_Q: tl.constexpr,
     D: tl.constexpr,
     HALF_D: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
     pid_h = tl.program_id(1)
-    base = X_ptr + pid_m * sx_m + pid_h * sx_h
+    if pid_h < H_Q:
+        base = Q_ptr + pid_m * sq_m + pid_h * sq_h
+        w_ptr = WQ_ptr
+        eps = q_eps
+    else:
+        base = K_ptr + pid_m * sk_m + (pid_h - H_Q) * sk_h
+        w_ptr = WK_ptr
+        eps = k_eps
 
     offs_half = tl.arange(0, HALF_D)
-
-    # Load both halves — the compiler will coalesce these into one transaction
-    # since they're contiguous in the inner dim.
-    x_first  = tl.load(base + offs_half * sx_d).to(tl.float32)
-    x_second = tl.load(base + (offs_half + HALF_D) * sx_d).to(tl.float32)
-
-    # RMS computed from both halves
-    sumsq = tl.sum(x_first * x_first, axis=0) + tl.sum(x_second * x_second, axis=0)
-    inv_rms = 1.0 / tl.sqrt(sumsq / D + eps)
-
-    w_first  = tl.load(W_norm_ptr + offs_half).to(tl.float32)
-    w_second = tl.load(W_norm_ptr + offs_half + HALF_D).to(tl.float32)
-
-    x_first  = x_first  * inv_rms * w_first
-    x_second = x_second * inv_rms * w_second
-
+    x_first = tl.load(base + offs_half).to(tl.float32)
+    x_second = tl.load(base + offs_half + HALF_D).to(tl.float32)
     pos = tl.load(Pos_ptr + pid_m).to(tl.float32)
-    inv_freq = tl.exp(-tl.log(rope_theta) * (offs_half.to(tl.float32) * 2.0 / D))
-    angle = pos * inv_freq
-    cos = tl.cos(angle)
-    sin = tl.sin(angle)
-
-    out_first  = x_first * cos - x_second * sin
-    out_second = x_second * cos + x_first * sin
-
-    tl.store(base + offs_half * sx_d,             out_first.to(X_ptr.dtype.element_ty))
-    tl.store(base + (offs_half + HALF_D) * sx_d,  out_second.to(X_ptr.dtype.element_ty))
+    out_first, out_second = rms_norm_rope(x_first, x_second, w_ptr, pos, eps, rope_theta, D, HALF_D)
+    tl.store(base + offs_half, out_first.to(Q_ptr.dtype.element_ty))
+    tl.store(base + offs_half + HALF_D, out_second.to(Q_ptr.dtype.element_ty))
 
 
-def fused_qk_norm_rope(x, w_norm, pos, eps, rope_theta):
-    """
-    x:      (M, H, D)  fp32 — modified in place
-    w_norm: (D,)       fp32
-    pos:    (M,)       int32 positions
-    """
-    M, H, D = x.shape
-    assert D % 2 == 0
-    assert x.is_contiguous() or x.stride(-1) == 1
-
-    grid = (M, H)
-    _qk_norm_rope_kernel[grid](
-        x, w_norm, pos.to(torch.int32),
-        eps, rope_theta,
-        x.stride(0), x.stride(1), x.stride(2),
-        D=D, HALF_D=D // 2,
+@torch.library.custom_op("mstar::qk_norm_rope_inplace", mutates_args={"q", "k"})
+def qk_norm_rope_inplace(
+    q: torch.Tensor, k: torch.Tensor,
+    q_weight: torch.Tensor, k_weight: torch.Tensor, pos_ids: torch.Tensor,
+    q_eps: float, k_eps: float, rope_theta: float,
+) -> None:
+    """RMSNorm each head of q ([M, H_q, D]) and k ([M, H_kv, D]) by its own
+    weight, then rotate both by ``pos_ids[:M]`` (non-interleaved RoPE over the
+    full head dim), in place. The head dim must be contiguous; the token and
+    head strides are free, so q and k can be slices of one qkv projection."""
+    num_tokens, num_q_heads, head_dim = q.shape
+    assert k.shape[0] == num_tokens and k.shape[2] == head_dim and head_dim % 2 == 0
+    assert q.stride(2) == 1 and k.stride(2) == 1 and q.dtype == k.dtype
+    if num_tokens == 0:
+        return
+    _qk_pair_norm_rope_kernel[(num_tokens, num_q_heads + k.shape[1])](
+        q, k, q_weight, k_weight, pos_ids,
+        q_eps, k_eps, rope_theta,
+        q.stride(0), q.stride(1), k.stride(0), k.stride(1),
+        H_Q=num_q_heads, D=head_dim, HALF_D=head_dim // 2,
         num_warps=4, num_stages=1,
     )
-    return x
+
+
+@qk_norm_rope_inplace.register_fake
+def _qk_norm_rope_inplace_fake(q, k, q_weight, k_weight, pos_ids, q_eps, k_eps, rope_theta) -> None:
+    return None
 
 
 @triton.jit
-def _norm_rope(x1, x2, w1, w2, eps, pos, rope_theta, offs_half, D: tl.constexpr, elem_ty: tl.constexpr):
-    """RMSNorm then rotate-half RoPE of one head given as its two halves, each
-    rounded to ``elem_ty`` where the unfused path stores it."""
-    inv_rms = 1.0 / tl.sqrt((tl.sum(x1 * x1, axis=0) + tl.sum(x2 * x2, axis=0)) / D + eps)
-    x1 = (x1 * inv_rms * w1).to(elem_ty).to(tl.float32)
-    x2 = (x2 * inv_rms * w2).to(elem_ty).to(tl.float32)
-    angle = pos * tl.exp(-tl.log(rope_theta) * (offs_half.to(tl.float32) * 2.0 / D))
-    cos, sin = tl.cos(angle), tl.sin(angle)
-    return (x1 * cos - x2 * sin).to(elem_ty).to(tl.float32), (x2 * cos + x1 * sin).to(elem_ty).to(tl.float32)
-
-
-@triton.jit(do_not_specialize=["pos"])
-def _depth_attn_kernel(
-    Q_ptr, K_ptr, V_ptr, QW_ptr, KW_ptr, KC_ptr, VC_ptr, O_ptr,
-    pos, eps, rope_theta, sm_scale,
-    sq_b, sq_h, sk_b, sk_h, sv_b, sv_h,
-    sc_b, sc_n, sc_h, so_b, so_h,
-    GROUP: tl.constexpr, D: tl.constexpr, HALF_D: tl.constexpr, BLOCK_N: tl.constexpr,
+def _qk_norm_rope_kv_kernel(
+    Q_ptr, K_ptr, V_ptr, WQ_ptr, WK_ptr, Pos_ptr, Cache_ptr, Page_ptr, Slot_ptr,
+    q_eps, k_eps, rope_theta, n_write,
+    sq_m, sq_h, sk_m, sk_h, sv_m, sv_h,
+    sc_page, sc_kv, sc_slot, sc_head,
+    H_Q: tl.constexpr,
+    H_KV: tl.constexpr,
+    D: tl.constexpr,
+    HALF_D: tl.constexpr,
 ):
-    """One (row, q head) of a one-token decode step at position ``pos`` over a
-    small per-row cache: q/k RMSNorm, RoPE, the new k/v written at ``pos``
-    (by the first q head of each kv head), and attention over ``0..pos``. The
-    new key and value are used from registers, so no program depends on
-    another's write."""
-    b = tl.program_id(0)
-    h = tl.program_id(1)
-    kvh = h // GROUP
-    elem_ty = KC_ptr.dtype.element_ty
+    """``_qk_pair_norm_rope_kernel`` plus the step's KV write: a k head is
+    stored rotated into its (page, slot) of the NHD cache layer, a v head
+    (programs past the q and k heads) copied there; tokens past ``n_write``
+    (the plan's padding) write nothing."""
+    pid_m = tl.program_id(0)
+    pid_h = tl.program_id(1)
     offs_half = tl.arange(0, HALF_D)
-    offs_d = tl.arange(0, D)
-    posf = pos.to(tl.float32)
-    qb = Q_ptr + b * sq_b + h * sq_h
-    q1, q2 = _norm_rope(
-        tl.load(qb + offs_half).to(tl.float32), tl.load(qb + HALF_D + offs_half).to(tl.float32),
-        tl.load(QW_ptr + offs_half).to(tl.float32), tl.load(QW_ptr + HALF_D + offs_half).to(tl.float32),
-        eps, posf, rope_theta, offs_half, D, elem_ty,
-    )
-    kb = K_ptr + b * sk_b + kvh * sk_h
-    k1, k2 = _norm_rope(
-        tl.load(kb + offs_half).to(tl.float32), tl.load(kb + HALF_D + offs_half).to(tl.float32),
-        tl.load(KW_ptr + offs_half).to(tl.float32), tl.load(KW_ptr + HALF_D + offs_half).to(tl.float32),
-        eps, posf, rope_theta, offs_half, D, elem_ty,
-    )
-    vb = V_ptr + b * sv_b + kvh * sv_h
-    v_cur = tl.load(vb + offs_d).to(tl.float32)
-    if h % GROUP == 0:
-        cb = b * sc_b + pos * sc_n + kvh * sc_h
-        tl.store(KC_ptr + cb + offs_half, k1.to(elem_ty))
-        tl.store(KC_ptr + cb + HALF_D + offs_half, k2.to(elem_ty))
-        tl.store(VC_ptr + cb + offs_d, v_cur.to(elem_ty))
-    # the current position, from registers
-    m_i = (tl.sum(q1 * k1, axis=0) + tl.sum(q2 * k2, axis=0)) * sm_scale
-    l_i = 1.0
-    acc = v_cur
-    # earlier positions, from the cache (written by earlier launches)
-    offs_n = tl.arange(0, BLOCK_N)
-    mask_n = offs_n < pos
-    base = b * sc_b + kvh * sc_h + offs_n[:, None] * sc_n
-    kc1 = tl.load(KC_ptr + base + offs_half[None, :], mask=mask_n[:, None], other=0.0).to(tl.float32)
-    kc2 = tl.load(KC_ptr + base + HALF_D + offs_half[None, :], mask=mask_n[:, None], other=0.0).to(tl.float32)
-    qk = (tl.sum(kc1 * q1[None, :], axis=1) + tl.sum(kc2 * q2[None, :], axis=1)) * sm_scale
-    qk = tl.where(mask_n, qk, -float("inf"))
-    m_new = tl.maximum(m_i, tl.max(qk, axis=0))
-    p = tl.exp(qk - m_new)
-    alpha = tl.exp(m_i - m_new)
-    vc = tl.load(VC_ptr + base + offs_d[None, :], mask=mask_n[:, None], other=0.0).to(tl.float32)
-    acc = acc * alpha + tl.sum(p[:, None] * vc, axis=0)
-    l_i = l_i * alpha + tl.sum(p, axis=0)
-    out = acc / l_i
-    tl.store(O_ptr + b * so_b + h * so_h + offs_d, out.to(O_ptr.dtype.element_ty))
+    if pid_h >= H_Q + H_KV:
+        if pid_m < n_write:
+            h = pid_h - H_Q - H_KV
+            src = V_ptr + pid_m * sv_m + h * sv_h
+            page = tl.load(Page_ptr + pid_m).to(tl.int64)
+            slot = tl.load(Slot_ptr + pid_m).to(tl.int64)
+            dst = Cache_ptr + page * sc_page + sc_kv + slot * sc_slot + h * sc_head
+            tl.store(dst + offs_half, tl.load(src + offs_half).to(Cache_ptr.dtype.element_ty))
+            tl.store(dst + offs_half + HALF_D, tl.load(src + offs_half + HALF_D).to(Cache_ptr.dtype.element_ty))
+        return
+    if pid_h < H_Q:
+        base = Q_ptr + pid_m * sq_m + pid_h * sq_h
+        w_ptr = WQ_ptr
+        eps = q_eps
+    else:
+        base = K_ptr + pid_m * sk_m + (pid_h - H_Q) * sk_h
+        w_ptr = WK_ptr
+        eps = k_eps
+
+    x_first = tl.load(base + offs_half).to(tl.float32)
+    x_second = tl.load(base + offs_half + HALF_D).to(tl.float32)
+    pos = tl.load(Pos_ptr + pid_m).to(tl.float32)
+    out_first, out_second = rms_norm_rope(x_first, x_second, w_ptr, pos, eps, rope_theta, D, HALF_D)
+
+    if pid_h < H_Q:
+        tl.store(base + offs_half, out_first.to(Q_ptr.dtype.element_ty))
+        tl.store(base + offs_half + HALF_D, out_second.to(Q_ptr.dtype.element_ty))
+    elif pid_m < n_write:
+        h = pid_h - H_Q
+        page = tl.load(Page_ptr + pid_m).to(tl.int64)
+        slot = tl.load(Slot_ptr + pid_m).to(tl.int64)
+        dst = Cache_ptr + page * sc_page + slot * sc_slot + h * sc_head
+        tl.store(dst + offs_half, out_first.to(Cache_ptr.dtype.element_ty))
+        tl.store(dst + offs_half + HALF_D, out_second.to(Cache_ptr.dtype.element_ty))
 
 
-def _depth_decode_attention_torch(q, k, v, q_norm_weight, k_norm_weight, eps, rope_theta, k_cache, v_cache, pos):
-    """``depth_decode_attention`` in torch ops, rounding where the kernel does (CPU path)."""
-    D = q.shape[-1]
-    half = D // 2
-    inv_freq = rope_theta ** (-torch.arange(0, half, device=q.device, dtype=torch.float32) * 2.0 / D)
-    cos, sin = torch.cos(pos * inv_freq), torch.sin(pos * inv_freq)
-
-    def norm_rope(x, w):
-        xf = x.float()
-        xf = (xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps) * w.float()).to(x.dtype).float()
-        x1, x2 = xf[..., :half], xf[..., half:]
-        return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1).to(x.dtype)
-
-    k_cache[:, pos] = norm_rope(k, k_norm_weight)
-    v_cache[:, pos] = v
-    out = torch.nn.functional.scaled_dot_product_attention(
-        norm_rope(q, q_norm_weight).unsqueeze(2).float(),
-        k_cache[:, :pos + 1].transpose(1, 2).float(),
-        v_cache[:, :pos + 1].transpose(1, 2).float(),
-        enable_gqa=True,
-    )
-    return out.squeeze(2).to(q.dtype)
-
-
-@torch.compiler.disable
-def depth_decode_attention(q, k, v, q_norm_weight, k_norm_weight, eps, rope_theta, k_cache, v_cache, pos):
-    """One decode position of a short per-row sequence (Qwen3-TTS's CodePredictor
-    walks one 16-token codec frame): q/k RMSNorm + RoPE at ``pos``, the new k/v
-    written into the caches at ``pos``, and attention over positions ``0..pos``,
-    in one kernel instead of five (two norms, RoPE, two cache copies, attention).
-
-    q: (B, H_q, D), k/v: (B, H_kv, D), last dim contiguous (views of a fused QKV
-    are fine). k_cache/v_cache: (B, S, H_kv, D) with S > pos. Returns (B, H_q, D).
-    """
-    if not q.is_cuda:
-        return _depth_decode_attention_torch(
-            q, k, v, q_norm_weight, k_norm_weight, eps, rope_theta, k_cache, v_cache, pos,
-        )
-    B, H_q, D = q.shape
-    H_kv = k.shape[1]
-    S = k_cache.shape[1]
-    assert q.stride(-1) == k.stride(-1) == v.stride(-1) == 1 and k_cache.stride(-1) == 1
-    assert k_cache.stride() == v_cache.stride() and 0 <= pos < S and D % 2 == 0
-    out = torch.empty((B, H_q, D), dtype=q.dtype, device=q.device)
-    _depth_attn_kernel[(B, H_q)](
-        q, k, v, q_norm_weight, k_norm_weight, k_cache, v_cache, out,
-        pos, float(eps), float(rope_theta), 1.0 / D ** 0.5,
+@torch.library.custom_op("mstar::qk_norm_rope_kv_write", mutates_args={"q", "cache_layer"})
+def qk_norm_rope_kv_write(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+    q_weight: torch.Tensor, k_weight: torch.Tensor, pos_ids: torch.Tensor,
+    cache_layer: torch.Tensor, page_idx: torch.Tensor, slot_idx: torch.Tensor, n_write: int,
+    q_eps: float, k_eps: float, rope_theta: float,
+) -> None:
+    """``qk_norm_rope_inplace`` on q, and the step's KV write in the same
+    launch: k normed and rotated, and v, stored at each token's (page, slot)
+    of one NHD cache layer ``[pages, 2, page_size, H_kv, D]`` (``k`` itself
+    is left as it was). The first ``n_write`` tokens are written."""
+    num_tokens, num_q_heads, head_dim = q.shape
+    num_kv_heads = k.shape[1]
+    assert k.shape == v.shape and k.shape[0] == num_tokens and k.shape[2] == head_dim
+    assert q.stride(2) == 1 and k.stride(2) == 1 and v.stride(2) == 1
+    assert cache_layer.shape[-2:] == (num_kv_heads, head_dim) and cache_layer.stride(-1) == 1
+    if num_tokens == 0:
+        return
+    _qk_norm_rope_kv_kernel[(num_tokens, num_q_heads + 2 * num_kv_heads)](
+        q, k, v, q_weight, k_weight, pos_ids, cache_layer, page_idx, slot_idx,
+        q_eps, k_eps, rope_theta, n_write,
         q.stride(0), q.stride(1), k.stride(0), k.stride(1), v.stride(0), v.stride(1),
-        k_cache.stride(0), k_cache.stride(1), k_cache.stride(2), out.stride(0), out.stride(1),
-        GROUP=H_q // H_kv, D=D, HALF_D=D // 2, BLOCK_N=triton.next_power_of_2(S),
-        # one warp per (row, head): 3.6 us a call at 64 rows x 16 heads on an H200, 14 us with four
-        num_warps=1,
+        cache_layer.stride(0), cache_layer.stride(1), cache_layer.stride(2), cache_layer.stride(3),
+        H_Q=num_q_heads, H_KV=num_kv_heads, D=head_dim, HALF_D=head_dim // 2,
+        num_warps=4, num_stages=1,
     )
-    return out
+
+
+@qk_norm_rope_kv_write.register_fake
+def _qk_norm_rope_kv_write_fake(q, k, v, q_weight, k_weight, pos_ids, cache_layer, page_idx, slot_idx,
+                                n_write, q_eps, k_eps, rope_theta) -> None:
+    return None
 
 
 # ============================================================================

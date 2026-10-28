@@ -1,8 +1,5 @@
 model: "qwen3_5_9b"
 max_seq_len: 32768
-# GIL switch interval of the API server process (see docs/serving.rst):
-# token streaming keeps three of its threads busy
-api_switch_interval_s: 0.001
 node_groups:
   # A whole replica per GPU (text, images and video); the conductor sends
   # each request to the replica serving fewer. For image and video traffic

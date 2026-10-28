@@ -20,8 +20,7 @@ a long one, and the budget bounds a forward's memory.
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable, Mapping
-from contextlib import contextmanager
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -40,24 +39,6 @@ from mstar.engine.resources.step import Segment, SlotLease, SubmoduleStep
 from mstar.model.omnilingual_asr.components.wav2vec2 import Wav2Vec2CTC
 from mstar.model.omnilingual_asr.config import ENCODER_ATTN, SAMPLE_RATE, TOKEN_IDS, WAVEFORM
 from mstar.model.submodule_base import ModelInputsFromEngine, NodeInputs, NodeSubmodule
-from mstar.platforms.compile import with_inductor_overrides
-
-
-@contextmanager
-def _full_fp32_matmuls(enabled: bool):
-    """The engine runs fp32 matmuls as TF32 (``set_float32_matmul_precision('high')``);
-    an fp32 deployment of this model asks for full fp32, which is what the
-    reference computes."""
-    if not enabled:
-        yield
-        return
-    previous = torch.get_float32_matmul_precision()
-    torch.set_float32_matmul_precision("highest")
-    try:
-        yield
-    finally:
-        torch.set_float32_matmul_precision(previous)
-
 
 # The packed encoder (layers, final norm, CTC head, argmax) as a piecewise
 # capture region
@@ -67,7 +48,7 @@ ENCODER_LOOP = "encoder_loop"
 class OmniASRCTCSubmodule(NodeSubmodule):
     # Every request has its own length, so the engine's compile of the whole
     # forward would recompile per shape; the encoder runs eagerly. The conv
-    # feature extractor alone is compiled (below), dynamic from the first call.
+    # feature extractor alone is compiled (``compile_regions``).
     disable_torch_compile = True
     # The model runs in its own dtype end to end, as the reference does (only
     # the conv stack's LayerNorms upcast to fp32), not under autocast.
@@ -82,26 +63,24 @@ class OmniASRCTCSubmodule(NodeSubmodule):
         super().__init__()
         self.model = model
         self.dtype = next(model.parameters()).dtype
+        if self.dtype == torch.float32:
+            # an fp32 deployment computes what the reference does: full fp32
+            # matmuls, not the engine's TF32 default (the engine applies it)
+            self.float32_matmul_precision = "highest"
         self._max_batch_size = max_batch_size
         self._max_batch_samples = int(max_batch_seconds * SAMPLE_RATE)
         self._max_batch_frames = model.frame_lengths([self._max_batch_samples])[0]
-        # Eager, each conv layer's channel LayerNorm (in fp32, over a transposed
-        # copy) costs more than the conv: about half the GPU time of a batched
-        # step. Inductor fuses the transposes, the norm and the GELU, under the
-        # platform's inductor settings as the engine's compiles are.
-        self._compiled_features = with_inductor_overrides(
-            torch.compile(model.encoder_frontend.feature_extractor, dynamic=True)
-        )
-        self._attn_fns: dict[int, Callable] = {}
 
-    def warm_compile(self, device: str) -> None:
-        """Compile the feature extractor at load rather than on a live request:
-        one graph for a lone clip (size-1 dims specialize) and the dynamic one."""
-        if torch.device(device).type == "cpu":
-            return
-        with torch.no_grad():
-            for rows in (1, 2):
-                self._compiled_features(torch.zeros(rows, SAMPLE_RATE, dtype=self.dtype, device=device))
+    def compile_regions(self) -> dict[str, list[tuple]]:
+        """Eager, each conv layer's channel LayerNorm (in fp32, over a transposed
+        copy) costs more than the conv: about half the GPU time of a batched
+        step, and inductor fuses the transposes, the norm and the GELU. Warmed
+        at start-up for a lone clip (size-1 dims specialize) and the dynamic
+        graph."""
+        device = self.get_device()
+        return {"model.encoder_frontend.feature_extractor": [
+            (torch.zeros(rows, SAMPLE_RATE, dtype=self.dtype, device=device),) for rows in (1, 2)
+        ]}
 
     def prepare_inputs(
         self,
@@ -154,20 +133,13 @@ class OmniASRCTCSubmodule(NodeSubmodule):
         def make_static_inputs(shape: PiecewiseCaptureShape) -> dict[str, torch.Tensor]:
             return {"hidden": torch.zeros(shape.total_tokens, model_dim, dtype=self.dtype, device=device)}
 
-        def declare_step(request_ids: list[str], seq_lens: list[int]) -> SubmoduleStep:
-            (rid,) = request_ids
-            return SubmoduleStep(
-                segments=[Segment(request_id=rid, label="main", span=n) for n in seq_lens],
-                steps={ENCODER_ATTN: AttentionStep(causal=False)},
-            )
-
         return {
             ENCODER_LOOP: PiecewisePackedConfig(
                 capture_fn=self._capture_encoder,
                 make_static_inputs=make_static_inputs,
-                declare_step=declare_step,
+                attn_key=ENCODER_ATTN,
                 lease_before_step=True,
-                can_lease=lambda inputs: self._packs([inp.input_seq_len for inp in inputs]),
+                can_lease=self._fits_capture,
                 one_row_per_step=True,
                 total_tokens=self.ENCODER_FRAME_BUCKETS,
                 capture_batch_sizes=[1],
@@ -176,16 +148,8 @@ class OmniASRCTCSubmodule(NodeSubmodule):
 
     def _capture_encoder(self, inp: PiecewiseCallInputs) -> dict[str, torch.Tensor]:
         """The captured region: reads the runner's buffer, never rebinds."""
-        attn = self._attn_fn(inp.resources[ENCODER_ATTN])
+        attn = functools.partial(inp.resources[ENCODER_ATTN].run, label="main")
         return {"ids": self.model.encode_packed(inp.static_inputs["hidden"], attn).argmax(dim=-1)}
-
-    def _attn_fn(self, resource) -> Callable:
-        """The resource's attention over the step's segments, one callable per
-        bound resource."""
-        fn = self._attn_fns.get(id(resource))
-        if fn is None:
-            fn = self._attn_fns[id(resource)] = functools.partial(resource.run, label="main")
-        return fn
 
     def max_batch_size(self, graph_walk: str) -> int:
         del graph_walk
@@ -217,6 +181,28 @@ class OmniASRCTCSubmodule(NodeSubmodule):
                 groups.append([row])
         return groups
 
+    def _padded_groups(self, waveforms: list[torch.Tensor]):
+        """Each sub-batch as ``(rows, batch, lengths)``: its waveforms
+        zero-padded to the longest, and their lengths (None when none is
+        padded)."""
+        lengths = [w.shape[0] for w in waveforms]
+        for group in self.sub_batches(lengths):
+            group_lens = [lengths[row] for row in group]
+            longest = max(group_lens)
+            batch = waveforms[group[0]].new_zeros(len(group), longest)
+            for i, row in enumerate(group):
+                batch[i, : lengths[row]] = waveforms[row]
+            yield group, batch, group_lens if any(n < longest for n in group_lens) else None
+
+    def _fits_capture(self, inputs: list[NodeInputs]) -> bool:
+        """Whether a step replays the captured encoder: it packs, and its rows,
+        one segment each under the replay's one row, fit the attention
+        resource's per-request ceiling (read from it, so a YAML override
+        holds). A step over the ceiling encodes packed eagerly."""
+        return len(inputs) <= self.node_resources[ENCODER_ATTN].max_segments_per_request and self._packs(
+            [inp.input_seq_len for inp in inputs]
+        )
+
     def _packs(self, frames: list[int]) -> bool:
         """Whether a step's rows encode packed, in one call: their frames fit
         the audio budget. A step over it encodes padded per sub-batch instead,
@@ -224,44 +210,31 @@ class OmniASRCTCSubmodule(NodeSubmodule):
         plan per call."""
         return sum(frames) <= self._max_batch_frames
 
-    def _features_fn(self, batch: torch.Tensor):
-        # CPU (tests) stays eager
-        return self._compiled_features if batch.device.type != "cpu" else None
-
     def _transcribe_packed(
         self, waveforms: list[torch.Tensor], attn, engine_inputs: ModelInputsFromEngine,
     ) -> list[torch.Tensor]:
         """Argmax ids per row: the conv frontend runs padded per sub-batch, then
         every row's valid frames go through the encoder packed, in request order
         (the order `declare_step` laid the segments out in)."""
-        lengths = [w.shape[0] for w in waveforms]
         rows: list[torch.Tensor | None] = [None] * len(waveforms)
-        for group in self.sub_batches(lengths):
-            group_lens = [lengths[row] for row in group]
-            longest = max(group_lens)
-            batch = waveforms[group[0]].new_zeros(len(group), longest)
-            for i, row in enumerate(group):
-                batch[i, : lengths[row]] = waveforms[row]
-            padded = any(n < longest for n in group_lens)
-            x, frame_lens, _ = self.model.frontend(
-                batch, group_lens if padded else None, features=self._features_fn(batch),
-            )
+        for group, batch, group_lens in self._padded_groups(waveforms):
+            x, frame_lens, _ = self.model.frontend(batch, group_lens)
             for i, (row, n) in enumerate(zip(group, frame_lens, strict=True)):
                 rows[row] = x[i, :n]
         packed = rows[0] if len(rows) == 1 else torch.cat(rows)
         frames = [r.shape[0] for r in rows]
-        runner = engine_inputs.piecewise_runners.get(ENCODER_LOOP)
-        if runner is not None and runner.can_run(1, packed.shape[0]):
-            # all of the step's segments under one row; a copy, since the
-            # output buffer is overwritten by the next step's replay
+        if ENCODER_LOOP in engine_inputs.piecewise_leases:
+            runner = engine_inputs.piecewise_runners[ENCODER_LOOP]
+            # all of the step's segments under one row (`one_row_per_step`);
+            # a copy, since the output buffer is overwritten by the next
+            # step's replay
             ids = runner.run(
                 static_inputs={"hidden": packed},
-                request_ids=[engine_inputs.request_ids[0]],
+                request_ids=engine_inputs.request_ids,
                 seq_lens=frames,
-                real_bs=1,
             ).get("ids")
         else:
-            ids = self.model.encode_packed(packed, self._attn_fn(attn)).argmax(dim=-1)
+            ids = self.model.encode_packed(packed, functools.partial(attn.run, label="main")).argmax(dim=-1)
         return list(ids.split(frames))
 
     def _transcribe(
@@ -273,17 +246,8 @@ class OmniASRCTCSubmodule(NodeSubmodule):
         if attn is not None and self._packs(self.model.frame_lengths(lengths)):
             return self._transcribe_packed(waveforms, attn, engine_inputs)
         out: list[torch.Tensor | None] = [None] * len(waveforms)
-        for group in self.sub_batches(lengths):
-            group_lens = [lengths[row] for row in group]
-            longest = max(group_lens)
-            batch = waveforms[group[0]].new_zeros(len(group), longest)
-            for i, row in enumerate(group):
-                batch[i, : lengths[row]] = waveforms[row]
-            padded = any(n < longest for n in group_lens)
-            with _full_fp32_matmuls(self.dtype == torch.float32 and batch.is_cuda):
-                logits, frame_lens = self.model(
-                    batch, group_lens if padded else None, features=self._features_fn(batch),
-                )
+        for group, batch, group_lens in self._padded_groups(waveforms):
+            logits, frame_lens = self.model(batch, group_lens)
             ids = logits.argmax(dim=-1)
             for i, (row, n) in enumerate(zip(group, frame_lens, strict=True)):
                 out[row] = ids[i, :n]

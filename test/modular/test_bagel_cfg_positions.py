@@ -27,7 +27,7 @@ from mstar.engine.resources import PagedKVConfig, PositionConfig, StepContext, S
 from mstar.engine.resources.kv.manager import KVManager
 from mstar.engine.resources.kv.transfer import TransferEngineInfo
 from mstar.engine.resources.position.manager import RopeManager
-from mstar.model.bagel.submodules import MIXED_TEXT, LLMSubmodule, active_labels
+from mstar.model.bagel.submodules import CFG_BRANCHES, MIXED_TEXT, LLMSubmodule, active_labels
 from mstar.model.submodule_base import ARNodeInputs
 
 pytestmark = pytest.mark.skipif(
@@ -76,6 +76,9 @@ class _Harness:
     def run(self, graph_walk: str, span: int, pos_ids=None) -> None:
         inputs = ARNodeInputs(input_seq_len=span)
         inputs.resource_step_info = True  # requires_cfg
+        if graph_walk.startswith("image_gen"):
+            # every label a guided request holds, as an in-interval step stamps it
+            inputs.kwargs[CFG_BRANCHES] = 3
         if pos_ids is not None:
             inputs.custom_pos_ids = pos_ids
         step = LLMSubmodule.declare_step(
@@ -189,7 +192,7 @@ def test_published_positions_travel_to_a_branch_on_another_node(harness):
 
     remote = _Harness(torch.device("cuda:0"))
     published = harness.rope.publish(RID)
-    remote.rope.admit_retrieve(RID, "LLM_cfg_text", "image_gen_cfg", published)
+    remote.rope.admit_retrieve(RID, "LLM_cfg_text", "image_gen_cfg2", published)
 
     assert remote.positions() == harness.positions()
 

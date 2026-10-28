@@ -1,5 +1,5 @@
-"""Ragged attention checks that need no GPU: head-dimension padding and head
-sharding."""
+"""Ragged attention checks that need no GPU: head-dimension padding, head
+sharding and the custom op's manager registry."""
 
 import sys
 from types import SimpleNamespace
@@ -10,7 +10,7 @@ import torch
 
 from mstar.engine.resources.attn.ragged.wrappers import (
     SUPPORTED_HEAD_DIMS,
-    RaggedPrefillWrapper,
+    FlashInferRaggedPrefillWrapper,
     padded_head_dim,
 )
 from mstar.engine.resources.attn.wrappers import (
@@ -44,7 +44,7 @@ def test_padded_head_dim_rejects_oversized():
             dict(page_size=16, batch_size=2, max_num_pages=4),
         ),
         (
-            RaggedPrefillWrapper, "BatchPrefillWithRaggedKVCacheWrapper",
+            FlashInferRaggedPrefillWrapper, "BatchPrefillWithRaggedKVCacheWrapper",
             dict(max_num_segments=2, max_total_tokens=16),
         ),
     ],
@@ -117,21 +117,125 @@ def test_mixed_wrapper_builds_both_halves_in_graph_mode(monkeypatch):
     assert prefill.call_args.kwargs["use_cuda_graph"] is True
 
 
-@pytest.mark.parametrize("shard_heads,expected", [(True, 2), (False, 4)])
-def test_shard_heads_false_keeps_every_head(shard_heads, expected):
-    """A node whose ranks split something other than heads (guidance branches)
-    keeps the full head count on every rank."""
+def _load_heads(kind, splits_heads, tp=1, sp=2):
+    """Load one resource of ``kind`` (4 heads) for nodes declaring
+    ``splits_heads`` (node -> flag) on a tp x sp lockstep instance, and
+    return the heads one rank holds."""
+    from mstar.engine.engine import Engine
+    from mstar.engine.resources import RaggedAttentionConfig, RaggedAttentionSpec
+    from mstar.engine.resources.recurrent.config import (
+        RecurrentBlockConfig,
+        RecurrentStateConfig,
+        RecurrentStateSpec,
+    )
+    from mstar.model.submodule_base import NodeSubmodule
+
+    class _Node(NodeSubmodule):
+        def __init__(self, splits):
+            super().__init__()
+            self.splits_heads = splits
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+
+        def prepare_inputs(self, *args, **kwargs):
+            raise NotImplementedError
+
+        def forward(self, *args, **kwargs):
+            raise NotImplementedError
+
+    class _Rank:
+        rank = 0
+
+        def __init__(self, world_size):
+            self.world_size = world_size
+
+        def barrier(self):
+            pass
+
+    class _Groups:
+        def get_joint_group_for_node(self, node):
+            return SimpleNamespace(world_size=tp * sp, rank=0, tp_group=_Rank(tp), sp_group=_Rank(sp))
+
+        def get_instance_world_size_for_node(self, node):
+            return tp * sp
+
+        def get_instance_rank_for_node(self, node):
+            return 0
+
+        def resource_needs_remote_transfer(self, nodes, local_nodes):
+            return False
+
+    nodes = set(splits_heads)
+    if kind == "ragged":
+        spec = RaggedAttentionSpec(
+            resource_key="res", nodes=nodes,
+            config=RaggedAttentionConfig(num_qo_heads=4, num_kv_heads=4, head_dim=72, dtype=torch.bfloat16),
+        )
+    else:
+        spec = RecurrentStateSpec("res", nodes, RecurrentStateConfig(
+            num_layers=1, max_slots=2,
+            blocks={"state": RecurrentBlockConfig(shape=(4, 8), dtype=torch.float32, shard_dims=(0,))},
+        ))
+    engine = Engine(None, autocast_dtype=None)
+    engine.load_model(
+        submodules={node: _Node(splits) for node, splits in splits_heads.items()}, specs=[spec],
+        parallel_groups=_Groups(), device=torch.device("cpu"), transfer_engine_info=None,
+    )
+    if kind == "ragged":
+        return engine._resources["res"]._kwargs["num_qo_heads"]
+    return spec.config.blocks["state"].shape[0]
+
+
+@pytest.mark.parametrize("tp,sp,splits_heads,heads", [
+    (1, 2, True, 2), (1, 2, False, 4), (2, 1, False, 2), (2, 2, False, 2),
+])
+@pytest.mark.parametrize("kind", ["ragged", "recurrent"])
+def test_a_node_whose_ranks_split_other_work_keeps_every_head(kind, tp, sp, splits_heads, heads):
+    """Every resource the engine builds for a multi-rank node holds one rank's
+    slice of the heads, whatever the resource kind. A node whose SP ranks
+    split something else (``splits_heads = False``, e.g. guidance branches)
+    keeps every head across them; its TP ranks still split them."""
+    assert _load_heads(kind, {"dit": splits_heads}, tp=tp, sp=sp) == heads
+
+
+def test_nodes_sharing_a_resource_must_agree_on_splitting_heads():
+    """The resource is built once for every node it serves; nodes that would
+    size it differently are refused at load rather than one picked by set
+    order, which could differ across ranks."""
+    with pytest.raises(ValueError, match="split its heads differently"):
+        _load_heads("ragged", {"a": True, "b": False})
+
+
+def test_resource_info_built_without_head_shards_shards_over_its_group():
+    """Built outside the engine (a reference test, the checkpoint validator),
+    an ``EngineResourceInfo`` over a two-rank group gives one rank's heads."""
     from mstar.engine.resources import RaggedAttentionConfig, RaggedAttentionSpec
     from mstar.engine.resources.base import EngineResourceInfo, build_resource
 
     spec = RaggedAttentionSpec(
-        resource_key="ragged", nodes={"encoder"},
-        config=RaggedAttentionConfig(num_qo_heads=4, num_kv_heads=4, head_dim=72, shard_heads=shard_heads),
+        resource_key="by_hand", nodes={"encoder"},
+        config=RaggedAttentionConfig(num_qo_heads=4, num_kv_heads=4, head_dim=64),
     )
-    mgr = build_resource(
-        spec,
-        EngineResourceInfo(
-            device=torch.device("cpu"), kv_dtype=torch.bfloat16, joint_comm_group=SimpleNamespace(world_size=2),
-        ),
+    mgr = build_resource(spec, EngineResourceInfo(
+        device=torch.device("cpu"), kv_dtype=torch.bfloat16, joint_comm_group=SimpleNamespace(world_size=2),
+    ))
+    assert mgr._kwargs["num_qo_heads"] == 2
+
+
+def test_a_dropped_manager_leaves_the_op_registry():
+    """The custom op finds a manager by key; the registry must not keep one
+    alive past the engine that built it."""
+    import gc
+
+    from mstar.engine.resources import RaggedAttentionConfig, RaggedAttentionSpec
+    from mstar.engine.resources.attn.ragged.base import _MANAGERS
+    from mstar.engine.resources.base import EngineResourceInfo, build_resource
+
+    spec = RaggedAttentionSpec(
+        resource_key="dropped", nodes={"encoder"},
+        config=RaggedAttentionConfig(num_qo_heads=4, num_kv_heads=4, head_dim=64),
     )
-    assert mgr._kwargs["num_qo_heads"] == expected
+    mgr = build_resource(spec, EngineResourceInfo(device=torch.device("cpu"), kv_dtype=torch.bfloat16))
+    assert _MANAGERS["dropped"] is mgr
+    del mgr
+    gc.collect()
+    assert "dropped" not in _MANAGERS

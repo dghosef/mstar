@@ -1,6 +1,6 @@
 """FLUX.2 [klein] node submodules (four nodes, one optional engine resource).
 
-    text_encoder -> KleinTextEncoderSubmodule  native Qwen3 taps; batches every request (fixed 512 tokens)
+    text_encoder -> Qwen3TextEncoderSubmodule  native Qwen3 taps over all 512 padded positions (shared node)
     vae_encoder  -> KleinVaeEncoderSubmodule   reference images -> normalized packed latent tokens (edits)
     dit          -> KleinDenoiseSubmodule      DenoiseLoopSubmodule + the klein transformer + Euler step
     vae_decoder  -> KleinVaeDecoderSubmodule   packed tokens -> uint8 image; batches equal shapes
@@ -22,10 +22,11 @@ from torch import nn
 
 from mstar.communication.tensors import NameToTensorList
 from mstar.conductor.request_info import CurrentForwardPassInfo
+from mstar.engine.accelerator_graph_config import geometric_batch_sizes
 from mstar.model.components.batched_rows import BatchedRows
 from mstar.model.components.diffusion.compile_utils import ExactOps, compile_transformer_forward
 from mstar.model.components.diffusion.decode_utils import (
-    VAE_DECODE_BATCH_SIZES,
+    VAE_MAX_DECODE_BATCH,
     compile_vae_decode,
     decode_in_chunks,
 )
@@ -41,6 +42,7 @@ from mstar.model.components.diffusion.image_io import (
     unpack_latents,
     unpatchify_latents,
 )
+from mstar.model.components.diffusion.qwen3.submodule import TEXT_EMBEDS
 from mstar.model.components.diffusion.rope import MultiAxisRoPE
 from mstar.model.flux2_klein.config import Flux2KleinConfig
 from mstar.model.submodule_base import NodeInputs, NodeSubmodule
@@ -48,9 +50,6 @@ from mstar.model.submodule_base import NodeInputs, NodeSubmodule
 logger = logging.getLogger(__name__)
 
 # Edge names shared with the model file.
-TEXT_INPUTS, TEXT_MASK, TEXT_EMBEDS = "text_inputs", "text_mask", "text_embeds"
-# step metadata: whether the tokenized prompt is padded, settled on the host at tokenization
-TEXT_PADDED = "text_padded"
 IMAGE_INPUTS, REF_LATENTS, IMAGE_OUTPUT = "image_inputs", "ref_latents", "image_output"
 
 
@@ -82,102 +81,6 @@ def shape_from_metadata(config: Flux2KleinConfig, step_metadata: dict) -> KleinS
         text_len=config.text_encoder.max_sequence_length,
         ref_grids=tuple(tuple(g) for g in step_metadata.get("ref_grids", ())),
     )
-
-
-# ---------------------------------------------------------------------------
-# text_encoder
-# ---------------------------------------------------------------------------
-
-class KleinTextEncoderSubmodule(BatchedRows, NodeSubmodule):
-    """Qwen3 hidden-state taps over the chat-templated, 512-token right-padded prompt.
-
-    Every request has the same token count, so the node batches unconditionally:
-    ``text_inputs`` / ``text_mask`` rows stack into ``[B, 512]`` and each request gets
-    its ``[1, 512, joint_dim]`` slice of the output. All 512 positions (pad tokens
-    included) are emitted, as the reference feeds them all to the DiT.
-
-    With ``capture_batch_sizes`` the encoder is captured per batch size. Eager it is
-    launch-bound (~1.6k small kernels, ~10 ms of GPU work in a ~50 ms forward at B=1).
-    Only the padded-prompt path is captured: whether a prompt has padding is settled
-    on the host at tokenization (``TEXT_PADDED`` in the step metadata), and a batch
-    holding a prompt that fills all 512 tokens runs the encoder's unmasked path eagerly.
-    """
-
-    disable_torch_compile = True
-    output_keys = (TEXT_EMBEDS,)
-    keep_batch_dim = True
-
-    def __init__(
-        self, encoder: nn.Module, config: Flux2KleinConfig, max_batch_size: int = 16,
-        capture_walk: str | None = None, capture_batch_sizes: Sequence[int] = (),
-    ):
-        super().__init__()
-        self.encoder = encoder
-        self.config = config
-        self._max_batch_size = max_batch_size
-        self._capture_walk = capture_walk
-        self._capture_batch_sizes = [b for b in capture_batch_sizes if b <= max_batch_size]
-
-    def prepare_inputs(self, graph_walk, fwd_info, inputs: NameToTensorList, **kwargs) -> NodeInputs:
-        return NodeInputs(
-            tensor_inputs={TEXT_INPUTS: inputs[TEXT_INPUTS][0], TEXT_MASK: inputs[TEXT_MASK][0]},
-            input_seq_len=self.config.text_encoder.max_sequence_length,
-            # None (not settled at tokenization) keeps the encoder's own device-side check
-            resource_step_info=fwd_info.step_metadata.get(TEXT_PADDED),
-        )
-
-    def can_batch(self, batch, model_inputs) -> bool:
-        return len(model_inputs) > 1
-
-    def max_batch_size(self, graph_walk: str):
-        return self._max_batch_size
-
-    def cg_key_info(self, graph_walk: str, per_request_info, per_request_input_metadata=None, **kwargs):
-        """True when every real row is a padded prompt: the only captured path. Padding rows
-        of a captured bucket carry no step metadata."""
-        del graph_walk, per_request_input_metadata, kwargs
-        flags = [info.step_metadata.get(TEXT_PADDED) for info in per_request_info.values() if info.step_metadata]
-        return bool(flags) and all(flag is True for flag in flags)
-
-    def preprocess(self, graph_walk, engine_inputs, inputs: list[NodeInputs]) -> dict:
-        flags = [inp.resource_step_info for inp in inputs]
-        return {
-            TEXT_INPUTS: torch.stack([inp.tensor_inputs[TEXT_INPUTS] for inp in inputs]),
-            TEXT_MASK: torch.stack([inp.tensor_inputs[TEXT_MASK] for inp in inputs]),
-            # any padded row puts the batch on the masked path, as the reference batches it
-            "padded": None if None in flags else any(flags),
-        }
-
-    def run_batch(self, text_inputs: torch.Tensor, text_mask: torch.Tensor, padded: bool | None = None, **kwargs):
-        device = self.get_device()
-        embeds = self.encoder(
-            text_inputs.to(device=device, dtype=torch.long), text_mask.to(device=device), padded=padded,
-        )
-        return {TEXT_EMBEDS: embeds.to(self.encoder.dtype)}
-
-    def get_accelerator_graph_configs(self, device: torch.device, tp_world_size: int = 1):
-        if self._capture_walk is None or not self._capture_batch_sizes:
-            return []
-        from mstar.engine.accelerator_graph_config import BatchedAcceleratorGraphConfig
-
-        seq = self.config.text_encoder.max_sequence_length
-        # a padding row's prompt: one real token, so every query row attends to something
-        mask = torch.zeros(seq, dtype=torch.long, device=device)
-        mask[0] = 1
-        single = NodeInputs(
-            tensor_inputs={TEXT_INPUTS: torch.zeros(seq, dtype=torch.long, device=device), TEXT_MASK: mask},
-            input_seq_len=seq, resource_step_info=True,
-        )
-        return [BatchedAcceleratorGraphConfig(
-            capture_graph_walk=self._capture_walk,
-            single_request_inputs=single,
-            additional_key_info=True,
-            compile=False,
-            capture_batch_sizes=list(self._capture_batch_sizes),
-            # batches past the largest capture (or holding an unpadded prompt) run eager
-            caps_eager_batch_size=False,
-            input_seq_dims={TEXT_INPUTS: 0, TEXT_MASK: 0},
-        )]
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +134,9 @@ class KleinDenoiseSubmodule(DenoiseLoopSubmodule):
     (``capture_buckets``) record those kernels together with the Euler update.
     """
 
+    # the noise is a function of the latent grid and the seed alone
+    PREFETCH_SEEDS = True
+
     def __init__(
         self,
         transformer: nn.Module,
@@ -268,25 +174,12 @@ class KleinDenoiseSubmodule(DenoiseLoopSubmodule):
             self.config.scheduler, int(fwd_info.step_metadata["num_inference_steps"]), bucket_key.image_tokens,
         )
 
-    def seed_to_device(self, graph_walk: str) -> bool:
-        # pack_latents is a reshape + permute, so it is value-identical run after the
-        # copy rather than before it (measured: test_diffusion_noise_stager.py). That
-        # lets the draw go straight into the stager's pinned buffer, skipping both the
-        # host memcpy and the pageable copy's host stall. Return False to fall back.
-        del graph_walk
-        return True
-
     def seed_latents(self, fwd_info, bucket_key: KleinShape, generator: torch.Generator) -> torch.Tensor:
         # randn_tensor parity: drawn in the packed [C, h, w] layout in bf16 on the CPU
         # generator, then packed row-major to tokens.
         h, w = bucket_key.grid
         shape = (1, self.config.transformer.in_channels, h, w)
-        if self.seed_to_device(fwd_info.graph_walk):
-            noise = self.noise_stager(self.transformer.dtype).randn_to_device(
-                shape, fwd_info.random_seed, self.get_device(),
-            )
-        else:
-            noise = torch.randn(shape, generator=generator, dtype=self.transformer.dtype)
+        noise = torch.randn(shape, generator=generator, dtype=self.transformer.dtype)
         return pack_latents(noise)[0]
 
     def request_inputs(self, fwd_info, inputs: NameToTensorList, bucket_key: KleinShape) -> dict[str, torch.Tensor]:
@@ -355,7 +248,7 @@ class KleinVaeDecoderSubmodule(BatchedRows, NodeSubmodule):
 
     def __init__(
         self, vae: nn.Module, config: Flux2KleinConfig, max_batch_size: int = 8, compile_decode: bool = False,
-        warmup_grids: Sequence[tuple[int, int]] = (), decode_batch_sizes: Sequence[int] = VAE_DECODE_BATCH_SIZES,
+        warmup_grids: Sequence[tuple[int, int]] = (),
     ):
         super().__init__()
         self.vae = vae
@@ -368,7 +261,9 @@ class KleinVaeDecoderSubmodule(BatchedRows, NodeSubmodule):
         self._compiled = bool(compile_decode)
         self._decode_one = compile_vae_decode(vae) if compile_decode else vae.decode
         # compiled: only these batch sizes are ever decoded (larger batches are split into them)
-        self._decode_batch_sizes = tuple(decode_batch_sizes) if compile_decode else ()
+        self._decode_batch_sizes = (
+            tuple(geometric_batch_sizes(min(max_batch_size, VAE_MAX_DECODE_BATCH))) if compile_decode else ()
+        )
         # latent shapes (batch, H, W) the compiled decode was warmed with; any other shape decodes eager:
         # a fresh max-autotune compile inside a request cost 40-100 s (measured on 1024x768 / 512^2 edits)
         self._warmed: set[tuple[int, int, int]] = set()

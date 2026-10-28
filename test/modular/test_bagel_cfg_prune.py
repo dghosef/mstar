@@ -1,43 +1,56 @@
 """BAGEL image_gen runs only the CFG branches a step needs.
 
-Guidance on, the old step always ran main, cfg_text and cfg_img as one
-batched forward, though the combine never reads ``v_cfg_img`` when the image
-scale is <= 1 (the text-to-image default), and outside the CFG interval it
-reduces to ``v_main``. ``cfg_branches`` decides 1/2/3 on the host from the
-loop counter; ``declare_step`` plans that many labels and the forward runs
-that many. These pin the decision table, its agreement with the old
-device-side interval test, the combine reducing to what the old one computed,
-and the declaration matching the branch count. CPU only.
+Guidance on, the step used to run main, cfg_text and cfg_img as one batched
+forward, though the combine never reads ``v_cfg_img`` when the image scale is
+<= 1 (the text-to-image default), and outside the CFG interval it reduces to
+``v_main``. ``cfg_branches`` decides 1/2/3 on the host; a request's guided
+steps are one window (``cfg_window``), which a CFG-parallel deployment runs as
+its own walk between single-node ones (``image_gen_phases``). These pin the
+decision table, its agreement with the device-side interval test the step used
+to run, the phases reproducing the per-step count, the conductor's walk through
+them, the combine reducing to what the always-three-branch one computed, and
+the declaration matching the branch count. CPU only.
 """
 
 from __future__ import annotations
 
-import dataclasses
+import itertools
 import types
 
 import pytest
 import torch
 
+from mstar.conductor.request_info import DEFAULT_PARTITION, CurrentForwardPassInfo
 from mstar.engine.resources import KVStep, PositionStep
-from mstar.model.bagel.config import BagelModelConfig
+from mstar.model.bagel.config import BagelAutoEncoderConfig, BagelModelConfig, BagelViTConfig
 from mstar.model.bagel.submodules import (
     CFG_BRANCHES,
-    IMAGE_GEN_LOOP,
+    CFG_WALKS,
+    DENOISE_WALKS,
+    IMAGE_DECODE,
+    IMAGE_GEN,
+    IMAGE_GEN_HEAD,
     LLMSubmodule,
-    active_labels,
+    apply_timestep_shift,
     cfg_branches,
+    cfg_window,
     combine_cfg_velocity,
+    denoise_loop,
+    image_gen_phases,
+    image_gen_step_branches,
     image_gen_timestep,
 )
-from mstar.model.submodule_base import ARNodeInputs
+from mstar.model.submodule_base import ARNodeInputs, ModelInputsFromEngine
 
-_DEFAULTS = {f.name: f.default for f in dataclasses.fields(BagelModelConfig)}
-N = _DEFAULTS["num_timesteps"]
-SHIFT = _DEFAULTS["timestep_shift"]
+IMAGE_GEN_LOOP = denoise_loop(IMAGE_GEN)
+
+CONFIG = BagelModelConfig(vae_config=BagelAutoEncoderConfig(), vit_config=BagelViTConfig())
+N = CONFIG.num_timesteps
+SHIFT = CONFIG.timestep_shift
 T2I = dict(  # text-to-image request defaults
-    cfg_interval=tuple(_DEFAULTS["cfg_interval"]),
-    text_scale=_DEFAULTS["cfg_text_scale"],
-    img_scale=_DEFAULTS["cfg_img_scale"],
+    cfg_interval=tuple(CONFIG.cfg_interval),
+    text_scale=CONFIG.cfg_text_scale,
+    img_scale=CONFIG.cfg_img_scale,
 )
 EDIT = dict(cfg_interval=(0.0, 1.0), text_scale=4.0, img_scale=2.0)  # bagel_model edit overrides
 STEPS = range(N - 1)  # time_index 0 .. N-2
@@ -47,7 +60,7 @@ def _device_timestep(k: int) -> torch.Tensor:
     """What `_forward_image_gen` computes from its time_index input."""
     time_index = torch.full((8,), float(k), dtype=torch.float32)
     t_uniform = 1.0 - time_index / (N - 1)
-    return LLMSubmodule._apply_timestep_shift(t=t_uniform, shift=SHIFT)
+    return apply_timestep_shift(t=t_uniform, shift=SHIFT)
 
 
 def _old_in_interval(k: int, interval) -> bool:
@@ -155,38 +168,37 @@ def test_pruned_combine_matches_the_old_combine(renorm, rmin, request_kind, dtyp
 # --- the declaration and the forward's inputs -----------------------------
 
 
-def _stub(**overrides):
-    return types.SimpleNamespace(
-        node_name="LLM",
-        CFG_BATCHED_LABEL=LLMSubmodule.CFG_BATCHED_LABEL,
-        _get_active_labels=lambda walk, cfg: active_labels(walk, cfg, "LLM"),
-        **overrides,
+def _llm() -> LLMSubmodule:
+    return LLMSubmodule(
+        language_model=types.SimpleNamespace(model=types.SimpleNamespace(embed_tokens=None), lm_head=None),
+        llm2vae=None, vae2llm=None, time_embedder=None, latent_pos_embed=None, config=CONFIG,
     )
 
 
-def _image_gen_row(n_branches: int | None, span: int = 6) -> ARNodeInputs:
+def _info(graph_walk: str = "image_gen", **fields) -> CurrentForwardPassInfo:
+    return CurrentForwardPassInfo(request_id="r0", graph_walk=graph_walk, fwd_index=0, random_seed=0, max_tokens=0,
+                                  **fields)
+
+
+def _image_gen_row(n_branches: int, span: int = 6) -> ARNodeInputs:
     row = ARNodeInputs(input_seq_len=span)
     row.resource_step_info = True  # requires_cfg
     row.custom_pos_ids = {
         label: torch.full((span,), 10 + i, dtype=torch.int32)
         for i, label in enumerate(("main", "cfg_text", "cfg_img"))
     }
-    if n_branches is not None:
-        row.kwargs[CFG_BRANCHES] = n_branches
+    row.kwargs[CFG_BRANCHES] = n_branches
     return row
 
 
 @pytest.mark.parametrize("n_branches,labels", [
-    (None, ("main", "cfg_text", "cfg_img")),  # pruning off / unstamped
     (3, ("main", "cfg_text", "cfg_img")),
     (2, ("main", "cfg_text")),
     (1, ("main",)),
 ])
 def test_declared_step_plans_exactly_the_branches_run(n_branches, labels):
     span = 6
-    step = LLMSubmodule.declare_step(
-        _stub(), "image_gen", ["r0"], [_image_gen_row(n_branches, span)],
-    )
+    step = _llm().declare_step("image_gen", ["r0"], [_image_gen_row(n_branches, span)])
     kv: KVStep = step.steps["kv"]
     rope: PositionStep = step.steps["rope"]
     assert tuple(seg.label for seg in kv.segments) == labels
@@ -202,18 +214,15 @@ def test_declared_step_plans_exactly_the_branches_run(n_branches, labels):
     assert step.steps["attn"].causal is False
 
 
-@pytest.mark.parametrize("n_branches", [None, 1, 2, 3])
+@pytest.mark.parametrize("n_branches", [1, 2, 3])
 def test_preprocess_hands_the_forward_the_declared_count(n_branches):
     row = _image_gen_row(n_branches)
-    out = LLMSubmodule.preprocess(
-        _stub(), "image_gen",
-        engine_inputs=types.SimpleNamespace(
-            per_request_info={"r0": types.SimpleNamespace(step_metadata={})},
-        ),
+    out = _llm().preprocess(
+        "image_gen", engine_inputs=ModelInputsFromEngine(request_ids=["r0"], per_request_info={"r0": _info()}),
         inputs=[row],
     )
     assert "kwargs" not in out
-    assert out.get(CFG_BRANCHES) == n_branches
+    assert out[CFG_BRANCHES] == n_branches
     assert out["requires_cfg"] is True
 
 
@@ -222,162 +231,203 @@ def test_image_gen_shape_inputs_stay_bounded_across_output_sizes():
     that grows with every size requested."""
     from mstar.model.bagel.submodules import _IMAGE_GEN_SHAPES_CACHED
 
-    stub = _stub(
-        config=types.SimpleNamespace(latent_downsample=16, max_latent_size=64),
-        _image_gen_shape_cache={},
-        _get_text_vae_idxs=lambda n, device: LLMSubmodule._get_text_vae_idxs(None, n, device),
-    )
-    first = LLMSubmodule._image_gen_shape_inputs(stub, 256, 256, "cpu")
+    llm = _llm()
+    first = llm._image_gen_shape_inputs(256, 256, "cpu")
     for i in range(3 * _IMAGE_GEN_SHAPES_CACHED):
-        LLMSubmodule._image_gen_shape_inputs(stub, 256, 256 + 16 * (i + 1), "cpu")
+        llm._image_gen_shape_inputs(256, 256 + 16 * (i + 1), "cpu")
         # the size in use stays cached while others come and go
-        assert LLMSubmodule._image_gen_shape_inputs(stub, 256, 256, "cpu") is first
-    assert len(stub._image_gen_shape_cache) == _IMAGE_GEN_SHAPES_CACHED
+        assert llm._image_gen_shape_inputs(256, 256, "cpu") is first
+    assert len(llm._image_gen_shape_cache) == _IMAGE_GEN_SHAPES_CACHED
 
 
-def _request(k, first_iter, prune=True, **meta):
-    cfg = types.SimpleNamespace(
-        num_timesteps=N, timestep_shift=SHIFT,
-        cfg_interval=_DEFAULTS["cfg_interval"],
-        cfg_text_scale=_DEFAULTS["cfg_text_scale"],
-        cfg_img_scale=_DEFAULTS["cfg_img_scale"],
-    )
-    stub = _stub(config=cfg, _cfg_prune=prune, _warned_loop_counter=False)
-    info = types.SimpleNamespace(
-        step_metadata={"requires_cfg": True, **meta},
-        dynamic_loop_iter_counts={} if k is None else {IMAGE_GEN_LOOP: k},
-    )
-    return LLMSubmodule._image_gen_cfg_branches(stub, info, first_iter)
-
-
-def test_branch_count_follows_the_loop_counter_and_request_kwargs():
-    last = N - 2
-    assert _request(0, True) == 2
-    assert _request(last, False) == 1
-    # per-request kwargs (as step metadata) override the config defaults
-    assert _request(last, False, cfg_interval=[0.0, 1.0], cfg_img_scale=2.0) == 3
-    assert _request(0, True, cfg_img_scale=2.0, cfg_interval=[0.0, 1.0]) == 3
-
-
-def test_falls_back_to_all_branches_when_off_or_counter_is_not_tracking():
-    assert _request(5, False, prune=False) is None
-    assert _request(None, False) is None  # loop counter missing on a later step
-    assert _request(3, True) is None      # seeded latents but counter says step 3
-    assert _request(0, True, requires_cfg=False) is None
-
-
-def test_image_gen_walk_names_the_loop_the_counter_is_read_from():
-    """An unnamed Loop gets a random uuid, and `dynamic_loop_iter_counts`
-    would never carry IMAGE_GEN_LOOP: every step would fall back."""
-    from mstar.model.bagel.bagel_model import BagelModel
-
-    model = BagelModel.__new__(BagelModel)
-    model.config = types.SimpleNamespace(num_timesteps=N, max_position_embeddings=32768)
-    model._has_cfg_parallel = False
-    model._has_llm_disaggregation = False
-    model._image_gen_remote_handoff = False
-    loops = model.get_graph_walk_graphs()["image_gen"].get_loops()
-    assert IMAGE_GEN_LOOP in loops
-    assert loops[IMAGE_GEN_LOOP].max_iters == N - 1
-
-
-# --- parallel CFG (image_gen_cfg) ---------------------------------------------
-
-
-def test_parallel_branch_nodes_sit_out_the_branches_a_step_does_not_read():
-    from mstar.model.bagel.submodules import cfg_branch_skipped
-
-    # main always runs; cfg_text runs from 2 branches; cfg_img only at 3
-    assert [cfg_branch_skipped("main", n) for n in (1, 2, 3)] == [False, False, False]
-    assert [cfg_branch_skipped("cfg_text", n) for n in (1, 2, 3)] == [True, False, False]
-    assert [cfg_branch_skipped("cfg_img", n) for n in (1, 2, 3)] == [True, True, False]
-    # no count stamped (pruning off): every branch runs
-    assert not any(cfg_branch_skipped(label, None) for label in ("main", "cfg_text", "cfg_img"))
-
-
-def test_parallel_combine_reduces_to_the_old_combine():
-    """combine_cfg with a host branch count gives what the device-side interval test gave."""
-    from mstar.model.bagel.submodules import CombineCFGSubmodule
-
-    cfg = types.SimpleNamespace(**{k: _DEFAULTS[k] for k in (
-        "num_timesteps", "timestep_shift", "cfg_text_scale", "cfg_img_scale",
-        "cfg_interval", "cfg_renorm_type", "cfg_renorm_min",
-    )})
-    node = CombineCFGSubmodule(cfg)
-    g = torch.Generator().manual_seed(0)
-    v = [torch.randn(16, 8, generator=g) for _ in range(3)]
-    latents = torch.randn(16, 8, generator=g)
-    for k in (0, N - 2):
-        time_index = torch.full((16,), float(k))
-        n = _branches(k, **T2I)
-        tensors = dict(
-            v_main=v[0], v_cfg_text=v[1], v_cfg_img=v[2], latents=latents, time_index=time_index,
+def _old_image_gen_step_branches(config, fwd_info: CurrentForwardPassInfo, first_iter: bool) -> int:
+    """The per-step branch count before the denoise phases (a copy of the old
+    `image_gen_step_branches`): the oracle the phase schedule must reproduce."""
+    meta = fwd_info.step_metadata
+    if not meta.get("requires_cfg", False):
+        return 1
+    k = fwd_info.dynamic_loop_iter_counts.get(IMAGE_GEN_LOOP, 0)
+    if (k == 0) != first_iter:
+        raise ValueError(
+            f"BAGEL image_gen: loop counter {IMAGE_GEN_LOOP!r} reads {k} on a "
+            f"{'first' if first_iter else 'later'} iteration"
         )
-        old = node.forward("image_gen_cfg", None, **tensors)["latents"][0]
-        new = node.forward("image_gen_cfg", None, **tensors, cfg_branches=n)["latents"][0]
-        torch.testing.assert_close(new, old, rtol=0, atol=1e-6)
-
-
-def _combine_inputs(k: int, sat_out: tuple[str, ...], counter: int | None = None):
-    """combine_cfg's prepare_inputs at step ``k`` of a t2i request, with the named
-    branch nodes having sat the step out and the combine's loop counter reading
-    ``counter`` (default ``k``)."""
-    from mstar.model.bagel.submodules import CombineCFGSubmodule, sat_out_velocity
-
-    cfg = types.SimpleNamespace(cfg_prune=True, **{k_: _DEFAULTS[k_] for k_ in (
-        "num_timesteps", "timestep_shift", "cfg_text_scale", "cfg_img_scale",
-        "cfg_interval", "cfg_renorm_type", "cfg_renorm_min",
-    )})
-    g = torch.Generator().manual_seed(0)
-    latents = torch.randn(16, 8, generator=g)
-    inputs = {
-        name: [sat_out_velocity(latents) if name[2:] in sat_out else torch.randn(16, 8, generator=g)]
-        for name in ("v_main", "v_cfg_text", "v_cfg_img")
-    }
-    inputs.update(latents=[latents], time_index=[torch.full((16,), float(k))])
-    info = types.SimpleNamespace(
-        step_metadata={"requires_cfg": True},
-        dynamic_loop_iter_counts={IMAGE_GEN_LOOP: k if counter is None else counter},
+    t = image_gen_timestep(k, config.num_timesteps, config.timestep_shift)
+    return cfg_branches(
+        t,
+        tuple(meta.get("cfg_interval", config.cfg_interval)),
+        meta.get("cfg_text_scale", config.cfg_text_scale),
+        meta.get("cfg_img_scale", config.cfg_img_scale),
     )
-    node = CombineCFGSubmodule(cfg)
-    return node, node.prepare_inputs("image_gen_cfg", info, inputs)
 
 
-def test_combine_never_reads_a_branch_that_sat_the_step_out():
-    """A branch node counts from its own worker's loop counter: if it sat out a step
-    whose combine reads its velocity, the request fails rather than combining a
-    placeholder as the unconditional velocity."""
-    k_out = N - 2
-    assert _branches(k_out, **T2I) == 1
-    node, prepared = _combine_inputs(k_out, sat_out=("cfg_text", "cfg_img"))
-    assert set(prepared.tensor_inputs) == {"v_main", "latents", "time_index"}
-    out = node.forward("image_gen_cfg", None, **prepared.tensor_inputs, **prepared.kwargs)
-    assert out["latents"][0].shape == (16, 8)
+@pytest.mark.parametrize("num_timesteps,shift", [(50, 3.0), (30, 1.0)])
+@pytest.mark.parametrize("scales", [(4.0, 1.0), (4.0, 2.0), (1.0, 1.0)], ids=["t2i", "edit", "no_cfg"])
+@pytest.mark.parametrize("interval", [(0.4, 1.0), (0.0, 1.0), (0.1, 0.7)])
+@pytest.mark.parametrize("cfg_parallel", [False, True])
+def test_phase_schedule_runs_the_old_branch_count_at_every_step(num_timesteps, shift, scales, interval, cfg_parallel):
+    """The walks tile the steps in order, only the last decodes, and every step
+    runs the branches the old per-step count gave it. On a CFG-parallel
+    deployment every phase fixes its count at intake, so no node reads a loop
+    counter (the steps below hand it none)."""
+    config = BagelModelConfig(vae_config=BagelAutoEncoderConfig(), vit_config=BagelViTConfig())
+    config.num_timesteps, config.timestep_shift = num_timesteps, shift
+    text_scale, img_scale = scales
+    meta = {"requires_cfg": text_scale > 1.0 or img_scale > 1.0, "cfg_interval": list(interval),
+            "cfg_text_scale": text_scale, "cfg_img_scale": img_scale}
+    window = cfg_window(num_timesteps, shift, interval, text_scale, img_scale)
+    phases = image_gen_phases(window, num_timesteps, cfg_parallel)
 
-    k_in = next(k for k in STEPS if k > 0 and _branches(k, **T2I) == 2)
-    # t2i never reads cfg_img, so it sitting out is consistent
-    _, prepared = _combine_inputs(k_in, sat_out=("cfg_img",))
-    assert "v_cfg_img" not in prepared.tensor_inputs
-    with pytest.raises(ValueError, match="cfg_text sat out"):
-        _combine_inputs(k_in, sat_out=("cfg_text", "cfg_img"))
+    assert sum(p.steps for p in phases) == num_timesteps - 1
+    decodes = [p.walk == IMAGE_DECODE or DENOISE_WALKS[p.walk].decode for p in phases]
+    assert decodes == [False] * (len(phases) - 1) + [True]
+    if cfg_parallel:
+        assert all(p.branches is not None for p in phases)
+    starts = list(itertools.accumulate((p.steps for p in phases), initial=0))
+    old = []
+    new = []
+    for k in range(num_timesteps - 1):
+        info = _info(step_metadata=meta, dynamic_loop_iter_counts={IMAGE_GEN_LOOP: k})
+        old.append(_old_image_gen_step_branches(config, info, first_iter=k == 0))
+        i = next(i for i, p in enumerate(phases) if starts[i] <= k < starts[i + 1])
+        phase = phases[i]
+        if phase.walk in CFG_WALKS:
+            assert phase.branches == CFG_WALKS[phase.walk]
+            new.append(phase.branches)
+        else:
+            info = _info(
+                graph_walk=phase.walk,
+                step_metadata={**meta, "cfg_window": list(window), "image_gen_branches": phase.branches},
+                dynamic_loop_iter_counts={denoise_loop(phase.walk): k} if phase.branches is None else {},
+            )
+            new.append(image_gen_step_branches(phase.walk, info, first_iter=k == starts[i]))
+    assert new == old
+    if set(old) == {1}:
+        # nothing guided: straight to image_gen, never the branch nodes
+        assert phases == ((IMAGE_GEN, num_timesteps - 1, 1),)
 
-    # The combine's own counter isn't tracking the loop (reads 0 on a later step): it takes
-    # the count from the branches that ran instead of failing the request.
-    node, prepared = _combine_inputs(k_in, sat_out=("cfg_img",), counter=0)
-    assert prepared.kwargs["cfg_branches"] == 2
-    out = node.forward("image_gen_cfg", None, **prepared.tensor_inputs, **prepared.kwargs)
-    _, reference = _combine_inputs(k_in, sat_out=("cfg_img",))
-    expected = node.forward("image_gen_cfg", None, **reference.tensor_inputs, **reference.kwargs)
-    torch.testing.assert_close(out["latents"][0], expected["latents"][0])
+
+def test_only_a_varying_branch_count_reads_the_loop_counter():
+    """A phase with one branch count never reads the counter, so one reading 0
+    on a later step (as the per-node counters did on CFG-parallel nodes) cannot
+    fail or misplace it. Where the count varies, a counter that disagrees with
+    whether the latents were seeded would pick another step's branches, so the
+    step fails rather than guessing."""
+    window = cfg_window(N, SHIFT, T2I["cfg_interval"], T2I["text_scale"], T2I["img_scale"])
+
+    def branches(walk, fixed, counter, first_iter):
+        info = _info(
+            graph_walk=walk,
+            step_metadata={"requires_cfg": True, "cfg_window": list(window), "image_gen_branches": fixed},
+            dynamic_loop_iter_counts={} if counter is None else {denoise_loop(walk): counter},
+        )
+        return image_gen_step_branches(walk, info, first_iter)
+
+    assert branches(IMAGE_GEN, 1, 0, False) == 1        # the tail after a CFG walk
+    assert branches(IMAGE_GEN_HEAD, 1, None, False) == 1
+    assert branches(IMAGE_GEN, None, 0, True) == 2
+    assert branches(IMAGE_GEN, None, window.stop, False) == 1
+    with pytest.raises(ValueError, match="loop counter"):
+        branches(IMAGE_GEN, None, None, False)  # loop counter missing on a later step
+    with pytest.raises(ValueError, match="loop counter"):
+        branches(IMAGE_GEN, None, 3, True)      # seeded latents but counter says step 3
 
 
-def test_image_gen_cfg_walk_names_the_loop_too():
-    from mstar.model.bagel.bagel_model import BagelModel
+def _pointer(uuid):
+    from mstar.graph.base import TensorPointerInfo
+
+    return TensorPointerInfo(dims=[1], dtype=torch.float32, nbytes=4, address=0, stride=[1], uuid=uuid,
+                             source_session_id="", source_entity="worker_0")
+
+
+def _image_request_intake(kwargs, cfg_parallel=True):
+    """A text-to-image request through BAGEL's intake: the model, the request's
+    `CFGWindow`, the kwargs process_prompt hands on, and its first forward."""
+    from mstar.model.bagel.bagel_model import CFG_WINDOW, BagelModel
 
     model = BagelModel.__new__(BagelModel)
-    model.config = types.SimpleNamespace(num_timesteps=N, max_position_embeddings=32768)
-    model._has_cfg_parallel = True
+    model.config = CONFIG
+    model._has_cfg_parallel = cfg_parallel
     model._has_llm_disaggregation = False
     model._image_gen_remote_handoff = False
-    loops = model.get_graph_walk_graphs()["image_gen_cfg"].get_loops()
-    assert IMAGE_GEN_LOOP in loops
+    params = model._request_params(["text"], ["image"], kwargs)
+    window = cfg_window(N, SHIFT, tuple(params["cfg_interval"]), params["cfg_text_scale"], params["cfg_img_scale"])
+    model_kwargs = {**kwargs, CFG_WINDOW: tuple(window)}
+    fwd = model.get_initial_forward_pass_args(
+        DEFAULT_PARTITION, ["text"], ["image"], {"text_inputs": [_pointer(0)]}, model_kwargs,
+    )
+    return model, window, model_kwargs, fwd
+
+
+@pytest.mark.parametrize("kwargs,walks", [
+    ({}, ["image_gen_cfg2", IMAGE_GEN]),
+    ({"cfg_interval": [0.0, 1.0], "cfg_img_scale": 2.0}, ["image_gen_cfg3", IMAGE_DECODE]),
+    ({"cfg_interval": [0.1, 0.7]}, [IMAGE_GEN_HEAD, "image_gen_cfg2", IMAGE_GEN]),
+    ({"cfg_text_scale": 1.0}, [IMAGE_GEN]),
+], ids=["t2i", "edit_scales", "window_inside", "no_cfg"])
+def test_conductor_walks_a_cfg_parallel_request_through_its_phases(kwargs, walks):
+    """Every rank follows the conductor's walk: after prefill the request runs
+    its phases in order, each loop capped at its steps, each walk after the
+    first fed the previous one's persisted latents and time_index on every
+    node that reads them, and the request ends after the decode."""
+    model, window, model_kwargs, fwd = _image_request_intake(kwargs)
+    graphs = model.get_graph_walk_graphs()
+    metadata, persist, seen, loops = fwd.full_metadata, {}, [], []
+    while not (fwd := model.get_partition_forward_pass_args(DEFAULT_PARTITION, metadata, persist)).request_done:
+        walk = metadata.graph_walk
+        fed = {(edge.next_node, edge.name): [info.uuid for info in edge.tensor_info] for edge in fwd.inputs}
+        # the conductor drops what a walk unpersists from the request's persist signals
+        unpersisted = {info.uuid for info in fwd.unpersist_tensors}
+        assert {uuid for uuids in fed.values() for uuid in uuids} <= unpersisted
+        persist = {name: [i for i in infos if i.uuid not in unpersisted] for name, infos in persist.items()}
+        expected = [] if not seen else [100 * len(seen) + i for i in range(2)]
+        if walk == IMAGE_DECODE:
+            assert fed == {("vae_decoder", "latents"): expected[:1]}
+        else:
+            readers = ("LLM",) if walk not in CFG_WALKS else (
+                ("LLM", "LLM_cfg_text", "LLM_cfg_img")[:CFG_WALKS[walk]] + ("combine_cfg",)
+            )
+            assert fed == {(node, name): expected[i:i + 1] for node in readers
+                           for i, name in enumerate(("latents", "time_index"))}
+            assert set(graphs[walk].get_nodes()) - {"vae_decoder"} == set(readers)
+            assert denoise_loop(walk) in graphs[walk].get_loops()
+            loops.append(denoise_loop(walk))
+        phase = metadata.kwargs["image_gen_phases"][metadata.kwargs["image_gen_phase"]]
+        # fixed at intake on this deployment: no node reads a loop counter for it
+        assert fwd.step_metadata["image_gen_branches"] == (phase.branches if walk in DENOISE_WALKS else None)
+        if walk in DENOISE_WALKS:
+            assert phase.branches is not None
+        seen.append(walk)
+        # the walk's loop persists where it left off, appended as the conductor does
+        persist.setdefault("latents", []).append(_pointer(100 * len(seen)))
+        persist.setdefault("time_index", []).append(_pointer(100 * len(seen) + 1))
+    assert seen == walks
+    phases = model._image_gen_phases(window)
+    assert [p.walk for p in phases] == walks
+    caps = model.get_loop_caps(**model_kwargs)
+    assert {name: caps[name] for name in loops} == {denoise_loop(p.walk): p.steps for p in phases if p.steps}
+
+
+_TEXT_ONLY = {("LLM", "prefill_text"): ["cfg_text"], ("LLM", "prefill_vit"): ["cfg_text"],
+              ("LLM", "prefill_vae"): ["cfg_text"]}
+_BOTH = {("LLM", "prefill_text"): ["cfg_text", "cfg_img"], ("LLM", "prefill_vit"): ["cfg_text"],
+         ("LLM", "prefill_vae"): ["cfg_text"]}
+
+
+@pytest.mark.parametrize("kwargs,cfg_parallel,published,final", [
+    ({}, True, _TEXT_ONLY, {}),
+    ({"cfg_interval": [0.0, 1.0], "cfg_img_scale": 2.0}, True, _BOTH, {("LLM", "decode"): ["cfg_img"]}),
+    ({"cfg_interval": [0.5, 0.5]}, True, {}, {}),
+    # one node runs every branch: what it publishes is unchanged
+    ({}, False, _BOTH, {("LLM", "decode"): ["cfg_img"]}),
+], ids=["t2i", "edit_scales", "empty_window", "single_node"])
+def test_a_guided_request_publishes_only_the_kv_its_cfg_walk_reads(kwargs, cfg_parallel, published, final):
+    """On a CFG-parallel deployment the branch labels' readers are the CFG
+    walk's branch nodes, so the main LLM exports only those, and nothing for a
+    guided request whose window has no step."""
+
+    model, _, model_kwargs, fwd = _image_request_intake(kwargs, cfg_parallel)
+    assert fwd.full_metadata.kwargs["requires_cfg"]
+    kv = model.get_request_resource_configs({DEFAULT_PARTITION: fwd}, model_kwargs)["kv"]
+    assert kv.publish_labels_per_node_walk == published
+    assert kv.final_publish_labels_per_node_walk == final

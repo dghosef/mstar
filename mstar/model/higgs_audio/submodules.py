@@ -32,7 +32,14 @@ from mstar.engine.engine import ExecutingBatch
 from mstar.engine.resources import AttentionStep, KVStep, PositionStep, SamplerStep, Segment, SlotLease, SubmoduleStep
 from mstar.engine.resources.attn.base import AttentionManager
 from mstar.engine.resources.sampler.resource import SamplerResource
-from mstar.model.higgs_audio.config import ATTN, KV_CACHE, ROPE, SAMPLER, HiggsAudioModelConfig
+from mstar.model.higgs_audio.config import (
+    ATTN,
+    AUDIO_FEATURE_LENS_KEY,
+    KV_CACHE,
+    ROPE,
+    SAMPLER,
+    HiggsAudioModelConfig,
+)
 from mstar.model.submodule_base import (
     ARNodeInputs,
     ARNodeSubmodule,
@@ -41,7 +48,6 @@ from mstar.model.submodule_base import (
     NodeInputs,
     NodeSubmodule,
     TokenStop,
-    device_loopback_enabled,
 )
 from mstar.utils.h2d import to_device_nonblocking
 
@@ -108,20 +114,21 @@ class HiggsAudioEncoderSubmodule(NodeSubmodule):
         features = inputs["audio_features"][0]
         if features.dim() == 2:
             features = features.unsqueeze(0)  # (1, num_mel_bins, T)
-        # one host read per request: the valid embeddings of each chunk
-        valid = [
-            self.config.encoder_output_length(int(n))
-            for n in inputs["audio_feature_lens"][0].reshape(-1).tolist()
-        ]
+        # each chunk's valid mel frames, known on the host since process_prompt
+        frames = list(fwd_info.step_metadata[AUDIO_FEATURE_LENS_KEY])
         return NodeInputs(
             tensor_inputs={"audio_features": features},
-            kwargs={"valid_lengths": valid},
+            kwargs={
+                "frames": frames,
+                "valid_lengths": [self.config.encoder_output_length(n) for n in frames],
+            },
             input_seq_len=features.shape[0],
         )
 
     def _padded(self, width: int) -> bool:
-        """A clip under one chunk: run at the full width, its tail masked."""
-        return self.graphs and width < self.chunk_frames
+        """A clip under one chunk: run at the full width, its tail masked,
+        captured or not."""
+        return width < self.chunk_frames
 
     def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
         # chunks are padded to their own request's longest, so only requests of
@@ -151,8 +158,10 @@ class HiggsAudioEncoderSubmodule(NodeSubmodule):
             "valid_lengths": [inp.kwargs["valid_lengths"] for inp in inputs],
         }
         if padded:
+            # a short clip is one chunk; its mask sum can be one past its mel
+            # width, and the slice below counts from the mask sum too
             out["valid_frames"] = to_device_nonblocking(
-                torch.tensor(widths, dtype=torch.long), self.get_device(),
+                [inp.kwargs["frames"][0] for inp in inputs], self.get_device(), dtype=torch.long,
             )
         return out
 
@@ -258,9 +267,6 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
     embeds inside the graph.
     """
 
-    # the decode walk reads its input ids off the sampler's slot masters
-    reads_device_loopback = True
-
     PREFILL_TOKEN_BUCKETS = [64, 128, 256, 512, 1024, 2048]
     PREFILL_CAPTURE_BATCH_SIZES = [1, 2, 4, 8]
     DECODE_CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16, 32]
@@ -269,9 +275,10 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
         super().__init__()
         self.model = llm
         self.config = config
+        # decode reads its input ids off the sampler's slot masters
         self.token_stop = TokenStop(
             loop="decode_loop", buffer="new_token", stop_ids=frozenset(config.stop_token_ids),
-            sampler=SAMPLER, walk="decode",
+            sampler=SAMPLER, walk="decode", loopback_signal="text_inputs",
         )
 
     def get_accelerator_graph_configs(
@@ -279,6 +286,8 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
     ) -> list[AcceleratorGraphConfig]:
         return [
             BatchedAcceleratorGraphConfig(
+                # max-autotune until the default compile level (mstar serve -O) is measured on this model
+                compile_mode="max-autotune-no-cudagraphs",
                 capture_graph_walk="decode",
                 single_request_inputs=ARNodeInputs(
                     input_ids=torch.zeros(1, dtype=torch.long, device=device),
@@ -287,6 +296,8 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
                 capture_batch_sizes=self.DECODE_CAPTURE_BATCH_SIZES,
             ),
             PackedAcceleratorGraphConfig(
+                # max-autotune until the default compile level (mstar serve -O) is measured on this model
+                compile_mode="max-autotune-no-cudagraphs",
                 capture_graph_walk="prefill_audio",
                 make_node_input=lambda n: ARNodeInputs(
                     input_seq_len=n,
@@ -310,9 +321,9 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
     ) -> ARNodeInputs:
         device = self.get_device()
 
-        if graph_walk == "decode" and has_loopback and self._device_loopback():
+        if (row := self.uniform_row_inputs(graph_walk, has_loopback)) is not None:
             # the token is read off the sampler's slot master in `preprocess`
-            return ARNodeInputs(input_seq_len=1)
+            return row
 
         if graph_walk == "prefill_audio":
             # the audio between the ChatML text around it, prefilled as one span
@@ -333,21 +344,6 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
         # is one id, so staging it costs 8 bytes instead of a hidden vector
         token_ids = inputs["text_inputs"][0].to(device).reshape(-1)
         return ARNodeInputs(input_seq_len=1, input_ids=token_ids)
-
-    def uniform_row_inputs(
-        self, graph_walk: str, has_loopback: bool = False,
-    ) -> ARNodeInputs | None:
-        if graph_walk == "decode" and has_loopback and self._device_loopback():
-            return ARNodeInputs(input_seq_len=1)
-        return None
-
-    def _device_loopback(self) -> bool:
-        return device_loopback_enabled() and self.node_resources[SAMPLER].has_slot_masters
-
-    def device_loopback_signals(self, graph_walk: str) -> frozenset[str]:
-        if graph_walk == "decode" and self._device_loopback():
-            return frozenset({"text_inputs"})
-        return frozenset()
 
     def declare_step(
         self,
@@ -394,9 +390,12 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
                 return {"input_ids": torch.cat([inp.input_ids for inp in inputs])}
             # device loop-back: each row's last sampled token, read by slot;
             # rows whose previous step was the prefill brought theirs
-            return {"input_ids": self.loopback_input_ids(
-                engine_inputs.resources[SAMPLER], engine_inputs.request_ids, inputs,
-            )}
+            sampler: SamplerResource = engine_inputs.resources[SAMPLER]
+            ids = sampler.loopback_tokens(engine_inputs.request_ids)
+            routed = [i for i, inp in enumerate(inputs) if inp.input_ids is not None]
+            if routed:
+                sampler.overwrite_rows(routed, (ids, torch.cat([inputs[i].input_ids for i in routed])))
+            return {"input_ids": ids}
         return {
             "input_embeds": torch.cat(
                 [inp.input_embeds for inp in inputs], dim=0
@@ -487,11 +486,3 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
             return
         outputs["text_inputs"] = outputs["new_token"]
 
-    def step_is_input_free(self, graph_walk: str) -> bool:
-        # a decode row is one token, like the capture template's
-        return graph_walk == "decode"
-
-    def inline_client_signals(self, graph_walk: str) -> dict[str, str]:
-        # the decode loop's client edge carries the token the stop check
-        # already has on the host; prefill's client edge is persisted
-        return {"text_inputs": "new_token"} if graph_walk == "decode" else {}

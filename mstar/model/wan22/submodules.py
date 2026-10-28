@@ -18,7 +18,6 @@ itself — reference parity must not depend on what context wraps the call, and
 the v1 engine supplies neither the autocast nor the no-grad wrapper.
 """
 
-import functools
 import logging
 import os
 from contextlib import contextmanager
@@ -29,9 +28,11 @@ from torch import nn
 
 from mstar.communication.tensors import NameToTensorList
 from mstar.conductor.request_info import CurrentForwardPassInfo
+from mstar.distributed.communication import CommGroup
 from mstar.engine.resources import AttentionStep, Segment, SlotLease, SubmoduleStep
+from mstar.model.components.diffusion.attention import RaggedAttentionMixin
+from mstar.model.components.distributed.sequence_parallel import my_rows
 from mstar.model.submodule_base import ModelInputsFromEngine, NodeInputs, NodeSubmodule
-from mstar.model.wan22.components.dit import Wan22AttentionFns
 from mstar.model.wan22.components.unipc import (
     SOLVER_ORDER,
     UniPCState,
@@ -337,7 +338,7 @@ class Wan22AttnLayout(NamedTuple):
     branches: int
 
 
-class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
+class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, RaggedAttentionMixin, NodeSubmodule):
     """Dense 5B video DiT with the UniPC step run inline.
 
     One loop iteration is one batch-2 transformer forward (the positive and
@@ -372,6 +373,7 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
     # The ragged self-attention resource (Wan22Model.get_node_resources) and its span.
     SELF_ATTN = "dit_self_attn"
     VIDEO_SPAN = "video"
+    attn_resource_key = SELF_ATTN
 
     # The WHOLE forward cannot be one compiled region: Inductor would fuse the UniPC
     # step's `sample - sigma * output` and pass the 0-dim CPU-resident sigma as a
@@ -381,25 +383,22 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
     # (patchify -> blocks -> head) is compiled in __init__ (config.compile_dit),
     # leaving the solver, CFG combine, and everything touching sigma eager.
     disable_torch_compile = True
+    # CFG-parallel: the node's two ranks split guidance branches, not heads
+    splits_heads = False
 
     def __init__(self, transformer: nn.Module, config: Wan22Config, sp_group=None):
         super().__init__()
         self.transformer = transformer
         self.config = config
-        # CFG parallelism: the node's lockstep group arrives as its sp group, but
-        # nothing splits the sequence. Two ranks split the CFG batch, each running
-        # one branch at batch 1, and the predictions are all-gathered, so the step
-        # costs one branch's forward plus a latent-sized gather. Every rank then runs
-        # the same combine and UniPC step on replicated latents. Any other shape
-        # (guidance off, more ranks) computes the whole batch on every rank, which is
-        # correct but no faster.
-        self.sp_group = sp_group if sp_group is not None and sp_group.world_size > 1 else None
-        if self.sp_group is not None and self.sp_group.world_size != 2:
-            logger.warning(
-                "Wan2.2 dit: sp_size=%d; CFG parallelism needs exactly 2 ranks, so every "
-                "rank computes the whole step.", self.sp_group.world_size,
-            )
-        self._attn_fns: Wan22AttentionFns | None = None
+        # CFG parallelism: the node's lockstep group arrives as its sp group
+        # (not passed on one GPU, so trivial here; Wan22Model.validate_config_yaml
+        # refuses any size but 2), but nothing splits the sequence. The ranks
+        # split the batch-2 CFG stack (my_rows, then an all-gather), each running
+        # one branch at batch 1, so the step costs one branch's forward plus a
+        # latent-sized gather. Every rank then runs the same combine and UniPC
+        # step on replicated latents. Without guidance both ranks compute the
+        # whole step, correct but no faster.
+        self.sp_group = sp_group or CommGroup.trivial()
         self._record_fp32_islands()
         # Compile the inner DiT region only (tensors in, tensor out; nothing
         # CPU-resident crosses it), IN PLACE so ``self.transformer`` keeps its
@@ -414,9 +413,6 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
         self._compiled_shapes: set[tuple[int, ...]] = set()
         self._eager_forward = None
         if self._compile_dit and transformer is not None:
-            # Serving numerics, like the compile itself: the reference gates build
-            # with compile_dit off and keep the exact GELU path.
-            transformer.set_fuse_ffn_gelu(True)
             # with the transformer it belongs to: one swapped in later runs its own forward
             self._eager_forward = (transformer, transformer.forward)
             transformer.forward = torch.compile(
@@ -489,34 +485,20 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
             tensor_inputs=tensor_inputs, resource_step_info=layout, input_seq_len=layout.video_tokens,
         )
 
-    def _cfg_split(self, guidance_scale: float) -> bool:
-        """Whether this step's two guidance branches run one per rank.
+    def _branch_rows(self, guidance_scale: float) -> slice:
+        """This rank's rows of the [cond, uncond] stack; the unguided step is
+        the one conditional row, which every rank runs.
 
         ``guidance_scale`` is request metadata, identical on every rank of the
         instance, so all ranks agree on whether the forward's gather runs."""
-        return guidance_scale > 1.0 and self.sp_group is not None and self.sp_group.world_size == 2
+        return my_rows(self.sp_group, 2) if guidance_scale > 1.0 else slice(0, 1)
 
     def _branches(self, guidance_scale: float) -> int:
         """Guidance branches this rank's forward computes."""
-        return 2 if guidance_scale > 1.0 and not self._cfg_split(guidance_scale) else 1
+        rows = self._branch_rows(guidance_scale)
+        return rows.stop - rows.start
 
     # attention ------------------------------------------------------------
-    def bind_node_resources(self, resources) -> None:
-        super().bind_node_resources(resources)
-        self._attn_fns = None  # the memoized callables hold the old resources
-
-    def _attention_fns(self) -> Wan22AttentionFns | None:
-        """The ragged callables, built once per resource binding, or None to run SDPA."""
-        if self._attn_fns is None:
-            self_attn = self.node_resources.get(self.SELF_ATTN)
-            if self_attn is None:
-                return None
-            self._attn_fns = Wan22AttentionFns(
-                self_attn=functools.partial(self_attn.run, label=self.VIDEO_SPAN), cross_attn=None,
-            )
-            logger.info("Wan2.2 DiT: self-attention through the engine's ragged attention resource")
-        return self._attn_fns
-
     def declare_step(
         self, graph_walk: str, request_ids: list[str], inputs: list[NodeInputs],
         slot_lease: SlotLease | None = None, piecewise_leases=None, **kwargs,
@@ -562,10 +544,9 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
                 model_input = latents
             model_input = model_input.to(self.transformer.dtype)
 
-            # expand_timesteps: the per-token timestep over the post-patch grid is
-            # constant within a latent frame (I2V frame-0 tokens get 0), so the
-            # DiT takes it once per frame and broadcasts the modulation.
-            temp_ts = mask[0, 0, :, 0, 0] * t
+            # expand_timesteps: per-token timestep over the post-patch grid
+            # ([:, ::2, ::2] == patch_size (1, 2, 2)); I2V frame-0 tokens get 0.
+            temp_ts = (mask[0, 0][:, ::2, ::2] * t).flatten()
             noise_pred = self._noise_prediction(
                 model_input, temp_ts, text_embeds_pos, text_embeds_neg, guidance_scale
             )
@@ -615,8 +596,8 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
         reference's two sequential forwards. The combine runs in the
         transformer's output dtype (bf16), like the reference."""
         do_cfg = guidance_scale > 1.0
-        cfg_split = self._cfg_split(guidance_scale)
-        batch = self._branches(guidance_scale)
+        rows = self._branch_rows(guidance_scale)
+        batch = rows.stop - rows.start
         hidden_states = model_input.repeat(batch, 1, 1, 1, 1)
         timestep = temp_ts.unsqueeze(0).expand(batch, -1)
         # dynamic=False keys the compiled trace on the full input shape (batch
@@ -633,11 +614,9 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
                     "this resolution now (one-time pause); later requests reuse it.",
                     shape_key,
                 )
-        if cfg_split:
-            # rank 0 the conditional branch, rank 1 the unconditional one
-            encoder_hidden_states = text_embeds_pos if self.sp_group.rank == 0 else text_embeds_neg
-        elif do_cfg:
-            encoder_hidden_states = torch.cat([text_embeds_pos, text_embeds_neg], dim=0)
+        if do_cfg:
+            # this rank's branches of the CFG stack, gathered back after the forward
+            encoder_hidden_states = torch.cat([text_embeds_pos, text_embeds_neg], dim=0)[rows]
         else:
             encoder_hidden_states = text_embeds_pos
         transformer = self.transformer
@@ -647,12 +626,11 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
             hidden_states=hidden_states,
             timestep=timestep,
             encoder_hidden_states=encoder_hidden_states.to(self.transformer.dtype),
-            attn_fns=self._attention_fns(),
+            self_attn_fn=self.ragged_for(self.VIDEO_SPAN),
         )
         if not do_cfg:
             return out
-        if cfg_split:
-            out = self.sp_group.all_gather(out.contiguous(), dim=0)
+        out = self.sp_group.all_gather(out.contiguous(), dim=0)
         noise_cond, noise_uncond = out[0:1], out[1:2]
         return noise_uncond + guidance_scale * (noise_cond - noise_uncond)
 
@@ -735,15 +713,13 @@ class Wan22VaeDecoderSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmod
         # ``_create_submodule`` before any submodule is constructed.
         self.vae = vae.to(self._decode_dtype())
         self._record_fp32_islands()
-        self._fast_step = None
+        self._fast = None
         self._fast_sizes = config.fast_decode_sizes()
         if config.vae_decode_fast:
             from mstar.model.components import wan_vae
 
-            # Before the compile traces the decoder; this VAE instance is the
-            # decoder node's own.
-            wan_vae.to_channels_last(self.vae)
-            self._fast_step = wan_vae.DecoderStep(self.vae, compile=True, deterministic=True)
+            # this VAE instance is the decoder node's own
+            self._fast = wan_vae.FastDecoder(self.vae)
             logger.info(
                 "Wan2.2 VAE decode: untiled %s on the shared Wan VAE decoder (channels-last, compiled); "
                 "other sizes decode stock",
@@ -751,21 +727,11 @@ class Wan22VaeDecoderSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmod
             )
 
     def _decode_dtype(self):
-        # TODO: pull conv3d-dtype resolution into a common helper shared with
-        # cosmos3 (same cuDNN-version issue there).
-        # cuDNN ships fast bf16 conv3d for this VAE decode only from 9.16. On
-        # older builds bf16 is 2-10x SLOWER than fp32/TF32, so read the live cuDNN
-        # version and pick accordingly; an upgrade then flips the choice on its own.
-        # WAN22_VAE_DECODE_FP32 forces fp32.
         if self._decode_dtype_cached is not None:
             return self._decode_dtype_cached
-        override = os.environ.get("WAN22_VAE_DECODE_FP32")
-        if override is not None:
-            on = override.lower() not in ("0", "false", "no", "off")
-            self._decode_dtype_cached = torch.float32 if on else torch.bfloat16
-        else:
-            ver = torch.backends.cudnn.version() or 0
-            self._decode_dtype_cached = torch.bfloat16 if ver >= 91600 else torch.float32
+        from mstar.model.components import wan_vae
+
+        self._decode_dtype_cached = wan_vae.decode_dtype("WAN22_VAE_DECODE_FP32")
         logger.info("Wan2.2 VAE decode dtype = %s (cuDNN %s)",
                     self._decode_dtype_cached, torch.backends.cudnn.version())
         return self._decode_dtype_cached
@@ -863,22 +829,15 @@ class Wan22VaeDecoderSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmod
                 "tiled" if tiled else "untiled", height, width, num_frames,
                 estimate / 2**30, free_bytes / 2**30, _DECODE_UNTILED_SAFETY_MARGIN, mode,
             )
-            fast = self._fast_step is not None and not tiled and (width, height) in self._fast_sizes
-            if self._fast_step is not None:
-                from mstar.model.components import wan_vae
-
+            fast = self._fast is not None and not tiled and (width, height) in self._fast_sizes
+            if self._fast is not None and not fast:
                 # One request per step, so nothing else decodes on this VAE
-                # while its layout switches. Outside inference mode: a weight
-                # made in it is an inference tensor, whose dispatch keys the
-                # compiled graph's parameter guards reject (a recompile).
-                with torch.inference_mode(False):
-                    (wan_vae.to_channels_last if fast else wan_vae.to_default_layout)(vae)
+                # while its layout switches; the fast decode switches it back.
+                self._fast.use_stock_layout()
             if tiled:
                 video = vae.tiled_decode(latents, return_dict=False)[0]
             elif fast:
-                video = wan_vae.decode_causal(
-                    vae, latents, wan_vae.new_feat_cache(vae), self._fast_step, clip_start=True,
-                )
+                video = self._fast.decode(latents)
             else:
                 video = vae.decode(latents, return_dict=False)[0]
             # Quantize to 8-bit at the worker boundary (see class docstring).

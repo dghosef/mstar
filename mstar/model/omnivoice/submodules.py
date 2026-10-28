@@ -258,8 +258,14 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
             tokens = inputs["audio_tokens"][0].to(device)
             target_len = tokens.shape[-1]
 
-        cond_len = prefix_ids.shape[-1] + target_len
-        uncond_len = target_len if float(meta["guidance_scale"]) != 0 else 0
+        # the row's place in the step's packed canvas, built once here
+        item = CanvasItem(
+            request_id=fwd_info.request_id,
+            prefix_ids=prefix_ids,
+            prefix_audio_mask=prefix_audio_mask,
+            tokens=tokens.unsqueeze(0),
+            guidance_scale=float(meta["guidance_scale"]),
+        )
         return NodeInputs(
             tensor_inputs={
                 "prefix_ids": prefix_ids,
@@ -269,10 +275,10 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
             },
             # the iteration, for postprocess: at iteration 0 the loop counter
             # is not there yet, and reading the step edge would sync
-            kwargs={"request_id": fwd_info.request_id, "doc_lens": (cond_len, uncond_len), "step": k},
+            kwargs={"request_id": fwd_info.request_id, "item": item, "step": k},
             # The row's packed contribution: its conditional document plus,
             # with CFG on, the target again as the unconditional one.
-            input_seq_len=cond_len + uncond_len,
+            input_seq_len=sum(item.doc_pair),
         )
 
     def declare_step(
@@ -285,10 +291,10 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
         **kwargs,
     ) -> SubmoduleStep | None:
         """The eager path's attention layout; a leased replay plans its own."""
-        if not self.config.backbone_graphs or (piecewise_leases or {}).get(BACKBONE_LAYERS):
+        if (piecewise_leases or {}).get(BACKBONE_LAYERS):
             return None
         return self._attention_step(
-            request_ids, document_pairs([inp.kwargs["doc_lens"] for inp in inputs])
+            request_ids, document_pairs([inp.kwargs["item"].doc_pair for inp in inputs])
         )
 
     @staticmethod
@@ -347,8 +353,6 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
     def _logits(self, engine_inputs: ModelInputsFromEngine, canvas: PackedCanvas) -> torch.Tensor:
         """The step's target logits: from the captured layer stack when a
         bucket fits, else eagerly through the same ragged attention."""
-        if not self.config.backbone_graphs:
-            return self.backbone(canvas)
         position_ids = canvas.position_ids[0]
         static_inputs = {
             "input_ids": canvas.packed_ids[0].t(),
@@ -356,14 +360,11 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
             "pos_ids": position_ids.to(torch.int32),
         }
         num_requests = len(canvas.items)
-        runner = engine_inputs.piecewise_runners.get(BACKBONE_LAYERS)
-        if runner is not None and runner.can_run(num_requests, int(position_ids.shape[0])):
-            hidden = runner.run(
+        if BACKBONE_LAYERS in engine_inputs.piecewise_leases:
+            hidden = engine_inputs.piecewise_runners[BACKBONE_LAYERS].run(
                 static_inputs=static_inputs,
                 request_ids=list(engine_inputs.request_ids),
-                seq_lens=document_pairs([
-                    (item.cond_len, item.target_len if item.does_cfg else 0) for item in canvas.items
-                ]),
+                seq_lens=document_pairs([item.doc_pair for item in canvas.items]),
                 real_bs=num_requests,
             ).get_view("hidden")
         else:
@@ -380,25 +381,14 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
 
         Canvases differ in length per request, so there is no padded collation
         here; the batch is one packed sequence with a document boundary per
-        CFG branch, and ``engine_inputs.per_request_info`` carries the
-        per-request guidance scale that decides each item's layout.
+        CFG branch, laid out from each row's ``CanvasItem`` (``prepare_inputs``),
+        whose guidance scale decides its documents.
         """
         device = self.get_device()
-        items = [
-            CanvasItem(
-                request_id=rid,
-                prefix_ids=row.tensor_inputs["prefix_ids"],
-                prefix_audio_mask=row.tensor_inputs["prefix_audio_mask"],
-                tokens=row.tensor_inputs["audio_tokens"].unsqueeze(0),
-                guidance_scale=float(
-                    engine_inputs.per_request_info[rid].step_metadata["guidance_scale"]
-                ),
-            )
-            for rid, row in zip(engine_inputs.request_ids, inputs, strict=True)
-        ]
+        items = [row.kwargs["item"] for row in inputs]
         return {
             "items": items,
-            "canvas": build_packed_canvas(items, self.config.audio_mask_id, device),
+            "canvas": build_packed_canvas(items, device),
         }
 
     def max_batch_size(self, graph_walk: str):

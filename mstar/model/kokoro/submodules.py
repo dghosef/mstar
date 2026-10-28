@@ -22,7 +22,6 @@ per call, so no call needs more memory than a capture did.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
 import time
@@ -64,18 +63,6 @@ else:
     step_logger.setLevel(logging.WARNING)
 
 PCM16_SCALE = 32767
-
-
-@contextlib.contextmanager
-def cudnn_benchmark(enabled: bool):
-    """cuDNN times its conv algorithms per new shape inside the block (the frame
-    half runs on the worker's one GPU thread); the process flag is restored."""
-    previous = torch.backends.cudnn.benchmark
-    torch.backends.cudnn.benchmark = enabled or previous
-    try:
-        yield
-    finally:
-        torch.backends.cudnn.benchmark = previous
 
 
 def text_region(bucket: int) -> str:
@@ -133,15 +120,19 @@ class KokoroSynthSubmodule(NodeSubmodule):
     # fp32 end to end, as the reference: the phase-sensitive vocoder does not
     # tolerate reduced precision.
     disable_autocast = True
+    # cuDNN times the frame half's conv algorithms once per captured bucket;
+    # the eager fallback keeps its heuristic pick, so a new frame count does
+    # not search again
+    capture_cudnn_benchmark = True
 
     def __init__(self, model: KokoroTTS, config: KokoroModelConfig):
         super().__init__()
         self.model = model
         self.config = config
-        if config.compile_decoder and next(model.parameters()).is_cuda:
-            # Bound-method attribute shadows the class method for both the
-            # captured regions and the eager fallback.
-            model.decode_frames = torch.compile(model.decode_frames, dynamic=True)
+
+    def compile_regions(self) -> dict[str, list[tuple]]:
+        # the frame half, for both its captured buckets and the eager fallback
+        return {"model.decode_frames": []} if self.config.compile_decoder else {}
 
     # -- per request -------------------------------------------------------
 
@@ -269,8 +260,6 @@ class KokoroSynthSubmodule(NodeSubmodule):
                     real_bs=len(rows),
                 )["audio"]
             else:
-                # cuDNN's heuristic pick: autotuning here would search again
-                # for every new frame count the eager fallback sees
                 num_frames = max(sizes[r] for r in rows)
                 audio, _ = self.model.synthesize_frames(
                     d[index], t_en[index], pred_dur[index], style[index], num_frames
@@ -371,9 +360,7 @@ class KokoroSynthSubmodule(NodeSubmodule):
 
     def _frames_capture(self, inp: PiecewiseCallInputs) -> dict[str, torch.Tensor]:
         si = inp.static_inputs
-        with cudnn_benchmark(self.config.decoder_cudnn_benchmark):
-            audio = self.model.decode_frames(si["en"], si["asr"], si["frame_lengths"].clamp(min=1), si["style"])
-        return {"audio": audio}
+        return {"audio": self.model.decode_frames(si["en"], si["asr"], si["frame_lengths"].clamp(min=1), si["style"])}
 
     def _text_static_inputs(self, shape: PiecewiseCaptureShape, bucket: int, device) -> dict[str, torch.Tensor]:
         return {

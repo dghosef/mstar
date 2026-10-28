@@ -18,6 +18,7 @@ Run: COSMOS3_NANO_DIR=<snap> python3 test_engine_cache.py
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import os
 
@@ -646,9 +647,9 @@ def test_anchor_encode_matches_full() -> None:
         print("  (skipped anchor-encode parity: needs COSMOS3_NANO_DIR + CUDA)")
         return
     device = base["device"]
-    # [C, H, W] in [0, 1] on the 8-bit grid, like load_image: the aspect-crop
-    # conditioning recipe (Edge) rounds to 8 bits, the stretch/action path does
-    # not, so an off-grid image would reach the two encodes as different pixels.
+    # [C, H, W] in [0, 1] on the 8-bit grid, like load_image: the i2v
+    # conditioning recipe rounds to 8 bits, the action path does not, so an
+    # off-grid image would reach the two encodes as different pixels.
     img = torch.randint(0, 256, (3, H, W), device=device).float() / 255.0
     md = {"height": H, "width": W, "num_frames": VIDEO_FRAMES, "has_image_condition": True}
     anchor = _encode_cond(base["model"], md, {"image_inputs": [img]}, "prefill_cond")
@@ -678,15 +679,18 @@ def _check_compile_vae(num_frames, tag):
     from mstar.model.cosmos3.submodules import Cosmos3VAEDecoderSubmodule
 
     model, lat = ctx["model"], ctx["lat_fused"]
-    vae, config = model._build_vae(ctx["device"]), model.config
+    # the stock vae.decode on both arms (vae_decode_fast routes around it), each on
+    # its own VAE instance
+    config = dataclasses.replace(model.config, vae_decode_fast=False)
     walk = "video_gen" if num_frames > 1 else "image_gen"
     out_key = "video_output" if num_frames > 1 else "image_output"
     had = os.environ.pop("COSMOS3_COMPILE_VAE", None)
     try:
-        eager = Cosmos3VAEDecoderSubmodule(vae=vae, config=config)
+        os.environ["COSMOS3_COMPILE_VAE"] = "0"
+        eager = Cosmos3VAEDecoderSubmodule(vae=model._build_vae(ctx["device"]), config=config)
         img_eager = eager.forward(walk, None, latents=lat.clone())[out_key][0]
         os.environ["COSMOS3_COMPILE_VAE"] = "1"
-        compiled = Cosmos3VAEDecoderSubmodule(vae=vae, config=config)
+        compiled = Cosmos3VAEDecoderSubmodule(vae=model._build_decoder_only_vae(ctx["device"]), config=config)
         img_comp = compiled.forward(walk, None, latents=lat.clone())[out_key][0]
     except Exception as exc:  # noqa: BLE001
         print(f"  (skipped {tag} compile-VAE parity: VAE/compile unavailable: {exc})")
