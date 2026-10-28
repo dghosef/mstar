@@ -2711,7 +2711,7 @@ class Cosmos3VAEDecoderSubmodule(NodeSubmodule):
         self.config = config
         self._decode_dtype_cached = None
         self._channels_last = False
-        self._fast_step = None
+        self._whole_clip = None
         # The decode is 3D-conv bound, one-shot per request at request-specific
         # shapes, and not graph-captured; torch.compile fuses its pointwise
         # epilogues (~20-30% off the 189-frame video decode, neutral for
@@ -2732,34 +2732,24 @@ class Cosmos3VAEDecoderSubmodule(NodeSubmodule):
             logger.info("Cosmos3 VAE decode torch.compile enabled")
         # Resolve + log the decode dtype now (a cheap cuDNN-version read) so the
         # choice is fixed at startup, not on the first request.
-        self._decode_dtype()
+        if vae is not None:
+            self._decode_dtype()
         if fast:
             # Cast before the layout switch and the compile trace, so both see the
             # weights the decode runs with (the decoder-only VAE both decoder
             # nodes share, never the encoder's; see Cosmos3Model).
             self.vae = vae = vae.to(self._decode_dtype())
-            _wan_vae().to_channels_last(vae)
+            self._whole_clip = _wan_vae().FastDecoder(vae, compile=self._decode_compiled)
             self._channels_last = True
-            self._fast_step = _wan_vae().DecoderStep(vae, compile=self._decode_compiled, deterministic=True)
             logger.info("Cosmos3 VAE decode: whole clips on the shared Wan VAE decoder (channels-last)")
 
     def prepare_inputs(self, graph_walk, fwd_info, inputs, **kwargs) -> NodeInputs:
         return NodeInputs(tensor_inputs={"latents": inputs["latents"][0]})
 
     def _decode_dtype(self):
-        # cuDNN ships fast Hopper bf16 conv3d for the Wan-VAE decode only from
-        # 9.16; before that bf16 is 2-10x slower than fp32/TF32 (measured via a
-        # single-variable cuDNN swap), so gate on the live version — an upgrade
-        # flips it automatically. COSMOS3_VAE_DECODE_FP32 overrides.
         if self._decode_dtype_cached is not None:
             return self._decode_dtype_cached
-        override = os.environ.get("COSMOS3_VAE_DECODE_FP32")
-        if override is not None:
-            on = override.lower() not in ("0", "false", "no", "off")
-            self._decode_dtype_cached = torch.float32 if on else torch.bfloat16
-        else:
-            ver = torch.backends.cudnn.version() or 0
-            self._decode_dtype_cached = torch.bfloat16 if ver >= 91600 else torch.float32
+        self._decode_dtype_cached = _wan_vae().decode_dtype("COSMOS3_VAE_DECODE_FP32")
         logger.info("Cosmos3 VAE decode dtype = %s (cuDNN %s)",
                     self._decode_dtype_cached, torch.backends.cudnn.version())
         return self._decode_dtype_cached
@@ -2796,13 +2786,8 @@ class Cosmos3VAEDecoderSubmodule(NodeSubmodule):
         """Latents -> uint8 pixel frames ``[1, 3, T, H, W]``."""
         vae_dtype = self._decode_dtype()
         z = self._vae_input(latents)
-        if self._fast_step is not None:
-            wan_vae = _wan_vae()
-            with torch.autocast(device_type="cuda", enabled=False):
-                decoded = wan_vae.decode_causal(
-                    self.vae, z, wan_vae.new_feat_cache(self.vae), self._fast_step, clip_start=True,
-                )
-            return self._to_uint8(decoded)
+        if self._whole_clip is not None:
+            return self._to_uint8(self._whole_clip.decode(z))
         with torch.autocast(device_type="cuda", enabled=False):
             if (
                 self._decode_compiled
@@ -2874,11 +2859,15 @@ class Cosmos3VAEDecoderARSubmodule(Cosmos3VAEDecoderSubmodule):
         )
         # Before any compile traces the decode; only the decoder-only VAE the
         # decoder nodes share is converted, never the encoder's (see Cosmos3Model).
-        if vae is not None and config.vae_decode_channels_last:
-            _wan_vae().to_channels_last(vae)
-            self._channels_last = True
+        # The stateless re-decode never runs the step, so it compiles only when warm.
         self._warm_enabled = vae is not None and bool(config.windowed_decode_warm_cache)
-        self._step = _wan_vae().DecoderStep(vae, compile=self._decode_compiled) if self._warm_enabled else None
+        self._stream = None
+        if vae is not None and (config.vae_decode_channels_last or self._warm_enabled):
+            self._stream = _wan_vae().FastDecoder(
+                vae, channels_last=config.vae_decode_channels_last,
+                compile=self._decode_compiled and self._warm_enabled, deterministic=False,
+            )
+            self._channels_last = config.vae_decode_channels_last
 
     def prepare_inputs(self, graph_walk, fwd_info, inputs, **kwargs) -> NodeInputs:
         chunks = (inputs or {}).get("window_latents") or []
@@ -3006,19 +2995,13 @@ class Cosmos3VAEDecoderARSubmodule(Cosmos3VAEDecoderSubmodule):
     def _decode_stream(self, latents: torch.Tensor, feat_cache: list, clip_start: bool) -> torch.Tensor:
         """``_decode_pixels`` continuing the stream whose decoder cache is
         ``feat_cache`` (updated in place)."""
-        wan_vae = _wan_vae()
         z = self._vae_input(latents)
         # Only steady windows group latents per call: a stream's first window
         # (the clip start, or a resumed session's context ahead of its new
         # latents) runs one latent per call, so its peak stays the default's.
         per_call = 1 if clip_start else int(self.config.windowed_decode_latents_per_call)
-        with (
-            torch.autocast(device_type="cuda", enabled=False),
-            wan_vae.cudnn_benchmark(self.config.vae_decode_cudnn_benchmark),
-        ):
-            decoded = wan_vae.decode_causal(
-                self.vae, z, feat_cache, self._step, clip_start=clip_start, latents_per_call=per_call,
-            )
+        with _wan_vae().cudnn_benchmark(self.config.vae_decode_cudnn_benchmark):
+            decoded = self._stream.decode_stream(z, feat_cache, clip_start=clip_start, latents_per_call=per_call)
         return self._to_uint8(decoded)
 
 

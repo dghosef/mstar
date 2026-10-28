@@ -172,10 +172,8 @@ class LingBotDitSubmodule(_SingleRequestMixin, NodeSubmodule):
         if vae is not None and not config.vae_decode_fp32:
             # The latents are cast to bf16 for the decode, so the weights must be too.
             vae.to(torch.bfloat16)
-        if vae is not None and config.vae_decode_channels_last:
-            wan_vae.to_channels_last(vae)
-        self._decode_step = (
-            wan_vae.DecoderStep(vae, compile=config.vae_decode_compile, deterministic=True)
+        self._decoder = (
+            wan_vae.FastDecoder(vae, channels_last=config.vae_decode_channels_last, compile=config.vae_decode_compile)
             if vae is not None else None
         )
         # Debug hook for the parity harness: keep the last chunk's latents and
@@ -283,10 +281,8 @@ class LingBotDitSubmodule(_SingleRequestMixin, NodeSubmodule):
         mean = torch.tensor(self.vae.config.latents_mean).view(1, cfg.vae_z_dim, 1, 1, 1).to(z)
         inv_std = 1.0 / torch.tensor(self.vae.config.latents_std).view(1, cfg.vae_z_dim, 1, 1, 1).to(z)
         z = z / inv_std + mean
-        with torch.amp.autocast("cuda", enabled=False), wan_vae.cudnn_benchmark(cfg.vae_decode_cudnn_benchmark):
-            return wan_vae.decode_causal(
-                self.vae, z, state["feat_cache"], self._decode_step, clip_start=clip_start, latents_per_call=1,
-            )
+        with wan_vae.cudnn_benchmark(cfg.vae_decode_cudnn_benchmark):
+            return self._decoder.decode_stream(z, state["feat_cache"], clip_start=clip_start)
 
     def check_stop(self, request_id, request_info: CurrentForwardPassInfo, outputs) -> set[str]:
         done = request_info.dynamic_loop_iter_counts.get(ROLLOUT_LOOP_NAME, 0)
