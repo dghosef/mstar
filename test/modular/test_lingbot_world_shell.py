@@ -244,18 +244,6 @@ def test_one_chunk_needs_thirteen_poses(model, monkeypatch):
     assert out["camera_poses"][0].shape[0] == 4  # one chunk of latent frames
 
 
-_NUMERICS_SETTINGS = ("reference_numerics", "vae_decode_fp32", "vae_decode_channels_last", "vae_decode_compile",
-                      "vae_decode_cudnn_benchmark")
-
-
-@pytest.mark.parametrize("setting, value", [(name, value) for name in _NUMERICS_SETTINGS for value in ("false", 0)]
-                         + [("reference_numerics", None)])
-def test_numerics_settings_must_be_bools(setting, value):
-    """A yaml "false" is truthy; read as on it would serve the opposite numerics."""
-    with pytest.raises(ValueError, match=setting):
-        LingBotWorldModel(skip_weight_loading=True, **{setting: value})
-
-
 def test_mstar_serve_knows_the_model():
     from pathlib import Path
 
@@ -471,53 +459,3 @@ def test_the_shipped_config_serves_one_rollout_at_a_time(model):
         with pytest.raises(ValueError, match="max_concurrent_requests: 1") as err:
             model.validate_config_yaml(config, "lingbot.yaml")
     assert "4.7 GiB at 480x832" in str(err.value) and "up to 11.2 GiB" in str(err.value)
-
-
-def test_the_decode_settings_are_model_kwargs_and_unknown_ones_are_refused():
-    """``vae_decode_*`` from a yaml override the ``reference_numerics`` preset
-    (a fast config can still decode eagerly), and a misspelled key is refused
-    rather than ignored."""
-    fast = LingBotWorldModel(skip_weight_loading=True, reference_numerics=False, vae_decode_compile=False)
-    assert fast.config.vae_decode_compile is False
-    assert fast.config.vae_decode_channels_last is True  # the rest of the preset stays
-    exact = LingBotWorldModel(skip_weight_loading=True, vae_decode_fp32=False)
-    assert exact.config.vae_decode_fp32 is False and exact.config.reference_numerics
-    with pytest.raises(TypeError):
-        LingBotWorldModel(skip_weight_loading=True, vae_decode_compiled=False)
-
-
-def test_fast_blocks_compile_each_pointwise_chain_once_for_every_block(monkeypatch):
-    """Off reference numerics the blocks share one compiled graph per pointwise
-    chain: a guard on the block's modules would recompile per block and, past
-    Dynamo's cache limit, drop the later blocks to eager."""
-    from torch._dynamo.testing import CompileCounter
-
-    from mstar.model.lingbot_world.components import dit
-
-    counter, options, real_compile = CompileCounter(), [], torch.compile
-
-    def compile(fn, **kw):
-        options.append(kw.pop("options"))
-        return real_compile(fn, backend=counter, **kw)
-
-    monkeypatch.setattr(torch, "compile", compile)
-    dit._compiled.cache_clear()
-    torch._dynamo.reset()
-    try:
-        dim, n = 16, 5
-        blocks = [dit.CausalBlock(dim, 32, 2, 1e-6, fast=True) for _ in range(3)]
-        g = torch.Generator().manual_seed(0)
-        x, y, *e = (torch.randn(1, n, dim, generator=g) for _ in range(8))
-        for block in blocks:
-            chains = [
-                (dit._qkv, block.self_attn, x), (dit._q, block.cross_attn, x),
-                (dit._pre, block.norm1, x, e[0], e[1]), (dit._post_self, x, y, e[2], e[3], e[4]),
-                (dit._norm3, block.norm3, x), (dit._ffn, block.norm2, block.ffn, x, e[3], e[4], e[5]),
-            ]
-            for fn, *args in chains:
-                torch.testing.assert_close(dit._pointwise(True, fn, *args), fn(*args), rtol=0, atol=0)
-        assert counter.frame_count == 6
-        assert options == [{"emulate_precision_casts": True}] * 6
-    finally:
-        dit._compiled.cache_clear()
-        torch._dynamo.reset()

@@ -61,30 +61,11 @@ class LingBotWorldModel(Model):
         cache_dir: str | None = None,
         variant: str = LINGBOT_VARIANT_1_3B,
         skip_weight_loading: bool = False,
-        reference_numerics: bool = True,
-        vae_decode_fp32: bool | None = None,
-        vae_decode_channels_last: bool | None = None,
-        vae_decode_compile: bool | None = None,
-        vae_decode_cudnn_benchmark: bool | None = None,
+        **kwargs,
     ):
-        """The ``vae_decode_*`` settings default to ``reference_numerics``'s
-        preset (see ``LingBotWorldConfig``); any one given overrides it."""
         if variant != LINGBOT_VARIANT_1_3B:
             raise NotImplementedError(f"LingBot-World variant {variant!r} is not implemented yet.")
-        fast = not reference_numerics
-        settings = {
-            "reference_numerics": reference_numerics,
-            "vae_decode_fp32": not fast if vae_decode_fp32 is None else vae_decode_fp32,
-            "vae_decode_channels_last": fast if vae_decode_channels_last is None else vae_decode_channels_last,
-            "vae_decode_compile": fast if vae_decode_compile is None else vae_decode_compile,
-            "vae_decode_cudnn_benchmark": fast if vae_decode_cudnn_benchmark is None else vae_decode_cudnn_benchmark,
-        }
         self.config = LINGBOT_CONFIGS[variant]()
-        for name, value in settings.items():
-            # a yaml "false" is truthy: refuse it rather than read it as on
-            if not isinstance(value, bool):
-                raise ValueError(f"LingBot-World {name} must be true or false, got {value!r}.")
-            setattr(self.config, name, value)
         self.model_path_hf = model_path_hf or LINGBOT_HF_REPOS[variant]
         self.cache_dir = cache_dir
         self.skip_weight_loading = skip_weight_loading
@@ -397,8 +378,6 @@ class LingBotWorldModel(Model):
             from mstar.model.lingbot_world.weight_loader import build_lingbot_dit
 
             require_flash_attn()
-            if not self.config.reference_numerics:
-                import flash_attn.cute  # noqa: F401  (flash-attn-4; docs/installation.rst)
             dit = build_lingbot_dit(self.config, self.model_path_hf, device=device, cache_dir=self.cache_dir)
             return LingBotDitSubmodule(
                 dit, self._load_vae().to(device), self.config, encoder_vae=self._load_vae().to(device),
