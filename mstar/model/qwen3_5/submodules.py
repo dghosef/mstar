@@ -778,18 +778,11 @@ class VisionEncoderSubmodule(NodeSubmodule):
                 "sin": torch.zeros(n, head_dim, dtype=autocast_dtype, device=device),
             }
 
-        def declare_step(request_ids: list[str], seq_lens: list[int]) -> SubmoduleStep:
-            (rid,) = request_ids
-            return SubmoduleStep(
-                segments=[Segment(request_id=rid, label="main", span=n) for n in seq_lens],
-                steps={VISION_ATTN: AttentionStep(causal=False)},
-            )
-
         return {
             VISION_BLOCK_LOOP: PiecewisePackedConfig(
                 capture_fn=self._capture_block_loop,
                 make_static_inputs=make_static_inputs,
-                declare_step=declare_step,
+                attn_key=VISION_ATTN,
                 lease_before_step=True,
                 one_row_per_step=True,
                 can_lease=self._fits_capture,

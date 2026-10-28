@@ -5,7 +5,7 @@ from typing import Any, Callable
 
 import torch
 
-from mstar.engine.resources import SubmoduleStep
+from mstar.engine.resources import AttentionStep, Segment, SubmoduleStep
 from mstar.model.submodule_base import ModelInputsFromEngine, NodeInputs
 
 
@@ -385,6 +385,30 @@ class PiecewisePackedConfig(PiecewiseAcceleratorGraphConfig):
     replay.
     """
     total_tokens: list[int]  # token-count buckets to capture
+    # The attention resource of a region whose rows each attend within
+    # themselves. Set with `declare_step` left None, the region declares one
+    # non-causal "main" segment per row on it; a `one_row_per_step` region's
+    # lengths are all segments of its one row.
+    attn_key: str | None = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.attn_key is not None:
+            if self.declare_step is not None:
+                raise ValueError("attn_key declares the region's step; leave declare_step None")
+            self.declare_step = self._segment_per_row
+
+    def _segment_per_row(self, request_ids: list[str], seq_lens: list[int]) -> SubmoduleStep:
+        if self.one_row_per_step:
+            (rid,) = request_ids
+            request_ids = [rid] * len(seq_lens)
+        return SubmoduleStep(
+            segments=[
+                Segment(request_id=rid, label="main", span=n)
+                for rid, n in zip(request_ids, seq_lens, strict=True)
+            ],
+            steps={self.attn_key: AttentionStep(causal=False)},
+        )
 
     def get_config_type(self) -> PiecewiseConfigType:
         return PiecewiseConfigType.PACKED

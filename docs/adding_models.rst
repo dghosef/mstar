@@ -1679,6 +1679,9 @@ BAGEL's ViT tower is the packed, cacheless counterpart. See
 ``mstar/model/bagel/submodules.py``, region ``"vit_block_loop"``: a
 ``PiecewisePackedConfig`` whose region declares only ragged attention, with patch
 embedding and the RoPE gathers left eager because they are data-dependent indexing.
+A packed region whose rows each attend within themselves passes ``attn_key`` (the
+attention resource) instead of a ``declare_step``: the config then declares one
+non-causal segment per row, or under ``one_row_per_step`` one per length of its row.
 
 .. _config-yaml:
 
