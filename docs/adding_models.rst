@@ -1058,8 +1058,8 @@ methods are:
    tokens. When a prefill walk outside the loop samples the reply's first token, list it
    in ``prefill_walks``: the token counts toward ``max_tokens`` (a ``generated_key``
    counter has to include it), and a stop id sampled
-   there ends the loop at its first step, whose token the engine drops (GLM-5.2, Command
-   A+).
+   there ends the loop at its first step, whose ``buffer`` the engine drops, so the loop
+   has to emit the token under that name (GLM-5.2, Command A+).
 
 ``on_request_added(self, request_id, request_info)`` (optional)
    Called on the worker's main thread when the request reaches the worker, before any of
