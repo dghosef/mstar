@@ -73,11 +73,14 @@ def output_shaping(kwargs: dict) -> dict:
     """The request's output-shaping kwargs as ``post_process`` takes them.
     ``process_prompt`` reads them too, so a bad value fails the request before
     it generates."""
+    enabled = kwargs.get("postprocess_output", True)
+    if not isinstance(enabled, bool):
+        raise ValueError(f"postprocess_output must be true or false, not {enabled!r}")
     try:
         return {
             "pad_duration": float(kwargs.get("pad_duration", 0.1)),
             "fade_duration": float(kwargs.get("fade_duration", 0.1)),
-            "enabled": bool(kwargs.get("postprocess_output", True)),
+            "enabled": enabled,
         }
     except (TypeError, ValueError) as exc:
         raise ValueError(f"pad_duration and fade_duration must be numbers: {exc}") from None

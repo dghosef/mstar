@@ -138,7 +138,12 @@ def test_a_clients_value_for_a_model_internal_key_never_reaches_the_model_or_con
     assert kwargs["from_process_prompt"] == 1, "the model's own metadata never arrived"
 
 
-def test_omnivoice_refuses_a_bad_output_shaping_value_before_it_generates():
+@pytest.mark.parametrize("kwargs, field", [
+    ({"pad_duration": "soon"}, "pad_duration"),
+    # bool("false") is True
+    ({"postprocess_output": "false"}, "postprocess_output"),
+])
+def test_omnivoice_refuses_a_bad_output_shaping_value_before_it_generates(kwargs, field):
     """``postprocess`` shapes the waveform after the whole unmask loop; a bad
     value there would fail a request whose generation already ran."""
     from mstar.model.omnivoice.config import OmniVoiceConfig
@@ -146,5 +151,5 @@ def test_omnivoice_refuses_a_bad_output_shaping_value_before_it_generates():
 
     model = object.__new__(OmniVoiceModel)
     model.config = OmniVoiceConfig()
-    with pytest.raises(ValueError, match="pad_duration"):
-        model.process_prompt("hello", ["text"], ["audio"], pad_duration="soon")
+    with pytest.raises(ValueError, match=field):
+        model.process_prompt("hello", ["text"], ["audio"], **kwargs)
