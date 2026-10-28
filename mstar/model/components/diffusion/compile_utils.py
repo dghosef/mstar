@@ -62,6 +62,12 @@ def exclude_from_compile(transformer: nn.Module, types: Sequence[type] = EXACT_O
     return count
 
 
+def excluded_from_compile(module: nn.Module) -> bool:
+    """Whether :func:`exclude_from_compile` took ``module`` out of the compiled graph: it
+    replaces the module's forward with an instance attribute."""
+    return "forward" in vars(module)
+
+
 def _exact_rms_norm_forward(module: nn.RMSNorm, x: torch.Tensor) -> torch.Tensor:
     if len(module.normalized_shape) != 1:
         return torch.nn.functional.rms_norm(x, module.normalized_shape, module.weight, module.eps)

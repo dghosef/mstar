@@ -26,6 +26,7 @@ import torch
 from torch import nn
 
 from mstar.model.components.diffusion.attention import RaggedAttentionFn, joint_attention
+from mstar.model.components.diffusion.compile_utils import excluded_from_compile
 from mstar.model.components.linear import FusedColumnLinear
 from mstar.model.z_image.components.qk_norm_rope import fits as qk_norm_rope_fits
 from mstar.model.z_image.components.qk_norm_rope import qk_norm_rope
@@ -101,8 +102,8 @@ class ZImageAttention(nn.Module):
     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, ragged: RaggedAttentionFn | None) -> torch.Tensor:
         q, k, v = (t.unflatten(-1, (-1, self.head_dim)) for t in self.qkv(x).chunk(3, dim=-1))
         dtype = q.dtype
-        # compile_exact_ops [norms] keeps the norms eager (an instance forward): no fusion then
-        if (torch.compiler.is_compiling() and self.q_norm is not None and "forward" not in vars(self.q_norm)
+        # compile_exact_ops [norms] keeps the norms eager: no fusion then
+        if (torch.compiler.is_compiling() and self.q_norm is not None and not excluded_from_compile(self.q_norm)
                 and qk_norm_rope_fits(q, k, self.q_norm.weight) and self.k_norm.eps == self.q_norm.eps):
             q, k = qk_norm_rope(q, k, self.q_norm.weight, self.k_norm.weight, freqs_cis, self.q_norm.eps)
         else:
