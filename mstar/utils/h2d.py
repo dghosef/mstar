@@ -138,11 +138,30 @@ class PinnedStager:
                 mirror.record(key, values)
 
 
-def to_device_nonblocking(tensor: torch.Tensor, device: torch.device | str) -> torch.Tensor:
-    """``tensor`` on ``device`` without the host waiting: a CPU source goes
-    through pinned memory, so the copy queues behind the work already on the
-    stream instead of draining it first (a pageable copy blocks until then)."""
+def to_device_nonblocking(
+    data: torch.Tensor | Sequence,
+    device: torch.device | str,
+    dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """``data`` on ``device`` without the host waiting: host values go through
+    pinned memory, so the copy queues behind the work already on the stream
+    instead of draining it first (a pageable copy blocks until then).
+
+    A sequence is built straight into pinned memory as ``torch.tensor(data,
+    dtype=dtype)`` would build it, so it costs one host allocation; a CPU
+    tensor is pinned unless it already is. The caching host allocator holds a
+    pinned source until the copy that reads it has completed, so the caller
+    need not keep it. Where the device takes no pinned memory (a CPU device),
+    the result is a plain ``.to(device)``.
+    """
     device = torch.device(device)
-    if device.type != "cuda" or tensor.device.type != "cpu":
-        return tensor.to(device)
-    return tensor.pin_memory().to(device, non_blocking=True)
+    pin = DeviceCapability.of(device).pin_memory
+    if not isinstance(data, torch.Tensor):
+        host = torch.tensor(data, dtype=dtype, pin_memory=pin)
+    elif dtype is not None:
+        raise ValueError("dtype is for a sequence; convert the tensor before staging it")
+    elif not pin or data.device.type != "cpu":
+        return data.to(device)
+    else:
+        host = data.pin_memory()
+    return host.to(device, non_blocking=pin)
