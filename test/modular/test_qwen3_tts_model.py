@@ -1382,7 +1382,7 @@ class _IdentityNorm(torch.nn.Module):
     def forward(self, hidden_states):
         return hidden_states.clone()
 
-    def forward_residual(self, hidden_states, residual):
+    def forward_residual(self, hidden_states, residual, comm_group=None):
         if residual is None:
             return hidden_states.clone(), hidden_states
         residual.add_(hidden_states)
