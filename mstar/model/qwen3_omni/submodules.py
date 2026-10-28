@@ -294,7 +294,9 @@ class AudioEncoderSubmodule(NodeSubmodule):
         return enc.proj2(enc.act(enc.proj1(hidden)))
 
     def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
-        return True
+        # A step's clips run as one pass only within the largest capture, which
+        # bounds its memory; a larger step runs each clip as its own pass.
+        return self._fits_capture(model_inputs)
 
     def max_batch_size(self, graph_walk: str) -> int:
         return self.MAX_BATCH_SIZE

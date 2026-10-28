@@ -345,6 +345,16 @@ def test_packed_clips_split_by_the_encoder_s_own_window():
         torch.testing.assert_close(packed[rid]["audio_embeds"][0], ref, rtol=1e-4, atol=1e-4)
 
 
+def test_clips_past_the_largest_capture_run_one_per_pass():
+    """A step's clips pack into one encoder pass only while they fit the
+    largest capture bucket, which bounds the pass's memory."""
+    audio = AudioEncoderSubmodule(SimpleNamespace(n_window=50, n_window_infer=400), config=None)
+    # 40k mel frames, ~5.2k encoder rows: one fits the 8192-row bucket, two don't
+    clips = [audio.prepare_inputs("prefill_audio", None, {"audio_features": [torch.zeros(1, 40_000)]})] * 2
+    assert audio.can_batch(None, clips[:1])
+    assert not audio.can_batch(None, clips), "two long clips were packed past the largest capture into one pass"
+
+
 @requires_cuda
 def test_the_vision_encoder_compiles_no_graph_for_a_size_inside_the_ranges_it_has_compiled():
     pytest.importorskip("flash_attn")
