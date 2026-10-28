@@ -432,6 +432,8 @@ def test_higgs_encoder_prep_reads_no_tensor():
 class _OmniAudioEncoder(torch.nn.Module):
     """Records each call's mel frames; one embedding per output position."""
 
+    n_window = 50
+
     def __init__(self):
         super().__init__()
         self.call_frames = []
