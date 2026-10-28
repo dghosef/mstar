@@ -294,6 +294,7 @@ def test_to_device_nonblocking_pins_where_the_device_capability_says(monkeypatch
     monkeypatch.setattr(torch, "empty", empty)
     host = Mock(spec=torch.Tensor)
     host.device = torch.device("cpu")
+    host.is_pinned.return_value = False
     host.is_contiguous.return_value = True
     host.numel.return_value = 0
     to_device_nonblocking(host, device)
