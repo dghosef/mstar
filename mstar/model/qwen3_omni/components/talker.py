@@ -335,9 +335,9 @@ class Qwen3OmniCodePredictor(nn.Module):
     The Code Predictor runs 15 autoregressive steps (for residual codebooks
     1..15).
 
-    ``forward_depth_unrolled(...)`` runs every layer with per-token position
-    IDs over a static dense KV cache tensor (``depth``); the unrolled CUDA
-    graph captures it.
+    ``forward_depth_unrolled(...)`` runs every layer over a static dense KV
+    cache, through the ``depth`` cursor that each depth step binds; the
+    unrolled CUDA graph captures it.
     """
 
     def __init__(self, config: Qwen3OmniModelConfig):
@@ -394,25 +394,14 @@ class Qwen3OmniCodePredictor(nn.Module):
     def forward_depth_unrolled(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
         """Run one "slice" of the code-predictor AR loop over a dense KV cache,
         attending through ``DepthAttention``'s Triton kernels. Bind the slice
-        first with ``depth.bind_step(kv_cache, position_ids, cache_pos)``: the
-        depth loop binds it, not this frame, which would compile once per
-        ``cache_pos``.
+        first with ``depth.bind_step``, once per call: the depth loop binds it,
+        not this frame, which would compile once per ``cache_pos``.
 
         It is safe to call repeatedly inside a single graph capture because:
 
           * The KV cache is a preallocated dense tensor (no plan() call).
-          * Position IDs come in directly (no PlanState bookkeeping).
           * Write/read slices use Python-static ``cache_pos`` / ``seq_len`` so
             the captured kernel sees identical shapes every replay.
-
-        ``bind_step``'s arguments:
-            kv_cache: ``[n_layers, bs, 2, max_seq_len, n_kv_heads, head_dim]``
-                dense tensor preallocated by the runner. It is not cleared between
-                steps: every position a step reads is written earlier in the same step.
-            position_ids: ``[bs, seq_len]`` int tensor with the absolute
-                position of each input token within the depth sequence.
-            cache_pos: write offset into ``kv_cache``'s seq-len axis. The new
-                K/V tokens land at ``[cache_pos : cache_pos + seq_len]``.
 
         Args:
             inputs_embeds: ``[bs, seq_len, hidden_size]``. ``seq_len`` is 2 for

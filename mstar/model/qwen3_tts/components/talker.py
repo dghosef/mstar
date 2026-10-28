@@ -252,13 +252,10 @@ class Qwen3TTSCodePredictor(nn.Module):
 
     def forward_depth_unrolled(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
         """Run all CodePredictor layers for one depth token, the step bound
-        first with ``depth.bind_step(kv_cache, position_ids, cache_pos)``.
-
-        ``kv_cache`` layout is ``[layers, batch, K/V, groups, kv_heads,
-        head_dim]``. Unlike Talker cache, it is frame-local scratch space:
-        every generated frame starts at ``cache_pos=0`` and overwrites it.
-        The depth loop binds the step, not this frame, which would compile
-        once per ``cache_pos``.
+        first with ``depth.bind_step``, once per call. Unlike the Talker's,
+        the cache it binds is frame-local scratch space: every generated frame
+        starts at ``cache_pos=0`` and overwrites it. The depth loop binds the
+        step, not this frame, which would compile once per ``cache_pos``.
 
         ``inputs_embeds`` is ``[batch, 1, talker_hidden]``; the returned
         hidden state is ``[batch, 1, predictor_hidden]``.

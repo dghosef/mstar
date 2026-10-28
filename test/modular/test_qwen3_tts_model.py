@@ -47,6 +47,7 @@ from mstar.model.submodule_base import (
     HostRows,
     InputMetadata,
     ModelInputsFromEngine,
+    NodeSubmodule,
 )
 from mstar.streaming.chunk_policy import ScheduledLeftContextChunkPolicy
 from mstar.streaming.stream_buffer import StreamBuffer, StreamChunkInfo
@@ -1497,6 +1498,41 @@ def test_qwen3_tts_code_predictor_uses_the_shared_kernels(monkeypatch):
     assert key_shape[1] == config.talker.num_code_groups
     assert cache_len == 1
     assert len(calls) == config.talker.code_predictor.num_hidden_layers
+
+
+def _cpu_predictor(monkeypatch):
+    config = _tiny_model_config()
+    predictor = Qwen3TTSCodePredictor(config)
+    for layer in predictor.model.layers:
+        layer.input_layernorm = _IdentityNorm()
+        layer.post_attention_layernorm = _IdentityNorm()
+    predictor.model.norm = _IdentityNorm()
+    _fake_cp_kernels(monkeypatch)
+    cp = config.talker.code_predictor
+    kv_cache = torch.zeros(
+        cp.num_hidden_layers, 2, 2, config.talker.num_code_groups, cp.num_key_value_heads, cp.head_dim,
+    )
+    return predictor, kv_cache, torch.randn(2, 1, config.talker.hidden_size)
+
+
+def test_code_predictor_depth_step_is_bound_once_per_pass(monkeypatch):
+    """A pass whose step was not bound must fail, not write and attend over
+    the previous step's depth positions."""
+    predictor, kv_cache, x = _cpu_predictor(monkeypatch)
+    predictor.depth.bind_step(kv_cache, torch.zeros(2, 1, dtype=torch.long), cache_pos=0)
+    predictor.forward_depth_unrolled(x)
+    with pytest.raises(ValueError, match="bind_step"):
+        predictor.forward_depth_unrolled(x)
+
+
+def test_code_predictor_attention_keeps_its_depth_kv_when_the_node_binds(monkeypatch):
+    """The engine binds the node's resources into every module; the code
+    predictor's attention attends through its own ``DepthKV`` regardless."""
+    predictor, kv_cache, x = _cpu_predictor(monkeypatch)
+    NodeSubmodule.bind_node_resources(predictor, {"attn": object(), "kv": object(), "rope": object()})
+    assert all(layer.self_attn.attend is predictor.depth for layer in predictor.model.layers)
+    predictor.depth.bind_step(kv_cache, torch.zeros(2, 1, dtype=torch.long), cache_pos=0)
+    predictor.forward_depth_unrolled(x)
 
 
 @torch.compiler.disable
