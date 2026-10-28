@@ -67,9 +67,11 @@ def _trim_over_a_reversed_copy(audio, rate, mid_sil, lead_sil, trail_sil):
 @pytest.mark.parametrize("rate", [24000, 22050, 44100, 16000])
 @pytest.mark.parametrize("seed", range(25))
 def test_trailing_trim_reads_the_shared_prefix_sums(seed, rate):
-    """The trailing trim reads the lead-trimmed segment backwards over its prefix
-    sums, sample-exact against measuring a reversed copy, including where a
-    rate's fractional samples per millisecond pad or drop the edge."""
+    """Guards the flipped-bounds path (``_Segment.reversed_tail``) where the pydub
+    comparison skips, as on CI: the trailing trim reads the lead-trimmed segment
+    backwards over its prefix sums, sample-exact against measuring a reversed
+    copy, including where a rate's fractional samples per millisecond pad or
+    drop the edge."""
     rng = np.random.default_rng(seed)
     audio = _speech(rng, rng.uniform(0.0, 4.0), rate)
     if seed % 5 == 0:  # loud to both edges
