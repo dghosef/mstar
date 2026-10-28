@@ -169,10 +169,9 @@ class LingBotDitSubmodule(_SingleRequestMixin, NodeSubmodule):
         self.encoder_vae = encoder_vae
         self.config = config
         self.schedule = make_fast_schedule(config.sample_shift, config.timesteps_index, config.num_train_timesteps)
-        self._decoder = (
-            wan_vae.FastDecoder(vae, channels_last=config.vae_decode_channels_last, compile=False)
-            if vae is not None else None
-        )
+        if vae is not None and config.vae_decode_channels_last:
+            wan_vae.to_channels_last(vae)
+        self._decode_step = wan_vae.DecoderStep(vae, compile=False) if vae is not None else None
         # Debug hook for the parity harness: keep the last chunk's latents and
         # float frames in the request state.
         self.keep_chunk_outputs = False
@@ -242,19 +241,16 @@ class LingBotDitSubmodule(_SingleRequestMixin, NodeSubmodule):
         generator = state["generator"]
 
         with torch.inference_mode():
-            # per chunk: freed before the decode, not kept with the request
-            cam_mod = self.dit.camera_modulation(plucker)
             steps = self.schedule.step_timesteps
             for i, t in enumerate(steps):
                 timestep = torch.stack([t]).to(device)
-                flow = self.dit(latent, timestep, context, y, cam_mod, kv, current_start, frame_seqlen)
+                flow = self.dit(latent, timestep, context, y, plucker, kv, current_start, frame_seqlen)
                 x0 = flow_to_x0(flow, latent, t, self.schedule)
                 if i < len(steps) - 1:
                     noise = torch.randn(x0.shape, generator=generator, device=x0.device, dtype=x0.dtype)
                     latent = add_noise(x0, noise, steps[i + 1], self.schedule)
             commit_t = torch.stack([steps[-1] * 0.0]).to(device)
-            self.dit(x0, commit_t, context, y, cam_mod, kv, current_start, frame_seqlen)
-            del cam_mod
+            self.dit(x0, commit_t, context, y, plucker, kv, current_start, frame_seqlen)
             pixels = self._decode(x0, state, clip_start=chunk == 0)
 
         state.add("chunk", chunk + 1)
@@ -275,7 +271,10 @@ class LingBotDitSubmodule(_SingleRequestMixin, NodeSubmodule):
         mean = torch.tensor(self.vae.config.latents_mean).view(1, cfg.vae_z_dim, 1, 1, 1).to(z)
         inv_std = 1.0 / torch.tensor(self.vae.config.latents_std).view(1, cfg.vae_z_dim, 1, 1, 1).to(z)
         z = z / inv_std + mean
-        return self._decoder.decode_stream(z, state["feat_cache"], clip_start=clip_start)
+        with torch.amp.autocast("cuda", enabled=False):
+            return wan_vae.decode_causal(
+                self.vae, z, state["feat_cache"], self._decode_step, clip_start=clip_start, latents_per_call=1,
+            )
 
     def check_stop(self, request_id, request_info: CurrentForwardPassInfo, outputs) -> set[str]:
         done = request_info.dynamic_loop_iter_counts.get(ROLLOUT_LOOP_NAME, 0)

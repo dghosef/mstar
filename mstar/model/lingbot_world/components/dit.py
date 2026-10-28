@@ -116,8 +116,7 @@ def causal_rope_apply(
         freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1),
     ], dim=-1).reshape(seq_len, 1, -1)
     x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
-    if seq_len < x.size(1):
-        x_i = torch.cat([x_i, x[0, seq_len:]])
+    x_i = torch.cat([x_i, x[0, seq_len:]])
     return x_i.unsqueeze(0).type_as(x)
 
 
@@ -282,15 +281,8 @@ class CausalBlock(nn.Module):
         self.cam_scale_layer = nn.Linear(dim, dim)
         self.cam_shift_layer = nn.Linear(dim, dim)
 
-    def cam_modulation(self, cam: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """The block's camera scale and shift; a function of the chunk's Plucker
-        rays alone, so the same for all of a chunk's forwards."""
-        cam_hidden = self.cam_injector_layer2(F.silu(self.cam_injector_layer1(cam)))
-        cam_hidden = cam_hidden + cam
-        return self.cam_scale_layer(cam_hidden), self.cam_shift_layer(cam_hidden)
-
     def forward(
-        self, x: torch.Tensor, e: torch.Tensor, cam_mod: tuple[torch.Tensor, torch.Tensor], cross_k: torch.Tensor,
+        self, x: torch.Tensor, e: torch.Tensor, cam: torch.Tensor, cross_k: torch.Tensor,
         cross_v: torch.Tensor, attn_args: dict,
     ) -> torch.Tensor:
         with torch.amp.autocast("cuda", dtype=torch.float32):
@@ -299,8 +291,9 @@ class CausalBlock(nn.Module):
         with torch.amp.autocast("cuda", dtype=torch.float32):
             x = x + y * e[2].squeeze(2)
 
-        cam_scale, cam_shift = cam_mod
-        x = (1.0 + cam_scale) * x + cam_shift
+        cam_hidden = self.cam_injector_layer2(F.silu(self.cam_injector_layer1(cam)))
+        cam_hidden = cam_hidden + cam
+        x = (1.0 + self.cam_scale_layer(cam_hidden)) * x + self.cam_shift_layer(cam_hidden)
 
         x = x + self.cross_attn(self.norm3(x), cross_k, cross_v)
         y = self.ffn(self.norm2(x).float() * (1 + e[4].squeeze(2)) + e[3].squeeze(2))
@@ -363,34 +356,19 @@ class LingBotCausalDiT(nn.Module):
             sink_tokens=cfg.sink_size * frame_seqlen, windowed=windowed, device=device,
         )
 
-    def camera_modulation(self, plucker: torch.Tensor) -> list[tuple[torch.Tensor, torch.Tensor]]:
-        """Each block's camera (scale, shift) for a chunk's Plucker rays
-        ``[1, 384, f, h, w]`` bf16. A chunk's denoise and commit forwards share
-        its rays, so the caller computes this (four GEMMs a block) once per chunk."""
-        cfg = self.config
-        with torch.amp.autocast("cuda", dtype=torch.bfloat16), torch.no_grad():
-            cam = rearrange(
-                plucker, "1 c (f c1) (h c2) (w c3) -> 1 (f h w) (c c1 c2 c3)",
-                c1=cfg.patch_size[0], c2=cfg.patch_size[1], c3=cfg.patch_size[2],
-            ).contiguous()
-            cam = self.patch_embedding_wancamctrl(cam)
-            cam = cam + self.c2ws_hidden_states_layer2(F.silu(self.c2ws_hidden_states_layer1(cam)))
-            return [block.cam_modulation(cam) for block in self.blocks]
-
     def forward(
         self, x: torch.Tensor, t: torch.Tensor, context: torch.Tensor, y: torch.Tensor,
-        cam_mod: list[tuple[torch.Tensor, torch.Tensor]], cache: RollingKVCache, current_start: int,
-        frame_seqlen: int,
+        plucker: torch.Tensor, cache: RollingKVCache, current_start: int, frame_seqlen: int,
     ) -> torch.Tensor:
         """One chunk: ``x`` ``[16, f, h, w]`` fp32 noisy latents, ``t`` ``[1]``
         timestep, ``context`` ``[L, 4096]`` text embeds, ``y`` ``[20, f, h, w]``
-        mask + image latent, ``cam_mod`` the chunk's ``camera_modulation``.
-        Writes the chunk's K/V at absolute token ``current_start``; returns the
-        fp32 flow prediction ``[16, f, h, w]``."""
+        mask + image latent, ``plucker`` ``[1, 384, f, h, w]`` bf16. Writes the
+        chunk's K/V at absolute token ``current_start``; returns the fp32 flow
+        prediction ``[16, f, h, w]``."""
         with torch.amp.autocast("cuda", dtype=torch.bfloat16), torch.no_grad():
-            return self._forward(x, t, context, y, cam_mod, cache, current_start, frame_seqlen)
+            return self._forward(x, t, context, y, plucker, cache, current_start, frame_seqlen)
 
-    def _forward(self, x, t, context, y, cam_mod, cache, current_start, frame_seqlen):
+    def _forward(self, x, t, context, y, plucker, cache, current_start, frame_seqlen):
         cfg = self.config
         device = self.patch_embedding.weight.device
         freqs = self.freqs(device)
@@ -400,19 +378,13 @@ class LingBotCausalDiT(nn.Module):
         x = x.flatten(2).transpose(1, 2)
         seq_len = x.size(1)
 
-        per_token = t.dim() > 1
-        if not per_token:
+        if t.dim() == 1:
             t = t.expand(t.size(0), seq_len)
         with torch.amp.autocast("cuda", dtype=torch.float32):
             bt = t.size(0)
             e = self.time_embedding(
                 sinusoidal_embedding_1d(cfg.freq_dim, t.flatten()).unflatten(0, (bt, seq_len)).float())
             e0 = self.time_projection(e).unflatten(2, (6, cfg.dim))
-        if not per_token:
-            # Every token's row of e/e0 is the same bits, so keep one and let the
-            # modulation broadcast. The per-token [L, 6, dim] fp32 tensors
-            # otherwise cost ~10% of a forward in elementwise traffic, in every block.
-            e, e0 = e[:, :1], e0[:, :1]
 
         if not cache.cross_k:
             padded = torch.cat([context, context.new_zeros(cfg.text_len - context.size(0), context.size(1))])
@@ -422,6 +394,13 @@ class LingBotCausalDiT(nn.Module):
                 cache.cross_k.append(k)
                 cache.cross_v.append(v)
 
+        cam = rearrange(
+            plucker, "1 c (f c1) (h c2) (w c3) -> 1 (f h w) (c c1 c2 c3)",
+            c1=cfg.patch_size[0], c2=cfg.patch_size[1], c3=cfg.patch_size[2],
+        ).contiguous()
+        cam = self.patch_embedding_wancamctrl(cam)
+        cam = cam + self.c2ws_hidden_states_layer2(F.silu(self.c2ws_hidden_states_layer1(cam)))
+
         plan = cache.plan(current_start, seq_len)
         start_frame = current_start // frame_seqlen
         if start_frame + grid[0] > freqs.shape[0]:
@@ -429,7 +408,7 @@ class LingBotCausalDiT(nn.Module):
                 f"latent frame {start_frame + grid[0]} is past the RoPE table ({freqs.shape[0]} frames)")
         for i, block in enumerate(self.blocks):
             attn_args = dict(grid=grid, freqs=freqs, start_frame=start_frame, cache=cache, layer=i, plan=plan)
-            x = block(x, e0, cam_mod[i], cache.cross_k[i], cache.cross_v[i], attn_args)
+            x = block(x, e0, cam, cache.cross_k[i], cache.cross_v[i], attn_args)
         cache.global_end = plan.current_end
         cache.local_end = plan.local_end
 
