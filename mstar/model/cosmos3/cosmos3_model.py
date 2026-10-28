@@ -37,8 +37,9 @@ Edge checkpoints add the reasoner (the understanding tower served as a VLM):
 
 Streaming rollout (opt-in, ``enable_windowed_video``; ported from #198):
     video_gen_ar - the denoise loop run window by window over a long clip.
-                 ``chained`` windows re-pin the previous window's tail as clean
-                 conditioning; ``kv`` windows attend block-causally over the
+                 ``chained`` windows pin the previous window's last frames,
+                 re-encoded as a clip of their own, as clean conditioning;
+                 ``kv`` windows attend block-causally over the
                  committed K/V of earlier windows (one commit iteration per
                  window appends the finished window's clean K/V; the pool's
                  retention policy releases frames past the context horizon at
@@ -212,7 +213,8 @@ class Cosmos3Model(Model):
         # and the decoder submodule, so build it once. The transformer is
         # shared between the DiT and reasoner nodes likewise.
         self._vae = None
-        self._decoder_vae = None
+        self._decoder_only_vaes: dict[str, torch.nn.Module] = {}
+        self._encode_vaes: dict[str, torch.nn.Module] = {}
         self._transformer = None
 
     # ------------------------------------------------------------------
@@ -1481,12 +1483,9 @@ class Cosmos3Model(Model):
                 "Cosmos3 window_mode='kv' does not support overlap_frames; "
                 "cross-window conditioning comes from the committed context."
             )
-        overlap_units = min(max(round(overlap_frames / tf), 0), window_units - 1)
-        if overlap_frames > 0 and overlap_units == 0:
-            logger.warning(
-                "Cosmos3 overlap_frames=%d rounds to no latent frames (temporal scale %d); "
-                "windows will not overlap.", overlap_frames, tf,
-            )
+        # frames -> latent frames as the reference's pipelines map them: k
+        # latent frames pin 1 + (k - 1) * tf pixel frames
+        overlap_units = min((overlap_frames - 1) // tf + 1 if overlap_frames > 0 else 0, window_units - 1)
         if overlap_units:
             # Two clean latent frames are the conditioning floor (the V2V
             # recipe's pin count); a single frame visibly degrades the next
@@ -1829,6 +1828,12 @@ class Cosmos3Model(Model):
                 transformer=self._build_transformer(device, tp_group=tp_group, sp_group=sp_group),
                 config=self.config,
                 scheduler=self._build_scheduler(),
+                # Chained windows re-encode the frames they continue from: the
+                # decode on the whole-clip decoder's VAE, the encode on the
+                # encoder node's fp32 one, both shared with those nodes when
+                # they are in this process.
+                head_decode_vae=self._build_whole_clip_decode_vae(device) if self._windowed_serving_enabled() else None,
+                head_encode_vae=self._build_encode_vae(device) if self._windowed_serving_enabled() else None,
             )
         if node_name == VAE_ENCODER_NODE:
             return Cosmos3VAEEncoderSubmodule(
@@ -1840,19 +1845,9 @@ class Cosmos3Model(Model):
         # two share; otherwise a decoder shares the default-layout instance.
         # Only the streaming chunk state and the compile wrappers are per node.
         if node_name == VAE_DECODER_NODE:
-            vae = (
-                self._build_decoder_only_vae(device)
-                if self.config.vae_decode_fast
-                else self._build_vae(device)
-            )
-            return Cosmos3VAEDecoderSubmodule(vae=vae, config=self.config)
+            return Cosmos3VAEDecoderSubmodule(vae=self._build_whole_clip_decode_vae(device), config=self.config)
         if node_name == VAE_DECODER_AR_NODE:
-            vae = (
-                self._build_decoder_only_vae(device)
-                if self.config.vae_decode_channels_last
-                else self._build_vae(device)
-            )
-            return Cosmos3VAEDecoderARSubmodule(vae=vae, config=self.config)
+            return Cosmos3VAEDecoderARSubmodule(vae=self._build_streaming_decode_vae(device), config=self.config)
         if node_name == AUDIO_DECODER_NODE:
             return Cosmos3AudioDecoderSubmodule(
                 sound_tokenizer=self._build_sound_tokenizer(device), config=self.config
@@ -1937,33 +1932,51 @@ class Cosmos3Model(Model):
         self._vae = vae.to(device).eval()
         return self._vae
 
+    def _build_whole_clip_decode_vae(self, device: str):
+        """The VAE the whole-clip decoder and a chained window's head decode
+        on: the decoder-only copy when ``vae_decode_fast`` switches it to
+        channels-last, else the shared instance."""
+        if self.config.vae_decode_fast:
+            return self._build_decoder_only_vae(device)
+        return self._build_vae(device)
+
+    def _build_streaming_decode_vae(self, device: str):
+        """The VAE the streaming decoder decodes on: the decoder-only copy
+        when the decode goes channels-last (the conversion is in place), else
+        the shared instance."""
+        if self.config.vae_decode_channels_last:
+            return self._build_decoder_only_vae(device)
+        return self._build_vae(device)
+
     def _build_decoder_only_vae(self, device: str):
-        # Separate from _build_vae's instance (and without the encoder), so
-        # converting it to channels-last leaves that one untouched. Built once:
-        # both decoder nodes convert it the same way and cast it to the same
-        # decode dtype (Cosmos3VAEDecoderSubmodule._decode_dtype).
+        # A separate instance (the decode needs no encoder) per device, shared
+        # by the nodes on it that convert its layout in place, so the shared
+        # whole instance stays as loaded. They also cast it to the same decode
+        # dtype (Cosmos3VAEDecoderSubmodule._decode_dtype).
         if self.skip_weight_loading:
             return None
-        if self._decoder_vae is not None:
-            return self._decoder_vae
-        from diffusers import AutoencoderKLWan
+        if device not in self._decoder_only_vaes:
+            from diffusers import AutoencoderKLWan
 
-        vae = AutoencoderKLWan.from_pretrained(str(self._ensure_repo() / "vae"))
-        vae.encoder = None
-        self._decoder_vae = vae.to(device).eval()
-        return self._decoder_vae
+            vae = AutoencoderKLWan.from_pretrained(str(self._ensure_repo() / "vae"))
+            vae.encoder = None
+            self._decoder_only_vaes[device] = vae.to(device).eval()
+        return self._decoder_only_vaes[device]
 
     def _build_encode_vae(self, device: str):
         # The encoder node keeps its own fp32 instance instead of sharing the
         # decoder's: encode always runs fp32 while the decode dtype is
         # cuDNN-gated (bf16 from 9.16), so a shared instance would re-cast the
-        # full VAE weights on every encode/decode interleave.
+        # full VAE weights on every encode/decode interleave. One per device,
+        # shared with a chained window's head when the DiT is on it.
         if self.skip_weight_loading:
             return None
-        from diffusers import AutoencoderKLWan
+        if device not in self._encode_vaes:
+            from diffusers import AutoencoderKLWan
 
-        vae = AutoencoderKLWan.from_pretrained(str(self._ensure_repo() / "vae"))
-        return vae.float().to(device).eval()
+            vae = AutoencoderKLWan.from_pretrained(str(self._ensure_repo() / "vae"))
+            self._encode_vaes[device] = vae.float().to(device).eval()
+        return self._encode_vaes[device]
 
     def _build_vision_model(self, device: str):
         """The reasoner's vision tower + projector, from ``vision_encoder/``."""

@@ -300,10 +300,15 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
     prefill_capture_token_buckets: tuple[int, ...] = (16, 32, 64, 128, 256)
     prefill_capture_batch_sizes: tuple[int, ...] = (1,)
 
-    def __init__(self, transformer, config, scheduler=None):
+    def __init__(self, transformer, config, scheduler=None, head_decode_vae=None, head_encode_vae=None):
         super().__init__()
         self.transformer = transformer
         self.config = config
+        # Re-encodes the frames a chained window (or a resumed session)
+        # continues from; built only for deployments serving windowed video.
+        self._window_head = (
+            ChainedWindowHead(head_decode_vae, head_encode_vae, config) if head_decode_vae is not None else None
+        )
         # Template scheduler; a fresh instance (with its own multistep state) is
         # built per request from this one's config.
         self._scheduler_template = scheduler
@@ -794,11 +799,11 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         return node_inputs
 
     def _session_tail(self, session_id: str, units: int, height: int, width: int) -> torch.Tensor:
-        """The stored last-window latents a resumed request pins its head
-        with: the newest ``units`` latent frames, at the request's latent
-        size. Unknown (or evicted) sessions and size mismatches are request
-        errors — silently starting from scratch would break the client's
-        frame accounting."""
+        """The head a resumed request pins: ``units`` latent frames re-encoded
+        from the stored last window's final frames (``ChainedWindowHead``), at
+        the request's latent size. Unknown (or evicted) sessions and size
+        mismatches are request errors — silently starting from scratch would
+        break the client's frame accounting."""
         tail = self._sessions.get(session_id)  # promotes the session
         if tail is None:
             raise ValueError(
@@ -810,7 +815,7 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
                 f"Cosmos3 resume_session: session {session_id!r} holds latents of shape "
                 f"{tuple(tail.shape)}, which cannot seed a {height}x{width} window."
             )
-        return tail[:, :, -units:]
+        return self._window_head(tail, units)
 
     def _store_session_tail(self, st, window_latents: torch.Tensor) -> None:
         """The rollout's final window, kept for a ``resume_session`` follow-up
@@ -967,8 +972,9 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
     def _finish_window(self, st, window_latents, time_index, window_index) -> dict:
         """End of a window: emit the window's clean latents on the streaming
         edge and stage the next window — fresh scheduler, fresh noise, and
-        (chained mode) the finished tail re-pinned as clean overlap
-        conditioning through the same vmask machinery video-to-video uses."""
+        (chained mode) the window's last frames, re-encoded as their own clip
+        (``ChainedWindowHead``), pinned as clean overlap conditioning through
+        the same vmask machinery video-to-video uses."""
         schedule = st["ar_schedule"]
         outputs = {
             "latents": [window_latents],
@@ -995,7 +1001,7 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             shape, generator=st["ar_generator"], device=device, dtype=dtype
         )
         if plan.cond_units > 0:
-            tail = window_latents[:, :, -plan.cond_units:].to(dtype)
+            tail = self._window_head(window_latents, plan.cond_units).to(dtype)
             vmask = torch.zeros((1, 1, plan.units, 1, 1), device=device, dtype=dtype)
             vmask[:, :, :plan.cond_units] = 1.0
             cond_video = torch.zeros(shape, device=device, dtype=dtype)
@@ -2619,10 +2625,7 @@ class Cosmos3VAEEncoderSubmodule(NodeSubmodule):
         if next(vae.parameters()).dtype != torch.float32:
             vae.float()
         device = vision.device
-        mean = torch.tensor(vae.config.latents_mean, dtype=torch.float32, device=device).view(1, -1, 1, 1, 1)
-        inv_std = (1.0 / torch.tensor(vae.config.latents_std, dtype=torch.float32, device=device)).view(
-            1, -1, 1, 1, 1
-        )
+        mean, inv_std = _latent_affine(vae, torch.float32, device)
         # fp32 outside autocast; pipeline-side latent normalization; the DiT
         # consumes the latents in its bf16 checkpoint dtype.
         with torch.autocast(device_type=device.type, enabled=False):
@@ -2689,6 +2692,55 @@ def _wan_vae():
     from mstar.model.components import wan_vae
 
     return wan_vae
+
+
+def _latent_affine(vae, dtype: torch.dtype, device) -> tuple[torch.Tensor, torch.Tensor]:
+    """The pipeline-side latent normalization of ``vae`` as ``[1, C, 1, 1, 1]``
+    tensors: raw latents ``z = latents / inv_std + mean``, DiT latents
+    ``(z - mean) * inv_std``."""
+    mean = torch.tensor(vae.config.latents_mean, dtype=dtype, device=device).view(1, -1, 1, 1, 1)
+    inv_std = (1.0 / torch.tensor(vae.config.latents_std, dtype=dtype, device=device)).view(1, -1, 1, 1, 1)
+    return mean, inv_std
+
+
+class ChainedWindowHead:
+    """The clean head of a window that continues earlier frames: a chained
+    window's overlap, or a resumed session's first window.
+
+    The checkpoint was trained on clips whose first latent frame encodes one
+    pixel frame alone and every later one the four frames after it, so a
+    finished window's tail latents (mid-stream latents) are not what a
+    window's first positions expect; pinned there, the rollout washes out
+    within a few windows. Like the reference's video-to-video conditioning,
+    the head is the last ``1 + (units - 1) * tf`` frames, decoded to 8 bits
+    and encoded again as a clip of their own. The decode is the whole-clip
+    decode the ``vae_decoder`` node runs (compiled, channels-last, the
+    cuDNN-gated dtype, the frames quantized as served), behind
+    ``chained_head_context_latents`` latents of the same window so the causal
+    decoder is warm at the kept frames; the encode runs fp32 like the encoder
+    node's. Both VAEs are the model's shared copies when the nodes share a
+    process. Held outside the module tree, so the engine's casts of the DiT
+    never reach them.
+    """
+
+    def __init__(self, decode_vae, encode_vae, config):
+        self.decoder = Cosmos3VAEDecoderSubmodule(decode_vae, config)
+        self.encode_vae = encode_vae
+        self.config = config
+
+    def __call__(self, window_latents: torch.Tensor, units: int) -> torch.Tensor:
+        # at least one: a clip's latent 0 is a clip start, a mid-stream latent is not
+        ctx = max(1, int(self.config.chained_head_context_latents))
+        z = window_latents[:, :, -min(window_latents.shape[2], units + ctx):]
+        frames = 1 + (units - 1) * self.config.vae.scale_factor_temporal
+        pixels = self.decoder._decode_pixels(z)[:, :, -frames:]
+        vae = self.encode_vae
+        if next(vae.parameters()).dtype != torch.float32:
+            vae.float()
+        mean, inv_std = _latent_affine(vae, torch.float32, z.device)
+        with torch.autocast(device_type=z.device.type, enabled=False):
+            raw_mu = vae.encode(pixels.to(torch.float32) / 127.5 - 1).latent_dist.mode()
+        return ((raw_mu - mean) * inv_std).to(window_latents.dtype)
 
 
 class Cosmos3VAEDecoderSubmodule(NodeSubmodule):
@@ -2758,10 +2810,7 @@ class Cosmos3VAEDecoderSubmodule(NodeSubmodule):
         vae_dtype = self._decode_dtype()
         if next(vae.parameters()).dtype != vae_dtype:
             vae = vae.to(vae_dtype)
-        mean = torch.tensor(vae.config.latents_mean, dtype=vae_dtype, device=latents.device).view(1, -1, 1, 1, 1)
-        inv_std = (1.0 / torch.tensor(vae.config.latents_std, dtype=vae_dtype, device=latents.device)).view(
-            1, -1, 1, 1, 1
-        )
+        mean, inv_std = _latent_affine(vae, vae_dtype, latents.device)
         # Force z to the VAE dtype: the engine's outer autocast promotes the
         # `1.0 / std` division to fp32, and a fp32 z into the autocast-off bf16
         # conv3d fails ("Input type (float) and bias type (BFloat16)"). No-op
