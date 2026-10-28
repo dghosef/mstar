@@ -117,12 +117,11 @@ pub struct LoopSpec {
     pub accumulated: Vec<EdgeSpec>,
     pub output_names: Vec<Sym>,
     pub accum_names: Vec<Sym>,
-    /// Python's `Loop._loop_back_inputs` / `_external_inputs`, computed by
-    /// `GraphSection.get_inputs_outputs()` and handed over verbatim — the real
-    /// port's compile seam does the same rather than re-deriving them.
-    /// `loop_back` keeps every pair as (signal, dest node name), a dest in
-    /// another worker graph included: a loop split across worker graphs loops
-    /// back through them. `external_inputs` keeps the pairs into this graph.
+    /// Python's `Loop._loop_back_inputs` / `_external_inputs`, taken from
+    /// `GraphSection.get_inputs_outputs()` rather than re-derived.
+    /// `loop_back` keeps every (signal, dest node name) pair, since a loop
+    /// split across worker graphs loops back through the others too.
+    /// `external_inputs` keeps only the pairs into this graph's nodes.
     pub loop_back: Vec<(Sym, Sym)>,
     pub external_inputs: Vec<(Sym, NodeId)>,
 }
