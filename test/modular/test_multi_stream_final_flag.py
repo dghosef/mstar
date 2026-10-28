@@ -259,3 +259,22 @@ def test_a_batch_hold_keeps_later_chunks_back_until_enough_are_ready():
     push("c", 1)
     Worker._poll_stream_buffers(worker, idle=False)
     assert sorted(ingested[5:]) == ["a", "b", "c"], "min_chunks ready across requests releases them all"
+
+
+def test_a_lockstep_leader_holds_its_streams_and_a_follower_does_not():
+    """A batch hold applies on the rank that picks a lockstep node's rows (its
+    leader) and on unreplicated nodes; a follower ingests its chunks at once."""
+    from mstar.streaming.topology import ChunkBatchHold
+
+    hold = ChunkBatchHold(max_wait_s=60.0, min_chunks=3)
+    consumers = {"codes": "codec", "frames": "talker", "text": "detok"}
+    worker = Worker.__new__(Worker)
+    worker._my_consumer_connections = [
+        SimpleNamespace(edge_name=edge, batch_hold=hold) for edge in consumers
+    ]
+    worker._consumer_node_cache = consumers
+    worker.parallel_nodes = {"codec", "talker"}
+    worker.parallel_leader_nodes = {"codec"}
+    assert worker._build_stream_holds() == {"codes": hold, "text": hold}, (
+        "only a node this rank follows ingests unheld"
+    )

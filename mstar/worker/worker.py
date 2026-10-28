@@ -774,15 +774,7 @@ class Worker:
         self._stream_partition: dict[str, str] = {
             conn.edge_name: conn.to_partition for conn in self._my_consumer_connections
         }
-        # edge_name -> how long its ready chunks may wait to batch. A lockstep
-        # consumer's leader holds and its followers ingest at once: the leader
-        # picks every step's rows, and a follower waits for a row's chunk.
-        followed = self.parallel_nodes - self.parallel_leader_nodes
-        self._stream_holds: dict[str, ChunkBatchHold] = {
-            conn.edge_name: conn.batch_hold for conn in self._my_consumer_connections
-            if conn.batch_hold is not None
-            and self._consumer_node_cache.get(conn.edge_name) not in followed
-        }
+        self._stream_holds = self._build_stream_holds()
 
         # (graph_walk, node) -> innermost enclosing loop, for ending a
         # stream-terminated loop in _postprocess_batch. Structural, so it is
@@ -809,6 +801,17 @@ class Worker:
             )),
             enable_transfers=self.tensor_manager.enable_transfer_metrics,
         )
+
+    def _build_stream_holds(self) -> dict[str, ChunkBatchHold]:
+        """edge_name -> how long its ready chunks may wait to batch. A lockstep
+        consumer's leader holds and its followers ingest at once: the leader
+        picks every step's rows, and a follower waits for a row's chunk."""
+        followed = self.parallel_nodes - self.parallel_leader_nodes
+        return {
+            conn.edge_name: conn.batch_hold for conn in self._my_consumer_connections
+            if conn.batch_hold is not None
+            and self._consumer_node_cache.get(conn.edge_name) not in followed
+        }
 
     @staticmethod
     def _build_innermost_loop_cache(
