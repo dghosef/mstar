@@ -306,8 +306,9 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
        comes from the extension, or give ``{path: ..., modality: ...}``.
        ``repeat: N`` sends ``text`` N times over, a long prompt for a path only
        long prompts take (a long-context prefill). Each entry is sent as many
-       times at once as the most data-parallel replicas any node group serves (its
-       ranks over ``tp_size`` x ``sp_size``), so every replica warms. A node group
+       times at once as the most data-parallel replicas any of the model's worker
+       graphs is served by (the replicas the conductor picks from; a node group no
+       walk places adds none), so every replica warms. A node group
        with fewer replicas, such as one DiT instance beside a replicated VAE, gets
        those copies together and may batch them, so its one-request shape can stay
        cold. ``concurrency: N`` submits N copies per replica at once, so they can batch, for a step that
