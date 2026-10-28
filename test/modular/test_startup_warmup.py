@@ -13,6 +13,7 @@ import pytest
 sys.path.insert(0, ".")
 
 from mstar.api_server import entrypoint
+from mstar.graph.base import GraphEdge, GraphNode, Sequential
 
 
 class _FakeServer:
@@ -152,17 +153,39 @@ def test_hf_file_references_resolve_from_the_cache(monkeypatch) -> None:
     assert len(fake.submitted) == 1
 
 
-def test_warmup_reaches_every_data_parallel_replica() -> None:
+def test_warmup_reaches_every_data_parallel_replica(tmp_path) -> None:
     """One concurrent copy of each warmup per replica, so the conductor's
-    least-loaded placement warms every replica, not a random one."""
-    config = {"node_groups": [
-        {"node_names": ["dit", "vae_decoder"], "ranks": [0, 1]},
+    least-loaded placement warms every replica, not a random one. Replicas are
+    counted from the model's worker graphs, the ones the conductor picks from."""
+    from test_startup_graph_validation import _config, _llm, _ToyModel
+
+    def walks():
+        encoder = GraphNode(name="text_encoder", input_names=["x"], outputs=[GraphEdge(next_node="llm", name="x")])
+        return {"gen": Sequential([encoder, _llm()])}
+
+    model = _ToyModel(walks, tp_enabled_nodes={"llm"})
+
+    def replicas(node_groups):
+        return entrypoint._data_parallel_replicas(model, _config(tmp_path, node_groups))
+
+    assert replicas([
+        {"node_names": ["llm"], "ranks": [0, 1]},
         {"node_names": ["text_encoder"], "ranks": [0]},
-    ]}
-    assert entrypoint._data_parallel_replicas(config) == 2
+    ]) == 2
     # a lockstep instance is one replica
-    assert entrypoint._data_parallel_replicas({"node_groups": [{"ranks": [0, 1], "sp_size": 2}]}) == 1
-    assert entrypoint._data_parallel_replicas({"node_groups": [{"ranks": [0, 1, 2, 3], "tp_size": 2}]}) == 2
+    assert replicas([
+        {"node_names": ["llm"], "ranks": [0, 1], "tp_size": 2},
+        {"node_names": ["text_encoder"], "ranks": [0]},
+    ]) == 1
+    assert replicas([
+        {"node_names": ["llm"], "ranks": [0, 1, 2, 3], "tp_size": 2},
+        {"node_names": ["text_encoder"], "ranks": [0]},
+    ]) == 2
+    # a node group no walk places is never routed to, so it adds no copies
+    assert replicas([
+        {"node_names": ["llm", "text_encoder"], "ranks": [0]},
+        {"node_names": ["unused"], "ranks": [1, 2, 3]},
+    ]) == 1
     fake = _FakeServer()
     entrypoint._run_warmup_requests(fake, [{"text": "a"}, {"text": "b"}], copies=2)
     assert [s["request_id"] for s in fake.submitted] == ["warmup-0.0.0", "warmup-0.0.1", "warmup-1.0.0", "warmup-1.0.1"]
