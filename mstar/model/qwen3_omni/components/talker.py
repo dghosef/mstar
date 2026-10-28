@@ -360,14 +360,12 @@ class Qwen3OmniCodePredictor(nn.Module):
         # tensor is assigned later once the per-head weights exist on the
         # target device. Shape: ``[num_residual, vocab, hidden]``.
         # The unrolled MTP graph indexes this with a Python-static int at
-        # capture time (Option P), which is fixed-address and graph-safe.
+        # capture time, which is fixed-address and graph-safe.
         self.register_buffer(
             "lm_head_weight",
             torch.empty(num_residual, cp.vocab_size, cp.hidden_size),
             persistent=False,
         )
-
-        self._num_residual = num_residual
 
     def consolidate_stacked_weights(self) -> None:
         """Stack per-head ``nn.Linear`` weights into ``lm_head_weight``.
@@ -375,11 +373,10 @@ class Qwen3OmniCodePredictor(nn.Module):
         Must be called once after ``load_weights_from_hf_shards`` has
         populated the ``lm_head`` ModuleList. Replaces the placeholder
         ``lm_head_weight`` buffer with a real, contiguous tensor on the
-        same device/dtype as the per-head weights. After this call, the
-        unrolled graph path uses ``lm_head_weight[i]`` instead of
-        ``lm_head[i].weight``. The per-head ``nn.Linear`` modules are kept
-        (used by the eager fallback path) -- the duplicated memory is
-        ~120 MB, small relative to the full Qwen3-Omni checkpoint.
+        same device/dtype as the per-head weights. The depth loop reads
+        ``lm_head_weight[i]``; the per-head ``nn.Linear`` modules stay only
+        as the weight loader's targets, a ~120 MB duplicate, small relative
+        to the full Qwen3-Omni checkpoint.
         """
         stacked = torch.stack(
             [lm.weight.data for lm in self.lm_head], dim=0,
@@ -389,34 +386,8 @@ class Qwen3OmniCodePredictor(nn.Module):
         # placeholder created in __init__ with the real device tensor.
         self.lm_head_weight = stacked
 
-    def get_embedding(self, group_idx: int):
-        assert group_idx > 0
-        return self.model.codec_embedding[group_idx-1]
-
-    def get_lm_head(self, group_idx: int):
-        assert group_idx > 0
-        return self.lm_head[group_idx-1]
-
-    @property
-    def codec_embedding(self):
-        """Alias for submodule access."""
-        return self.model.codec_embedding
-
-    @torch.compiler.disable
-    def _apply_rope(self, q_rot, k_rot, flat_pos, rope_theta):
-        # moved to its own function for torch.compile purposes
-        # imported here so the package imports without flashinfer (CPU tests)
-        import flashinfer
-
-        return flashinfer.rope.apply_rope_pos_ids(
-            q_rot, k_rot,
-            pos_ids=flat_pos,
-            rope_theta=rope_theta,
-            interleave=False,
-        )
-
     # ------------------------------------------------------------------
-    # SDPA + dense-KV depth forward (for unrolled CUDA-graph capture)
+    # Dense-KV depth forward (for unrolled CUDA-graph capture)
     # ------------------------------------------------------------------
     def forward_depth_unrolled(
         self,
@@ -425,11 +396,10 @@ class Qwen3OmniCodePredictor(nn.Module):
         kv_cache: torch.Tensor,
         cache_pos: int,
     ) -> torch.Tensor:
-        """Run one "slice" of the code-predictor AR loop with SDPA + dense KV.
+        """Run one "slice" of the code-predictor AR loop over a dense KV cache,
+        attending through ``cp_attend``'s Triton kernels.
 
-        This is the CUDA-graph-compatible replacement for the paged-FlashInfer
-        attention path. It is safe to call repeatedly inside a single
-        ``torch.cuda.graph`` capture because:
+        It is safe to call repeatedly inside a single graph capture because:
 
           * The KV cache is a preallocated dense tensor (no plan() call).
           * Position IDs come in directly (no PlanState bookkeeping).
