@@ -250,6 +250,9 @@ class Qwen3TTSCodePredictor(nn.Module):
             head.weight.data for head in self.lm_head
         ]).contiguous()
 
+    # cache_pos changes every depth step, so this frame stays eager (see
+    # code_predictor_kernels); what it calls still compiles.
+    @torch.compiler.disable(recursive=False)
     def forward_depth_unrolled(
         self,
         inputs_embeds: torch.Tensor,

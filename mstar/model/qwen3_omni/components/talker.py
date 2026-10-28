@@ -389,6 +389,9 @@ class Qwen3OmniCodePredictor(nn.Module):
     # ------------------------------------------------------------------
     # Dense-KV depth forward (for unrolled CUDA-graph capture)
     # ------------------------------------------------------------------
+    # cache_pos changes every depth step, so this frame stays eager (see
+    # code_predictor_kernels); what it calls still compiles.
+    @torch.compiler.disable(recursive=False)
     def forward_depth_unrolled(
         self,
         inputs_embeds: torch.Tensor,

@@ -1525,37 +1525,54 @@ class _OpaqueKernel:
         return _opaque_launch
 
 
-def test_qwen3_tts_depth_loop_compiles_its_kernel_launchers_once(monkeypatch):
-    """The engine compiles a captured forward with static ints, so a launcher
-    frame Dynamo compiled would recompile at every depth position (and batch
-    bucket) until the recompile limit."""
-    import inspect
+@pytest.mark.parametrize("model", ["qwen3_tts", "qwen3_omni"])
+def test_code_predictor_depth_loop_compiles_no_frame_per_position(model, monkeypatch):
+    """The engine compiles a captured forward with static ints, so a compiled
+    frame that holds a depth step's ``cache_pos`` would recompile at every depth
+    position (and batch bucket) until the recompile limit: walking four depth
+    positions must compile no more frames than walking two."""
+    from torch._dynamo.testing import CompileCounter
 
     import mstar.model.components.code_predictor_kernels as kernels
 
     monkeypatch.setattr(kernels, "_cp_qk_norm_rope_kv_kernel", _OpaqueKernel())
     monkeypatch.setattr(kernels, "_cp_attn_kernel", _OpaqueKernel())
-    config = _tiny_model_config()
-    predictor = Qwen3TTSCodePredictor(config)
+    if model == "qwen3_tts":
+        config = _tiny_model_config()
+        predictor = Qwen3TTSCodePredictor(config)
+        cp, hidden = config.talker.code_predictor, config.talker.hidden_size
+    else:
+        from mstar.model.qwen3_omni.components.talker import Qwen3OmniCodePredictor
+        from mstar.model.qwen3_omni.config import CodePredictorConfig, Qwen3OmniModelConfig
+
+        cp = CodePredictorConfig(
+            vocab_size=32, hidden_size=16, intermediate_size=32, num_hidden_layers=2,
+            num_attention_heads=1, num_key_value_heads=1, head_dim=16, num_code_groups=4,
+        )
+        predictor = Qwen3OmniCodePredictor(Qwen3OmniModelConfig(code_predictor=cp))
+        hidden = cp.hidden_size
     for layer in predictor.model.layers:
         layer.input_layernorm = _IdentityNorm()
         layer.post_attention_layernorm = _IdentityNorm()
     predictor.model.norm = _IdentityNorm()
-    cp = config.talker.code_predictor
-    kv_cache = torch.zeros(
-        cp.num_hidden_layers, 2, 2, config.talker.num_code_groups, cp.num_key_value_heads, cp.head_dim,
-    )
-    torch._dynamo.reset()
+    bs, depth = 2, 4
+    kv_cache = torch.zeros(cp.num_hidden_layers, bs, 2, depth, cp.num_key_value_heads, cp.head_dim)
+    pos = torch.arange(depth, dtype=torch.int32)[:, None, None].expand(depth, bs, 1).contiguous()
+
+    def frames_compiled(positions: int) -> int:
+        # the shape of the talkers' captured depth loops
+        def depth_loop(x, pos, kv_cache):
+            for cache_pos in range(positions):
+                predictor.forward_depth_unrolled(x, pos[cache_pos], kv_cache, cache_pos=cache_pos)
+
+        torch._dynamo.reset()
+        counter = CompileCounter()
+        with torch.no_grad():
+            torch.compile(depth_loop, backend=counter, dynamic=False)(torch.randn(bs, 1, hidden), pos, kv_cache)
+        return counter.frame_count
+
     try:
-        depth_step = torch.compile(predictor.forward_depth_unrolled, backend="eager", dynamic=False)
-        for cache_pos in range(config.talker.num_code_groups):
-            depth_step(
-                torch.randn(2, 1, config.talker.hidden_size),
-                torch.full((2, 1), cache_pos, dtype=torch.int32), kv_cache, cache_pos=cache_pos,
-            )
-        for launcher in (kernels.cp_qk_norm_rope_kv_write, kernels.cp_attention):
-            code = inspect.unwrap(launcher).__code__
-            assert torch._dynamo.eval_frame._debug_get_cache_entry_list(code) == []
+        assert frames_compiled(depth) == frames_compiled(2)
     finally:
         torch._dynamo.reset()
 

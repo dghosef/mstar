@@ -10,9 +10,11 @@ been six launches of a few microseconds around a ~1 us job.
 ``cp_attend`` is a layer's attention built from the first two, the ``attend``
 both code predictors hand ``run_layers``.
 
-The launchers are opaque to Dynamo, as the ops they replace were: a captured
-forward compiles with static ints, so a traced launcher would recompile for
-every depth position and batch bucket.
+A captured forward compiles with static ints, so any compiled frame that holds a
+depth step's ``cache_pos`` (or passes it on) recompiles at every depth position.
+The launchers and ``cp_attend`` are opaque to Dynamo, ``run_layers`` runs eager
+around an opaque ``attend``, and ``forward_depth_unrolled`` skips its own frame:
+only the norms and MLPs compile.
 """
 from __future__ import annotations
 
@@ -164,6 +166,7 @@ def cp_attention(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, 
     return out
 
 
+@torch.compiler.disable
 def cp_attend(
     kv_cache: torch.Tensor, pos: torch.Tensor, cache_pos: int,
     layer_idx: int, attn: torch.nn.Module, h: torch.Tensor,
@@ -173,7 +176,8 @@ def cp_attend(
     depth positions ``cache_pos .. cache_pos + S - 1``, each token attending over
     the positions so far. ``pos`` holds one position per token. Bind the cache
     arguments with ``functools.partial`` to get ``run_layers``' ``attend(i,
-    self_attn, h)``. Plain Python: the projections compile, the launchers do not."""
+    self_attn, h)``. Eager, projections included: at decode width they are
+    cuBLAS GEMMs either way."""
     bs, seq_len, _ = h.shape
     qkv = attn.qkv_proj(h)
     # q normed and roped in place; k (normed, roped) and v into the cache
