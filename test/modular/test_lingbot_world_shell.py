@@ -484,3 +484,40 @@ def test_the_decode_settings_are_model_kwargs_and_unknown_ones_are_refused():
     assert exact.config.vae_decode_fp32 is False and exact.config.reference_numerics
     with pytest.raises(TypeError):
         LingBotWorldModel(skip_weight_loading=True, vae_decode_compiled=False)
+
+
+def test_fast_blocks_compile_each_pointwise_chain_once_for_every_block(monkeypatch):
+    """Off reference numerics the blocks share one compiled graph per pointwise
+    chain: a guard on the block's modules would recompile per block and, past
+    Dynamo's cache limit, drop the later blocks to eager."""
+    from torch._dynamo.testing import CompileCounter
+
+    from mstar.model.lingbot_world.components import dit
+
+    counter, options, real_compile = CompileCounter(), [], torch.compile
+
+    def compile(fn, **kw):
+        options.append(kw.pop("options"))
+        return real_compile(fn, backend=counter, **kw)
+
+    monkeypatch.setattr(torch, "compile", compile)
+    dit._compiled.cache_clear()
+    torch._dynamo.reset()
+    try:
+        dim, n = 16, 5
+        blocks = [dit.CausalBlock(dim, 32, 2, 1e-6, fast=True) for _ in range(3)]
+        g = torch.Generator().manual_seed(0)
+        x, y, *e = (torch.randn(1, n, dim, generator=g) for _ in range(8))
+        for block in blocks:
+            chains = [
+                (dit._qkv, block.self_attn, x), (dit._q, block.cross_attn, x),
+                (dit._pre, block.norm1, x, e[0], e[1]), (dit._post_self, x, y, e[2], e[3], e[4]),
+                (dit._norm3, block.norm3, x), (dit._ffn, block.norm2, block.ffn, x, e[3], e[4], e[5]),
+            ]
+            for fn, *args in chains:
+                torch.testing.assert_close(dit._pointwise(True, fn, *args), fn(*args), rtol=0, atol=0)
+        assert counter.frame_count == 6
+        assert options == [{"emulate_precision_casts": True}] * 6
+    finally:
+        dit._compiled.cache_clear()
+        torch._dynamo.reset()

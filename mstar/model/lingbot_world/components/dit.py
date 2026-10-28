@@ -37,6 +37,7 @@ numerics (explicit ``type_as`` casts, SDPA, fp32-island weights) are the
 diffusers pipeline's, not this checkpoint's reference.
 """
 
+import functools
 import math
 from dataclasses import dataclass, field
 
@@ -222,8 +223,55 @@ class _WritePlan:
     current_end: int
 
 
+# A block's pointwise chains (modulation, norms, FFN activation, gated
+# residuals) around its GEMMs, as functions of the modules they run, so that
+# off reference numerics one compiled graph per chain serves every block.
+# Attention, RoPE and the cache writes stay eager: they take the chunk's
+# Python-int cache indices, which would recompile per chunk.
+
+
+def _qkv(attn, x):
+    return attn.norm_q(attn.q(x)), attn.norm_k(attn.k(x)), attn.v(x)
+
+
+def _q(attn, x):
+    return attn.norm_q(attn.q(x))
+
+
+def _pre(norm1, x, e0, e1):
+    return norm1(x).float() * (1 + e1.squeeze(2)) + e0.squeeze(2)
+
+
+def _post_self(x, y, e2, cam_scale, cam_shift):
+    with torch.amp.autocast("cuda", dtype=torch.float32):
+        x = x + y * e2.squeeze(2)
+    return (1.0 + cam_scale) * x + cam_shift
+
+
+def _norm3(norm3, x):
+    return norm3(x)
+
+
+def _ffn(norm2, ffn, x, e3, e4, e5):
+    y = ffn(norm2(x).float() * (1 + e4.squeeze(2)) + e3.squeeze(2))
+    with torch.amp.autocast("cuda", dtype=torch.float32):
+        return x + y * e5.squeeze(2)
+
+
+@functools.cache
+def _compiled(fn):
+    # the rounding is a compile-time option: no config patch per call
+    return torch.compile(fn, dynamic=False, options={"emulate_precision_casts": True})
+
+
+def _pointwise(fast: bool, fn, *args):
+    """``fn(*args)``, through its compiled graph with ``fast``: trading
+    bit-parity with the reference for speed."""
+    return (_compiled(fn) if fast else fn)(*args)
+
+
 class CausalSelfAttention(nn.Module):
-    def __init__(self, dim: int, num_heads: int, eps: float, fa4: bool = False):
+    def __init__(self, dim: int, num_heads: int, eps: float, fast: bool = False):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -233,31 +281,28 @@ class CausalSelfAttention(nn.Module):
         self.o = nn.Linear(dim, dim)
         self.norm_q = WanRMSNorm(dim, eps=eps)
         self.norm_k = WanRMSNorm(dim, eps=eps)
-        self.fa4 = fa4
+        self.fast = fast
 
     def forward(
         self, x: torch.Tensor, grid: tuple[int, int, int], freqs: torch.Tensor,
         start_frame: int, cache: RollingKVCache, layer: int, plan: _WritePlan,
     ) -> torch.Tensor:
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
-        q, k, v = self._qkv(x)
+        q, k, v = _pointwise(self.fast, _qkv, self, x)
         q, k, v = q.view(b, s, n, d), k.view(b, s, n, d), v.view(b, s, n, d)
         roped_query = causal_rope_apply(q, grid, freqs, start_frame).type_as(v)
         roped_key = causal_rope_apply(k, grid, freqs, start_frame).type_as(v)
         cache.write(layer, roped_key, v, plan)
         window = slice(max(0, plan.local_end - cache.capacity), plan.local_end)
-        x = _flash_attention(roped_query, cache.k[layer][:, window], cache.v[layer][:, window], self.fa4)
+        x = _flash_attention(roped_query, cache.k[layer][:, window], cache.v[layer][:, window], self.fast)
         return self.o(x.flatten(2))
-
-    def _qkv(self, x):
-        return self.norm_q(self.q(x)), self.norm_k(self.k(x)), self.v(x)
 
 
 class CrossAttention(nn.Module):
     """Cross-attention to the 512-token text stream. The text K/V are computed
     on a request's first forward and reused for the rest of its rollout."""
 
-    def __init__(self, dim: int, num_heads: int, eps: float, fa4: bool = False):
+    def __init__(self, dim: int, num_heads: int, eps: float, fast: bool = False):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -267,7 +312,7 @@ class CrossAttention(nn.Module):
         self.o = nn.Linear(dim, dim)
         self.norm_q = WanRMSNorm(dim, eps=eps)
         self.norm_k = WanRMSNorm(dim, eps=eps)
-        self.fa4 = fa4
+        self.fast = fast
 
     def text_kv(self, context: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         b, n, d = context.size(0), self.num_heads, self.head_dim
@@ -275,20 +320,21 @@ class CrossAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         b, n, d = x.size(0), self.num_heads, self.head_dim
-        q = self._q(x).view(b, -1, n, d)
-        return self.o(_flash_attention(q, k, v, self.fa4).flatten(2))
-
-    def _q(self, x):
-        return self.norm_q(self.q(x))
+        q = _pointwise(self.fast, _q, self, x).view(b, -1, n, d)
+        return self.o(_flash_attention(q, k, v, self.fast).flatten(2))
 
 
 class CausalBlock(nn.Module):
-    def __init__(self, dim: int, ffn_dim: int, num_heads: int, eps: float, fa4: bool = False):
+    """``fast``: off reference numerics, flash-attn-4 attention and compiled
+    pointwise chains (see ``LingBotWorldConfig.reference_numerics``)."""
+
+    def __init__(self, dim: int, ffn_dim: int, num_heads: int, eps: float, fast: bool = False):
         super().__init__()
+        self.fast = fast
         self.norm1 = WanLayerNorm(dim, eps)
-        self.self_attn = CausalSelfAttention(dim, num_heads, eps, fa4)
+        self.self_attn = CausalSelfAttention(dim, num_heads, eps, fast)
         self.norm3 = WanLayerNorm(dim, eps, elementwise_affine=True)
-        self.cross_attn = CrossAttention(dim, num_heads, eps, fa4)
+        self.cross_attn = CrossAttention(dim, num_heads, eps, fast)
         self.norm2 = WanLayerNorm(dim, eps)
         self.ffn = nn.Sequential(nn.Linear(dim, ffn_dim), nn.GELU(approximate="tanh"), nn.Linear(ffn_dim, dim))
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
@@ -310,26 +356,11 @@ class CausalBlock(nn.Module):
     ) -> torch.Tensor:
         with torch.amp.autocast("cuda", dtype=torch.float32):
             e = (self.modulation.unsqueeze(0) + e).chunk(6, dim=2)
-        y = self.self_attn(self._pre(x, e[0], e[1]), **attn_args)
-        x = self._post_self(x, y, e[2], *cam_mod)
-        x = x + self.cross_attn(self._norm3(x), cross_k, cross_v)
-        return self._ffn(x, e[3], e[4], e[5])
-
-    def _pre(self, x, e0, e1):
-        return self.norm1(x).float() * (1 + e1.squeeze(2)) + e0.squeeze(2)
-
-    def _post_self(self, x, y, e2, cam_scale, cam_shift):
-        with torch.amp.autocast("cuda", dtype=torch.float32):
-            x = x + y * e2.squeeze(2)
-        return (1.0 + cam_scale) * x + cam_shift
-
-    def _norm3(self, x):
-        return self.norm3(x)
-
-    def _ffn(self, x, e3, e4, e5):
-        y = self.ffn(self.norm2(x).float() * (1 + e4.squeeze(2)) + e3.squeeze(2))
-        with torch.amp.autocast("cuda", dtype=torch.float32):
-            return x + y * e5.squeeze(2)
+        fast = self.fast
+        y = self.self_attn(_pointwise(fast, _pre, self.norm1, x, e[0], e[1]), **attn_args)
+        x = _pointwise(fast, _post_self, x, y, e[2], *cam_mod)
+        x = x + self.cross_attn(_pointwise(fast, _norm3, self.norm3, x), cross_k, cross_v)
+        return _pointwise(fast, _ffn, self.norm2, self.ffn, x, e[3], e[4], e[5])
 
 
 class CausalHead(nn.Module):
@@ -358,9 +389,8 @@ class LingBotCausalDiT(nn.Module):
             nn.Linear(config.text_dim, dim), nn.GELU(approximate="tanh"), nn.Linear(dim, dim))
         self.time_embedding = nn.Sequential(nn.Linear(config.freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
         self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
-        # flash-attn-4 off reference numerics (see LingBotWorldConfig.reference_numerics)
         self.blocks = nn.ModuleList(
-            CausalBlock(dim, config.ffn_dim, config.num_heads, config.eps, fa4=not config.reference_numerics)
+            CausalBlock(dim, config.ffn_dim, config.num_heads, config.eps, fast=not config.reference_numerics)
             for _ in range(config.num_layers)
         )
         self.head = CausalHead(dim, config.out_dim, patch, config.eps)
@@ -373,24 +403,6 @@ class LingBotCausalDiT(nn.Module):
             rope_params(n, 2 * (d // 6)),
         ], dim=1)
         self._freqs: dict[torch.device, torch.Tensor] = {}
-        if not config.reference_numerics:
-            self._fast_numerics()
-
-    def _fast_numerics(self) -> None:
-        """Trade bit-parity with the reference for speed: each block's
-        pointwise chains (modulation, norms, FFN activation, gated residuals)
-        compiled around the GEMMs. Attention, RoPE and the cache writes stay
-        eager: they take the chunk's Python-int cache indices, which would
-        recompile per chunk."""
-        def compiled(fn):
-            # the rounding is a compile-time option: no config patch per call
-            return torch.compile(fn, dynamic=False, options={"emulate_precision_casts": True})
-
-        for block in self.blocks:
-            for name in ("_pre", "_post_self", "_norm3", "_ffn"):
-                setattr(block, name, compiled(getattr(block, name)))
-            block.self_attn._qkv = compiled(block.self_attn._qkv)
-            block.cross_attn._q = compiled(block.cross_attn._q)
 
     def freqs(self, device: torch.device) -> torch.Tensor:
         if device not in self._freqs:
