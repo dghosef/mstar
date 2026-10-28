@@ -1,4 +1,5 @@
-"""The shared dense Qwen3 LM against HF's ``Qwen3ForCausalLM`` on CPU.
+"""The shared dense Qwen3 LM against HF's ``Qwen3ForCausalLM`` on CPU, and the
+frames ``run_layers`` compiles (Qwen3.5's stack included).
 
 The engine's KV / attention / position resources are stood in for by dense
 fakes (causal SDPA over the accumulated K/V with GQA, and textbook RoPE), so
@@ -167,30 +168,7 @@ def test_prefill_and_decode_logits_match_hf():
         rope.next_pos += 1
 
 
-def _graph_calls(fn, *args) -> int:
-    """Compiled graphs one call of ``torch.compile(fn)`` runs, after a first
-    call that compiles them."""
-    calls = [0]
-
-    def backend(gm, example_inputs):
-        def run(*inputs):
-            calls[0] += 1
-            return gm.forward(*inputs)
-        return run
-
-    torch._dynamo.reset()
-    try:
-        compiled = torch.compile(fn, backend=backend, dynamic=False)
-        with torch.no_grad():
-            compiled(*args)
-            calls[0] = 0
-            compiled(*args)
-    finally:
-        torch._dynamo.reset()
-    return calls[0]
-
-
-def test_layer_stack_runs_one_compiled_frame_per_layer_besides_attention():
+def test_layer_stack_runs_one_compiled_frame_per_layer_besides_attention(dynamo_counts):
     """``run_layers`` runs eager (its loop breaks at the layer cursor), so each
     compiled frame it calls per layer is dispatched on every uncaptured forward:
     the norms and the MLP must be one frame."""
@@ -207,8 +185,56 @@ def test_layer_stack_runs_one_compiled_frame_per_layer_besides_attention():
 
     x = torch.randn(3, TINY["hidden_size"])
     two, four = lm(2), lm(4)
-    extra = _graph_calls(lambda h: four(h, label="main"), x) - _graph_calls(lambda h: two(h, label="main"), x)
-    assert extra <= 2 * (_graph_calls(two.layers[0].self_attn, x) + 1)
+    extra = (dynamo_counts(lambda h: four(h, label="main"), x).graph_calls
+             - dynamo_counts(lambda h: two(h, label="main"), x).graph_calls)
+    assert extra <= 2 * (dynamo_counts(two.layers[0].self_attn, x).graph_calls + 1)
+
+
+class _StubCursor:
+    @torch.compiler.disable
+    def bind_step(self, label):
+        pass
+
+    @torch.compiler.disable
+    def set_layer_idx(self, layer_idx):
+        pass
+
+
+class _StubMixer(torch.nn.Module):
+    """A delta-net or attention layer as the stack sees it: cursors, one matmul."""
+
+    def __init__(self, hidden):
+        super().__init__()
+        self.proj = torch.nn.Linear(hidden, hidden, bias=False)
+        self.attend = self.mix = _StubCursor()
+
+    def forward(self, h):
+        return self.proj(h)
+
+
+def test_qwen3_5_layer_loop_compiles_no_frame_per_layer(dynamo_counts):
+    """A captured forward compiles with static ints, so a compiled frame that
+    holds the layer index (Qwen3.5's ``attend`` hook moves each layer's cursor)
+    recompiles per layer until the recompile limit: four layers must compile
+    no more frames than two."""
+    from mstar.model.qwen3_5.components.language_model import Qwen3_5LanguageModel
+    from mstar.model.qwen3_5.config import FULL_ATTENTION, LINEAR_ATTENTION, Qwen3_5Config
+
+    def compiles(n):
+        config = Qwen3_5Config(
+            num_hidden_layers=n, hidden_size=16, intermediate_size=32,
+            layer_types=[LINEAR_ATTENTION] * (n - 1) + [FULL_ATTENTION],
+            num_attention_heads=2, num_key_value_heads=1, head_dim=8,
+            linear_num_key_heads=1, linear_num_value_heads=2, linear_key_head_dim=8,
+            linear_value_head_dim=8, linear_conv_kernel_dim=4, vocab_size=32,
+            rms_norm_eps=1e-6, max_position_embeddings=64,
+        )
+        lm = Qwen3_5LanguageModel(config)
+        for layer in lm.layers:
+            layer.self_attn = _StubMixer(config.hidden_size)
+        return dynamo_counts(lambda h: lm(h, label="main"), torch.randn(3, config.hidden_size)).compiles
+
+    assert compiles(4) == compiles(2)
 
 
 @pytest.mark.parametrize("overrides,head_dim,fusable", [

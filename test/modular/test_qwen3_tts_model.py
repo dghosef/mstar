@@ -1525,30 +1525,9 @@ class _OpaqueKernel:
         return _opaque_launch
 
 
-def _dynamo_compiles(fn, args: tuple) -> int:
-    """Frames Dynamo compiles in one call ``torch.compile(fn, dynamic=False)(*args)``,
-    recompiles included. A graph count would miss a frame that only guards on
-    an int before a graph break: it compiles an empty graph per value."""
-    from torch._dynamo.callback import callback_handler
-
-    count = [0]
-
-    def on_start(*_args):
-        count[0] += 1
-
-    torch._dynamo.reset()
-    callback_handler.register_start_callback(on_start)
-    try:
-        with torch.no_grad():
-            torch.compile(fn, backend="eager", dynamic=False)(*args)
-    finally:
-        callback_handler.remove_start_callback(on_start)
-        torch._dynamo.reset()
-    return count[0]
-
-
 def _depth_loop(model, monkeypatch):
-    """``n -> (fn, args)``: the talker's captured depth loop over ``n`` steps."""
+    """The code predictor, and ``n -> (fn, args)``: the talker's captured depth
+    loop over ``n`` steps."""
     import mstar.model.components.code_predictor_kernels as kernels
 
     monkeypatch.setattr(kernels, "_cp_qk_norm_rope_kv_kernel", _OpaqueKernel())
@@ -1589,67 +1568,19 @@ def _depth_loop(model, monkeypatch):
 
         return depth_loop, (torch.randn(bs, 1, hidden), pos, pair_pos, kv_cache)
 
-    return walk
+    return predictor, walk
 
 
-class _StubCursor:
-    @torch.compiler.disable
-    def bind_step(self, label):
-        pass
-
-    @torch.compiler.disable
-    def set_layer_idx(self, layer_idx):
-        pass
-
-
-class _StubMixer(torch.nn.Module):
-    """A delta-net or attention layer as the stack sees it: cursors, one matmul."""
-
-    def __init__(self, hidden):
-        super().__init__()
-        self.proj = torch.nn.Linear(hidden, hidden, bias=False)
-        self.attend = self.mix = _StubCursor()
-
-    def forward(self, h):
-        return self.proj(h)
-
-
-def _qwen3_5_layers(model, monkeypatch):
-    """``n -> (fn, args)``: Qwen3.5's layer loop over ``n`` layers."""
-    from mstar.model.qwen3_5.components.language_model import Qwen3_5LanguageModel
-    from mstar.model.qwen3_5.config import FULL_ATTENTION, LINEAR_ATTENTION, Qwen3_5Config
-
-    def walk(n):
-        config = Qwen3_5Config(
-            num_hidden_layers=n, hidden_size=16, intermediate_size=32,
-            layer_types=[LINEAR_ATTENTION] * (n - 1) + [FULL_ATTENTION],
-            num_attention_heads=2, num_key_value_heads=1, head_dim=8,
-            linear_num_key_heads=1, linear_num_value_heads=2, linear_key_head_dim=8,
-            linear_value_head_dim=8, linear_conv_kernel_dim=4, vocab_size=32,
-            rms_norm_eps=1e-6, max_position_embeddings=64,
-        )
-        lm = Qwen3_5LanguageModel(config)
-        for layer in lm.layers:
-            layer.self_attn = _StubMixer(config.hidden_size)
-
-        def layer_loop(x):
-            return lm(x, label="main")
-
-        return layer_loop, (torch.randn(3, config.hidden_size),)
-
-    return walk
-
-
-@pytest.mark.parametrize("model,loop", [
-    ("qwen3_tts", _depth_loop), ("qwen3_omni", _depth_loop), ("qwen3_5", _qwen3_5_layers),
-])
-def test_layer_loop_compiles_no_frame_per_step(model, loop, monkeypatch):
+@pytest.mark.parametrize("model", ["qwen3_tts", "qwen3_omni"])
+def test_code_predictor_depth_loop_compiles_no_frame_per_position(model, monkeypatch, dynamo_counts):
     """The engine compiles a captured forward with static ints, so a compiled
-    frame that holds a code predictor's depth position or a stack's layer index
-    recompiles at every value (and batch bucket) until the recompile limit:
-    four steps must compile no more frames than two."""
-    walk = loop(model, monkeypatch)
-    assert _dynamo_compiles(*walk(4)) == _dynamo_compiles(*walk(2))
+    frame that holds a depth step's ``cache_pos`` recompiles at every depth
+    position (and batch bucket) until the recompile limit: four steps must
+    compile no more frames than two."""
+    _, walk = _depth_loop(model, monkeypatch)
+    fn4, args4 = walk(4)
+    fn2, args2 = walk(2)
+    assert dynamo_counts(fn4, *args4).compiles == dynamo_counts(fn2, *args2).compiles
 
 
 def test_qwen3_tts_per_request_sampler_configs_drive_code_predictor():
