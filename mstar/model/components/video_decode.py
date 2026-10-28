@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import bisect
 import functools
+import logging
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +20,8 @@ import torch
 
 from mstar.model.media_limits import video_decode_threads
 from mstar.utils.cpus import usable_cpus
+
+logger = logging.getLogger(__name__)
 
 
 @functools.cache
@@ -39,6 +42,14 @@ def _decode_pool() -> ThreadPoolExecutor:
         if _pool is None:
             _pool = ThreadPoolExecutor(_max_decoders(), thread_name_prefix="video_decode")
         return _pool
+
+
+@functools.cache
+def _warn_no_key_frames() -> None:
+    logger.warning(
+        "torchcodec's VideoDecoder has no _get_key_frame_indices: sampled video "
+        "frames decode on one decoder, not split by keyframe interval"
+    )
 
 
 Transform = Callable[[torch.Tensor], torch.Tensor]
@@ -72,6 +83,8 @@ def decode_frames_at(
         decoder = VideoDecoder(filepath, num_ffmpeg_threads=video_decode_threads())
     # private in torchcodec 0.17; without it the clip decodes on one decoder
     key_frames = getattr(decoder, "_get_key_frame_indices", None)
+    if key_frames is None:
+        _warn_no_key_frames()
     keys = key_frames().tolist() if key_frames is not None and _max_decoders() > 1 else [0]
     order = sorted(set(indices))
     by_gop: dict[int, list[int]] = {}
