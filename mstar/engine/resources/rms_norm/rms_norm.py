@@ -3,7 +3,8 @@
 The operator keeps fused accelerator implementations behind one stable
 ``mstar::rms_norm`` graph boundary. CUDA currently dispatches to FlashInfer,
 XPU dispatches to vllm-xpu-kernels, and other devices use the portable
-PyTorch implementation.
+PyTorch implementation. ``mstar::fused_add_rms_norm`` does the same for
+FlashInfer's in-place residual add + RMSNorm on CUDA.
 """
 
 import torch
@@ -93,3 +94,25 @@ def run_rms_norm(
         eps,
         rms_norm_dtype,
     )
+
+
+@torch.library.custom_op("mstar::fused_add_rms_norm", mutates_args=("x", "residual"))
+def fused_add_rms_norm(
+    x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, eps: float, gemma_mode: bool,
+) -> None:
+    """In place: ``residual += x``, then ``x = rms_norm(residual)``.
+
+    FlashInfer's wrapper is a plain Python function (its op registration is a
+    no-op), so Dynamo traces into it and breaks the graph there. Each call site
+    then compiles as a frame of its own, once per norm module and shape.
+    """
+    from flashinfer.norm import fused_add_rmsnorm, gemma_fused_add_rmsnorm
+
+    (gemma_fused_add_rmsnorm if gemma_mode else fused_add_rmsnorm)(x, residual, weight, eps)
+
+
+@fused_add_rms_norm.register_fake
+def _fused_add_rms_norm_fake(
+    x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, eps: float, gemma_mode: bool,
+) -> None:
+    return None

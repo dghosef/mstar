@@ -1,5 +1,6 @@
 """Backend-neutral RMSNorm operator tests."""
 
+import pytest
 import torch
 
 from mstar.engine.resources.rms_norm import run_rms_norm
@@ -20,3 +21,31 @@ def test_rms_norm_portable_kernel_matches_reference():
 
 def test_rms_norm_operator_has_backend_neutral_name():
     assert hasattr(torch.ops.mstar, "rms_norm")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="the fused add+norm is the CUDA path")
+def test_fused_add_rms_norm_compiles_without_a_graph_break():
+    """FlashInfer's fused add+norm wrapper is plain Python, so traced it breaks
+    the graph, and each norm call site then compiles (and recompiles) as a frame
+    of its own. Behind ``mstar::fused_add_rms_norm`` a residual stream is one
+    graph."""
+    pytest.importorskip("flashinfer")
+    from mstar.model.components.norm import RMSNorm
+
+    norms = [RMSNorm(64).cuda().to(torch.bfloat16) for _ in range(3)]
+
+    def stream(x):
+        h, residual = x, None
+        for norm in norms:
+            h, residual = norm.forward_residual(h, residual)
+        return h, residual
+
+    x = torch.randn(4, 64, device="cuda", dtype=torch.bfloat16)
+    want = stream(x.clone())
+    torch._dynamo.reset()
+    try:
+        got = torch.compile(stream, fullgraph=True, backend="eager")(x.clone())
+    finally:
+        torch._dynamo.reset()
+    for g, w in zip(got, want, strict=True):
+        assert torch.equal(g, w)

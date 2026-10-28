@@ -7,8 +7,14 @@ MLP, and norms — so models pick the variants they want and pass them in.
 ``GatedDecoderLayer``: variant for adaRMS conditioning (pi05 action
 expert). The norms are ``AdaRMSNorm`` and return ``(normed, gate)``; the
 residual is ``x + gate * y`` instead of ``x + y``.
+
+``run_layers``: a stack of ``DecoderLayer``s with each residual add deferred
+into the next norm (``RMSNorm.forward_residual``).
 """
 from __future__ import annotations
+
+from functools import partial
+from typing import Callable
 
 import torch
 from torch import nn
@@ -63,6 +69,43 @@ class DecoderLayer(nn.Module):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         return residual + hidden_states
+
+    def forward_residual(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None,
+        attend: Callable[[torch.Tensor], torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The layer with its residual adds left to the norms: returns the MLP
+        output and the stream it has not been added to yet. ``attend`` stands in
+        for ``self_attn`` on the normed input (a code predictor's own kernels)."""
+        h, residual = self.input_layernorm.forward_residual(hidden_states, residual)
+        h = self.self_attn(h) if attend is None else attend(h)
+        h, residual = self.post_attention_layernorm.forward_residual(h, residual)
+        return self.mlp(h), residual
+
+
+def run_layers(
+    layers: nn.ModuleList, hidden_states: torch.Tensor, norm: nn.Module,
+    attend: Callable[[int, nn.Module, torch.Tensor], torch.Tensor] | None = None,
+) -> torch.Tensor:
+    """``layers`` then the final ``norm``, each residual add fused into the next
+    norm (one add+norm kernel instead of two launches). The stream starts at
+    ``hidden_states`` and later norms update it in place, so pass a tensor the
+    caller may overwrite.
+
+    By default layer ``i`` attends through its engine attention, its layer
+    cursor moved to ``i`` first; ``attend(i, self_attn, h)`` replaces that.
+    """
+    residual = None
+    for i, layer in enumerate(layers):
+        if attend is None:
+            layer.self_attn.attend.set_layer_idx(i)
+            hidden_states, residual = layer.forward_residual(hidden_states, residual)
+        else:
+            hidden_states, residual = layer.forward_residual(
+                hidden_states, residual, partial(attend, i, layer.self_attn),
+            )
+    normed, _ = norm.forward_residual(hidden_states, residual)
+    return normed
 
 
 class GatedDecoderLayer(nn.Module):
