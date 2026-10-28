@@ -258,6 +258,8 @@ def test_postprocess_keeps_asr_text_tag_and_drops_specials():
     ids = model.tokenizer.encode("language English<asr_text> hello world") + [IM_END]
     text = model.postprocess(torch.tensor(ids), "text").decode("utf-8")
     assert text == "language English<asr_text> hello world"
+    # a decode token sent inline arrives as a list (`Model.postprocess`)
+    assert b"".join(model.postprocess([i], "text") for i in ids).decode("utf-8") == text
 
 
 # --------------------------------------------------------------------------

@@ -803,7 +803,8 @@ class Model(ABC):
         Given an output of a certain modality, encode and return as bytes.
         This will likely need to overridden with model-specific behavior.
         A value sent inline (``NodeSubmodule.inline_client_signals``) arrives
-        as a list of ints rather than a tensor.
+        as a list of ints rather than a tensor; ``mstar.model.utils.token_ids``
+        reads either.
         ``request_kwargs`` is the request's model_kwargs, so encoders can honor
         per-request parameters (e.g. writing a video container at the request's
         frame rate).
