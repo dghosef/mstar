@@ -528,6 +528,8 @@ class PreprocessWorkerThread:
     # None (a thread built without __init__) preprocesses one request at a time
     _prep_pool: ThreadPoolExecutor | None = None
     output_ready: EventWakeup | None = None
+    # class-level so a thread built without __init__ stamps no read times
+    enable_prof = False
     # Appends handled per pass before output delivery gets its turn again: one
     # for each of up to 32 live calls appending at once. An append costs a file
     # decode, far less than a request's preprocess, which is one per pass.

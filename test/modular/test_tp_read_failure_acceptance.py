@@ -692,6 +692,7 @@ def _worker(rank, scenario, comm, graph, engine, tm, group):
     w._streaming_edge_names = set()
     w._consumer_node_cache = {}
     w._stream_partition = {}
+    w._stream_holds = {}
     w._innermost_loop_by_node = {}
     w._metrics = None
     for setup in _DESIGN_SETUP:

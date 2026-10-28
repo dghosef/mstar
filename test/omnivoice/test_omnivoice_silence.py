@@ -50,10 +50,11 @@ def test_edge_cases_match_pydub(audio, reference):
     assert np.array_equal(got, want)
 
 
-def test_postprocess_shapes_the_waveform_and_refuses_a_masked_canvas():
+def test_postprocess_shapes_the_waveform_and_refuses_a_masked_canvas(reference):
     """code2wav emits the raw float waveform and the API side shapes it the
     reference's way (here: peak-normalised to 0.5, faded and padded); a canvas
     that still held MASK cells arrives NaN-poisoned and is refused."""
+    del reference  # the fade and pad are the reference package's
     import torch
 
     from mstar.model.omnivoice.components.codec import post_process

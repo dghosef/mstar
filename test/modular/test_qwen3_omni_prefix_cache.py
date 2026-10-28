@@ -24,7 +24,7 @@ from mstar.engine.resources.kv.plan import KVPlanOutputs
 from mstar.engine.resources.position.config import PositionConfig
 from mstar.engine.resources.position.manager import RopeManager
 from mstar.model.qwen3_omni.components.rope import get_rope_index_vision
-from mstar.model.qwen3_omni.config import THINKER_KV, THINKER_MIXED, THINKER_POS, Qwen3OmniModelConfig
+from mstar.model.qwen3_omni.config import AUDIO_ATTN, THINKER_KV, THINKER_MIXED, THINKER_POS, Qwen3OmniModelConfig
 from mstar.model.qwen3_omni.qwen3_omni_model import Qwen3OmniModel, image_span
 from mstar.model.qwen3_omni.submodules import AudioEncoderSubmodule, ThinkerSubmodule, VisionEncoderSubmodule
 
@@ -76,7 +76,7 @@ def thinker():
 
 
 def _prepare(thinker, walk: str, inputs: dict, held: CachedPrefix | None = None, rid: str = RID):
-    info = SimpleNamespace(rid_handle=rid)
+    info = SimpleNamespace(rid_handle=rid, step_metadata={})
     prepared = thinker.prepare_inputs(walk, info, inputs)
     if held is None:
         return prepared
@@ -307,25 +307,42 @@ def _audio(n_window: int) -> AudioEncoderSubmodule:
     return AudioEncoderSubmodule(encoder, config=None)
 
 
+class _WindowedAttention:
+    """The ragged attention resource's eager answer: each planned window attends only to itself."""
+
+    def __init__(self, windows: list[list[int]]):
+        self.spans = [n for spans in windows for n in spans]
+
+    def run(self, q, k, v, label):
+        return torch.cat([
+            nn.functional.scaled_dot_product_attention(*(t.transpose(0, 1) for t in qkv)).transpose(0, 1)
+            for qkv in zip(q.split(self.spans), k.split(self.spans), v.split(self.spans), strict=True)
+        ])
+
+
 def test_packed_clips_split_by_the_encoder_s_own_window():
     """A clip's embedding count is counted with the encoder's ``n_window``, as the
     prompt layout counts it; with the default window's count a 104-frame clip
     would claim 14 embeddings where a 52-frame window gives 13."""
     audio = _audio(n_window=52)
-    prepared = [
-        audio.prepare_inputs(
-            "audio", None, {"audio_features": [clip], "audio_seqlens": [torch.tensor([clip.shape[-1]])]},
-        )
-        for clip in (torch.randn(128, 104), torch.randn(128, 60))
-    ]
-    engine_inputs = SimpleNamespace(request_ids=["a", "b"])
+    clips = (torch.randn(128, 104), torch.randn(128, 60))
+    prepared = [audio.prepare_inputs("prefill_audio", None, {"audio_features": [clip]}) for clip in clips]
+    tensors = audio.preprocess("prefill_audio", None, prepared)
+    engine_inputs = SimpleNamespace(
+        request_ids=["a", "b"], piecewise_runners={},
+        resources={AUDIO_ATTN: _WindowedAttention(tensors["layout"].windows)},
+    )
     with torch.no_grad():
-        packed = audio.forward_batched("audio", engine_inputs, **audio.preprocess("audio", engine_inputs, prepared))
-        alone = [audio.forward("audio", None, **p.tensor_inputs)["audio_embeds"][0] for p in prepared]
+        packed = audio.forward_batched("prefill_audio", engine_inputs, **tensors)
+        alone = [
+            audio.audio_encoder(clip, feature_lens=torch.tensor([clip.shape[-1]])).last_hidden_state for clip in clips
+        ]
 
     assert [packed[rid]["audio_embeds"][0].shape for rid in "ab"] == [a.shape for a in alone], (
         "a packed clip's embeddings were split at a window other than the encoder's"
     )
+    for rid, ref in zip("ab", alone, strict=True):
+        torch.testing.assert_close(packed[rid]["audio_embeds"][0], ref, rtol=1e-4, atol=1e-4)
 
 
 @requires_cuda

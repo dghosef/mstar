@@ -108,9 +108,10 @@ class _Conductor:
         self.inbox = queue.Queue()
 
     def poll_for_messages(self, timeout_ms=1):
-
-        return False
-
+        # waits as the socket's poll does, so the API loop doesn't spin on the GIL
+        if self.inbox.empty():
+            time.sleep(timeout_ms / 1000)
+        return not self.inbox.empty()
 
     def get_all_new_messages(self):
         """Everything queued; a queued list arrives as one batch."""
@@ -296,9 +297,7 @@ class _BridgeSocket:
         self.bridge, self.script = bridge, list(script)
 
     def poll_for_messages(self, timeout_ms=1):
-
         return False
-
 
     def get_all_new_messages(self, blocking=True, timeout_s=None):
         if not self.script:
