@@ -320,6 +320,16 @@ class _WindowedAttention:
         ])
 
 
+class _UnleasedRunner:
+    """A layer-stack runner with room for the step, which the step never leased."""
+
+    def can_run(self, bs, total_tokens):
+        return True
+
+    def run(self, **kwargs):
+        raise AssertionError("replayed the captured layers for a step that leased no slot")
+
+
 def test_packed_clips_split_by_the_encoder_s_own_window():
     """A clip's embedding count is counted with the encoder's ``n_window``, as the
     prompt layout counts it; with the default window's count a 104-frame clip
@@ -329,7 +339,9 @@ def test_packed_clips_split_by_the_encoder_s_own_window():
     prepared = [audio.prepare_inputs("prefill_audio", None, {"audio_features": [clip]}) for clip in clips]
     tensors = audio.preprocess("prefill_audio", None, prepared)
     engine_inputs = SimpleNamespace(
-        request_ids=["a", "b"], piecewise_runners={},
+        request_ids=["a", "b"],
+        # the step holds no lease, so the layers run eagerly even though a runner could
+        piecewise_runners={AudioEncoderSubmodule.AUDIO_LAYERS: _UnleasedRunner()}, piecewise_leases={},
         resources={AUDIO_ATTN: _WindowedAttention(tensors["layout"].windows)},
     )
     with torch.no_grad():

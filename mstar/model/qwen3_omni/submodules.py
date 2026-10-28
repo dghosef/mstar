@@ -337,8 +337,10 @@ class AudioEncoderSubmodule(NodeSubmodule):
         """Encode the step's clips in one pass and split the rows back by clip."""
         hidden = self._frontend(audio_features, layout)
         rows = hidden.shape[0]
-        runner = engine_inputs.piecewise_runners.get(self.AUDIO_LAYERS)
-        if runner is not None and runner.can_run(1, rows):
+        # replay only under the step's lease; a step the region refused runs
+        # eagerly under declare_step's own plan
+        if self.AUDIO_LAYERS in engine_inputs.piecewise_leases:
+            runner = engine_inputs.piecewise_runners[self.AUDIO_LAYERS]
             # a copy: the next step's replay overwrites the output buffer
             out = runner.run(
                 static_inputs={"hidden": hidden},
