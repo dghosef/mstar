@@ -2,21 +2,32 @@
 indptrs (`_packed_addressing`), matches unpacking the same indptrs with torch
 ops (the device path it replaced, kept here as the reference): staged into a
 captured state (`_stage_packed_plan_state`) and uploaded for an eager write
-(`_host_plan_state`). A step that writes nothing leaves a slot's buffer zero
-and then issues no copy."""
+(`_host_plan_state`), from the Rust addressing and from its numpy fallback. A
+step that writes nothing leaves a slot's buffer zero and then issues no copy."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
+from mstar.engine.resources.kv import manager as manager_mod
 from mstar.engine.resources.kv.manager import KVManager, KVPlanState, _SlotBuffer
 from mstar.engine.resources.kv.plan import SINK_PAGE, PagedIndptrs
 from mstar.utils.h2d import PinnedStager
 
 PAGE, CAPTURE = 16, 96
+
+
+@pytest.fixture(params=["rust", "numpy"])
+def addressing(request, monkeypatch):
+    if request.param == "rust" and manager_mod._rust_packed_addressing is None:
+        pytest.skip("the mstar_rust extension is not built with kv_packed_addressing")
+    if request.param == "numpy":
+        monkeypatch.setattr(manager_mod, "_rust_packed_addressing", None)
+    return request.param
 
 
 def _kv():
@@ -90,7 +101,7 @@ def _device_unpacked(kv, indptrs) -> KVPlanState:
     return ref
 
 
-def test_host_addressing_matches_device_unpacking():
+def test_host_addressing_matches_device_unpacking(addressing):
     kv = _kv()
     rng = np.random.default_rng(0)
     for _ in range(20):
@@ -118,7 +129,7 @@ def test_a_step_that_only_reads_stages_the_sink():
     assert got.token_to_cache.tolist() == [0] * CAPTURE
 
 
-def test_an_eager_writes_host_addressing_matches_the_reference():
+def test_an_eager_writes_host_addressing_matches_the_reference(addressing):
     kv = _kv()
     rng = np.random.default_rng(1)
     for _ in range(20):
