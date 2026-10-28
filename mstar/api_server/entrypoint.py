@@ -1621,12 +1621,9 @@ class WarmupRequest:
 
 
 def _data_parallel_replicas(model, config_path: str) -> int:
-    """The most replicas any worker graph is served by (its lockstep instances,
-    or its ranks without TP/SP), counted as the conductor counts them when it
-    picks one: how many copies of a request it takes to reach them all."""
-    return max(
-        len(wg._instance_ranks) or len(wg.ranks) for wg in model.get_worker_graphs(config_path)
-    )
+    """The most replicas any worker graph is served by: how many copies of a
+    request it takes for the conductor's placement to reach them all."""
+    return max(len(wg.replica_ranks) for wg in model.get_worker_graphs(config_path))
 
 
 def _run_warmup_requests(server: APIServer, specs: list, copies: int = 1) -> None:

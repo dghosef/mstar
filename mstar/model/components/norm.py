@@ -55,13 +55,10 @@ def add_rms_norm(
     rounding it to half precision, where the unfused pair rounds first.
     """
     if hidden_states.is_cuda and hidden_states.dtype in (torch.bfloat16, torch.float16):
-        from flashinfer.norm import fused_add_rmsnorm, gemma_fused_add_rmsnorm
-
         orig_shape = hidden_states.shape
         h = hidden_states.reshape(-1, orig_shape[-1])
         r = residual.reshape(-1, orig_shape[-1])
-        fused = gemma_fused_add_rmsnorm if gemma_mode else fused_add_rmsnorm
-        fused(h, r, weight, eps)
+        torch.ops.mstar.fused_add_rms_norm(h, r, weight, eps, gemma_mode)
         return h.reshape(orig_shape), r.reshape(orig_shape)
     r = hidden_states + residual
     return rms_norm(r, weight, eps, gemma_mode), r

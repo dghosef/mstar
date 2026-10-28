@@ -10,10 +10,11 @@ import pytest
 pytest.importorskip("torch")
 
 from mstar.conductor.conductor import Conductor  # noqa: E402
+from mstar.model.base import WorkerGraph  # noqa: E402
 
 
-def _wg(group_id, ranks, instance_ranks=()):
-    return SimpleNamespace(_group_id=group_id, ranks=list(ranks), _instance_ranks=[list(r) for r in instance_ranks])
+def _wg(group_id, ranks, sp_size=1):
+    return WorkerGraph(section=None, graph_walks=set(), ranks=list(ranks), sp_size=sp_size, _group_id=group_id)
 
 
 def _conductor(worker_graphs):
@@ -47,7 +48,7 @@ def test_requests_alternate_over_dp_replicas():
 
 def test_lockstep_instances_are_balanced_whole():
     # one sp2 node replicated as two instances: ranks (0, 1) and (2, 3)
-    conductor = _conductor({0: _wg(0, [0, 1, 2, 3], instance_ranks=[(0, 1), (2, 3)])})
+    conductor = _conductor({0: _wg(0, [0, 1, 2, 3], sp_size=2)})
     picks = {tuple(_admit(conductor, rid)[0]) for rid in ("a", "b")}
     assert picks == {("worker_0", "worker_1"), ("worker_2", "worker_3")}
 

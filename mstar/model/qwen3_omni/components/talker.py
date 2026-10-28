@@ -22,6 +22,7 @@ from torch import nn
 from mstar.distributed.communication import CommGroup
 from mstar.model.components import ParallelSparseMoeBlockWithSharedExpert, RMSNorm, TopKRouter
 from mstar.model.components.code_predictor_kernels import cp_attention, cp_qk_norm_rope_kv_write
+from mstar.model.components.decoder_layer import DecoderLayer, run_layers
 from mstar.model.components.distributed import ParallelGatedMLP
 from mstar.model.qwen3_omni.components.attention import Qwen3OmniAttention
 from mstar.model.qwen3_omni.config import TALKER_ATTN, TALKER_KV, TALKER_POS, Qwen3OmniModelConfig, TalkerTextConfig
@@ -255,7 +256,7 @@ class Qwen3OmniTalkerModel(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-class Qwen3OmniCodePredictorLayer(nn.Module):
+class Qwen3OmniCodePredictorLayer(DecoderLayer):
     """Single Code Predictor decoder layer (attention + dense MLP, no MoE).
 
     Uses QK-norm, standard 1D RoPE (no 3D MRoPE).
@@ -264,36 +265,23 @@ class Qwen3OmniCodePredictorLayer(nn.Module):
     def __init__(self, hidden_size: int, intermediate_size: int,
                  num_heads: int, num_kv_heads: int, head_dim: int,
                  rms_norm_eps: float, rope_theta: float):
-        super().__init__()
-        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
-        self.self_attn = Qwen3OmniAttention(
-            hidden_size=hidden_size,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-            head_dim=head_dim,
-            rope_theta=rope_theta,
-            rms_norm_eps=rms_norm_eps,
-            use_mrope=False,
+        super().__init__(
+            self_attn=Qwen3OmniAttention(
+                hidden_size=hidden_size,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                rope_theta=rope_theta,
+                rms_norm_eps=rms_norm_eps,
+                use_mrope=False,
+            ),
+            mlp=ParallelGatedMLP(
+                hidden_size=hidden_size, intermediate_size=intermediate_size,
+                activation="silu",
+            ),
+            input_layernorm=RMSNorm(hidden_size, eps=rms_norm_eps),
+            post_attention_layernorm=RMSNorm(hidden_size, eps=rms_norm_eps),
         )
-        self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
-        self.mlp = ParallelGatedMLP(
-            hidden_size=hidden_size, intermediate_size=intermediate_size,
-            activation="silu",
-        )
-
-    def forward(self, hidden_states, *, label: str, layer_idx: int):
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-        )
-        hidden_states = residual + hidden_states
-
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-        return hidden_states
 
 
 class Qwen3OmniCodePredictorInnerModel(nn.Module):
@@ -328,19 +316,6 @@ class Qwen3OmniCodePredictorInnerModel(nn.Module):
             for _ in range(num_residual)
         ])
 
-    def forward(self, hidden_states: torch.Tensor, *, label: str):
-        """
-        Just runs the inner layers; does NOT run embedding.
-        """
-        # cursors on the shared resources; see AttentionCallable
-        self.layers[0].self_attn.attend.bind_step(label)
-        for layer_idx, decoder_layer in enumerate(self.layers):
-            self.layers[layer_idx].self_attn.attend.set_layer_idx(layer_idx)
-            hidden_states = decoder_layer(hidden_states)
-        hidden_states = self.norm(hidden_states)
-        # the advance is the runner's now, off the step declaration
-        return hidden_states
-
     def get_input_embeddings(self):
         """Return the codec embedding list (for HF compatibility)."""
         return self.codec_embedding
@@ -359,12 +334,8 @@ class Qwen3OmniCodePredictor(nn.Module):
     The Code Predictor runs 15 autoregressive steps (for residual codebooks
     1..15) in float32 for precision.
 
-    Two forward paths:
-      * ``forward(embed, cache_manager)``  -- paged-FlashInfer eager path,
-        used as a fallback when CUDA graphs are disabled.
-      * ``forward_depth_unrolled(...)``   -- SDPA + dense-KV path that runs
-        every layer with per-token position IDs and a static KV cache tensor.
-        This is what the unrolled CUDA graph captures.
+    ``forward_depth_unrolled(...)`` runs every layer with per-token position
+    IDs over a static dense KV cache tensor; the unrolled CUDA graph captures it.
     """
 
     def __init__(self, config: Qwen3OmniModelConfig):
@@ -415,9 +386,6 @@ class Qwen3OmniCodePredictor(nn.Module):
         # place (see nn.Module.__setattr__); this replaces the meta
         # placeholder created in __init__ with the real device tensor.
         self.lm_head_weight = stacked
-
-    def forward(self, *args):
-        return self.model(*args)
 
     def get_embedding(self, group_idx: int):
         assert group_idx > 0
@@ -496,16 +464,8 @@ class Qwen3OmniCodePredictor(nn.Module):
         # the KVCacheEngine.has_autocast=False invariant).
         flat_pos = position_ids.reshape(-1)
 
-        # Each residual add rides in the next RMSNorm (FlashInfer's fused
-        # add + norm, in place on the stream), so the stream starts from a copy
-        # of the input embeddings, which the caller owns.
-        hidden_states, residual = hidden_states.clone(), None
-        for layer_idx, layer in enumerate(self.model.layers):
-            attn = layer.self_attn
-            hidden_states, residual = layer.input_layernorm.forward_residual(hidden_states, residual)
-
-            qkv = F.linear(hidden_states, layer.self_attn.qkv_proj.weight)
-            q_size = n_q_heads * head_dim
+        def attend(layer_idx: int, attn: nn.Module, h: torch.Tensor) -> torch.Tensor:
+            qkv = F.linear(h, attn.qkv_proj.weight)
             # q normed and roped in place; k (normed, roped) and v into the cache
             # at cache_pos .. cache_pos + seq_len.
             cp_qk_norm_rope_kv_write(
@@ -514,14 +474,11 @@ class Qwen3OmniCodePredictor(nn.Module):
                 attn.q_norm.variance_epsilon, attn.k_norm.variance_epsilon,
                 float(attn.rope_theta), n_q_heads, n_kv_heads, head_dim,
             )
-            q = qkv[..., :q_size].view(bs, seq_len, n_q_heads, head_dim)
-
+            q = qkv[..., :n_q_heads * head_dim].view(bs, seq_len, n_q_heads, head_dim)
             # Each new token attends causally over the depth positions so far.
             attn_out = cp_attention(q, kv_cache[layer_idx, :, 0], kv_cache[layer_idx, :, 1], cache_pos)
-            attn_out = attn.o_proj(attn_out.reshape(bs, seq_len, -1))
-            hidden_states, residual = layer.post_attention_layernorm.forward_residual(attn_out, residual)
-            hidden_states = layer.mlp(hidden_states)
+            return attn.o_proj(attn_out.reshape(bs, seq_len, -1))
 
-        # Final norm.
-        hidden_states, _ = self.model.norm.forward_residual(hidden_states, residual)
-        return hidden_states
+        # the residual stream is updated in place, so it starts from a copy of
+        # the input embeddings, which the caller owns
+        return run_layers(self.model.layers, hidden_states.clone(), self.model.norm, attend)

@@ -24,6 +24,7 @@ from torch import nn
 from mstar.distributed.communication import CommGroup
 from mstar.model.components import RMSNorm
 from mstar.model.components.code_predictor_kernels import cp_attention, cp_qk_norm_rope_kv_write
+from mstar.model.components.decoder_layer import DecoderLayer, run_layers
 from mstar.model.components.distributed import ParallelAttention, ParallelGatedMLP
 from mstar.model.qwen3_tts.config import (
     TALKER_ATTN,
@@ -50,38 +51,36 @@ class Qwen3TTSResizeMLP(nn.Module):
         return self.linear_fc2(F.silu(self.linear_fc1(hidden_states)))
 
 
-class Qwen3TTSTalkerLayer(nn.Module):
-    """One pre-norm Talker block backed by M* tensor-parallel layers; the
-    language model runs its residual chain across the layers."""
+class Qwen3TTSTalkerLayer(DecoderLayer):
+    """One pre-norm Talker block backed by M* tensor-parallel layers."""
 
     def __init__(
         self,
         config: Qwen3TTSTalkerConfig,
         comm_group: CommGroup | None = None,
     ) -> None:
-        super().__init__()
-        self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.self_attn = ParallelAttention(
-            hidden_size=config.hidden_size,
-            num_heads=config.num_attention_heads,
-            num_kv_heads=config.num_key_value_heads,
-            head_dim=config.head_dim,
-            rope_theta=config.rope_theta,
-            qk_norm=True,
-            rms_norm_eps=config.rms_norm_eps,
-            comm_group=comm_group,
-            attn_key=TALKER_ATTN,
-            kv_key=TALKER_KV,
-            pos_key=TALKER_POS,
-        )
-        self.post_attention_layernorm = RMSNorm(
-            config.hidden_size, config.rms_norm_eps
-        )
-        self.mlp = ParallelGatedMLP(
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            activation="silu",
-            comm_group=comm_group,
+        super().__init__(
+            self_attn=ParallelAttention(
+                hidden_size=config.hidden_size,
+                num_heads=config.num_attention_heads,
+                num_kv_heads=config.num_key_value_heads,
+                head_dim=config.head_dim,
+                rope_theta=config.rope_theta,
+                qk_norm=True,
+                rms_norm_eps=config.rms_norm_eps,
+                comm_group=comm_group,
+                attn_key=TALKER_ATTN,
+                kv_key=TALKER_KV,
+                pos_key=TALKER_POS,
+            ),
+            mlp=ParallelGatedMLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size,
+                activation="silu",
+                comm_group=comm_group,
+            ),
+            input_layernorm=RMSNorm(config.hidden_size, config.rms_norm_eps),
+            post_attention_layernorm=RMSNorm(config.hidden_size, config.rms_norm_eps),
         )
 
 
@@ -116,23 +115,10 @@ class Qwen3TTSTalkerLanguageModel(nn.Module):
         # make inductor specialize on the int. The resources own the pages, so
         # module code stays clear of the allocator.
         self.layers[0].self_attn.attend.bind_step(label)
-        # Each residual add is deferred into the next norm (one FlashInfer
-        # fused add+RMSNorm instead of an add and a norm), in place on the
-        # residual stream. The stream starts from a copy: ``input_embeds`` is
-        # the caller's, a packed replay's static input whose padding rows no
-        # copy refreshes.
-        hidden_states, residual = input_embeds.clone(), None
-        for layer_idx, layer in enumerate(self.layers):
-            layer.self_attn.attend.set_layer_idx(layer_idx)
-            h, residual = layer.input_layernorm.forward_residual(hidden_states, residual)
-            h = layer.self_attn(h)
-            h, residual = layer.post_attention_layernorm.forward_residual(h, residual)
-            hidden_states = layer.mlp(h)
-        # Sequence lengths still advance once per forward, after every layer
-        # wrote K/V for the same packed range — the runner does it now, on the
-        # step this forward was declared from.
-        normed, _ = self.norm.forward_residual(hidden_states, residual)
-        return normed
+        # The residual stream is updated in place, so it starts from a copy:
+        # ``input_embeds`` is the caller's, a packed replay's static input
+        # whose padding rows no copy refreshes.
+        return run_layers(self.layers, input_embeds.clone(), self.norm)
 
 
 class Qwen3TTSTalkerModel(nn.Module):
@@ -174,29 +160,28 @@ class Qwen3TTSTalkerModel(nn.Module):
 # factor the common implementation after that engine interface is available.
 
 
-class Qwen3TTSCodePredictorLayer(nn.Module):
+class Qwen3TTSCodePredictorLayer(DecoderLayer):
     """Parameter container for one replicated residual-code decoder block."""
 
     def __init__(self, config: Qwen3TTSModelConfig) -> None:
-        super().__init__()
         cp = config.code_predictor
-        self.input_layernorm = RMSNorm(cp.hidden_size, cp.rms_norm_eps)
-        self.self_attn = ParallelAttention(
-            hidden_size=cp.hidden_size,
-            num_heads=cp.num_attention_heads,
-            num_kv_heads=cp.num_key_value_heads,
-            head_dim=cp.head_dim,
-            rope_theta=cp.rope_theta,
-            qk_norm=True,
-            rms_norm_eps=cp.rms_norm_eps,
-        )
-        self.post_attention_layernorm = RMSNorm(
-            cp.hidden_size, cp.rms_norm_eps
-        )
-        self.mlp = ParallelGatedMLP(
-            hidden_size=cp.hidden_size,
-            intermediate_size=cp.intermediate_size,
-            activation="silu",
+        super().__init__(
+            self_attn=ParallelAttention(
+                hidden_size=cp.hidden_size,
+                num_heads=cp.num_attention_heads,
+                num_kv_heads=cp.num_key_value_heads,
+                head_dim=cp.head_dim,
+                rope_theta=cp.rope_theta,
+                qk_norm=True,
+                rms_norm_eps=cp.rms_norm_eps,
+            ),
+            mlp=ParallelGatedMLP(
+                hidden_size=cp.hidden_size,
+                intermediate_size=cp.intermediate_size,
+                activation="silu",
+            ),
+            input_layernorm=RMSNorm(cp.hidden_size, cp.rms_norm_eps),
+            post_attention_layernorm=RMSNorm(cp.hidden_size, cp.rms_norm_eps),
         )
 
 
@@ -287,14 +272,8 @@ class Qwen3TTSCodePredictor(nn.Module):
             raise ValueError("CodePredictor decode expects exactly one token")
         flat_position_ids = position_ids.reshape(-1)
 
-        # Residual adds are deferred into the next norm, as in the Talker; the
-        # stream starts from a copy, since the projection is the identity on
-        # 0.6B and its input is the caller's.
-        hidden_states, residual = hidden_states.clone(), None
-        for layer_idx, layer in enumerate(self.model.layers):
-            hidden_states, residual = layer.input_layernorm.forward_residual(hidden_states, residual)
-            attn = layer.self_attn
-            qkv = attn.qkv_proj(hidden_states)
+        def attend(layer_idx: int, attn: nn.Module, h: torch.Tensor) -> torch.Tensor:
+            qkv = attn.qkv_proj(h)
             # q normed and roped in place; k (normed, roped) and v into the
             # frame-local cache at this depth position
             cp_qk_norm_rope_kv_write(
@@ -306,11 +285,8 @@ class Qwen3TTSCodePredictor(nn.Module):
             q = qkv[..., :attn.num_heads * attn.head_dim].view(batch_size, seq_len, attn.num_heads, attn.head_dim)
             # attend over the prefix already generated within the same codec frame
             attn_output = cp_attention(q, kv_cache[layer_idx, :, 0], kv_cache[layer_idx, :, 1], cache_pos)
-            attn_output = attn_output.reshape(batch_size, seq_len, -1)
-            hidden_states, residual = layer.post_attention_layernorm.forward_residual(
-                attn.o_proj(attn_output), residual,
-            )
-            hidden_states = layer.mlp(hidden_states)
+            return attn.o_proj(attn_output.reshape(batch_size, seq_len, -1))
 
-        normed, _ = self.model.norm.forward_residual(hidden_states, residual)
-        return normed
+        # the stream starts from a copy, since the projection is the identity
+        # on 0.6B and its input is the caller's
+        return run_layers(self.model.layers, hidden_states.clone(), self.model.norm, attend)
