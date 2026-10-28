@@ -1413,6 +1413,23 @@ def _fake_cp_kernels(monkeypatch, calls=None):
     monkeypatch.setattr(kernels, "cp_attention", attention)
 
 
+def _cpu_predictor(monkeypatch, config=None, bs=2, calls=None):
+    """A code predictor with identity norms over the fake kernels, a zeroed
+    depth KV cache for ``bs`` rows, and one depth step's input."""
+    config = config or _tiny_model_config()
+    predictor = Qwen3TTSCodePredictor(config)
+    for layer in predictor.model.layers:
+        layer.input_layernorm = _IdentityNorm()
+        layer.post_attention_layernorm = _IdentityNorm()
+    predictor.model.norm = _IdentityNorm()
+    _fake_cp_kernels(monkeypatch, calls)
+    cp = config.talker.code_predictor
+    kv_cache = torch.zeros(
+        cp.num_hidden_layers, bs, 2, config.talker.num_code_groups, cp.num_key_value_heads, cp.head_dim,
+    )
+    return predictor, kv_cache, torch.randn(bs, 1, config.talker.hidden_size)
+
+
 def test_qwen3_tts_code_predictor_projects_wider_talker_inputs(monkeypatch):
     """1.7B: Talker width 2048 vs predictor width 1024 -> biased projection on
     every depth input; 0.6B (equal widths) -> identity, no extra parameters."""
@@ -1423,7 +1440,7 @@ def test_qwen3_tts_code_predictor_projects_wider_talker_inputs(monkeypatch):
 
     wide = _tiny_model_config()
     wide.talker.hidden_size = 32
-    predictor = Qwen3TTSCodePredictor(wide)
+    predictor, kv_cache, x = _cpu_predictor(monkeypatch, wide)
     projection = predictor.small_to_mtp_projection
     assert isinstance(projection, torch.nn.Linear)
     assert projection.weight.shape == (16, 32)
@@ -1435,17 +1452,8 @@ def test_qwen3_tts_code_predictor_projects_wider_talker_inputs(monkeypatch):
         dict(predictor.named_parameters())
     )
 
-    for layer in predictor.model.layers:
-        layer.input_layernorm = _IdentityNorm()
-        layer.post_attention_layernorm = _IdentityNorm()
-    predictor.model.norm = _IdentityNorm()
-    _fake_cp_kernels(monkeypatch)
-    cp = wide.talker.code_predictor
-    predictor.depth.bind_step(
-        torch.zeros(cp.num_hidden_layers, 2, 2, wide.talker.num_code_groups, cp.num_key_value_heads, cp.head_dim),
-        torch.zeros(2, 1, dtype=torch.long), cache_pos=0,
-    )
-    out = predictor.forward_depth_unrolled(torch.randn(2, 1, 32))
+    predictor.depth.bind_step(kv_cache, torch.zeros(2, 1, dtype=torch.long), cache_pos=0)
+    out = predictor.forward_depth_unrolled(x)
     assert out.shape == (2, 1, 16)
 
 
@@ -1453,42 +1461,21 @@ def test_qwen3_tts_code_predictor_leaves_its_input_alone(monkeypatch):
     """The fused add + norm updates the residual stream in place, and on 0.6B
     the predictor's input projection is the identity: the stream must not be
     the caller's tensor, which the Talker's captured step reads again."""
-    config = _tiny_model_config()
-    predictor = Qwen3TTSCodePredictor(config)
+    predictor, kv_cache, inputs = _cpu_predictor(monkeypatch)
     assert isinstance(predictor.small_to_mtp_projection, torch.nn.Identity)
-    for layer in predictor.model.layers:
-        layer.input_layernorm = _IdentityNorm()
-        layer.post_attention_layernorm = _IdentityNorm()
-    predictor.model.norm = _IdentityNorm()
-    _fake_cp_kernels(monkeypatch)
-    cp = config.talker.code_predictor
-    inputs = torch.randn(2, 1, config.talker.hidden_size)
     before = inputs.clone()
-    predictor.depth.bind_step(
-        torch.zeros(cp.num_hidden_layers, 2, 2, config.talker.num_code_groups, cp.num_key_value_heads, cp.head_dim),
-        torch.zeros(2, 1, dtype=torch.long), cache_pos=0,
-    )
+    predictor.depth.bind_step(kv_cache, torch.zeros(2, 1, dtype=torch.long), cache_pos=0)
     predictor.forward_depth_unrolled(inputs)
     assert torch.equal(inputs, before)
 
 
 def test_qwen3_tts_code_predictor_uses_the_shared_kernels(monkeypatch):
-    config = _tiny_model_config()
-    predictor = Qwen3TTSCodePredictor(config)
     # FlashInfer RMSNorm and the Triton kernels are CUDA-only, so replace them
     # without changing attention geometry.
-    for layer in predictor.model.layers:
-        layer.input_layernorm = _IdentityNorm()
-        layer.post_attention_layernorm = _IdentityNorm()
-    predictor.model.norm = _IdentityNorm()
-    calls = []
-    _fake_cp_kernels(monkeypatch, calls)
-    cp = config.talker.code_predictor
-    predictor.depth.bind_step(
-        torch.empty(cp.num_hidden_layers, 1, 2, config.talker.num_code_groups, cp.num_key_value_heads, cp.head_dim),
-        torch.zeros(1, 1, dtype=torch.long), cache_pos=0,
-    )
-    output = predictor.forward_depth_unrolled(torch.randn(1, 1, config.talker.hidden_size))
+    config, calls = _tiny_model_config(), []
+    predictor, kv_cache, x = _cpu_predictor(monkeypatch, config, bs=1, calls=calls)
+    predictor.depth.bind_step(kv_cache, torch.zeros(1, 1, dtype=torch.long), cache_pos=0)
+    output = predictor.forward_depth_unrolled(x)
 
     query_shape, key_shape, value_shape, cache_len = calls[0]
     assert output.shape == (1, 1, config.talker.hidden_size)
@@ -1498,21 +1485,6 @@ def test_qwen3_tts_code_predictor_uses_the_shared_kernels(monkeypatch):
     assert key_shape[1] == config.talker.num_code_groups
     assert cache_len == 1
     assert len(calls) == config.talker.code_predictor.num_hidden_layers
-
-
-def _cpu_predictor(monkeypatch):
-    config = _tiny_model_config()
-    predictor = Qwen3TTSCodePredictor(config)
-    for layer in predictor.model.layers:
-        layer.input_layernorm = _IdentityNorm()
-        layer.post_attention_layernorm = _IdentityNorm()
-    predictor.model.norm = _IdentityNorm()
-    _fake_cp_kernels(monkeypatch)
-    cp = config.talker.code_predictor
-    kv_cache = torch.zeros(
-        cp.num_hidden_layers, 2, 2, config.talker.num_code_groups, cp.num_key_value_heads, cp.head_dim,
-    )
-    return predictor, kv_cache, torch.randn(2, 1, config.talker.hidden_size)
 
 
 def test_code_predictor_depth_step_is_bound_once_per_pass(monkeypatch):

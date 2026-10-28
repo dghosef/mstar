@@ -173,11 +173,11 @@ class DepthKV:
     ``bind_step`` per step, and ``run_layers`` calls ``set_layer_idx`` per
     layer. Its methods are all eager, so the ints stay out of compiled frames
     (and none is ``recursive=False``; see ``run_layers``). A binding serves
-    one pass over the layers: the last layer's call drops it, so a step that
-    was not bound fails instead of reusing the previous step's slots."""
+    one pass over the layers: the pass's first layer consumes it, so a step
+    that was not bound fails instead of reusing the previous step's slots."""
 
     def __init__(self) -> None:
-        self.kv_cache: torch.Tensor | None = None
+        self._fresh = False
 
     @torch.compiler.disable
     def bind_step(self, kv_cache: torch.Tensor, pos: torch.Tensor, cache_pos: int) -> None:
@@ -185,17 +185,23 @@ class DepthKV:
 
         Args:
             kv_cache: ``[n_layers, bs, 2, max_seq_len, n_kv_heads, head_dim]``
-                dense tensor preallocated by the runner. It is not cleared between
-                steps: every position a step reads is written earlier in the same step.
+                dense tensor preallocated by the submodule. It is not cleared between
+                frames: every position a depth step reads was written earlier in the
+                same frame.
             pos: ``[bs, seq_len]`` int tensor with the absolute position of each
                 input token within the depth sequence.
             cache_pos: write offset into ``kv_cache``'s seq-len axis. The new
                 K/V tokens land at ``[cache_pos : cache_pos + seq_len]``.
         """
         self.kv_cache, self.pos, self.cache_pos = kv_cache, pos.reshape(-1), cache_pos
+        self._fresh = True
 
     @torch.compiler.disable
     def set_layer_idx(self, layer_idx: int) -> None:
+        if layer_idx == 0:
+            if not self._fresh:
+                raise ValueError("DepthKV: bind_step before each pass over the code predictor's layers")
+            self._fresh = False
         self.layer_idx = layer_idx
 
     @torch.compiler.disable
@@ -203,8 +209,6 @@ class DepthKV:
         """The current layer's attention for ``qkv (bs, S, (Hq + 2 Hkv) * D)``:
         k and v written at the step's depth positions, each token attending
         over the positions so far. Returns ``(bs, S, Hq * D)``."""
-        if self.kv_cache is None:
-            raise ValueError("DepthKV: bind_step before each pass over the code predictor's layers")
         bs, seq_len, _ = qkv.shape
         kv = self.kv_cache[self.layer_idx]
         # q normed and roped in place; k (normed, roped) and v into the cache
@@ -215,11 +219,7 @@ class DepthKV:
             float(attn.rope_theta), attn.num_heads, attn.num_kv_heads, attn.head_dim,
         )
         q = qkv[..., :attn.num_heads * attn.head_dim].view(bs, seq_len, attn.num_heads, attn.head_dim)
-        out = cp_attention(q, kv[:, 0], kv[:, 1], self.cache_pos)
-        if self.layer_idx == self.kv_cache.shape[0] - 1:
-            # the launches above hold the cache; the caller owns its storage
-            self.kv_cache = None
-        return out.reshape(bs, seq_len, -1)
+        return cp_attention(q, kv[:, 0], kv[:, 1], self.cache_pos).reshape(bs, seq_len, -1)
 
 
 class DepthAttention(ParallelAttention):
