@@ -2710,7 +2710,6 @@ class Cosmos3VAEDecoderSubmodule(NodeSubmodule):
         self.vae = vae
         self.config = config
         self._decode_dtype_cached = None
-        self._channels_last = False
         self._whole_clip = None
         # The decode is 3D-conv bound, one-shot per request at request-specific
         # shapes, and not graph-captured; torch.compile fuses its pointwise
@@ -2740,7 +2739,6 @@ class Cosmos3VAEDecoderSubmodule(NodeSubmodule):
             # nodes share, never the encoder's; see Cosmos3Model).
             self.vae = vae = vae.to(self._decode_dtype())
             self._whole_clip = _wan_vae().FastDecoder(vae, compile=self._decode_compiled)
-            self._channels_last = True
             logger.info("Cosmos3 VAE decode: whole clips on the shared Wan VAE decoder (channels-last)")
 
     def prepare_inputs(self, graph_walk, fwd_info, inputs, **kwargs) -> NodeInputs:
@@ -2769,8 +2767,9 @@ class Cosmos3VAEDecoderSubmodule(NodeSubmodule):
         # conv3d fails ("Input type (float) and bias type (BFloat16)"). No-op
         # on the fp32-decode path.
         z = (latents.to(vae_dtype) / inv_std + mean).to(vae_dtype)
-        if self._channels_last:
-            # Also the layout the compiled decode's warm-up traces with.
+        if _wan_vae().is_channels_last(self.vae):
+            # The VAE's layout, set by its FastDecoder; also the layout the
+            # compiled decode's warm-up traces with.
             z = z.contiguous(memory_format=torch.channels_last_3d)
         return z
 
@@ -2867,7 +2866,6 @@ class Cosmos3VAEDecoderARSubmodule(Cosmos3VAEDecoderSubmodule):
                 vae, channels_last=config.vae_decode_channels_last,
                 compile=self._decode_compiled and self._warm_enabled, deterministic=False,
             )
-            self._channels_last = config.vae_decode_channels_last
 
     def prepare_inputs(self, graph_walk, fwd_info, inputs, **kwargs) -> NodeInputs:
         chunks = (inputs or {}).get("window_latents") or []

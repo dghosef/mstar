@@ -328,7 +328,7 @@ class FastDecoder:
         self.vae = vae
         self.channels_last = channels_last
         if channels_last:
-            to_channels_last(vae)
+            self._use_layout(True)
         self.step = DecoderStep(vae, compile=compile, deterministic=deterministic)
 
     def _use_layout(self, channels_last: bool) -> None:
