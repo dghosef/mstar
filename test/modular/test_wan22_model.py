@@ -998,17 +998,64 @@ def _dit_info(guidance: float) -> CurrentForwardPassInfo:
     (None, 1.0, 1),  # guidance off: the conditional branch alone
     (2, 5.0, 1),     # two ranks split the branches
     (2, 1.0, 1),     # nothing to split: both ranks run the one branch
+    (3, 5.0, None),  # two branches do not split over three ranks: refused
 ])
 def test_wan22_dit_branches_per_rank(world_size, guidance, branches):
     group = _FakeSPGroup(world_size) if world_size else None
     submodule = Wan22DitSubmodule(transformer=None, config=Wan22Config(), sp_group=group)
-    node_inputs = submodule.prepare_inputs(
-        graph_walk=Wan22Model.VIDEO_GEN_WALK, fwd_info=_dit_info(guidance), inputs=_dit_loop_inputs(k=1),
-    )
+
+    def prepare():
+        return submodule.prepare_inputs(
+            graph_walk=Wan22Model.VIDEO_GEN_WALK, fwd_info=_dit_info(guidance), inputs=_dit_loop_inputs(k=1),
+        )
+    if branches is None:
+        with pytest.raises(ValueError, match="evenly"):
+            prepare()
+        return
+    node_inputs = prepare()
     layout = node_inputs.resource_step_info
     # latents [1, 4, 2, 2, 2] patchify (1, 2, 2) to 2 * 1 * 1 tokens
     assert layout.video_tokens == 2 and node_inputs.input_seq_len == 2
     assert layout.branches == branches
+
+
+class _BranchEcho(torch.nn.Module):
+    """A dit stand-in whose prediction is each row's text embedding, broadcast."""
+    dtype = torch.float32
+
+    def forward(self, hidden_states, timestep, encoder_hidden_states, self_attn_fn):
+        return encoder_hidden_states[:, :1, :1, None, None].expand_as(hidden_states).clone()
+
+
+class _TwoRankGroup(_FakeSPGroup):
+    """One rank of a two-rank instance. The all-gather checks this rank's rows
+    and returns both ranks' rows, as each rank's forward computes them."""
+    def __init__(self, rank: int, full: torch.Tensor):
+        super().__init__(world_size=2, rank=rank)
+        self.full, self.gathers = full, 0
+
+    def all_gather(self, x, dim):
+        assert dim == 0 and torch.equal(x, self.full[self.rank:self.rank + 1])
+        self.gathers += 1
+        return self.full
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("guidance", [5.0, 1.0])
+def test_wan22_cfg_parallel_rank_runs_its_branch_and_matches_one_gpu(rank, guidance):
+    """Each rank of the CFG-parallel pair forwards its own branch, gathers once
+    and only when guided, and the combine matches the one-GPU batch-2 forward."""
+    latents, ts = torch.zeros(1, 4, 2, 2, 2), torch.zeros(2)
+    pos, neg = torch.full((1, 8, 16), 3.0), torch.full((1, 8, 16), 1.0)
+    one_gpu = Wan22DitSubmodule(transformer=_BranchEcho(), config=Wan22Config(compile_dit=False))
+    one_gpu._self_attn_fn = object()
+    expected = one_gpu._noise_prediction(latents, ts, pos, neg, guidance)
+    full = _BranchEcho()(latents.repeat(2, 1, 1, 1, 1), None, torch.cat([pos, neg]), None)
+    group = _TwoRankGroup(rank, full)
+    pair = Wan22DitSubmodule(transformer=_BranchEcho(), config=Wan22Config(compile_dit=False), sp_group=group)
+    pair._self_attn_fn = object()
+    assert torch.equal(pair._noise_prediction(latents, ts, pos, neg, guidance), expected)
+    assert group.gathers == (1 if guidance > 1.0 else 0)
 
 
 @pytest.mark.parametrize("sp_size,ok", [(None, True), (1, True), (2, True), (3, False), (4, False)])

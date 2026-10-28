@@ -31,7 +31,7 @@ from mstar.communication.tensors import NameToTensorList
 from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.engine.resources import AttentionStep, Segment, SlotLease, SubmoduleStep
 from mstar.model.components.diffusion.attention import RaggedAttentionFn
-from mstar.model.components.distributed.sequence_parallel import gather_sequence, scatter_sequence
+from mstar.model.components.distributed.sequence_parallel import gather_rows, my_rows
 from mstar.model.submodule_base import ModelInputsFromEngine, NodeInputs, NodeSubmodule
 from mstar.model.wan22.components.unipc import (
     SOLVER_ORDER,
@@ -389,14 +389,14 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
         super().__init__()
         self.transformer = transformer
         self.config = config
-        # CFG parallelism: the node's two-rank lockstep group arrives as its sp
-        # group (Wan22Model.validate_config_yaml refuses any other size), but
-        # nothing splits the sequence. The ranks split the batch-2 CFG stack, each
-        # running one branch at batch 1, and the predictions are all-gathered, so
+        # CFG parallelism: the node's lockstep group arrives as its sp group
+        # (None on one GPU; Wan22Model.validate_config_yaml refuses any size but
+        # 2), but nothing splits the sequence. The ranks split the batch-2 CFG
+        # stack (my_rows / gather_rows), each running one branch at batch 1, so
         # the step costs one branch's forward plus a latent-sized gather. Every
         # rank then runs the same combine and UniPC step on replicated latents.
         # Without guidance both ranks compute the whole step, correct but no faster.
-        self.sp_group = sp_group if sp_group is not None and sp_group.world_size > 1 else None
+        self.sp_group = sp_group
         self._self_attn_fn: RaggedAttentionFn | None = None
         self._record_fp32_islands()
         # Compile the inner DiT region only (tensors in, tensor out; nothing
@@ -484,16 +484,18 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
             tensor_inputs=tensor_inputs, resource_step_info=layout, input_seq_len=layout.video_tokens,
         )
 
-    def _cfg_split(self, guidance_scale: float) -> bool:
-        """Whether this step's two guidance branches run one per rank.
+    def _branch_rows(self, guidance_scale: float) -> slice:
+        """This rank's rows of the [cond, uncond] stack; the unguided step is
+        the one conditional row, which every rank runs.
 
         ``guidance_scale`` is request metadata, identical on every rank of the
         instance, so all ranks agree on whether the forward's gather runs."""
-        return guidance_scale > 1.0 and self.sp_group is not None
+        return my_rows(self.sp_group, 2) if guidance_scale > 1.0 else slice(0, 1)
 
     def _branches(self, guidance_scale: float) -> int:
         """Guidance branches this rank's forward computes."""
-        return 2 if guidance_scale > 1.0 and not self._cfg_split(guidance_scale) else 1
+        rows = self._branch_rows(guidance_scale)
+        return rows.stop - rows.start
 
     # attention ------------------------------------------------------------
     def bind_node_resources(self, resources) -> None:
@@ -608,8 +610,8 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
         reference's two sequential forwards. The combine runs in the
         transformer's output dtype (bf16), like the reference."""
         do_cfg = guidance_scale > 1.0
-        cfg_split = self._cfg_split(guidance_scale)
-        batch = self._branches(guidance_scale)
+        rows = self._branch_rows(guidance_scale)
+        batch = rows.stop - rows.start
         hidden_states = model_input.repeat(batch, 1, 1, 1, 1)
         timestep = temp_ts.unsqueeze(0).expand(batch, -1)
         # dynamic=False keys the compiled trace on the full input shape (batch
@@ -627,12 +629,10 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
                     shape_key,
                 )
         if do_cfg:
-            encoder_hidden_states = torch.cat([text_embeds_pos, text_embeds_neg], dim=0)
+            # this rank's branches of the CFG stack, gathered back after the forward
+            encoder_hidden_states = torch.cat([text_embeds_pos, text_embeds_neg], dim=0)[rows]
         else:
             encoder_hidden_states = text_embeds_pos
-        if cfg_split:
-            # this rank's branch of the CFG stack, gathered back after the forward
-            encoder_hidden_states = scatter_sequence(self.sp_group, encoder_hidden_states, [1, 1])
         transformer = self.transformer
         if not compiled and self._eager_forward is not None and self._eager_forward[0] is transformer:
             transformer = self._eager_forward[1]
@@ -644,8 +644,7 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, NodeSubmodule):
         )
         if not do_cfg:
             return out
-        if cfg_split:
-            out = gather_sequence(self.sp_group, out, [1, 1])
+        out = gather_rows(self.sp_group, out)
         noise_cond, noise_uncond = out[0:1], out[1:2]
         return noise_uncond + guidance_scale * (noise_cond - noise_uncond)
 
