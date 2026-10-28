@@ -11,6 +11,7 @@ range merging and its edge trim, so the output is the reference's to the
 sample; ``test_omnivoice_silence`` checks it against pydub.
 """
 
+import copy
 import itertools
 
 import numpy as np
@@ -20,7 +21,12 @@ _FULL_SCALE = 32768.0
 
 
 class _Segment:
-    """An int16 mono signal addressed the way ``pydub.AudioSegment`` slices it."""
+    """An int16 mono signal addressed the way ``pydub.AudioSegment`` slices it.
+
+    It reads ``samples[lo:lo + n]``, zeros past the end of ``samples``, and
+    backwards when ``flipped``, so a trimmed or reversed segment shares its
+    parent's prefix sums instead of building its own.
+    """
 
     def __init__(self, samples: np.ndarray, rate: int):
         self.samples = samples
@@ -28,10 +34,11 @@ class _Segment:
         self.per_ms = rate / 1000.0
         squares = samples.astype(np.int64) ** 2
         self.prefix = np.concatenate([[0], np.cumsum(squares)])
+        self.lo, self.n, self.flipped = 0, len(samples), False
 
     def __len__(self) -> int:
         # milliseconds, rounded as pydub rounds them
-        return round(1000 * (len(self.samples) / self.rate))
+        return round(1000 * (self.n / self.rate))
 
     def bounds(self, start_ms, end_ms):
         """Sample bounds and zero-filled length of ``segment[start_ms:end_ms]``."""
@@ -40,11 +47,28 @@ class _Segment:
         end = (np.minimum(end_ms, n_ms) * self.per_ms).astype(np.int64)
         return start, end
 
+    def reversed_tail(self, start_ms: int) -> "_Segment":
+        """``segment[start_ms:].reverse()``, over the same prefix sums."""
+        if self.flipped:
+            raise ValueError("reversed_tail of a reversed segment")
+        start, end = (int(x) for x in self.bounds(np.asarray(start_ms), np.asarray(len(self))))
+        tail = copy.copy(self)
+        tail.lo, tail.n, tail.flipped = self.lo + start, end - start, True
+        return tail
+
+    def _span(self, start, end):
+        """Where ``[start, end)`` of the segment, clipped to it, lies in ``samples``."""
+        start, end = np.minimum(start, self.n), np.minimum(end, self.n)
+        if self.flipped:
+            start, end = self.n - end, self.n - start
+        return self.lo + start, self.lo + end
+
     def rms(self, start_ms, end_ms) -> np.ndarray:
         """``audioop.rms`` of each ``[start_ms, end_ms)`` slice (an int, floored)."""
         start, end = self.bounds(np.asarray(start_ms), np.asarray(end_ms))
+        lo, hi = self._span(start, end)
         n = len(self.samples)
-        squares = (self.prefix[np.minimum(end, n)] - self.prefix[np.minimum(start, n)]).astype(np.float64)
+        squares = (self.prefix[np.minimum(hi, n)] - self.prefix[np.minimum(lo, n)]).astype(np.float64)
         width = (end - start).astype(np.float64)  # past the end pydub pads zeros
         with np.errstate(divide="ignore", invalid="ignore"):
             rms = np.floor(np.sqrt(squares / width))
@@ -52,10 +76,17 @@ class _Segment:
 
     def slice(self, start_ms: int, end_ms: int) -> np.ndarray:
         start, end = (int(x) for x in self.bounds(np.asarray(start_ms), np.asarray(end_ms)))
-        data = self.samples[start:end]
-        if len(data) < end - start:
-            data = np.concatenate([data, np.zeros(end - start - len(data), dtype=data.dtype)])
-        return data
+        lo, hi = (int(x) for x in self._span(start, end))
+        data = self.samples[lo:hi]
+        out = np.zeros(max(end - start, 0), dtype=self.samples.dtype)
+        if self.flipped:
+            # the segment's [start, min(end, n)) is `samples[lo:hi]` backwards;
+            # what lies past the samples' end are its leading zeros
+            last = min(end, self.n) - start
+            out[last - len(data):last] = data[::-1]
+        else:
+            out[:len(data)] = data
+        return out
 
 
 def _silent_ranges(seg: _Segment, min_silence_len: int, threshold: float, seek_step: int) -> list[list[int]]:
@@ -138,9 +169,8 @@ def remove_silence(
         samples = _split_on_silence(_Segment(samples, sampling_rate), mid_sil, threshold, mid_sil, 10)
 
     seg = _Segment(samples, sampling_rate)
-    start = max(0, _leading_silence(seg, threshold_db) - lead_sil)
-    samples = seg.slice(start, len(seg))
-    seg = _Segment(samples[::-1], sampling_rate)
-    start = max(0, _leading_silence(seg, threshold_db) - trail_sil)
-    samples = seg.slice(start, len(seg))[::-1]
+    # the trailing trim is the leading one of the lead-trimmed signal reversed
+    tail = seg.reversed_tail(max(0, _leading_silence(seg, threshold_db) - lead_sil))
+    start = max(0, _leading_silence(tail, threshold_db) - trail_sil)
+    samples = tail.slice(start, len(tail))[::-1]
     return (samples.astype(np.float32) / 32768.0)[np.newaxis, :]
