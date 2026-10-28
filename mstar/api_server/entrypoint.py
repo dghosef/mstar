@@ -18,7 +18,7 @@ from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 import msgpack
 import uvicorn
@@ -1620,13 +1620,23 @@ class WarmupRequest:
         )
 
 
-def _data_parallel_replicas(model, config_path: str) -> int:
-    """The most replicas any worker graph is served by: how many copies of a
-    request it takes for the conductor's placement to reach them all."""
-    return max(len(wg.replica_ranks) for wg in model.get_worker_graphs(config_path))
+class DataParallelReplicas(NamedTuple):
+    """The most and fewest replicas any worker graph is served by. ``most`` is
+    how many copies of a request it takes for the conductor's placement to
+    reach them all."""
+
+    most: int
+    fewest: int
 
 
-def _run_warmup_requests(server: APIServer, specs: list, copies: int = 1) -> None:
+def _data_parallel_replicas(model, config_path: str) -> DataParallelReplicas:
+    counts = [len(wg.replica_ranks) for wg in model.get_worker_graphs(config_path)]
+    return DataParallelReplicas(most=max(counts), fewest=min(counts))
+
+
+def _run_warmup_requests(
+    server: APIServer, specs: list, replicas: DataParallelReplicas = DataParallelReplicas(1, 1),
+) -> None:
     """Run the deployment's ``warmup_requests`` once the workers are ready and
     before the server binds, so the first client does not pay what a first
     request of a shape costs (torch.compile of a denoise step, a cold
@@ -1634,14 +1644,14 @@ def _run_warmup_requests(server: APIServer, specs: list, copies: int = 1) -> Non
     warmup that is malformed or fails is logged and skipped; it must not keep
     the server from coming up.
 
-    Each spec runs as ``copies`` x its ``concurrency`` concurrent requests,
-    once per value when ``concurrency`` is a list: ``copies`` warms every
+    Each spec runs as ``replicas.most`` x its ``concurrency`` concurrent
+    requests, once per value when ``concurrency`` is a list: the copies warm every
     replica of a data-parallel deployment, since the conductor sends
     concurrent requests to different replicas (the least-loaded one each), and
     ``concurrency`` lets them batch, for a step that compiles per batch size;
-    both are best effort, as the scheduler decides what shares a step. Past
-    one copy, each level first runs once alone, since a node group with fewer
-    replicas than ``copies`` would batch the copies and miss its one-request
+    both are best effort, as the scheduler decides what shares a step. When
+    some worker graph has fewer replicas than that, each spec first runs once
+    alone, since that graph would batch the copies and miss its one-request
     shape.
     """
     if not isinstance(specs, list):
@@ -1667,12 +1677,19 @@ def _run_warmup_requests(server: APIServer, specs: list, copies: int = 1) -> Non
         except Exception as exc:  # noqa: BLE001 — a repeat too large to build, say
             logger.warning("warmup_requests[%d] skipped: %s", index, exc)
             continue
+        if replicas.fewest < replicas.most:
+            t0 = time.perf_counter()
+            try:
+                asyncio.run(_one(request, f"warmup-{index}.solo"))
+            except Exception as exc:  # noqa: BLE001 — the batched levels still run
+                logger.warning(
+                    "warmup request %d/%d failed after %.1f s alone: %s",
+                    index + 1, len(specs), time.perf_counter() - t0, getattr(exc, "detail", exc),
+                )
         for level, concurrency in enumerate(request.concurrency):
             t0 = time.perf_counter()
             try:
-                if copies > 1:
-                    asyncio.run(_one(request, f"warmup-{index}.{level}.solo"))
-                asyncio.run(_all(request, f"warmup-{index}.{level}", copies * concurrency))
+                asyncio.run(_all(request, f"warmup-{index}.{level}", replicas.most * concurrency))
             except Exception as exc:  # noqa: BLE001 — a cold server is better than none
                 logger.warning(
                     "warmup request %d/%d failed after %.1f s at concurrency %d: %s",
@@ -2630,12 +2647,12 @@ def main(argv: list[str] | None = None):
         # client never sees the first request of a shape.
         warmups = config.get("warmup_requests") or []
         if warmups:
-            copies = _data_parallel_replicas(model, args.config)
+            replicas = _data_parallel_replicas(model, args.config)
             logger.info(
                 "Running %d warmup request(s) before binding, %d at a time (one per replica)",
-                len(warmups), copies,
+                len(warmups), replicas.most,
             )
-            _run_warmup_requests(api_server, warmups, copies)
+            _run_warmup_requests(api_server, warmups, replicas)
         if args.enable_metrics:
             api_server.enable_metrics()
         if args.rust_frontend:
