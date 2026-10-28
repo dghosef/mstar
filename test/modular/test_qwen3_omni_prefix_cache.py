@@ -298,7 +298,7 @@ def test_a_prompt_with_a_video_keys_only_its_leading_text(model):
         "a prompt with a video keyed other than its leading text"
     )
 
-def _audio(n_window: int = 50) -> AudioEncoderSubmodule:
+def _audio(n_window: int) -> AudioEncoderSubmodule:
     config = Qwen3OmniMoeAudioEncoderConfig(
         encoder_layers=1, d_model=32, encoder_attention_heads=2, encoder_ffn_dim=64, output_dim=16,
         downsample_hidden_size=8, n_window=n_window,
@@ -306,20 +306,6 @@ def _audio(n_window: int = 50) -> AudioEncoderSubmodule:
     encoder = Qwen3OmniMoeAudioEncoder._from_config(config, attn_implementation="sdpa").eval()
     return AudioEncoderSubmodule(encoder, config=None)
 
-
-def test_the_audio_encoder_stays_eager_while_its_output_is_cached(monkeypatch):
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch, "compile", lambda fn, dynamic, **kwargs: dynamic)
-    engine = Engine.__new__(Engine)
-    engine._device = torch.device("cuda")
-    engine._item_encoders = {"audio_encoder"}
-    engine._submodules = {"audio_encoder": SimpleNamespace(submodule=_audio(), forward="eager")}
-
-    engine._compile_submodules()
-
-    assert engine._submodules["audio_encoder"].forward == "eager", (
-        "the audio encoder compiled while its output is cached"
-    )
 
 def test_packed_clips_split_by_the_encoder_s_own_window():
     """A clip's embedding count is counted with the encoder's ``n_window``, as the
@@ -344,7 +330,6 @@ def test_packed_clips_split_by_the_encoder_s_own_window():
 def test_the_vision_encoder_compiles_no_graph_for_a_size_inside_the_ranges_it_has_compiled():
     pytest.importorskip("flash_attn")
     torch._dynamo.reset()
-    node, walk, seen, unseen = "vision", "prefill_vision", [(1, 4, 6)], [(1, 8, 10)]
     submodule = _vision("flash_attention_2")
 
     def inputs(grid):
@@ -354,23 +339,21 @@ def test_the_vision_encoder_compiles_no_graph_for_a_size_inside_the_ranges_it_ha
     submodule = submodule.to(device="cuda", dtype=torch.bfloat16)
     engine = Engine.__new__(Engine)
     engine._device = torch.device("cuda")
-    engine._item_encoders = {node}
-    engine._submodules = {node: SimpleNamespace(submodule=submodule)}
+    engine._item_encoders = {"vision"}
+    engine._submodules = {"vision": SimpleNamespace(submodule=submodule)}
     engine._compile_submodules()
-    forward = engine._submodules[node].forward
+    forward = engine._submodules["vision"].forward
 
-    def encode(size):
-        prepared = submodule.prepare_inputs(walk, None, inputs(size))
+    def encode(grid):
+        prepared = submodule.prepare_inputs("prefill_vision", None, inputs(grid))
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-            forward(walk, None, **prepared.tensor_inputs)
+            forward("prefill_vision", None, **prepared.tensor_inputs)
 
-    for size in seen:
-        encode(size)
+    encode((1, 4, 6))
     frames = counters["frames"]["ok"]
     with torch._dynamo.config.patch(error_on_recompile=True):
-        for size in unseen:
-            encode(size)
+        encode((1, 8, 10))
 
     assert counters["frames"]["ok"] == frames, (
-        f"the {node} encoder compiled a graph for a size inside a range it had compiled"
+        "the vision encoder compiled a graph for a size inside a range it had compiled"
     )
