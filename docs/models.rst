@@ -570,8 +570,9 @@ Qwen3-Omni notes
   later codes at near-ties.
 - The audio encoder takes the clips of up to 16 requests a step and packs
   them along time in request order into one pass, with attention windowed
-  within each clip, while they fit its largest capture (8192 encoder rows,
-  about 630 s of audio); a larger step runs each clip as its own pass. A
+  within each clip: a captured replay up to 8192 encoder rows (about 630 s of
+  audio), an eager pass up to 16384 rows (about 21 min). A step past that runs
+  each clip as its own eager pass, tens of ms of host time per clip. A
   clip's embeddings can differ at the last bit with what it is batched
   beside, since the packed GEMMs' shapes change with the pass's total rows,
   and a prefix-cached audio prefix keeps the embeddings it was first computed
