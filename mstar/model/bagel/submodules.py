@@ -7,7 +7,7 @@ import functools
 import logging
 import os
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 from torch import nn
@@ -56,13 +56,45 @@ logger = logging.getLogger(__name__)
 # sampled token is one flat entry or one per request.
 _LOGITS = "_logits"
 
+
+class DenoiseWalk(NamedTuple):
+    """The shape of a denoise walk: a ``Loop`` named ``denoise_loop(walk)``."""
+    # 1: the one LLM node runs every branch the step needs; 2 or 3: one node per
+    # branch (``NODE_TO_CFG_LABEL`` order), combined in combine_cfg
+    branches: int
+    # ends in the VAE decode, or persists latents and time_index for the next walk
+    decode: bool
+
+
+IMAGE_GEN = "image_gen"
+# A guided request's phases on a CFG-parallel deployment (`image_gen_phases`):
+# the steps ahead of the CFG window, the window on the branch nodes, and the
+# VAE decode alone when the window runs to the last step.
+IMAGE_GEN_HEAD = "image_gen_head"
+IMAGE_DECODE = "image_decode"
+DENOISE_WALKS = {
+    IMAGE_GEN: DenoiseWalk(branches=1, decode=True),
+    IMAGE_GEN_HEAD: DenoiseWalk(branches=1, decode=False),
+    "image_gen_cfg2": DenoiseWalk(branches=2, decode=False),
+    "image_gen_cfg3": DenoiseWalk(branches=3, decode=False),
+}
+CFG_WALKS = {walk: d.branches for walk, d in DENOISE_WALKS.items() if d.branches > 1}
+# the walks whose one LLM node runs the step's branches (`image_gen_step_branches`)
+SINGLE_NODE_DENOISE_WALKS = frozenset(walk for walk, d in DENOISE_WALKS.items() if d.branches == 1)
+
+
+def denoise_loop(walk: str) -> str:
+    """A denoise walk's Loop. Named, and per walk, so a request's loop cap
+    (`get_loop_caps`) and the step's loop counter each name one phase."""
+    return f"{walk}_loop"
+
+
+IMAGE_GEN_LOOP = denoise_loop(IMAGE_GEN)
+
 # The LLM nodes' walks, and the CFG branch each node owns. Module level
 # because both the submodule (per step) and the model (per request, in
 # get_request_resource_configs) have to answer the same question.
-LLM_GRAPH_WALKS = (
-    "prefill_text", "prefill_vit", "prefill_vae",
-    "decode", "image_gen", "image_gen_cfg",
-)
+LLM_GRAPH_WALKS = ("prefill_text", "prefill_vit", "prefill_vae", "decode", *DENOISE_WALKS)
 NODE_TO_CFG_LABEL = {
     "LLM": "main",
     "LLM_cfg_text": "cfg_text",
@@ -87,16 +119,16 @@ def active_labels(graph_walk: str, cfg: bool, node_name: str) -> list[str]:
     """Cache labels a node touches on this walk.
 
     Guidance adds a branch label on the walks that carry one; with guidance
-    off every walk is just "main". ``image_gen_cfg`` is the parallel variant,
-    where each LLM node owns exactly one branch.
+    off every walk is just "main". On a CFG walk each LLM node owns exactly
+    one branch.
     """
     if graph_walk in {"prefill_text", "decode", MIXED_TEXT}:
         if cfg:
             return ["main", "cfg_img"]
-    elif graph_walk == "image_gen":
+    elif graph_walk in SINGLE_NODE_DENOISE_WALKS:
         if cfg:
             return ["main", "cfg_text", "cfg_img"]
-    elif graph_walk == "image_gen_cfg":
+    elif graph_walk in CFG_WALKS:
         return [NODE_TO_CFG_LABEL.get(node_name, "main")]
     return ["main"]
 
@@ -128,13 +160,8 @@ def vit_patches(
     return (height // patch_size) * (width // patch_size)
 
 
-# The image_gen denoise Loop. Named so its iteration count reaches the LLM
-# node through ``fwd_info.dynamic_loop_iter_counts`` (an unnamed Loop gets a
-# random uuid), which is how the step knows its timestep on the host.
-IMAGE_GEN_LOOP = "image_gen_loop"
-
 # Rides on ``NodeInputs.kwargs`` from ``prepare_inputs`` to ``declare_step`` and
-# the forward: how many CFG branches (1, 2 or 3) this image_gen step runs.
+# the forward: how many CFG branches (1, 2 or 3) a single-node denoise step runs.
 CFG_BRANCHES = "cfg_branches"
 
 # Output sizes whose image_gen shape inputs an LLM node keeps on the device: above
@@ -189,61 +216,99 @@ def cfg_branches(
     return 3 if img_scale > 1.0 else 2
 
 
-def image_gen_step_branches(config, fwd_info: CurrentForwardPassInfo, first_iter: bool) -> int:
-    """The CFG branch count of this request's image_gen step (`cfg_branches`), decided
-    on the host from the loop counter. Every node of the step (the LLM nodes and
-    combine_cfg) calls this for the same step.
+class CFGWindow(NamedTuple):
+    """The denoise steps ``[start, stop)`` that run guidance, and how many
+    branches each of them runs (`cfg_branches`). Every other step runs main
+    alone. One window, since t decreases with the step and the interval is one
+    range of t; ``start == stop`` when no step is guided."""
+    start: int
+    stop: int
+    branches: int
 
-    The counter is the step's ``time_index`` (0 on the iteration that seeds the
-    latents, +1 per Euler step); one that disagrees with whether the latents were
-    seeded is not tracking this loop, and guessing the timestep would change the
-    output, so the request fails.
+
+@functools.lru_cache(maxsize=256)
+def cfg_window(
+    num_timesteps: int, shift: float,
+    cfg_interval: tuple[float, float], text_scale: float, img_scale: float,
+) -> CFGWindow:
+    """A request's `CFGWindow`, from its guidance kwargs, once at intake.
+    ``cfg_interval`` must be hashable (a tuple)."""
+    counts = [
+        cfg_branches(image_gen_timestep(k, num_timesteps, shift), cfg_interval, text_scale, img_scale)
+        for k in range(num_timesteps - 1)
+    ]
+    guided = [k for k, n in enumerate(counts) if n > 1]
+    if not guided:
+        return CFGWindow(0, 0, 1)
+    window = CFGWindow(guided[0], guided[-1] + 1, counts[guided[0]])
+    assert len(guided) == window.stop - window.start, f"guided steps {guided} are not one window"
+    return window
+
+
+class ImageGenPhase(NamedTuple):
+    """One denoise walk of a request."""
+    walk: str
+    # its loop's iterations; 0 for IMAGE_DECODE, which has no loop
+    steps: int
+    # every step's CFG branch count, or None when it varies with the step: only
+    # a single-node walk holding the whole schedule, the window inside it
+    branches: int | None
+
+
+def image_gen_phases(window: CFGWindow, num_timesteps: int, cfg_parallel: bool) -> tuple[ImageGenPhase, ...]:
+    """The denoise walks a request runs, in order, from its `CFGWindow`.
+
+    One node runs every step's branches unless the deployment places them on
+    their own nodes, and the guided window has steps. Then the window is a CFG
+    walk on the branch nodes, the steps before it run on LLM alone, and those
+    after it run on LLM alone and decode (or, with none left, a decode-only
+    walk). A request without guidance never reaches the branch nodes. Every
+    phase but a single-GPU guided image_gen has one branch count throughout,
+    so its nodes never read a loop counter.
+    """
+    n = num_timesteps - 1
+    if window.start == window.stop:
+        return (ImageGenPhase(IMAGE_GEN, n, 1),)
+    if not cfg_parallel:
+        return (ImageGenPhase(IMAGE_GEN, n, None),)
+    phases = []
+    if window.start > 0:
+        phases.append(ImageGenPhase(IMAGE_GEN_HEAD, window.start, 1))
+    phases.append(ImageGenPhase(f"image_gen_cfg{window.branches}", window.stop - window.start, window.branches))
+    if window.stop < n:
+        phases.append(ImageGenPhase(IMAGE_GEN, n - window.stop, 1))
+    else:
+        phases.append(ImageGenPhase(IMAGE_DECODE, 0, 1))
+    return tuple(phases)
+
+
+def image_gen_step_branches(graph_walk: str, fwd_info: CurrentForwardPassInfo, first_iter: bool) -> int:
+    """The CFG branch count of this step of a single-node denoise walk: the
+    phase's own count (``image_gen_branches``), or, on the one walk whose count
+    varies, the `CFGWindow` at the step's time index, its loop counter.
+
+    The time index is 0 only on the iteration that seeds the latents; one that
+    disagrees with whether the latents were seeded is not tracking this loop,
+    and guessing the timestep would change the output, so the request fails.
     """
     meta = fwd_info.step_metadata
-    if not meta.get("requires_cfg", False):
-        return 1
-    k = fwd_info.dynamic_loop_iter_counts.get(IMAGE_GEN_LOOP, 0)
+    if (fixed := meta["image_gen_branches"]) is not None:
+        return fixed
+    k = fwd_info.dynamic_loop_iter_counts.get(denoise_loop(graph_walk), 0)
     if (k == 0) != first_iter:
         raise ValueError(
-            f"BAGEL image_gen: loop counter {IMAGE_GEN_LOOP!r} reads {k} on a "
+            f"BAGEL {graph_walk}: loop counter {denoise_loop(graph_walk)!r} reads {k} on a "
             f"{'first' if first_iter else 'later'} iteration"
         )
-    t = image_gen_timestep(k, config.num_timesteps, config.timestep_shift)
-    return cfg_branches(
-        t,
-        tuple(meta.get("cfg_interval", config.cfg_interval)),
-        meta.get("cfg_text_scale", config.cfg_text_scale),
-        meta.get("cfg_img_scale", config.cfg_img_scale),
-    )
+    start, stop, branches = meta["cfg_window"]  # a CFGWindow
+    return branches if start <= k < stop else 1
 
 
 def image_gen_branches(inputs: list) -> int:
-    """The CFG branch count an image_gen batch declares and runs, as
+    """The CFG branch count a single-node denoise batch declares and runs, as
     ``prepare_inputs`` stamped it. The walk is never batched; ``max`` keeps a
     hypothetical batch on the superset."""
     return max(inp.kwargs[CFG_BRANCHES] for inp in inputs)
-
-
-# The CFG branches in the order `cfg_branches` counts them: a step running n branches runs the first n.
-CFG_BRANCH_LABELS = ("main", "cfg_text", "cfg_img")
-
-
-def cfg_branch_skipped(label: str, n_branches: int) -> bool:
-    """Whether the parallel-CFG node owning ``label`` sits out a step that runs ``n_branches``."""
-    return CFG_BRANCH_LABELS.index(label) >= n_branches
-
-
-def sat_out_velocity(config: BagelModelConfig, device) -> torch.Tensor:
-    """What a parallel-CFG node sends for a step it sits out: a zero-row velocity
-    of the latents' width.
-
-    Each node counts the step's branches from its own worker's loop counter, so
-    ``combine_cfg`` checks the row count on the host rather than trusting the
-    counts agree; a placeholder of the velocity's shape would pass for a computed
-    one. Nothing reads its values or dtype.
-    """
-    width = config.vae_config.z_channels * config.latent_patch_size ** 2
-    return torch.empty((0, width), device=device)
 
 
 def combine_cfg_velocity(
@@ -831,8 +896,8 @@ class LLMSubmodule(ARNodeSubmodule):
     During image_gen, classifier-free guidance runs one LLM pass per branch
     the step needs (``image_gen_step_branches``: main, then cfg_text and
     cfg_img while their scales and the CFG interval keep them), each over its
-    own KV cache. Under image_gen_cfg each branch is its own node and
-    combine_cfg combines them. With all three the velocities are combined via:
+    own KV cache. On a CFG walk (CFG-parallel deployments) each branch is its
+    own node and combine_cfg combines them. With all three the velocities are combined via:
         v_final = v_cfg_img + img_scale * (
             v_cfg_text + text_scale * (v_main - v_cfg_text) - v_cfg_img
         )
@@ -1071,12 +1136,10 @@ class LLMSubmodule(ARNodeSubmodule):
         if graph_walk == "prefill_vae":
             node_inputs.tensor_inputs = self._get_text_vae_idxs(seq_len, device)
 
-        if graph_walk in ("image_gen", "image_gen_cfg"):
+        if graph_walk in DENOISE_WALKS:
             first_iter = "latents" not in inputs or len(inputs["latents"]) == 0
-            node_inputs.kwargs[CFG_BRANCHES] = image_gen_step_branches(self.config, fwd_info, first_iter)
-            if graph_walk == "image_gen_cfg" and self._sits_out(node_inputs.kwargs[CFG_BRANCHES]):
-                # the forward sends a zero-row velocity and reads nothing else
-                return node_inputs
+            if graph_walk in SINGLE_NODE_DENOISE_WALKS:
+                node_inputs.kwargs[CFG_BRANCHES] = image_gen_step_branches(graph_walk, fwd_info, first_iter)
             H = fwd_info.step_metadata.get("height", 1024)
             W = fwd_info.step_metadata.get("width", 1024)
             shape_inputs = self._image_gen_shape_inputs(H, W, device)
@@ -1148,12 +1211,9 @@ class LLMSubmodule(ARNodeSubmodule):
         the batch runs them rides in on ``NodeInputs.resource_step_info`` from
         ``prepare_inputs``.
         """
-        if graph_walk == "image_gen_cfg" and all(self._sits_out(inp.kwargs[CFG_BRANCHES]) for inp in inputs):
-            # this branch sits the step out (`cfg_branches`): no plan, no attention
-            return None
         requires_cfg = requires_cfg_for_inputs(inputs)
         labels = self._get_active_labels(graph_walk, requires_cfg)
-        if graph_walk == "image_gen" and requires_cfg:
+        if graph_walk in SINGLE_NODE_DENOISE_WALKS and requires_cfg:
             # Only the branches this step runs (`cfg_branches`): labels are
             # ordered main, cfg_text, cfg_img, so the first n. One branch is
             # the plain "main" step below; the forward reads the same count.
@@ -1174,9 +1234,9 @@ class LLMSubmodule(ARNodeSubmodule):
             ] for label in labels
         }
 
-        if graph_walk == "image_gen" and len(labels) > 1:
+        if graph_walk in SINGLE_NODE_DENOISE_WALKS and len(labels) > 1:
             # Batched CFG: one combined plan across the active branch labels
-            # so image_gen runs one forward instead of n. The frozen caches
+            # so the step runs one forward instead of n. The frozen caches
             # never grow during flow matching, so nothing commits.
             pos_ids = [
                 tensor for label in labels for tensor in per_label_pos_ids[label]
@@ -1213,7 +1273,7 @@ class LLMSubmodule(ARNodeSubmodule):
             sink = frozenset(
                 (rid, label) for label in labels if label != "main" for rid in request_ids if rid not in guided
             )
-        writes = graph_walk not in ("image_gen", "image_gen_cfg")
+        writes = graph_walk not in DENOISE_WALKS
         if graph_walk in ("prefill_vit", "prefill_vae"):
             pos_advance = (IMAGE_ADVANCE,) * len(segments)
         elif not writes:
@@ -1306,7 +1366,7 @@ class LLMSubmodule(ARNodeSubmodule):
     ) -> dict[str, torch.Tensor | Any]:
         """Data transform for the forward; the plans come from the step
         declaration the runner drives before this runs."""
-        if graph_walk in ("image_gen", "image_gen_cfg"):
+        if graph_walk in DENOISE_WALKS:
             assert len(inputs) == 1 , "Batching not supported for image gen"
 
         # Concatenate lists of tensors into single tensors for each input name
@@ -1321,7 +1381,7 @@ class LLMSubmodule(ARNodeSubmodule):
         # `declare_step` planned for.
         result.pop("kwargs", None)
         result.pop(CFG_BRANCHES, None)
-        if graph_walk in ("image_gen", "image_gen_cfg"):
+        if graph_walk in SINGLE_NODE_DENOISE_WALKS:
             result[CFG_BRANCHES] = image_gen_branches(inputs)
         result["sample_token"] = any([
             info.step_metadata.get("sample_prefill_token", True) \
@@ -1344,12 +1404,9 @@ class LLMSubmodule(ARNodeSubmodule):
         # The walks that never sample return straight out.
         if graph_walk == "prefill_vae":
             return self._forward_prefill_vae(**kwargs)
-        elif graph_walk == "image_gen":
+        elif graph_walk in SINGLE_NODE_DENOISE_WALKS:
             return self._forward_image_gen(**kwargs)
-        elif graph_walk == "image_gen_cfg":
-            if self._sits_out(kwargs[CFG_BRANCHES]):
-                # `prepare_inputs` built nothing else; the edge still carries a tensor
-                return {f"v_{self._cfg_label}": [sat_out_velocity(self.config, self.get_device())]}
+        elif graph_walk in CFG_WALKS:
             return self._forward_image_gen_single_branch(**kwargs)
 
         if graph_walk == "prefill_text":
@@ -1657,7 +1714,7 @@ class LLMSubmodule(ARNodeSubmodule):
         time_index: torch.Tensor,
         **kwargs,
     ) -> NameToTensorList:
-        """Single-branch LLM forward for parallel CFG (image_gen_cfg walk).
+        """Single-branch LLM forward on a CFG walk (``CFG_WALKS``).
 
         Each parallel LLM node (LLM, LLM_cfg_text, LLM_cfg_img) runs this
         method with its own cache label. The velocity output is sent to the
@@ -1672,7 +1729,6 @@ class LLMSubmodule(ARNodeSubmodule):
         kwargs.pop("cfg_renorm_type", None)
         kwargs.pop("cfg_interval", None)
         kwargs.pop("cfg_renorm_min", None)
-        kwargs.pop(CFG_BRANCHES)
 
         latents = input_embeds
         label = self._cfg_label
@@ -1714,12 +1770,8 @@ class LLMSubmodule(ARNodeSubmodule):
 
     @property
     def _cfg_label(self) -> str:
-        """This node's CFG branch, and its velocity edge ``v_<label>``, under image_gen_cfg."""
+        """This node's CFG branch, and its velocity edge ``v_<label>``, on a CFG walk."""
         return NODE_TO_CFG_LABEL.get(self.node_name, "main")
-
-    def _sits_out(self, n_branches: int) -> bool:
-        """Whether this image_gen_cfg branch node sits out a step running ``n_branches``."""
-        return cfg_branch_skipped(self._cfg_label, n_branches)
 
     def _batch_get_requires_cfg(self, per_request_info: dict[str, CurrentForwardPassInfo]):
         return any(
@@ -1949,12 +2001,12 @@ class VAEDecoderSubmodule(NodeSubmodule):
 class CombineCFGSubmodule(NodeSubmodule):
     """Lightweight node: applies CFG formula + Euler step.
 
-    Receives the VAE-space velocities of the branches the step runs (v_main,
-    then v_cfg_text and v_cfg_img as `cfg_branches` reads them) plus latents and
-    time_index from the parallel LLM branches. Applies the 2-node CFG formula
-    with renormalization, then performs an Euler step.
+    Receives the VAE-space velocities of the walk's branches (v_main and
+    v_cfg_text, and v_cfg_img on image_gen_cfg3) plus latents and time_index
+    from the parallel LLM branches. Applies the CFG formula with
+    renormalization, then performs an Euler step.
 
-    Used in the image_gen_cfg graph walk (parallel CFG architecture).
+    Used in the CFG walks (``CFG_WALKS``, parallel CFG architecture).
     Runs on the same GPU as the main LLM branch (enc_dec engine, no KV cache).
     """
 
@@ -1974,17 +2026,11 @@ class CombineCFGSubmodule(NodeSubmodule):
         device = inputs["v_main"][0].device
 
         first_iter = "latents" not in inputs or not inputs["latents"]
-        n_branches = image_gen_step_branches(self.config, fwd_info, first_iter)
-        # Each branch node counted from its own worker's loop counter; a velocity
-        # that sat out a step this combine reads would pass for a computed one.
-        labels = CFG_BRANCH_LABELS[:n_branches]
-        for label in labels:
-            if inputs[f"v_{label}"][0].shape[0] == 0:
-                raise ValueError(
-                    f"BAGEL parallel CFG: LLM_{label} sat out a step whose combine reads "
-                    f"{list(labels)}; the nodes' loop counters disagree"
-                )
-        result = {f"v_{label}": inputs[f"v_{label}"][0] for label in labels}
+        # the walk's branches: v_cfg_img only on image_gen_cfg3
+        result = {
+            f"v_{label}": inputs[f"v_{label}"][0]
+            for label in NODE_TO_CFG_LABEL.values() if inputs.get(f"v_{label}")
+        }
         if first_iter:
             H = fwd_info.step_metadata.get("height", 1024)
             W = fwd_info.step_metadata.get("width", 1024)
@@ -1997,17 +2043,16 @@ class CombineCFGSubmodule(NodeSubmodule):
                 "time_index": inputs["time_index"][0],
                 **result,
             }
-        return NodeInputs(tensor_inputs=result, kwargs={**fwd_info.step_metadata, CFG_BRANCHES: n_branches})
+        return NodeInputs(tensor_inputs=result, kwargs=dict(fwd_info.step_metadata))
 
     def forward(
         self,
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
         v_main: torch.Tensor,
+        v_cfg_text: torch.Tensor,
         latents: torch.Tensor,
         time_index: torch.Tensor,
-        cfg_branches: int,
-        v_cfg_text: torch.Tensor | None = None,
         v_cfg_img: torch.Tensor | None = None,
         cfg_text_scale: float = None,
         cfg_img_scale: float = None,
@@ -2033,9 +2078,9 @@ class CombineCFGSubmodule(NodeSubmodule):
         # below line up under dynamic shapes.
         n_latent = latents.shape[0]
         torch._check(v_main.shape[0] == n_latent)
-        for v in (v_cfg_text, v_cfg_img):  # None: that branch sat the step out
-            if v is not None:
-                torch._check(v.shape[0] == n_latent)
+        torch._check(v_cfg_text.shape[0] == n_latent)
+        if v_cfg_img is not None:
+            torch._check(v_cfg_img.shape[0] == n_latent)
         torch._check(time_index.shape[0] == n_latent)
 
         # Compute timestep and step size
@@ -2045,16 +2090,12 @@ class CombineCFGSubmodule(NodeSubmodule):
         timestep_next = apply_timestep_shift(t=t_uniform_next, shift=shift)
         dt = (timestep - timestep_next)[0]
 
-        # Branches project to VAE space before routing to this join. Decided on the host
-        # (`cfg_branches`): outside the interval the combine is v_main, and the image
-        # branch is read only with image guidance on.
-        if cfg_branches == 1:
-            v_final = v_main
-        else:
-            v_final = combine_cfg_velocity(
-                v_main, v_cfg_text, v_cfg_img if cfg_branches == 3 else None,
-                cfg_text_scale, cfg_img_scale, cfg_renorm_type, cfg_renorm_min,
-            )
+        # Branches project to VAE space before routing to this join. A CFG walk is
+        # the request's guided window (`CFGWindow`), so every step combines.
+        v_final = combine_cfg_velocity(
+            v_main, v_cfg_text, v_cfg_img,
+            cfg_text_scale, cfg_img_scale, cfg_renorm_type, cfg_renorm_min,
+        )
 
         # Euler step
         new_latents = latents - v_final * dt

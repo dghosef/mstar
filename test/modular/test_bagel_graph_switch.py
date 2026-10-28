@@ -103,7 +103,7 @@ def test_enabled_capture_keeps_existing_recipes(monkeypatch, device_type):
     assert configs[2].capture_token_lengths == [128, 256, 512, 1024, 2048]
 
 
-@pytest.mark.parametrize("graph_walk", ["image_gen", "image_gen_cfg"])
+@pytest.mark.parametrize("graph_walk", ["image_gen", "image_gen_head", "image_gen_cfg2", "image_gen_cfg3"])
 def test_image_generation_uses_the_single_request_forward(graph_walk):
     module = LLMSubmodule.__new__(LLMSubmodule)
     nn.Module.__init__(module)

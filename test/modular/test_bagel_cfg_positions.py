@@ -192,7 +192,7 @@ def test_published_positions_travel_to_a_branch_on_another_node(harness):
 
     remote = _Harness(torch.device("cuda:0"))
     published = harness.rope.publish(RID)
-    remote.rope.admit_retrieve(RID, "LLM_cfg_text", "image_gen_cfg", published)
+    remote.rope.admit_retrieve(RID, "LLM_cfg_text", "image_gen_cfg2", published)
 
     assert remote.positions() == harness.positions()
 
