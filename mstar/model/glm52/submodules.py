@@ -71,12 +71,9 @@ class Glm52LLMSubmodule(ARNodeSubmodule):
         self.lm_head = language_model.lm_head
         self.config = config
         self._capture_block_warned = False
-        # Per request, in its request_state: "ended_at_prefill", the prefill sampled a stop
-        # token: the prefill walk has no loop to stop, so the first decode step stops
-        # decode_loop and emits nothing (see ``_token_stops``).
         self.token_stop = TokenStop(
             loop="decode_loop", buffer="new_token", stop_ids=frozenset(config.eos_token_ids),
-            sampler=SAMPLER_RESOURCE,
+            sampler=SAMPLER_RESOURCE, prefill_walks=frozenset({"prefill"}),
         )
 
     PREFILL_TOKEN_BUCKETS = [32, 64, 128, 256, 512, 1024]
@@ -377,38 +374,6 @@ class Glm52LLMSubmodule(ARNodeSubmodule):
         if "new_token" not in outputs:
             return
         outputs["text_inputs"] = outputs["new_token"]
-        if self.request_state(request_id).get("ended_at_prefill"):
+        if self.ended_at_prefill(request_id):
             # the reply already ended: this step only closes the decode loop
             del outputs["new_token"]
-
-    def check_stop(
-        self, request_id: str,
-        request_info: CurrentForwardPassInfo,
-        outputs: dict[str, list[torch.Tensor]],
-    ) -> set[str]:
-        # the closing step of a reply that ended at prefill: postprocess dropped its token
-        if self._ended_at_prefill(request_id):
-            return {"decode_loop"}
-        return super().check_stop(request_id, request_info, outputs)
-
-    def _ended_at_prefill(self, request_id: str) -> bool:
-        # read, never create: the check can run after the state was dropped
-        state = self.request_states.get(request_id)
-        return state is not None and bool(state.get("ended_at_prefill"))
-
-    def _token_stops(self, request_id: str, token: int, info: CurrentForwardPassInfo) -> bool:
-        """``token_stop``'s verdict, with GLM-5.2's two differences: a stop token sampled
-        by the prefill ends the reply at the first decode step, and ``max_tokens`` counts
-        the prefill's token."""
-        if self._ended_at_prefill(request_id):
-            return True
-        stop = self.token_stop
-        on_stop_id = token in stop.stop_ids and not info.resource_configs[stop.sampler].ignore_eos
-        if info.graph_walk == "prefill":
-            # no decode_loop on this walk to stop; the conductor ends a max_tokens of 1 here
-            if on_stop_id:
-                self.request_state(request_id).add("ended_at_prefill", True)
-            return False
-        # 1 + (iters + 1) tokens so far
-        generated = info.dynamic_loop_iter_counts.get(stop.loop, 0) + 2
-        return on_stop_id or generated >= info.max_tokens

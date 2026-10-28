@@ -1055,7 +1055,10 @@ methods are:
    terminates. An AR submodule whose loop ends on a stop token or the token budget sets
    ``self.token_stop = TokenStop(...)`` in ``__init__`` instead of writing one; that also
    gives it ``check_stop_batched``, which checks a whole step off one host copy of its
-   tokens.
+   tokens. When a prefill walk outside the loop samples the reply's first token, list it
+   in ``prefill_walks``: the token counts toward ``max_tokens``, and a stop id sampled
+   there ends the loop at its first step, whose token ``postprocess`` drops when
+   ``ended_at_prefill(request_id)`` says so (GLM-5.2, Command A+).
 
 ``on_request_added(self, request_id, request_info)`` (optional)
    Called on the worker's main thread when the request reaches the worker, before any of

@@ -108,10 +108,8 @@ class NodeTests(unittest.TestCase):
                 self.node.postprocess("a", request, decode)
                 self.assertEqual("new_token" not in decode, ends)
                 self.assertEqual(self.node.check_stop("a", request, decode), {"decode_loop"} if ends else set())
-        self.assertEqual(self.node._ended_at_prefill, set())
-        self.node.check_stop("a", info(), {"new_token": [torch.tensor([3])]})
-        self.node.cleanup_request("a")
-        self.assertEqual(self.node._ended_at_prefill, set())
+                self.node.cleanup_request("a")
+                self.assertNotIn("a", self.node.request_states)
 
     def test_decode_stop_counts_prefill_token_and_respects_ignore_eos(self):
         for token, maximum, index, ignore_eos, stops in (
