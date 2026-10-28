@@ -139,10 +139,10 @@ class TransducerSubmodule(NodeSubmodule):
         device = states[0].device
         out = {
             "encoder_states": torch.cat(parts).view(len(states), width, -1),
-            "lengths": to_device_nonblocking(torch.tensor(lengths), device),
+            "lengths": to_device_nonblocking(lengths, device),
         }
         if self.head.prompt_projector is not None:
-            out["prompt_ids"] = to_device_nonblocking(torch.tensor([inp.kwargs[PROMPT_ID] for inp in inputs]), device)
+            out["prompt_ids"] = to_device_nonblocking([inp.kwargs[PROMPT_ID] for inp in inputs], device)
         return out
 
     # -- resources and captures --------------------------------------------------

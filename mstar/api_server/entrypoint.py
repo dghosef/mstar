@@ -1639,7 +1639,10 @@ def _run_warmup_requests(server: APIServer, specs: list, copies: int = 1) -> Non
     replica of a data-parallel deployment, since the conductor sends
     concurrent requests to different replicas (the least-loaded one each), and
     ``concurrency`` lets them batch, for a step that compiles per batch size;
-    both are best effort, as the scheduler decides what shares a step.
+    both are best effort, as the scheduler decides what shares a step. Past
+    one copy, each level first runs once alone, since a node group with fewer
+    replicas than ``copies`` would batch the copies and miss its one-request
+    shape.
     """
     if not isinstance(specs, list):
         logger.warning("warmup_requests must be a list; ignoring %r", type(specs).__name__)
@@ -1667,6 +1670,8 @@ def _run_warmup_requests(server: APIServer, specs: list, copies: int = 1) -> Non
         for level, concurrency in enumerate(request.concurrency):
             t0 = time.perf_counter()
             try:
+                if copies > 1:
+                    asyncio.run(_one(request, f"warmup-{index}.{level}.solo"))
                 asyncio.run(_all(request, f"warmup-{index}.{level}", copies * concurrency))
             except Exception as exc:  # noqa: BLE001 — a cold server is better than none
                 logger.warning(

@@ -188,7 +188,35 @@ def test_warmup_reaches_every_data_parallel_replica(tmp_path) -> None:
     ]) == 1
     fake = _FakeServer()
     entrypoint._run_warmup_requests(fake, [{"text": "a"}, {"text": "b"}], copies=2)
-    assert [s["request_id"] for s in fake.submitted] == ["warmup-0.0.0", "warmup-0.0.1", "warmup-1.0.0", "warmup-1.0.1"]
+    assert [s["request_id"] for s in fake.submitted] == [
+        "warmup-0.0.solo", "warmup-0.0.0", "warmup-0.0.1", "warmup-1.0.solo", "warmup-1.0.0", "warmup-1.0.1",
+    ]
+
+
+def test_replicated_warmup_runs_one_request_alone_first() -> None:
+    """Past one copy, each level first runs one request to its end alone: a node
+    group with fewer replicas than ``copies`` (one DiT beside a replicated VAE)
+    would otherwise get every copy together and only compile the batched shape."""
+    events = []
+
+    class _OrderedServer(_FakeServer):
+        def submit_request(self, **kwargs):
+            events.append(("submit", kwargs["request_id"]))
+            return super().submit_request(**kwargs)
+
+        async def collect_results(self, request_id, raw_request=None):
+            events.append(("done", request_id))
+            return await super().collect_results(request_id, raw_request)
+
+    entrypoint._run_warmup_requests(_OrderedServer(), [{"text": "a", "concurrency": [1, 2]}], copies=2)
+    assert events[:2] == [("submit", "warmup-0.0.solo"), ("done", "warmup-0.0.solo")]
+    level_1 = events.index(("submit", "warmup-0.1.solo"))
+    assert events[level_1 + 1] == ("done", "warmup-0.1.solo")
+    assert [rid for kind, rid in events[level_1 + 2:] if kind == "submit"] == [f"warmup-0.1.{c}" for c in range(4)]
+    # one copy: nothing extra
+    events.clear()
+    entrypoint._run_warmup_requests(_OrderedServer(), [{"text": "a"}])
+    assert events == [("submit", "warmup-0.0.0"), ("done", "warmup-0.0.0")]
 
 
 def test_concurrency_runs_copies_together_for_batched_shapes() -> None:
@@ -196,7 +224,7 @@ def test_concurrency_runs_copies_together_for_batched_shapes() -> None:
     a step compiled per batch size sees that batch before the bind."""
     fake = _FakeServer()
     entrypoint._run_warmup_requests(fake, [{"text": "a", "concurrency": 3}], copies=2)
-    assert [s["request_id"] for s in fake.submitted] == [f"warmup-0.0.{c}" for c in range(6)]
+    assert [s["request_id"] for s in fake.submitted] == ["warmup-0.0.solo"] + [f"warmup-0.0.{c}" for c in range(6)]
     # a list runs one warmup per batch size, in order, each under its own ids
     fake = _FakeServer()
     entrypoint._run_warmup_requests(fake, [{"text": "a", "concurrency": [1, 2]}])
