@@ -125,7 +125,9 @@ pub fn compile_one(
         let resolve = |it: &mut StrToId, v: &Vec<(String, String)>| -> Vec<(Sym, NodeId)> {
             v.iter().filter_map(|(n, d)| local.get(d.as_str()).map(|&id| (it.intern(n), id))).collect()
         };
-        let loop_back = resolve(it, &l.loop_back);
+        let loop_back = l.loop_back.iter()
+            .map(|(n, d)| (it.intern(n), it.intern(d)))
+            .collect();
         let external_inputs = resolve(it, &l.external_inputs);
         loop_specs.push(LoopSpec {
             name: it.intern(&l.name), max_iters: l.max_iters, parent,

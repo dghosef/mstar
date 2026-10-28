@@ -21,7 +21,7 @@ from mstar.graph.loop_indices import NestedLoopIndices
 from mstar.graph.runtime.base import ColumnarEdgeSpecs, EdgeSpec, RequestWalks, RouteInput, SpeculationPrepInput
 from mstar.graph.runtime.python import PythonGraphRuntime
 from mstar.graph.special_destinations import EMIT_TO_CLIENT, EMPTY_DESTINATION
-from mstar.model.base import WorkerGraph
+from mstar.model.base import WorkerGraph, _divide_into_worker_graphs
 from mstar.utils.containers import ParallelList
 
 pytest.importorskip(
@@ -1059,6 +1059,72 @@ def test_a_tensor_read_by_two_workers_holds_two_references(two_consumers):
     assert not book.can_gc(1), "still being read by the second worker"
     book.dereference(1, 1)
     assert book.can_gc(1)
+
+
+# --- a loop split across workers ---------------------------------------------
+
+@pytest.fixture(params=["python", "rust"])
+def split_loop(request):
+    """One loop whose body spans two workers, as BAGEL's CFG-parallel denoise:
+    ``step`` runs on a peer, ``combine`` here, and combine's output loops back
+    to step over the wire. The runtime under test is this worker's."""
+    loop = Loop(
+        name="L", max_iters=3, outputs=[],
+        section=Sequential(sections=[
+            GraphNode(name="step", input_names={"x"},
+                      outputs=[GraphEdge(name="v", next_node="combine")]),
+            GraphNode(name="combine", input_names={"v"},
+                      outputs=[GraphEdge(name="x", next_node="step")]),
+        ]),
+    )
+    wgs = _divide_into_worker_graphs(
+        loop, graph_walk=WALK, node_to_group_idx={"combine": 0, "step": 1},
+        node_groups=[{"ranks": [0]}, {"ranks": [1]}], input_streams=set(),
+    )
+    for wg in wgs:
+        wg.worker_graph_id = wg.ranks[0]
+    common = dict(
+        my_worker_id=WORKER, my_worker_graphs=[wg for wg in wgs if wg.ranks == [0]],
+        all_wg_ids_to_graph_walks={0: {WALK}, 1: {WALK}},
+        all_wg_ids_to_dyn_loops={0: {"L"}, 1: {"L"}},
+        all_wg_ids_to_nodes={0: {"combine"}, 1: {"step"}},
+        node_to_partition={"combine": "default", "step": "default"},
+        sharding_config=_sharding(),
+    )
+    if request.param == "python":
+        book = PythonTensorBookkeeping()
+        tm = _StubTensorManager(book)
+        return (PythonGraphRuntime(tensor_manager=tm, communicator=None,
+                                   **common), book, tm.tensor_store)
+    book = RustTensorBookkeeping()
+    return rust_runtime.RustGraphRuntime(bookkeeping=book, **common), book, None
+
+
+def test_the_last_iteration_sends_no_loop_back_to_a_peer(split_loop):
+    """A finishing loop sends no loop-back to another worker graph, or the
+    peer runs one more iteration with its counter back at 0."""
+    rt, book, _store = split_loop
+    rid = rt.add_request(
+        request_id="r1", partition="default", graph_walk=WALK,
+        partition_worker_graph_ids=[0, 1],
+        worker_graph_to_workers=ParallelList([0, 1], [[WORKER], ["worker_1"]]),
+        loop_caps={},
+    )
+    held = []
+    for k in range(3):
+        rt.ingest_inputs_batch(_ingest_block([rid], [_spec("v", "combine")]))
+        rt.pop_rids("combine", WALK, [rid])
+        uuid = 10 + k
+        book.put_tensor(uuid, _info(uuid))
+        book.increment_ref(uuid, 1)  # the safety hold
+        rt.complete_and_route_batch(RouteInput(
+            partition="default", graph_walk=WALK, node_name="combine",
+            output_signals=["x"], wg_ids=ParallelList([rid], [0]),
+            tensors=[uuid], num_tensors=[1],
+        ))
+        # A loop-back sent to the peer holds a reference for its read.
+        held.append(not _released(book, uuid))
+    assert held == [True, True, False]
 
 
 # --- several requests in one batch --------------------------------------------

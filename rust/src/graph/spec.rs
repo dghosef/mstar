@@ -120,7 +120,10 @@ pub struct LoopSpec {
     /// Python's `Loop._loop_back_inputs` / `_external_inputs`, computed by
     /// `GraphSection.get_inputs_outputs()` and handed over verbatim — the real
     /// port's compile seam does the same rather than re-deriving them.
-    pub loop_back: Vec<(Sym, NodeId)>,
+    /// `loop_back` keeps every pair as (signal, dest node name), a dest in
+    /// another worker graph included: a loop split across worker graphs loops
+    /// back through them. `external_inputs` keeps the pairs into this graph.
+    pub loop_back: Vec<(Sym, Sym)>,
     pub external_inputs: Vec<(Sym, NodeId)>,
 }
 
