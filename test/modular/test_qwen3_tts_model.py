@@ -1440,15 +1440,11 @@ def test_qwen3_tts_code_predictor_projects_wider_talker_inputs(monkeypatch):
     predictor.model.norm = _IdentityNorm()
     _fake_cp_kernels(monkeypatch)
     cp = wide.talker.code_predictor
-    out = predictor.forward_depth_unrolled(
-        inputs_embeds=torch.randn(2, 1, 32),
-        position_ids=torch.zeros(2, 1, dtype=torch.long),
-        kv_cache=torch.zeros(
-            cp.num_hidden_layers, 2, 2, wide.talker.num_code_groups,
-            cp.num_key_value_heads, cp.head_dim,
-        ),
-        cache_pos=0,
+    predictor.depth.bind_step(
+        torch.zeros(cp.num_hidden_layers, 2, 2, wide.talker.num_code_groups, cp.num_key_value_heads, cp.head_dim),
+        torch.zeros(2, 1, dtype=torch.long), cache_pos=0,
     )
+    out = predictor.forward_depth_unrolled(torch.randn(2, 1, 32))
     assert out.shape == (2, 1, 16)
 
 
@@ -1467,14 +1463,11 @@ def test_qwen3_tts_code_predictor_leaves_its_input_alone(monkeypatch):
     cp = config.talker.code_predictor
     inputs = torch.randn(2, 1, config.talker.hidden_size)
     before = inputs.clone()
-    predictor.forward_depth_unrolled(
-        inputs_embeds=inputs,
-        position_ids=torch.zeros(2, 1, dtype=torch.long),
-        kv_cache=torch.zeros(
-            cp.num_hidden_layers, 2, 2, config.talker.num_code_groups, cp.num_key_value_heads, cp.head_dim,
-        ),
-        cache_pos=0,
+    predictor.depth.bind_step(
+        torch.zeros(cp.num_hidden_layers, 2, 2, config.talker.num_code_groups, cp.num_key_value_heads, cp.head_dim),
+        torch.zeros(2, 1, dtype=torch.long), cache_pos=0,
     )
+    predictor.forward_depth_unrolled(inputs)
     assert torch.equal(inputs, before)
 
 
@@ -1489,19 +1482,12 @@ def test_qwen3_tts_code_predictor_uses_the_shared_kernels(monkeypatch):
     predictor.model.norm = _IdentityNorm()
     calls = []
     _fake_cp_kernels(monkeypatch, calls)
-    output = predictor.forward_depth_unrolled(
-        inputs_embeds=torch.randn(1, 1, config.talker.hidden_size),
-        position_ids=torch.zeros(1, 1, dtype=torch.long),
-        kv_cache=torch.empty(
-            config.talker.code_predictor.num_hidden_layers,
-            1,
-            2,
-            config.talker.num_code_groups,
-            config.talker.code_predictor.num_key_value_heads,
-            config.talker.code_predictor.head_dim,
-        ),
-        cache_pos=0,
+    cp = config.talker.code_predictor
+    predictor.depth.bind_step(
+        torch.empty(cp.num_hidden_layers, 1, 2, config.talker.num_code_groups, cp.num_key_value_heads, cp.head_dim),
+        torch.zeros(1, 1, dtype=torch.long), cache_pos=0,
     )
+    output = predictor.forward_depth_unrolled(torch.randn(1, 1, config.talker.hidden_size))
 
     query_shape, key_shape, value_shape, cache_len = calls[0]
     assert output.shape == (1, 1, config.talker.hidden_size)
@@ -1559,12 +1545,15 @@ def _depth_loop(model, monkeypatch):
         def depth_loop(x, pos, pair_pos, kv_cache):
             if model == "qwen3_tts":
                 for cache_pos in range(n):
-                    predictor.forward_depth_unrolled(x, pos[cache_pos], kv_cache, cache_pos=cache_pos)
+                    predictor.depth.bind_step(kv_cache, pos[cache_pos], cache_pos=cache_pos)
+                    predictor.forward_depth_unrolled(x)
             else:
                 # Qwen3-Omni opens with a two-token pass at cache_pos 0
-                predictor.forward_depth_unrolled(torch.cat([x, x], dim=1), pair_pos, kv_cache, cache_pos=0)
+                predictor.depth.bind_step(kv_cache, pair_pos, cache_pos=0)
+                predictor.forward_depth_unrolled(torch.cat([x, x], dim=1))
                 for cache_pos in range(2, n + 1):
-                    predictor.forward_depth_unrolled(x, pos[cache_pos], kv_cache, cache_pos=cache_pos)
+                    predictor.depth.bind_step(kv_cache, pos[cache_pos], cache_pos=cache_pos)
+                    predictor.forward_depth_unrolled(x)
 
         return depth_loop, (torch.randn(bs, 1, hidden), pos, pair_pos, kv_cache)
 
@@ -1585,8 +1574,8 @@ def test_code_predictor_depth_loop_compiles_no_frame_per_position(model, monkeyp
 
 @pytest.mark.parametrize("model", ["qwen3_tts", "qwen3_omni"])
 def test_code_predictor_attention_projections_compile(model, monkeypatch, dynamo_counts):
-    """``cp_attend``'s own frame runs eager (it binds the depth ints), but its
-    qkv and o projections must compile: at -O1 Inductor turns a one-row GEMM
+    """``DepthKV`` runs eager (it holds the depth ints), but the qkv and o
+    projections around it must compile: at -O1 Inductor turns a one-row GEMM
     into a fused reduction, which eager cuBLAS misses."""
     predictor, walk = _depth_loop(model, monkeypatch)
     attn = predictor.model.layers[0].self_attn

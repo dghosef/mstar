@@ -222,9 +222,10 @@ class _StubMixer(torch.nn.Module):
 
 def test_qwen3_5_layer_loop_compiles_no_frame_per_layer(dynamo_counts):
     """A captured forward compiles with static ints, so a compiled frame that
-    holds the layer index (Qwen3.5's ``attend`` hook moves each layer's cursor)
+    holds the layer index (Qwen3.5's ``set_cursor`` moves each layer's cursor)
     recompiles per layer until the recompile limit: four layers must compile
-    no more frames than two."""
+    no more frames than two. And the frame that holds it must not fail the
+    capture stance, as a ``recursive=False`` one does."""
     from mstar.model.qwen3_5.components.language_model import Qwen3_5LanguageModel
     from mstar.model.qwen3_5.config import FULL_ATTENTION, LINEAR_ATTENTION, Qwen3_5Config
 

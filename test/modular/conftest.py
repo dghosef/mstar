@@ -64,9 +64,11 @@ class DynamoCounts(NamedTuple):
 @pytest.fixture
 def dynamo_counts():
     """``count(fn, *args) -> DynamoCounts`` for ``torch.compile(fn,
-    dynamic=False)`` called twice on ``args``. A graph count would miss a frame
-    that only guards on an int before a graph break: it compiles an empty graph
-    per value."""
+    dynamic=False)`` called twice on ``args``, the second time under the capture
+    stance (``fail_on_recompile``), as the graph runner warms a bucket and then
+    captures it: a frame Dynamo calls back into on a warm call fails it. A graph
+    count would miss a frame that only guards on an int before a graph break: it
+    compiles an empty graph per value."""
     from torch._dynamo.callback import callback_handler
 
     def count(fn, *args) -> DynamoCounts:
@@ -90,7 +92,8 @@ def dynamo_counts():
             with torch.no_grad():
                 compiled(*args)
                 calls[0] = 0
-                compiled(*args)
+                with torch.compiler.set_stance("fail_on_recompile"):
+                    compiled(*args)
         finally:
             callback_handler.remove_start_callback(on_start)
             torch._dynamo.reset()
