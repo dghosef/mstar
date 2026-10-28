@@ -248,6 +248,12 @@ class WorkerGraph:
             # Conductor routes to the lockstep unit (the whole instance).
             self.tp_size = inst
 
+    @property
+    def replica_ranks(self) -> list[list[int]]:
+        """The ranks of each data-parallel replica: the lockstep instances, or
+        one rank apiece without TP/SP. The conductor routes a request to one."""
+        return self._instance_ranks or [[r] for r in self.ranks]
+
 
 def _combine_sections_sequential_or_parallel(
     section: GraphSection, other: GraphSection, comb_type: Type[Sequential] | Type[Parallel]

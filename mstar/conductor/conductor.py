@@ -934,7 +934,7 @@ class Conductor:
         for wg in self.worker_graphs.values():
             if wg._group_id in replicas:
                 continue
-            n = len(wg._instance_ranks) if wg._instance_ranks else len(wg.ranks)
+            n = len(wg.replica_ranks)
             if n == 1:
                 replicas[wg._group_id] = 0
                 continue
@@ -957,15 +957,11 @@ class Conductor:
         """
         result = {}
         for wg_id, wg in self.worker_graphs.items():
-            replica_idx = replicas[wg._group_id]
-            if wg._instance_ranks:
-                # Route to a whole instance (the lockstep unit): every rank of a
-                # tp*sp instance runs the request together, so its TP all-reduce
-                # and SP all-to-all collectives stay in sync. Picking a single TP
-                # row here would desync the SP all-to-all across rows.
-                result[wg_id] = [f"worker_{r}" for r in wg._instance_ranks[replica_idx]]
-            else:
-                result[wg_id] = [f"worker_{wg.ranks[replica_idx]}"]
+            # Route to a whole instance (the lockstep unit): every rank of a
+            # tp*sp instance runs the request together, so its TP all-reduce
+            # and SP all-to-all collectives stay in sync. Picking a single TP
+            # row here would desync the SP all-to-all across rows.
+            result[wg_id] = [f"worker_{r}" for r in wg.replica_ranks[replicas[wg._group_id]]]
         return result
 
     def _build_request_sharding_config(
