@@ -60,7 +60,7 @@ def test_fused_add_rms_norm_compiles_without_a_graph_break():
     want = stream(x.clone())
     torch._dynamo.reset()
     try:
-        got = torch.compile(stream, fullgraph=True, backend="eager")(x.clone())
+        got = torch.compile(stream, fullgraph=True, backend="aot_eager")(x.clone())
     finally:
         torch._dynamo.reset()
     for g, w in zip(got, want, strict=True):
