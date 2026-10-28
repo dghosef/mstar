@@ -266,6 +266,9 @@ class Qwen3_5LanguageModel(nn.Module):
             getattr(self.layers[idx].self_attn, attr).bind_step(label)
         return run_layers(self.layers, query_sequence, self.norm, self._attend, self.comm_group)
 
+    # Eager, so no compiled frame guards on the layer index ``i``; ``mixer``
+    # still compiles as its own frame.
+    @torch.compiler.disable(recursive=False)
     def _attend(self, i: int, mixer: nn.Module, h: torch.Tensor) -> torch.Tensor:
         """Layer ``i``'s mixer, its cursor (``attend`` or ``mix``) moved to the
         layer's index in its resource first."""
