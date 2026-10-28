@@ -1620,14 +1620,13 @@ class WarmupRequest:
         )
 
 
-def _data_parallel_replicas(config: dict) -> int:
-    """The most replicas any node group serves (its ranks over its tp x sp
-    instance size): how many copies of a request it takes to reach them all."""
-    replicas = 1
-    for group in config.get("node_groups") or []:
-        instance = int(group.get("tp_size", 1)) * int(group.get("sp_size", 1))
-        replicas = max(replicas, len(group.get("ranks") or []) // max(instance, 1))
-    return replicas
+def _data_parallel_replicas(model, config_path: str) -> int:
+    """The most replicas any worker graph is served by (its lockstep instances,
+    or its ranks without TP/SP), counted as the conductor counts them when it
+    picks one: how many copies of a request it takes to reach them all."""
+    return max(
+        len(wg._instance_ranks) or len(wg.ranks) for wg in model.get_worker_graphs(config_path)
+    )
 
 
 def _run_warmup_requests(server: APIServer, specs: list, copies: int = 1) -> None:
@@ -2632,7 +2631,7 @@ def main(argv: list[str] | None = None):
         # client never sees the first request of a shape.
         warmups = config.get("warmup_requests") or []
         if warmups:
-            copies = _data_parallel_replicas(config)
+            copies = _data_parallel_replicas(model, args.config)
             logger.info(
                 "Running %d warmup request(s) before binding, %d at a time (one per replica)",
                 len(warmups), copies,
