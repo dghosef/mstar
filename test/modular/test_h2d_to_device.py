@@ -5,9 +5,12 @@ pinned cases need an accelerator, since there is nothing to pin without one.
 
 from __future__ import annotations
 
+import types
+
 import pytest
 import torch
 
+from mstar.utils import h2d
 from mstar.utils.h2d import to_device_nonblocking
 
 
@@ -44,3 +47,24 @@ def test_a_non_contiguous_input_is_copied_correctly(accelerator_device):
 def test_an_empty_tensor_arrives_with_its_shape(accelerator_device):
     got = to_device_nonblocking(torch.empty(0, 3), accelerator_device)
     assert got.shape == (0, 3) and got.device == accelerator_device
+
+
+def test_an_already_pinned_tensor_is_copied_from_in_place(monkeypatch):
+    """A pinned source (``NemoLogMel.batch`` pads its clips straight into pinned
+    memory) is copied from as is, not through a second pinned buffer. Runs on any
+    host: the device is made to take pinned memory and the source to report pinned."""
+    takes_pinned = types.SimpleNamespace(pin_memory=True)
+    monkeypatch.setattr(h2d, "DeviceCapability", types.SimpleNamespace(of=lambda device: takes_pinned))
+    monkeypatch.setattr(torch.Tensor, "is_pinned", lambda self: True)
+    pinned_allocs = []
+    empty = torch.empty
+
+    def spy_empty(*args, pin_memory=False, **kwargs):
+        if pin_memory:
+            pinned_allocs.append(args)
+        return empty(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "empty", spy_empty)
+    source = torch.arange(12.0).reshape(3, 4)
+    got = to_device_nonblocking(source, torch.device("cpu"))
+    assert pinned_allocs == [] and got.data_ptr() == source.data_ptr()
