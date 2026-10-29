@@ -801,6 +801,7 @@ def _qwen3_tts(name, model_kwargs, tmp_path, monkeypatch):
         Qwen3TTSModel, config=Qwen3TTSModelConfig(tts_model_type=kind, tts_model_size=size),
         codec_batch_hold_ms=float(model_kwargs.get("codec_batch_hold_ms", 40.0)),
         codec_dtype=codec_dtype(model_kwargs.get("codec_dtype", "float32")),
+        codec_min_slack_ms=float(model_kwargs.get("codec_min_slack_ms", 250.0)),
     )
 
 

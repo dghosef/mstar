@@ -395,10 +395,6 @@ class Qwen3TTSModel(Model):
     # Streams the codec state pool holds (about 5 MiB each in float32); a
     # deployment sizes it with ``resources: {codec_state: {max_slots: ...}}``.
     MAX_CODEC_STREAMS = 256
-    # A held codec chunk goes once its stream has this little audio left to
-    # play: a codec step plus the trip to the client, with margin.
-    CODEC_MIN_SLACK_S = 0.25
-
     def __init__(
         self,
         model_path_hf: str,
@@ -416,6 +412,10 @@ class Qwen3TTSModel(Model):
         # A codec step costs several times its cost per row, and under load
         # windows become ready one or two per Talker step.
         self.codec_batch_hold_ms = float(kwargs.get("codec_batch_hold_ms", 40.0))
+        # Server-init knob: a held codec chunk goes once its stream has this
+        # little audio left to play (a codec step plus the trip to the client,
+        # with margin), however long codec_batch_hold_ms allows.
+        self.codec_min_slack_ms = float(kwargs.get("codec_min_slack_ms", 250.0))
         # Server-init knob: opt-in AudioSeal watermark on the codec's output
         # (``mstar.model.audio_watermark``). Checked here so a missing package
         # fails the server at startup, not at the first request.
@@ -666,7 +666,7 @@ class Qwen3TTSModel(Model):
                         min_chunks=CodecSubmodule.MAX_BATCH_SIZE,
                         # a frame plays for upsample / rate seconds: release before a stream runs dry
                         item_seconds=codec.decode_upsample_rate / codec.output_sample_rate,
-                        min_slack_s=self.CODEC_MIN_SLACK_S,
+                        min_slack_s=self.codec_min_slack_ms / 1000,
                     ) if self.codec_batch_hold_ms > 0 else None,
                 ),
             ],
@@ -1303,7 +1303,11 @@ class Qwen3TTSModel(Model):
         )
         decoder.eval()
         if self.codec_dtype != torch.float32:
+            rotary = decoder.pre_transformer.rotary_emb
+            inv_freq = rotary.inv_freq.clone()
             decoder.to(dtype=self.codec_dtype)
+            rotary.inv_freq = inv_freq   # the rotary frequencies stay fp32, as the RoPE they feed
+
         watermark = getattr(self, "audio_watermark", AudioWatermarkConfig())
         watermarker = AudioSealWatermarker.build(watermark, device) if watermark.enabled else None
         return CodecSubmodule(decoder, self.config, watermarker=watermarker)

@@ -620,8 +620,8 @@ Qwen3-TTS notes
   decodes every frame once: per stream it keeps each causal conv's last input
   samples, the transformer's sliding-window keys and values (71 per layer) and
   the frame count, about 5 MiB in float32, in the ``codec_state`` recurrent
-  pool (``resources: {codec_state: {max_slots: N}}`` sizes it; 256 streams by
-  default). A stream's audio equals a whole-utterance decode. Each chunk width
+  pool (``resources: {codec_state: {max_slots: N}}`` sizes it, one slot of it
+  the pool's sink; 256 streams by default). A stream's audio equals a whole-utterance decode. Each chunk width
   is a CUDA-graph bucket captured for batch sizes 1 to 32 (densely: the
   codec's cost is per row, so a padding row costs as much as a real one); the
   scheduler batches each width apart, so a stream's small first chunks are not
@@ -651,13 +651,15 @@ Qwen3-TTS notes
   ``mps: true`` in the YAML (see :doc:`serving`) the two workers' kernels also
   overlap, which raised c=32 throughput by about a fifth on an H100.
 - The codec decoder runs in float32 by default. Its decode is compiled
-  (Inductor) once for every capture. ``model_kwargs: {codec_dtype: bfloat16}``
+  (Inductor) once, with dynamic shapes, for every capture; cuDNN times its conv
+  algorithms per captured shape. ``model_kwargs: {codec_dtype: bfloat16}``
   runs it in bfloat16 (measured within noise of float32 on an H200).
 - Under load a codec chunk other than a stream's first waits up to 40 ms for
   chunks of other requests to batch with (``model_kwargs:
   {codec_batch_hold_ms: 40}``, 0 turns it off): a codec step costs several
   times its cost per row. It goes sooner once its stream has less than 0.25 s
-  of audio left to play (``ChunkBatchHold``'s playback deadline).
+  of audio left to play (``ChunkBatchHold``'s playback deadline;
+  ``model_kwargs: {codec_min_slack_ms: 250}``).
 - Opt-in AudioSeal watermark on the codec's output (off by default; install
   ``pip install -e '.[audioseal]'``). Turn it on in the deployment YAML::
 

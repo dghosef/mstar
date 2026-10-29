@@ -97,6 +97,7 @@ def _make_model() -> Qwen3TTSModel:
     model._submodule_cache = {}
     model.codec_batch_hold_ms = 40.0
     model.codec_dtype = torch.float32
+    model.codec_min_slack_ms = 250.0
     return model
 
 
@@ -465,7 +466,7 @@ def test_qwen3_tts_base_process_prompt_builds_in_context_clone():
         SPEAKER_ID_KEY: -1,
         LANGUAGE_ID_KEY: model.config.talker.codec_language_id["english"],
         REF_CLIP_KEY: clip_digest(clip),
-        # All 13 reference frames lead the codec stream as context (fewer than left_context).
+        # All 13 reference frames lead the codec stream as context (fewer than clone_lead_frames).
         Qwen3TTSModel.CODEC_STREAM_LEAD_KEY: 13,
     }
 
@@ -517,7 +518,7 @@ def test_qwen3_tts_reference_bounds_are_inclusive():
             tensors={"audio_inputs": [torch.zeros(seconds * 24000)]}, ref_text="x",
         )
         assert result.metadata[PROMPT_LAYOUT_KEY][-1] == frames
-        # only the last left_context (72) frames lead the codec stream
+        # only the last clone_lead_frames (72) frames lead the codec stream
         assert result.metadata[Qwen3TTSModel.CODEC_STREAM_LEAD_KEY] == min(frames, 72)
 
 
