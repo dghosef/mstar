@@ -46,6 +46,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -140,6 +141,13 @@ UNCOND_LABEL = "uncond"
 # one forward (``KVStep.combined_labels`` in the step declaration).
 CFG_BATCHED_LABEL = "_cfg_batched"
 
+# A captured denoise step's static-buffer inputs, each stacked on a leading
+# batch dim: the latents, the timestep, each branch's rotary table and the
+# clean/noisy token mask.
+CAPTURED_GEN_INPUTS = (
+    "latents", "vision_timesteps", "cos_cond", "sin_cond", "cos_uncond", "sin_uncond", "noisy_token_mask",
+)
+
 # Resource labels the DiT node declares (Cosmos3Model.get_node_resources) and
 # keys its resource steps by. ATTN is the paged backend: the understanding
 # tower's prefill writes its K/V through it, and a captured denoise graph
@@ -158,6 +166,15 @@ REASONER_PREFILL_WALKS = (REASONER_PREFILL_WALK, REASONER_PREFILL_VISION_WALK)
 REASONER_DECODE_LOOP = "reasoner_decode_loop"
 # The reasoner keeps every request's text under one cache label.
 REASONER_LABEL = "main"
+
+
+def denoise_compile_kwargs(mode: str) -> dict:
+    """``torch.compile`` arguments for the denoise step; see
+    ``Cosmos3Config.denoise_compile_mode``. "deterministic" and "default" are
+    the engine's compile modes of those names, "level" its -O level."""
+    from mstar.engine.accelerator_graph_runner import compile_kwargs
+
+    return compile_kwargs(None if mode == "level" else mode)
 
 
 def latent_frames(num_frames: int, config) -> int:
@@ -268,6 +285,23 @@ class GenStepInfo:
     retention: Mapping[str, RetentionPolicy] | None = None
 
 
+class _WarmupAttention:
+    """What ``Cosmos3DiTSubmodule.warmup_compiles`` binds in place of the
+    attention resource: no plan to read, a zero output of the query's size."""
+
+    requires_kv_write = False
+
+    def set_default_label(self, label: str) -> None:
+        del label
+
+    def set_default_layer_idx(self, layer_idx: int) -> None:
+        del layer_idx
+
+    def run(self, q: torch.Tensor, **kwargs) -> torch.Tensor:
+        del kwargs
+        return torch.zeros_like(q)
+
+
 class Cosmos3DiTSubmodule(ARNodeSubmodule):
     """Dual-pathway DiT node (understanding tower + generation denoiser)."""
 
@@ -326,21 +360,65 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         # attention; ``config.compile_denoise=False`` keeps the eager step for
         # the bit-exact parity tests.
         if config.compile_denoise and transformer is not None:
-            self.transformer.denoise_step = torch.compile(
-                self.transformer.denoise_step, fullgraph=False, dynamic=False,
-            )
+            kwargs = denoise_compile_kwargs(config.denoise_compile_mode)
+            self.transformer.denoise_step = torch.compile(self.transformer.denoise_step, **kwargs)
             self.transformer.denoise_step_batched_cfg = torch.compile(
-                self.transformer.denoise_step_batched_cfg, fullgraph=False, dynamic=False,
+                self.transformer.denoise_step_batched_cfg, **kwargs,
             )
-            # Dynamo unrolls the per-request loop and specializes on each
-            # request's shapes and strides; can_batch keeps a batch to one shape
-            # signature, and the position ids it reads are contiguous whatever
-            # the prompt length, so this is one graph per (signature, batch
-            # size), each compiling on its first batch (seconds with a warm cache).
-            self.transformer.denoise_step_action_batched = torch.compile(
-                self.transformer.denoise_step_action_batched, fullgraph=False, dynamic=False,
-            )
-            logger.info("Cosmos3 denoise compute torch.compile enabled")
+            if config.compile_denoise_batched:
+                # Only the cross-request step's layer stack, with the pack
+                # length dynamic: one compile, built by `warmup_compiles`
+                # before the first request, serves every batch size and mix of
+                # resolutions. The per-request patchify, rotary and unpatchify
+                # around it run eager.
+                self.transformer.gen_layers_batched = torch.compile(
+                    self.transformer.gen_layers_batched, **{**kwargs, "dynamic": True},
+                )
+                # The action step compiles whole: dynamo unrolls its per-request
+                # loop and specializes on each request's shapes, so can_batch keeps
+                # an action batch to one shape signature, and this is one graph
+                # per (signature, batch size), each compiling on its first batch.
+                self.transformer.denoise_step_action_batched = torch.compile(
+                    self.transformer.denoise_step_action_batched, **kwargs,
+                )
+            logger.info("Cosmos3 denoise compute torch.compile enabled (%s)", config.denoise_compile_mode)
+
+    def warmup_compiles(self) -> None:
+        """Build the compiled cross-request layer stack before the first
+        request: one two-request step at the default size, through
+        ``denoise_step_batched`` with a stand-in attention, since no request
+        has planned one yet. The attention call is a graph break, so what the
+        stand-in returns never enters a compiled graph, and the graph does not
+        depend on the size it was built at."""
+        if not (self.config.compile_denoise and self.config.compile_denoise_batched) or self.transformer is None:
+            return
+        cfg = self.config
+        frames = cfg.num_frames_video if cfg.video_size_default is not None else 1
+        width, height = (int(x) for x in (cfg.video_size_default or cfg.image_size_default))
+        device = self.get_device()
+        static = self._build_static(
+            [0] * 8, height, width, num_frames=frames, fps=24.0, has_image_condition=False, device=device,
+        )
+        row = {
+            "latents": torch.zeros(
+                self._latent_shape(height, width, frames), device=device,
+                dtype=self.transformer.proj_in.weight.dtype,
+            ),
+            "vision_timesteps": torch.zeros(static["num_noisy_vision_tokens"], device=device),
+            "position_ids_cond": static["vision_mrope_ids"],
+            "position_ids_uncond": static["vision_mrope_ids"],
+            "vision_token_shapes": static["vision_token_shapes"],
+            "vision_noisy_frame_indexes": static["vision_noisy_frame_indexes"],
+            "vision_mse_loss_indexes": static["mse_gen_indexes"],
+        }
+        t0 = time.perf_counter()
+        # as `forward_batched` runs it: native dtype, no autocast
+        with torch.autocast(device_type=device.type, enabled=False):
+            self.transformer.denoise_step_batched([row, row], CFG_BATCHED_LABEL, _WarmupAttention())
+        logger.info(
+            "Cosmos3 cross-request layer stack compiled in %.1f s (%dx%dx%d, two requests)",
+            time.perf_counter() - t0, width, height, frames,
+        )
 
     def to(self, *args, **kwargs):
         # The engine casts this submodule to bf16; the timestep embedder must stay
@@ -462,14 +540,21 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             "not the count `frame_tokens` gives a layout to size it by"
         )
         # proj_out runs on the generation token block, so shift the joint-sequence
-        # mse indexes to be relative to the generation tokens. The generation
-        # tokens' position ids are stored contiguous: a view of the joint ids has
-        # the prompt length as its stride, and the compiled steps guard on it.
+        # mse indexes to be relative to the generation tokens.
         static["mse_gen_indexes"] = static["vision_mse_loss_indexes"] - static["und_len"]
-        static["gen_position_ids"] = static["position_ids"][:, static["und_len"]:].contiguous()
         if sound_latent_frames is not None:
             static["sound_mse_gen_indexes"] = static["sound_mse_loss_indexes"] - static["und_len"]
+        self._attach_rotary(static, device)
         return static
+
+    def _attach_rotary(self, static: dict, device) -> None:
+        """The generation band's mRoPE table, ``rotary = (cos, sin)``
+        ([num_gen, head_dim], the tower's dtype). It depends only on the
+        positions, so it is built once here per request or window and handed
+        to every denoise step. None without a transformer (bookkeeping tests)."""
+        tf = self.transformer
+        if tf is not None:
+            static["rotary"] = tf._rotary(static["gen_position_ids"], device, tf.proj_in.weight.dtype)
 
     def _new_scheduler(self, num_inference_steps: int, device, use_karras_sigma=None, flow_shift=None):
         if self.config.distilled_sigmas:
@@ -574,7 +659,7 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         # and store their position ids contiguous (see ``_build_static``).
         static["mse_gen_indexes"] = static["vision_mse_loss_indexes"] - static["und_len"]
         static["action_mse_gen_indexes"] = static["action_mse_loss_indexes"] - static["und_len"]
-        static["gen_position_ids"] = static["position_ids"][:, static["und_len"]:].contiguous()
+        self._attach_rotary(static, device)
         return static
 
     # ------------------------------------------------------------------
@@ -947,24 +1032,24 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         commit_latents = (
             latents[:, :, plan.cond_units:] if plan.cond_units else latents
         ).to(dtype)
-        # The commit span's positions are the tail slice of the window's
-        # statics (kv statics carry absolute frames, so the slice is already
-        # at the right absolute positions). Both guidance branches commit,
-        # packed into one pass or sequentially per the batched_cfg regime.
+        # The commit span's rotary rows are the tail of the window's table
+        # (kv statics carry absolute frames, so those rows are already at the
+        # right absolute positions). Both guidance branches commit, packed
+        # into one pass or sequentially per the batched_cfg regime.
         offset = plan.cond_units * stride
-        cond_pos = st["cond"]["vision_mrope_ids"][:, offset:]
+        cond_rot = tuple(t[offset:] for t in st["cond"]["rotary"])
         if st["uncond"] is not None and self.batched_cfg:
             self.transformer.commit_window(
                 commit_latents,
-                [cond_pos, st["uncond"]["vision_mrope_ids"][:, offset:]],
+                [cond_rot, tuple(t[offset:] for t in st["uncond"]["rotary"])],
                 CFG_BATCHED_LABEL, attn,
             )
         else:
-            self.transformer.commit_window(commit_latents, [cond_pos], COND_LABEL, attn)
+            self.transformer.commit_window(commit_latents, [cond_rot], COND_LABEL, attn)
             if st["uncond"] is not None:
                 self.transformer.commit_window(
                     commit_latents,
-                    [st["uncond"]["vision_mrope_ids"][:, offset:]],
+                    [tuple(t[offset:] for t in st["uncond"]["rotary"])],
                     UNCOND_LABEL, attn,
                 )
         return self._finish_window(st, latents, time_index, window_index)
@@ -1017,13 +1102,16 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
     @staticmethod
     def _slim_statics(cond: dict, uncond: dict | None) -> None:
         """Drop packed-static fields the denoise loop never reads: the token
-        ids and und-tower rotary ids ride the prefill node inputs, and the raw
-        joint-sequence position ids and mse indexes are superseded by the
-        gen-relative ``gen_position_ids`` and ``*mse_gen_indexes``."""
+        ids and und-tower rotary ids ride the prefill node inputs, the raw
+        joint-sequence mse indexes are superseded by the gen-relative
+        ``*mse_gen_indexes``, and the generation band's position ids by its
+        ``rotary`` table."""
         for s in (cond, uncond) if uncond is not None else (cond,):
             for key in (
                 "input_ids", "text_mrope_ids", "position_ids", "vision_mse_loss_indexes",
                 "sound_mse_loss_indexes", "action_mse_loss_indexes",
+                "position_ids", "gen_position_ids", "vision_mrope_ids",
+                "sound_mrope_ids", "action_mrope_ids",
             ):
                 s.pop(key, None)
 
@@ -1208,7 +1296,7 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             return None
         self._check_scheduler_has_step(st, fwd_info.request_id, step_index)
         tensors = {"latents": latents, "time_index": time_index}
-        # The CUDA-graph capture reads the timestep, rotary positions and the
+        # The CUDA-graph capture reads the timestep, rotary tables and the
         # clean/noisy token mask as static buffers (it can't reach the
         # per-request scheduler at replay), so materialize them here. The eager
         # path ignores these and recomputes from per-request state. Only built
@@ -1224,8 +1312,8 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             # Every graph is built with all frames declared noisy, so the
             # timestep buffer spans every generation token.
             tensors["vision_timesteps"] = t.reshape(1).expand(st["cond"]["num_vision_tokens"]).contiguous()
-            tensors["position_ids_cond"] = st["cond"]["vision_mrope_ids"]
-            tensors["position_ids_uncond"] = st["uncond"]["vision_mrope_ids"]
+            tensors["cos_cond"], tensors["sin_cond"] = st["cond"]["rotary"]
+            tensors["cos_uncond"], tensors["sin_uncond"] = st["uncond"]["rotary"]
             tensors["noisy_token_mask"] = self._noisy_masks(st, device)[0]
         return ARNodeInputs(
             input_seq_len=st["cond"]["num_vision_tokens"],
@@ -1505,8 +1593,8 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         """Pack a denoise step's inputs for the CUDA-graph path.
 
         Runs with synthetic request ids (no per-request state). The
-        static-input tensors (latents, timestep, rotary positions) are
-        stacked on a leading batch dim, so one captured graph spans a whole
+        static-input tensors (``CAPTURED_GEN_INPUTS``) are stacked on a
+        leading batch dim, so one captured graph spans a whole
         concurrent batch (a batch of one for the single-request latency
         path); the replay side copies each request's tensors into these
         fixed buffers. The attention plan comes from the step declaration,
@@ -1515,11 +1603,8 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         guidance-interval steps.
         """
         return {
-            "latents": torch.stack([inp.tensor_inputs["latents"] for inp in inputs]),
-            "vision_timesteps": torch.stack([inp.tensor_inputs["vision_timesteps"] for inp in inputs]),
-            "position_ids_cond": torch.stack([inp.tensor_inputs["position_ids_cond"] for inp in inputs]),
-            "position_ids_uncond": torch.stack([inp.tensor_inputs["position_ids_uncond"] for inp in inputs]),
-            "noisy_token_mask": torch.stack([inp.tensor_inputs["noisy_token_mask"] for inp in inputs]),
+            key: torch.stack([inp.tensor_inputs[key] for inp in inputs])
+            for key in CAPTURED_GEN_INPUTS
         }
 
     def preprocess(
@@ -1645,7 +1730,7 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         return self.transformer.denoise_step(
             latents,
             vision_timesteps,
-            static["vision_mrope_ids"],
+            static["rotary"],
             static["vision_token_shapes"],
             static["vision_noisy_frame_indexes"],
             static["mse_gen_indexes"],
@@ -1712,8 +1797,8 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             cond_v, uncond_v = self.transformer.denoise_step_batched_cfg(
                 latents,
                 vision_timesteps,
-                st["cond"]["vision_mrope_ids"],
-                st["uncond"]["vision_mrope_ids"],
+                st["cond"]["rotary"],
+                st["uncond"]["rotary"],
                 st["cond"]["vision_token_shapes"],
                 st["cond"]["vision_noisy_frame_indexes"],
                 st["cond"]["mse_gen_indexes"],
@@ -1779,7 +1864,7 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
 
         if not cfg_active:
             velocity, sound_v = self.transformer.denoise_step(
-                latents, vts, st["cond"]["gen_position_ids"],
+                latents, vts, st["cond"]["rotary"],
                 st["cond"]["vision_token_shapes"], st["cond"]["vision_noisy_frame_indexes"],
                 st["cond"]["mse_gen_indexes"], COND_LABEL, attn,
                 **self._sound_kwargs(st["cond"], sound_latents, sts),
@@ -1787,8 +1872,8 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         elif self.batched_cfg:
             (cond_v, s_c), (uncond_v, s_u) = self.transformer.denoise_step_batched_cfg(
                 latents, vts,
-                st["cond"]["gen_position_ids"],
-                st["uncond"]["gen_position_ids"],
+                st["cond"]["rotary"],
+                st["uncond"]["rotary"],
                 st["cond"]["vision_token_shapes"],
                 st["cond"]["vision_noisy_frame_indexes"],
                 st["cond"]["mse_gen_indexes"], CFG_BATCHED_LABEL, attn,
@@ -1798,13 +1883,13 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             sound_v = s_u + st["gs"] * (s_c - s_u)
         else:
             cond_v, s_c = self.transformer.denoise_step(
-                latents, vts, st["cond"]["gen_position_ids"],
+                latents, vts, st["cond"]["rotary"],
                 st["cond"]["vision_token_shapes"], st["cond"]["vision_noisy_frame_indexes"],
                 st["cond"]["mse_gen_indexes"], COND_LABEL, attn,
                 **self._sound_kwargs(st["cond"], sound_latents, sts),
             )
             uncond_v, s_u = self.transformer.denoise_step(
-                latents, vts, st["uncond"]["gen_position_ids"],
+                latents, vts, st["uncond"]["rotary"],
                 st["uncond"]["vision_token_shapes"], st["uncond"]["vision_noisy_frame_indexes"],
                 st["uncond"]["mse_gen_indexes"], UNCOND_LABEL, attn,
                 **self._sound_kwargs(st["uncond"], sound_latents, sts),
@@ -1830,7 +1915,7 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         return self.transformer.denoise_step(
             latents,
             vts,
-            static["gen_position_ids"],
+            static["rotary"],
             static["vision_token_shapes"],
             static["vision_noisy_frame_indexes"],
             static["mse_gen_indexes"],
@@ -1893,8 +1978,8 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             (video_v, action_v), (v_u, a_u) = self.transformer.denoise_step_batched_cfg(
                 latents,
                 vts,
-                st["cond"]["gen_position_ids"],
-                st["uncond"]["gen_position_ids"],
+                st["cond"]["rotary"],
+                st["uncond"]["rotary"],
                 st["cond"]["vision_token_shapes"],
                 st["cond"]["vision_noisy_frame_indexes"],
                 st["cond"]["mse_gen_indexes"],
@@ -1936,8 +2021,9 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         # The denoise step batches across concurrent requests at the same walk.
         # The batched forward packs each request's own token shapes, so requests
         # at different resolutions / frame counts (and, for action, different
-        # modes / embodiment domains) can share the batch. One request stays on
-        # the simpler single-request path.
+        # embodiment domains) can share the batch; an action batch holds one
+        # shape signature, which its compiled step specializes on. One request
+        # stays on the simpler single-request path.
         if not self.batched_cfg or len(batch.request_ids) < 2:
             return False
         sts = [self.request_states.get(rid) for rid in batch.request_ids]
@@ -2023,8 +2109,8 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             reqs.append({
                 "latents": lat,
                 "vision_timesteps": torch.full((st["cond"]["num_noisy_vision_tokens"],), t.item(), device=lat.device),
-                "position_ids_cond": st["cond"]["vision_mrope_ids"],
-                "position_ids_uncond": st["uncond"]["vision_mrope_ids"],
+                "rotary_cond": st["cond"]["rotary"],
+                "rotary_uncond": st["uncond"]["rotary"],
                 "vision_token_shapes": st["cond"]["vision_token_shapes"],
                 "vision_noisy_frame_indexes": st["cond"]["vision_noisy_frame_indexes"],
                 "vision_mse_loss_indexes": st["cond"]["mse_gen_indexes"],
@@ -2076,8 +2162,8 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             reqs.append({
                 "latents": lat,
                 "vision_timesteps": torch.full((st["cond"]["num_noisy_vision_tokens"],), t.item(), device=lat.device),
-                "position_ids_cond": cond["gen_position_ids"],
-                "position_ids_uncond": unc["gen_position_ids"],
+                "rotary_cond": cond["rotary"],
+                "rotary_uncond": unc["rotary"],
                 "vision_token_shapes": cond["vision_token_shapes"],
                 "vision_noisy_frame_indexes": cond["vision_noisy_frame_indexes"],
                 "vision_mse_loss_indexes": cond["mse_gen_indexes"],
@@ -2134,7 +2220,7 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
                 "action_latents": act,
                 "vision_timesteps": torch.full((st["cond"]["num_noisy_vision_tokens"],), t.item(), device=lat.device),
                 "action_timesteps": torch.full((st["cond"]["num_noisy_action_tokens"],), t.item(), device=lat.device),
-                "position_ids_cond": cond["gen_position_ids"],
+                "rotary_cond": cond["rotary"],
                 "vision_token_shapes": cond["vision_token_shapes"],
                 "vision_noisy_frame_indexes": cond["vision_noisy_frame_indexes"],
                 "vision_mse_loss_indexes": cond["mse_gen_indexes"],
@@ -2145,7 +2231,7 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             }
             if with_cfg:
                 unc = st["uncond"]
-                req["position_ids_uncond"] = unc["gen_position_ids"]
+                req["rotary_uncond"] = unc["rotary"]
             reqs.append(req)
             meta.append((rid, st, lat, act, ti, t))
 
@@ -2180,7 +2266,7 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         resolution. Requests at other resolutions, or without guidance, fall back
         to the eager path. The per-resolution token layout is prompt-independent,
         so bake it once here and key it by latent shape; the per-prompt rotary
-        positions, the latents and the timestep flow in as static-buffer inputs.
+        tables, the latents and the timestep flow in as static-buffer inputs.
 
         Set ``COSMOS3_DISABLE_CUDA_GRAPH=1`` to skip capture and run the denoise
         loop eagerly (escape hatch for a misbehaving driver, and an A/B switch).
@@ -2209,8 +2295,8 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         dtype = self.transformer.proj_in.weight.dtype
         self._capture_layout: dict[tuple, dict] = {}
         configs = []
-        # The capture is bit-faithful at every resolution (the rotary uses a
-        # broadcast multiply — see Cosmos3RotaryEmbedding), but only HELPS
+        # The capture is bit-faithful at every resolution (the rotary tables
+        # are inputs, built outside the graph), but only HELPS
         # the launch-bound tiers: the graph's per-step input copies grow
         # with resolution and lose to the eager dense path at large latents.
         # Capture only below COSMOS3_GRAPH_MAX_LATENT_AREA (latent H*W).
@@ -2275,8 +2361,10 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             tensor_inputs={
                 "latents": torch.zeros(latent_shape, device=device, dtype=dtype),
                 "vision_timesteps": torch.zeros(num_vision, device=device, dtype=torch.float32),
-                "position_ids_cond": static["vision_mrope_ids"].clone(),
-                "position_ids_uncond": static["vision_mrope_ids"].clone(),
+                "cos_cond": static["rotary"][0].clone(),
+                "sin_cond": static["rotary"][1].clone(),
+                "cos_uncond": static["rotary"][0].clone(),
+                "sin_uncond": static["rotary"][1].clone(),
                 "noisy_token_mask": torch.ones(num_vision, device=device, dtype=torch.float32),
             },
             # What the capture's own `declare_step` reads: this bucket's
@@ -2388,23 +2476,23 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
     @torch.autocast(device_type="cuda", enabled=False)
     def forward_captured(
         self, graph_walk, engine_inputs: ModelInputsFromEngine,
-        latents, vision_timesteps, position_ids_cond, position_ids_uncond, noisy_token_mask,
+        latents, vision_timesteps, cos_cond, sin_cond, cos_uncond, sin_uncond, noisy_token_mask,
         **kwargs,
     ) -> dict:
         """Velocity-only denoise forward captured into a CUDA graph: both guidance
         branches in one pass (the combined plan), no scheduler step. The token
-        layout is baked per resolution; the latents, timestep and rotary positions
-        are static-buffer inputs stacked on a leading batch dim. A single request
-        keeps the two-branch path; a concurrent batch runs the per-request denoise
-        (the same compute as the eager cross-request forward), one transformer pass
-        over the whole batch."""
+        layout is baked per resolution; the latents, timestep and each branch's
+        rotary cos and sin are static-buffer inputs stacked on a leading batch
+        dim. A single request keeps the two-branch path; a concurrent batch
+        runs the per-request denoise (the same compute as the eager
+        cross-request forward), one transformer pass over the whole batch."""
         attn = self._gen_attn(engine_inputs)
         layout = self._capture_layout[tuple(latents.shape[1:])]
         rids = engine_inputs.request_ids
         if latents.shape[0] == 1:
             # Captured into the denoise CUDA graph.
             cond_v, uncond_v = self.transformer.denoise_step_batched_cfg(
-                latents[0], vision_timesteps[0], position_ids_cond[0], position_ids_uncond[0],
+                latents[0], vision_timesteps[0], (cos_cond[0], sin_cond[0]), (cos_uncond[0], sin_uncond[0]),
                 layout["vision_token_shapes"], layout["vision_noisy_frame_indexes"],
                 layout["mse_gen_indexes"], CFG_BATCHED_LABEL, attn,
                 noisy_token_mask=noisy_token_mask[0],
@@ -2414,8 +2502,8 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             {
                 "latents": latents[i],
                 "vision_timesteps": vision_timesteps[i],
-                "position_ids_cond": position_ids_cond[i],
-                "position_ids_uncond": position_ids_uncond[i],
+                "rotary_cond": (cos_cond[i], sin_cond[i]),
+                "rotary_uncond": (cos_uncond[i], sin_uncond[i]),
                 "vision_token_shapes": layout["vision_token_shapes"],
                 "vision_noisy_frame_indexes": layout["vision_noisy_frame_indexes"],
                 "vision_mse_loss_indexes": layout["mse_gen_indexes"],
@@ -2777,9 +2865,8 @@ class Cosmos3VAEDecoderSubmodule(NodeSubmodule):
             "0", "false", "no", "off",
         ):
             self._decode_compiled = True
-            # The fast path compiles its own DecoderStep; the stock decode is unused there.
-            if not fast:
-                self._decode = _wan_vae().compile_decode(vae.decode)
+            # with ``fast``, only images (one latent) decode through this
+            self._decode = _wan_vae().compile_decode(vae.decode)
             logger.info("Cosmos3 VAE decode torch.compile enabled")
         # Resolve + log the decode dtype now (a cheap cuDNN-version read) so the
         # choice is fixed at startup, not on the first request.
@@ -2791,7 +2878,8 @@ class Cosmos3VAEDecoderSubmodule(NodeSubmodule):
             # nodes share, never the encoder's; see Cosmos3Model).
             self.vae = vae = vae.to(self._decode_dtype())
             self._whole_clip = _wan_vae().FastDecoder(vae, compile=self._decode_compiled)
-            logger.info("Cosmos3 VAE decode: whole clips on the shared Wan VAE decoder (channels-last)")
+            logger.info("Cosmos3 VAE decode: video clips on the shared Wan VAE decoder (channels-last), "
+                        "images through the stock decode")
 
     def prepare_inputs(self, graph_walk, fwd_info, inputs, **kwargs) -> NodeInputs:
         return NodeInputs(tensor_inputs={"latents": inputs["latents"][0]})
@@ -2834,7 +2922,8 @@ class Cosmos3VAEDecoderSubmodule(NodeSubmodule):
         """Latents -> uint8 pixel frames ``[1, 3, T, H, W]``."""
         vae_dtype = self._decode_dtype()
         z = self._vae_input(latents)
-        if self._whole_clip is not None:
+        # one latent (an image) is faster through the stock decode (24 vs 36 ms on an H200)
+        if self._whole_clip is not None and z.shape[2] > 1:
             return self._to_uint8(self._whole_clip.decode(z))
         with torch.autocast(device_type="cuda", enabled=False):
             if (
