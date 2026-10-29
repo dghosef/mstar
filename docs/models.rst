@@ -385,12 +385,18 @@ default, which lowers the token count of short clips. Notes:
 - The vision encoder attends within each image and each video frame group
   separately, and its captured CUDA graphs hold up to 16384 patches and 64 such
   segments per prompt. A prompt over either limit runs the encoder without the
-  graph: a long video at ordinary resolution exceeds the patches, and one over
-  ~64 s with frames resized below ~256x256 pixels exceeds the segments.
+  graph (still compiled, so only the launches are extra): a long video at
+  ordinary resolution exceeds the patches, and one over ~64 s with frames
+  resized below ~256x256 pixels exceeds the segments.
 - An encoder step packs the images and videos of up to 8 requests into one
   replay; requests that would overflow it together run one at a time. The
   packed GEMMs' shapes follow the step's total patches, so an image's
   embeddings can differ at the last bit with what it is batched beside.
+- On two GPUs, ``configs/qwen3_5_9b_dp2.yaml`` (a whole replica per GPU)
+  serves image and video traffic faster than ``configs/qwen3_5_9b_tp2.yaml``,
+  whose vision encoder runs on one rank while the other waits for it in the
+  lockstep LLM: 9B on 2xH200, video_60s c32 1520 vs ~900-1000 output tok/s,
+  MMMU c32 4457 vs ~3100.
 - A long video is one wide prefill: one 1-3 minute video is ~11-12k tokens,
   beyond the largest captured ``prefill_vision`` bucket (4096), so it runs
   eagerly.
@@ -413,6 +419,14 @@ not the 256-slot default. The state defaults to the checkpoint's
 ``mamba_ssm_dtype`` (fp32 for the released checkpoints);
 ``gdn_state.state_dtype: bfloat16`` halves state traffic at some precision and
 needs FlashInfer's fused bf16 decode kernel (K = V = 128).
+
+Text prefill and mixed steps replay captured graphs by total tokens, on the
+ladder ``32 ... 8192`` (powers of two); a step pads to its bucket and a longer
+one runs eagerly. ``model_kwargs: prefill_token_buckets: [...]`` sets a
+deployment's own ladder: ``configs/qwen3_5_9b*.yaml`` add 3072, 5120, 6144 and
+7168, which cut the padding of compute-bound long prefills (+2% output tok/s
+on 9B, random 1024/256 at c=64/128, H200); the same ladder was not a win on
+0.8B, whose prefill is launch-bound. Each bucket adds captures and startup time.
 
 A captured decode step builds its rotary tables inside the graph from the
 planned positions, rather than staging tables built eagerly before the replay
