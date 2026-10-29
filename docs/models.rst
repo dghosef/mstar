@@ -565,7 +565,7 @@ Qwen3-Omni notes
   Talker needs only about 1.0 to 1.3x real time.
 - Numerics: the code predictor's residual adds fold into the next RMSNorm
   (FlashInfer's fused add + norm) and its attention is one Triton kernel
-  (``cp_attend``), neither bit-exact with the unfused ops. Its 15 depth
+  (``cp_attend``, shared with Qwen3-TTS), neither bit-exact with the unfused ops. Its 15 depth
   steps feed each sampled code into the next, so small differences can change
   later codes at near-ties.
 - The audio encoder takes the clips of up to 16 requests a step and packs
@@ -642,9 +642,15 @@ Qwen3-TTS notes
   ``code_predictor`` aux sampler, so custom values neither block batching nor
   fall off the graph. On the 1.7B checkpoints the CodePredictor projects the
   Talker-width inputs through ``small_to_mtp_projection`` before its depth loop.
-  Its depth loop runs the same Triton kernels as Qwen3-Omni's code predictor
-  (``mstar.model.components.code_predictor_kernels``): q/k norm, RoPE, the
-  KV write and attention in one launch per layer (``cp_attend``).
+  Its depth loop runs on the code predictor kernels
+  (``mstar.model.components.code_predictor_kernels``), five launches a layer:
+  each projection is one ``cp_linear`` launch with the RMSNorm folded into its
+  weight (a row scale from partial sums of squares its producer recorded), the
+  residual add or the SwiGLU in its epilogue, and the q/k norm, RoPE, KV write
+  and attention are one ``cp_attend`` launch (shared with Qwen3-Omni). Every
+  embedding table the loop reads is kept already projected by
+  ``small_to_mtp_projection``. None of this is bit-exact with the unfused
+  ops: the sampled residual codes can differ at near-ties.
 - ``configs/qwen3tts_1p7b_split.yaml`` (and ``configs/qwen3tts_split.yaml``
   for the 0.6B) runs the Codec on a second worker that
   shares GPU 0 (``rank_devices``) and caps the Talker KV pool so both fit.

@@ -59,7 +59,7 @@ from mstar.engine.resources import AttentionStep, KVStep, PositionStep, SamplerS
 from mstar.engine.resources.recurrent import RecurrentStatePool, RecurrentStep
 from mstar.engine.resources.sampler.resource import SamplerResource
 from mstar.model.audio_watermark import AudioSealWatermarker, WatermarkStream
-from mstar.model.components.code_predictor_kernels import cp_embed_accumulate
+from mstar.model.components.code_predictor_kernels import EMBED_BLOCK, cp_embed_accumulate, depth_partials
 from mstar.model.qwen3_tts.components.incremental_codec import IncrementalDecoder, codec_state_blocks
 from mstar.model.qwen3_tts.components.snake import fuse_snake_activations
 from mstar.model.qwen3_tts.components.speaker_encoder import (
@@ -193,6 +193,7 @@ class TalkerSubmodule(ARNodeSubmodule):
         # Lazy frame-local CodePredictor KV scratch, overwritten every step.
         self._cp_kv_cache: torch.Tensor | None = None
         self._cp_positions: torch.Tensor | None = None
+        self._cp_partials: torch.Tensor | None = None
 
     def _get_suppress_mask(self) -> torch.Tensor:
         """Cache the checkpoint's static invalid-token mask on the worker GPU."""
@@ -260,6 +261,12 @@ class TalkerSubmodule(ARNodeSubmodule):
                 device=self.get_device(),
             )
         return self._cp_kv_cache[:, :batch_size]
+
+    def _get_cp_partials(self) -> torch.Tensor:
+        """The depth loop's row sums of squares scratch (``cp_linear``)."""
+        if self._cp_partials is None:
+            self._cp_partials = depth_partials(self.get_device())
+        return self._cp_partials
 
     def _get_cp_positions(self) -> torch.Tensor:
         """``[num_codes, MAX_BATCH_SIZE, 1]`` depth positions, row ``g`` all
@@ -686,29 +693,29 @@ class TalkerSubmodule(ARNodeSubmodule):
         codec_embed_sum = torch.empty(
             batch_size, talker_table.shape[1], dtype=talker_table.dtype, device=layer0_codes.device
         )
-        # group 0 starts the sum; its (projected) embedding is position 1's input
-        embed = cp_embed_accumulate(
-            layer0_codes, talker_table, codec_embed_sum, all_codes, 0,
-            inputs=None if tables is None else tables[0], init=True,
-        )
-
         cp_cache = self._get_cp_kv_cache(batch_size)
         positions = self._get_cp_positions()
+        partials = self._get_cp_partials()
         # Position 0 conditions the depth decoder on the Talker hidden state.
         # Each following position consumes the previous group's embedding.
         depth = cp.depth
         depth.bind_step(cp_cache, positions[0, :batch_size], cache_pos=0)
-        cp.forward_depth_unrolled(last_hidden.unsqueeze(1))
+        x, n_part = cp.depth_input(last_hidden, partials)
+        cp.depth_step(x, partials, n_part)
+        # group 0 starts the sum; its (projected) embedding is position 1's input
+        embed = cp_embed_accumulate(
+            layer0_codes, talker_table, codec_embed_sum, all_codes, 0,
+            inputs=None if tables is None else tables[0], init=True, partials=partials,
+        )
+        n_part = embed.shape[1] // EMBED_BLOCK
         for group_idx in range(1, self.num_codes):
             depth.bind_step(cp_cache, positions[group_idx, :batch_size], cache_pos=group_idx)
-            cp_hidden = cp.forward_depth_step(embed.unsqueeze(1)).squeeze(1)
-            cp_logits = torch.matmul(cp_hidden, cp.lm_head_weight[group_idx - 1].t())
-            codes = sample_codes(cp_logits)
+            codes = sample_codes(cp.depth_step(embed, partials, n_part=n_part, head=group_idx - 1))
             last = group_idx == self.num_codes - 1
             embed = cp_embed_accumulate(
                 codes, cp.model.codec_embedding[group_idx - 1].weight, codec_embed_sum,
                 all_codes, group_idx,
-                inputs=None if tables is None or last else tables[group_idx],
+                inputs=None if tables is None or last else tables[group_idx], partials=partials,
             )
         return all_codes, codec_embed_sum
 
