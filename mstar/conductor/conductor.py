@@ -2304,6 +2304,7 @@ class Conductor:
 
             except Exception:
                 logger.exception("Conductor error in main loop")
+                time.sleep(0.01)  # a failing pass skipped the wait above
             finally:
                 if self.enable_nvtx:
                     range_pop()
