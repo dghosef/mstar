@@ -261,6 +261,39 @@ def test_a_batch_hold_keeps_later_chunks_back_until_enough_are_ready():
     assert sorted(ingested[5:]) == ["a", "b", "c"], "min_chunks ready across requests releases them all"
 
 
+def test_a_batch_hold_releases_a_stream_about_to_run_dry():
+    """With a playback deadline, a held chunk goes once its stream's popped
+    items have played out to ``min_slack_s``, however long ``max_wait_s`` is."""
+    import torch
+
+    from mstar.streaming.topology import ChunkBatchHold
+
+    buf = StreamBuffer(request_id="a", edge_name="codes", from_partition="LLM", policy=FixedChunkPolicy(chunk_size=1))
+    ingested = []
+    worker = SimpleNamespace(
+        request_state=SimpleNamespace(per_request_info={
+            "a": SimpleNamespace(stream_buffers={"codes": buf}, stream_buffers_by_consumer={"vocoder": {"codes": buf}}),
+        }),
+        _stream_holds={"codes": ChunkBatchHold(max_wait_s=60.0, min_chunks=3, item_seconds=0.5, min_slack_s=0.2)},
+        _consumer_node_cache={"codes": "vocoder"},
+        tensor_manager=SimpleNamespace(store_and_return_tensor_info=lambda rid, d, **k: {"codes": []}),
+        _graph_runtime=SimpleNamespace(ingest_inputs_batch=lambda block, **k: []),
+        _edge_block=list,
+        _mark_stream_ingested=lambda rid, edge: ingested.append(rid),
+    )
+    worker._pop_streaming_edge = lambda *a: Worker._pop_streaming_edge(worker, *a)
+    for i in range(2):
+        buf.pre_read_register(f"t{i}")
+        buf.put(f"t{i}", torch.zeros(1))
+    Worker._poll_stream_buffers(worker, idle=False)
+    assert ingested == ["a"], "the first chunk goes at once"
+    Worker._poll_stream_buffers(worker, idle=False)
+    assert ingested == ["a"], "one item (0.5 s) delivered just now: plenty of slack, so it waits"
+    buf._first_pop_at -= 0.35   # 0.15 s of that audio left to play
+    Worker._poll_stream_buffers(worker, idle=False)
+    assert ingested == ["a", "a"]
+
+
 def test_a_lockstep_leader_holds_its_streams_and_a_follower_does_not():
     """A batch hold applies on the rank that picks a lockstep node's rows (its
     leader) and on unreplicated nodes; a follower ingests its chunks at once."""
