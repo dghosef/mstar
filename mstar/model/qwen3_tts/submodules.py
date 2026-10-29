@@ -14,11 +14,12 @@
 #      - Supports continuous batching and whole-forward decode CUDA Graphs
 #        (the CodePredictor depth loop is captured inside them), plus a
 #        piecewise graph covering that loop on eager paths like prefill.
-#   2. CodecSubmodule (STATELESS engine)
+#   2. CodecSubmodule
 #      - Receives buffered codec frames from the Talker partition.
-#      - Pads each window of the chunk ramp to its CUDA Graph capture bucket.
-#      - Runs the official speech-tokenizer decoder and trims overlap (and, for
-#        voice clones, the reference frames) before emitting 24 kHz PCM.
+#      - Pads each chunk of the ramp to its CUDA Graph capture bucket.
+#      - Decodes each frame once with the official speech-tokenizer decoder,
+#        its causal state kept per stream in a recurrent-state pool, and trims
+#        a voice clone's reference frames before emitting 24 kHz PCM.
 #   3. RefEncoderSubmodule (no resources; Base voice clone only)
 #      - Turns one reference clip into the ECAPA x-vector that replaces the
 #        speaker tag and, for in-context cloning, into its codec frames.
@@ -28,7 +29,7 @@
 #                  -> postprocess -> check_stop (Talker only)
 #
 # Streaming topology:
-#   Talker --[codec_tokens, ScheduledLeftContextChunkPolicy((1, 3, 8, 16), 25, 25)]--> Codec
+#   Talker --[codec_tokens, ScheduledLeftContextChunkPolicy((1, 3, 8, 16), 25, 0)]--> Codec
 # ---------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -54,10 +55,11 @@ from mstar.engine.accelerator_graph_config import (
 )
 from mstar.engine.engine import ExecutingBatch
 from mstar.engine.resources import AttentionStep, KVStep, PositionStep, SamplerStep, Segment, SlotLease, SubmoduleStep
+from mstar.engine.resources.recurrent import RecurrentStatePool, RecurrentStep
 from mstar.engine.resources.sampler.resource import SamplerResource
 from mstar.model.audio_watermark import AudioSealWatermarker, WatermarkStream
 from mstar.model.components.code_predictor_kernels import cp_embed_accumulate
-from mstar.model.qwen3_tts.components.conv_stack import causal_receptive_field_frames, flat_conv_stack, leading_cuts
+from mstar.model.qwen3_tts.components.incremental_codec import IncrementalDecoder, codec_state_blocks
 from mstar.model.qwen3_tts.components.snake import fuse_snake_activations
 from mstar.model.qwen3_tts.components.speaker_encoder import (
     Qwen3TTSMelFrontEnd,
@@ -71,6 +73,7 @@ from mstar.model.qwen3_tts.config import (
     CHATML_ASSISTANT_PREFIX_TOKEN_IDS,
     CHATML_ASSISTANT_SUFFIX_TOKEN_IDS,
     CODE_PRED_SAMPLER,
+    CODEC_STATE,
     LANGUAGE_ID_KEY,
     PROMPT_LAYOUT_KEY,
     REF_CLIP_KEY,
@@ -730,10 +733,8 @@ class TalkerSubmodule(ARNodeSubmodule):
         """Frames this step pushes into the codec stream, one item per frame.
 
         The clone prefill leads with the tail of the reference clip's frames
-        so the codec warms up on the voice being cloned: only the last
-        ``left_context_frames`` matter, since that is all the context a
-        window ever carries, and every reference frame the stream carries
-        costs a codec pass whose audio ``CodecSubmodule`` then trims. Decode
+        (the last ``clone_lead_frames``) so the codec's state warms up on the
+        voice being cloned; ``CodecSubmodule`` trims their audio. Decode
         steps (the captured path) always push exactly one frame. Every item is
         ``[1, groups]``, the shape of a row of the batched outputs, so one
         stream's items always stack.
@@ -743,7 +744,7 @@ class TalkerSubmodule(ARNodeSubmodule):
         reference = self.request_state(request_id).get("reference_frames")
         if reference is None:
             return [frame]
-        return [*reference[-self.config.codec.left_context_frames:].split(1), frame]
+        return [*reference[-self.config.codec.clone_lead_frames:].split(1), frame]
 
     def forward(
         self,
@@ -965,37 +966,28 @@ class TalkerSubmodule(ARNodeSubmodule):
 
 
 class CodecSubmodule(ARNodeSubmodule):
-    """Convert streamed 16-code frames into overlap-trimmed PCM chunks.
+    """Convert streamed 16-code frames into PCM chunks, decoding each frame once.
 
-    The node runs on a stateless engine, but ``ARNodeInputs`` is reused as the
-    typed container for fixed-length codec tensors. Each pass carries its
-    window's geometry (real frames, repeated context); the neural decoder
-    itself has no cross-call state.
+    Chunks follow the model's ``ScheduledLeftContextChunkPolicy`` (a ramp of
+    small chunks, then ``chunk_frames``) and carry new frames only; an
+    in-context clone's first chunk also leads with the reference tail, decoded
+    to warm the state and trimmed from the audio. The decoder is causal, so the
+    state it holds after a chunk is all a later chunk needs
+    (``IncrementalDecoder``): it lives in the ``CODEC_STATE`` recurrent pool,
+    each step gathering its rows' state and scattering the new state back.
 
-    Windows follow the model's ``ScheduledLeftContextChunkPolicy``: a ramp of
-    small chunks, then ``chunk_frames`` new frames behind ``left_context_frames``
-    of context (a voice clone's reference tail is the first window's context).
-    Each distinct window size is a CUDA-graph bucket; a shorter window is
-    zero-padded up to the next bucket and trimmed after.
-
-    The decoder's transformer needs the whole window, but the conv stack after
-    it (nearly all of the cost) is causal with a short receptive field, so it
-    decodes only the new frames behind its receptive field (``conv_context``)
-    of the window.
+    Each distinct chunk width is a CUDA-graph bucket; a shorter chunk (the
+    terminal flush, a clone's first) is zero-padded to the next bucket and its
+    real length rides with it.
     """
 
-    # fp32, uncompiled: what ``get_stateless_flavor`` used to buy on the old
-    # stateless engine, stated directly now that the v1 engine reads these.
+    # fp32, and only the stateless decode compiled (``__init__``): the
+    # capture's gather and scatter stay outside it
     disable_torch_compile = True
     disable_autocast = True
 
-    # The conv stack decodes at most chunk + conv_context frames (35 for the
-    # 12 Hz decoder, 2.8 s of audio) whatever the window, so its activations stay small
-    # enough to capture batches of 32 next to the Talker; ``can_batch`` keeps
-    # the ceiling.
-    # The codec's cost is linear in rows (about 2.3 ms a full window at any
-    # batch size on an H200), so every padding row of a bucket costs a real
-    # row's decode: the buckets are dense.
+    # The codec's cost is linear in rows, so every padding row of a bucket
+    # costs a real row's decode: the buckets are dense.
     CAPTURE_BATCH_SIZES = [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 28, 32]
     MAX_BATCH_SIZE = CAPTURE_BATCH_SIZES[-1]
     # The opt-in watermark's captures are per chunk length and cost far more
@@ -1014,82 +1006,38 @@ class CodecSubmodule(ARNodeSubmodule):
         # Opt-in (``audio_watermark`` in model_kwargs): marks each request's
         # trimmed PCM in ``batch_postprocess``; None leaves it untouched.
         self.watermarker = watermarker
-        # Base streams may lead with a full reference tail: capture those windows too.
-        leads = (0, config.codec.left_context_frames) if config.supports_reference_audio else (0,)
-        windows = config.codec.codec_windows(leads)
-        self.max_window = windows[-1]
+        codec = config.codec
+        widths = {*codec.chunk_schedule, codec.chunk_frames}
+        if config.supports_reference_audio:
+            # a clone's first chunk: the reference tail, then the ramp's first chunk
+            widths.add(codec.clone_lead_frames + codec.chunk_schedule[0])
+        self.windows = sorted(widths)
+        self.max_window = self.windows[-1]
         self.total_upsample = 1
-        for factor in (
-            *config.codec.upsample_rates,
-            *config.codec.upsampling_ratios,
-        ):
+        for factor in (*codec.upsample_rates, *codec.upsampling_ratios):
             self.total_upsample *= factor
         fuse_snake_activations(decoder)
-        self.conv_context = self._split_conv_context(decoder, config) if config.codec.split_decode else None
-        self.split_decode = self.conv_context is not None
-        self._trim: dict[int, int] = {}
-        if self.split_decode:
-            # Windows whose conv stack decodes its full span differ only in the
-            # transformer's length, a small fixed cost, so they share the widest
-            # bucket and batch together (one step instead of one per window size).
-            full = self.conv_frames(self.max_window)
-            windows = [w for w in windows if self.conv_frames(w) < full] + [self.max_window]
-        self.windows = windows
-        if self.split_decode:
-            # The conv stack's context frames matter only for the first, low-rate
-            # modules: each module skips the leading samples no wanted output reads
-            # (``leading_cuts``), so the audio-rate modules, nearly all the cost,
-            # run over the new frames and a few samples. A bucket's cut is the
-            # least lead (new frames' first conv frame) of the windows it holds.
-            for window, context in config.codec.codec_window_contexts(leads):
-                bucket = self._bucket(window)
-                lead = min(context, self.conv_context)
-                self._trim[bucket] = min(self._trim.get(bucket, lead), lead)
-            self._flat_stack = flat_conv_stack(decoder)
-            self._cuts = {
-                trim: leading_cuts(self._flat_stack, trim * self.total_upsample)
-                for trim in range(self.conv_context + 1)
-            }
-        self._conv_start_stager = PinnedStager(torch.long, numel=self.MAX_BATCH_SIZE)
-
-    @staticmethod
-    def _split_conv_context(decoder: torch.nn.Module, config: Qwen3TTSModelConfig) -> int | None:
-        """Conv-stack context for split decoding, or None (with a warning) to decode whole windows."""
-        try:
-            receptive_field = causal_receptive_field_frames(decoder)
-        except (AttributeError, TypeError) as exc:
-            logger.warning(
-                "Qwen3-TTS codec: cannot derive the conv stack's receptive field (%s); "
-                "decoding whole windows, which is slower", exc,
-            )
-            return None
-        configured = config.codec.conv_context_frames
-        if configured is not None and configured < receptive_field:
-            logger.warning(
-                "Qwen3-TTS codec: conv_context_frames=%d is below the conv stack's %d-frame "
-                "receptive field, so split decoding would change the audio; decoding whole "
-                "windows, which is slower", configured, receptive_field,
-            )
-            return None
-        return receptive_field if configured is None else configured
-
-    def conv_frames(self, window: int) -> int:
-        """Frames the conv stack decodes for a window: its new frames plus ``conv_context``."""
-        codec = self.config.codec
-        return min(window, self.conv_context + max(*codec.chunk_schedule, codec.chunk_frames))
+        self.incremental = IncrementalDecoder(decoder)
+        blocks = self.incremental.state_blocks()
+        declared = codec_state_blocks(codec, next(decoder.parameters()).dtype)
+        if {n: (b.shape, b.dtype) for n, b in blocks.items()} != {n: (b.shape, b.dtype) for n, b in declared.items()}:
+            raise ValueError("the codec decoder's state does not match the CODEC_STATE blocks its model declares")
+        self.state_names = tuple(blocks)
+        # One compile for every capture rather than each config's own.
+        on_cuda = next(decoder.parameters()).is_cuda
+        self._decode_step = torch.compile(self.incremental, dynamic=False) if on_cuda else self.incremental
+        self._lengths_stager = PinnedStager(torch.long, numel=self.MAX_BATCH_SIZE)
 
     def _bucket(self, frames: int) -> int:
-        """Smallest captured window that holds ``frames`` (the terminal flush is shorter)."""
+        """Smallest captured width that holds ``frames``."""
         for window in self.windows:
             if frames <= window:
                 return window
-        raise ValueError(
-            f"Codec chunk has {frames} frames, maximum is {self.max_window}"
-        )
+        raise ValueError(f"Codec chunk has {frames} frames, maximum is {self.max_window}")
 
     @staticmethod
     def _codec_chunk(input_metadata: InputMetadata | None) -> StreamChunkInfo | None:
-        """This window's geometry from the stream buffer (offset, context, items, final)."""
+        """This chunk's place in the stream (offset, context, items, final)."""
         return input_metadata.stream_chunks.get("codec_tokens") if input_metadata else None
 
     def prepare_inputs(
@@ -1100,12 +1048,10 @@ class CodecSubmodule(ARNodeSubmodule):
         input_metadata: InputMetadata = EMPTY_INPUT_METADATA,
         **kwargs: Any,
     ) -> ARNodeInputs:
-        """Pad one stream window to its capture bucket.
+        """Pad the chunk to its capture bucket.
 
-        Input arrives as ``[frames, code_groups]``. The official decoder wants
-        ``[quantizers, frames]``; every request is padded to the smallest
-        captured window that fits so the ramp's windows and the terminal tail
-        all replay CUDA graphs. Every item is a frame: the Talker withholds
+        Input arrives as ``[frames, code_groups]``; the decoder wants
+        ``[quantizers, frames]``. Every item is a frame: the Talker withholds
         its EOS frame from the stream (``TokenStop.withhold``).
         """
         del graph_walk, kwargs
@@ -1118,44 +1064,41 @@ class CodecSubmodule(ARNodeSubmodule):
             # a stream whose first frame was EOS ends with an empty chunk
             codes = torch.zeros(0, self.config.num_code_groups, dtype=torch.long, device=self.get_device())
         # Items are one frame each, ``[groups]`` or ``[1, groups]`` (a row
-        # view of the Talker's batch output), so the window flattens to frames.
+        # view of the Talker's batch output), so the chunk flattens to frames.
         if codes.shape[-1] != self.config.num_code_groups:
-            raise ValueError(
-                f"Expected codec tokens with shape (frames, groups), got {codes.shape}"
-            )
+            raise ValueError(f"Expected codec tokens with shape (frames, groups), got {codes.shape}")
         codes = codes.reshape(-1, self.config.num_code_groups)[:, :self.config.codec.num_quantizers]
         frames = codes.shape[0]
-        context = chunk.context_items if chunk is not None else 0
-        # First window frame the conv stack decodes: the new frames' conv context.
-        conv_start = context - min(context, self.conv_context) if self.split_decode else 0
+        context = min(chunk.context_items if chunk is not None else 0, frames)
         bucket = self._bucket(max(frames, 1))
         if frames < bucket:
             codes = torch.nn.functional.pad(codes, (0, 0, 0, bucket - frames))
-        logger.debug(
-            "codec %s: window context=%d frames=%d bucket=%d final=%s",
-            fwd_info.request_id, context, frames, bucket, chunk is not None and chunk.is_final,
-        )
         state.add("codec_bucket", bucket)   # graph-key fallback when a caller has no stream chunk info
-        # The window's geometry rides with this pass: under speculative
-        # scheduling the next window of the same request is prepared before
+        # The chunk's geometry rides with this pass: under speculative
+        # scheduling the next chunk of the same request is prepared before
         # this one is postprocessed, so request state would be overwritten.
         return ARNodeInputs(
             tensor_inputs={"codec_tokens": codes.t().contiguous()},
-            kwargs={
-                "frames": frames, "context": context, "conv_start": conv_start,
-                "is_final": chunk is not None and chunk.is_final,
-            },
+            kwargs={"frames": frames, "context": context, "is_final": chunk is not None and chunk.is_final},
         )
 
-    def _batch_trim(self, width: int, inputs: list[ARNodeInputs]) -> int:
-        """Conv frames the batch's conv stack starts after: its bucket's cut,
-        or less when a row's new frames start earlier (a window the chunk
-        schedule does not produce), which then runs eagerly."""
-        trim = self._trim.get(width, 0)
-        for item in inputs:
-            if "context" in item.kwargs:
-                trim = min(trim, item.kwargs["context"] - item.kwargs["conv_start"])
-        return trim
+    def declare_step(
+        self,
+        graph_walk: str,
+        request_ids: list[str],
+        inputs: list[NodeInputs],
+        slot_lease: SlotLease | None = None,
+        piecewise_leases: Mapping[str, SlotLease] | None = None,
+        **kwargs,
+    ) -> SubmoduleStep:
+        """Every row reads and writes its stream's decoder state."""
+        del graph_walk, slot_lease, piecewise_leases, kwargs
+        return SubmoduleStep(
+            segments=[Segment(rid, "main", 1) for rid in request_ids],
+            steps={CODEC_STATE: RecurrentStep()},
+            # the widest bucket, as cg_key_info derives it before prepare_inputs
+            cg_key_info=max(item.tensor_inputs["codec_tokens"].shape[-1] for item in inputs),
+        )
 
     def preprocess(
         self,
@@ -1163,79 +1106,53 @@ class CodecSubmodule(ARNodeSubmodule):
         engine_inputs: ModelInputsFromEngine,
         inputs: list[ARNodeInputs],
     ) -> dict[str, torch.Tensor]:
-        """Stack the batch's windows, padded to its widest bucket.
-
-        Requests reach the codec at different points of the chunk ramp, so one
-        batch mixes windows. The decoder is causal, so trailing padding never
-        changes the frames in front of it; each request's ``postprocess`` keeps
-        only its own frames.
-        """
+        """Stack the batch's chunks, padded to its widest bucket, and their real lengths."""
         del graph_walk, engine_inputs
         windows = [item.tensor_inputs["codec_tokens"] for item in inputs]
         width = max(window.shape[-1] for window in windows)
         codec_tokens = torch.stack([
-            torch.nn.functional.pad(window, (0, width - window.shape[-1]))
-            for window in windows
+            torch.nn.functional.pad(window, (0, width - window.shape[-1])) for window in windows
         ])
-        conv_start = torch.empty(len(inputs), dtype=torch.long, device=codec_tokens.device)
-        # capture-time inputs carry no geometry: 0 is a valid start
-        self._conv_start_stager.copy_(conv_start, [item.kwargs.get("conv_start", 0) for item in inputs])
-        trim = self._batch_trim(width, inputs) if self.split_decode else 0
-        for item in inputs:
-            item.kwargs["trim"] = trim   # where this step's audio starts, for postprocess
-        # an int: a capture bakes its bucket's cut in, and replays only batches that share it
-        return {"codec_tokens": codec_tokens, "conv_start": conv_start, "trim": trim}
+        lengths = torch.empty(len(inputs), dtype=torch.long, device=codec_tokens.device)
+        # capture-time inputs carry no geometry: a full row
+        self._lengths_stager.copy_(lengths, [item.kwargs.get("frames", width) for item in inputs])
+        return {"codec_tokens": codec_tokens, "lengths": lengths}
 
-    def _decode(self, codec_tokens: torch.Tensor, conv_start: torch.Tensor, trim: int = 0) -> torch.Tensor:
-        """Decode windows to PCM16: per request, the audio of window frames
-        ``conv_start + trim`` .. ``conv_start + conv_frames(width)`` (all of it
-        when the decoder is not split)."""
-        if not self.split_decode:
-            wav = self.decoder(codec_tokens)
-        else:
-            decoder = self.decoder
-            hidden = decoder.quantizer.decode(codec_tokens)
-            hidden = decoder.pre_conv(hidden).transpose(1, 2)
-            hidden = decoder.pre_transformer(inputs_embeds=hidden).last_hidden_state.permute(0, 2, 1)
-            width = hidden.shape[-1]
-            length = self.conv_frames(width)
-            # Always from each request's conv_start, even when length == width:
-            # postprocess trims relative to it. Past a request's own frames the
-            # slice reads padding (or the clamp's repeat); causal convs keep
-            # that out of its audio.
-            index = (conv_start.view(-1, 1) + torch.arange(length, device=hidden.device)).clamp_(max=width - 1)
-            hidden = hidden.gather(2, index.unsqueeze(1).expand(-1, hidden.shape[1], -1))
-            cuts, final_cut = self._cuts[trim]
-            for module, cut in zip(self._flat_stack, cuts, strict=True):
-                hidden = module(hidden[..., cut:] if cut else hidden)
-            wav = hidden[..., final_cut:]
-        return (wav.clamp(-1, 1) * 32767).to(torch.int16).squeeze(1)
+    def _decode(
+        self, engine_inputs: ModelInputsFromEngine, codec_tokens: torch.Tensor, lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        """Decode the batch's chunks from their streams' state to PCM16 ``[B, width * upsample]``."""
+        pool: RecurrentStatePool = engine_inputs.resources[CODEC_STATE]
+        # a fresh stream, and a padding row on the sink, read zeros: the decoder's own left padding
+        state = {name: pool.gather(name) for name in self.state_names}
+        wav, new = self._decode_step(codec_tokens, state, lengths)
+        for name, value in new.items():
+            pool.scatter_(name, value)
+        return (wav.float() * 32767).to(torch.int16)
 
     def forward(
         self,
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
         codec_tokens: torch.Tensor,
-        conv_start: torch.Tensor,
+        lengths: torch.Tensor,
         **kwargs: Any,
     ) -> NameToTensorList:
-        """One request's window (``[1, quantizers, frames]``) -> its ``[samples]`` audio."""
-        del graph_walk, engine_inputs
-        return {"audio_chunk": [self._decode(codec_tokens, conv_start, kwargs.get("trim", 0))[0]]}
+        """One request's chunk (``[1, quantizers, frames]``) -> its ``[samples]`` audio."""
+        del graph_walk, kwargs
+        return {"audio_chunk": [self._decode(engine_inputs, codec_tokens, lengths)[0]]}
 
     def forward_batched(
         self,
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
         codec_tokens: torch.Tensor,
-        conv_start: torch.Tensor,
-        trim: int = 0,
+        lengths: torch.Tensor,
         **kwargs: Any,
     ) -> BatchedModelOutput:
-        del graph_walk, engine_inputs, kwargs
-        # one batch tensor, row i for request i: a pure tensor function to
-        # compile, and one clone per step rather than one per request
-        return BatchedModelOutput(row_outputs={"audio_chunk": self._decode(codec_tokens, conv_start, trim)})
+        del graph_walk, kwargs
+        # one batch tensor, row i for request i: one clone per step rather than one per request
+        return BatchedModelOutput(row_outputs={"audio_chunk": self._decode(engine_inputs, codec_tokens, lengths)})
 
     def postprocess(
         self,
@@ -1245,32 +1162,25 @@ class CodecSubmodule(ARNodeSubmodule):
         inputs: ARNodeInputs | None = None,
         **kwargs: Any,
     ) -> None:
-        """Drop padding and repeated-context audio (a clone's reference tail included) before emission.
+        """Drop padding and a clone's reference-tail audio before emission.
 
         ``inputs`` is this pass's ``prepare_inputs`` result (the engine hands it
-        back), which carries the window's frame and context counts and the
-        window frame the decoded audio starts at.
+        back), which carries the chunk's frame and context counts.
         """
         del request_info, kwargs
         if "audio_chunk" not in outputs:
             return
         if inputs is None:
-            raise ValueError("codec postprocess needs the pass's inputs for its window geometry")
-        frames = int(inputs.kwargs["frames"])
-        context = int(inputs.kwargs["context"])
-        conv_start = int(inputs.kwargs.get("conv_start", 0)) + int(inputs.kwargs.get("trim", 0))
-        start = (context - conv_start) * self.total_upsample
-        end = (frames - conv_start) * self.total_upsample
+            raise ValueError("codec postprocess needs the pass's inputs for its chunk geometry")
+        start = int(inputs.kwargs["context"]) * self.total_upsample
+        end = int(inputs.kwargs["frames"]) * self.total_upsample
         audio = outputs["audio_chunk"][0].reshape(-1)   # one request's samples, whatever the batch shape
         if audio.numel() < end:
             raise ValueError(
-                f"codec produced {audio.numel()} samples for a window of {frames} frames "
-                f"({end} expected after frame {conv_start})"
+                f"codec produced {audio.numel()} samples for a chunk of {end // self.total_upsample} frames"
             )
         outputs["audio_chunk"][0] = audio[start:end]
-        logger.debug(
-            "codec %s: emit frames %d..%d (%d samples)", request_id, context, frames, max(end - start, 0)
-        )
+        logger.debug("codec %s: emit %d samples", request_id, max(end - start, 0))
 
     def batch_postprocess(
         self,
@@ -1372,32 +1282,26 @@ class CodecSubmodule(ARNodeSubmodule):
     def get_accelerator_graph_configs(
         self, device: torch.device, tp_world_size: int = 1
     ) -> list[AcceleratorGraphConfig]:
-        """Capture every window of the chunk schedule for all batch buckets."""
+        """Capture every chunk width for all batch buckets."""
         del tp_world_size
         return [
             BatchedAcceleratorGraphConfig(
                 capture_graph_walk="codec_chunk",
                 replay_graph_walks=["codec_chunk"],
                 single_request_inputs=ARNodeInputs(
-                    # 1, not the window: batched buckets match on bs, and this
+                    # 1, not the width: batched buckets match on bs, and this
                     # keeps the intern seq_len from aliasing the trailing dims.
                     input_seq_len=1,
                     tensor_inputs={
                         "codec_tokens": torch.zeros(
-                            self.config.codec.num_quantizers,
-                            window,
-                            dtype=torch.long,
-                            device=device,
+                            self.config.codec.num_quantizers, window, dtype=torch.long, device=device,
                         )
                     },
                 ),
                 additional_key_info=window,
                 capture_batch_sizes=self.CAPTURE_BATCH_SIZES,
-                # Inductor fuses the conv stack's pads, adds and layout copies
-                # (~20-30% of a window's GPU time); ~55-60 dB SNR against the
-                # eager decode. "default" mode: no autotuning per capture.
-                compile=True,
-                compile_mode="default",
+                # the decode inside is compiled already, once for every capture
+                compile=False,
             )
             for window in self.windows
         ]
@@ -1405,7 +1309,7 @@ class CodecSubmodule(ARNodeSubmodule):
     def can_use_accelerator_graphs(
         self, batch: ExecutingBatch, model_inputs: list[NodeInputs]
     ) -> bool:
-        if not (
+        return (
             batch.graph_walk == "codec_chunk"
             and self.can_batch(batch, model_inputs)
             and all(
@@ -1413,12 +1317,6 @@ class CodecSubmodule(ARNodeSubmodule):
                 in {(self.config.codec.num_quantizers, window) for window in self.windows}
                 for item in model_inputs
             )
-        ):
-            return False
-        # the capture of the batch's widest bucket bakes in that bucket's cut
-        width = max(item.tensor_inputs["codec_tokens"].shape[-1] for item in model_inputs)
-        return (
-            (not self.split_decode or self._batch_trim(width, model_inputs) == self._trim.get(width, 0))
             and super().can_use_accelerator_graphs(batch, model_inputs)
         )
 
