@@ -13,6 +13,15 @@ model_kwargs:
 resources:
   talker_attn:
     flashinfer_backend: fa2
+  # Room for the requests that pile up past saturation: with the default pools
+  # an overload ran the KV pages and codec stream slots out and admit failures
+  # collapsed throughput (B at 80 req/s: 9.8 done/s, TTFA p99 119 s); with these
+  # it saturates softly (78/86/91 done/s at 80/88/96 req/s, TTFA p99 89-222 ms).
+  # Memory only: 70 GB peak on an H200.
+  talker_kv:
+    max_num_pages: 4096
+  codec_state:
+    max_slots: 512
 node_groups:
   - node_names: [Talker]
     ranks: [0]
