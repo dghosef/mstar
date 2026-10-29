@@ -171,7 +171,8 @@ class InlineToken:
 
 class PreparingInput(NamedTuple):
     """An input waiting its turn to be handed on, in arrival order: a request
-    whose prepare runs on the preprocess pool, or an append (no ``prepared``)."""
+    whose prepare runs on the preprocess pool, or one prepared as it is handed
+    on, or an append (those two have no ``prepared``)."""
     input: PreprocessInput | ClientAppend
     profile: DataWorkerProfile | None = None
     prepared: Future | None = None
@@ -555,6 +556,7 @@ class PreprocessWorkerThread:
     _encode_pool: ThreadPoolExecutor | None = None
     # None (a thread built without __init__) preprocesses one request at a time
     _prep_pool: ThreadPoolExecutor | None = None
+    _prep_workers = 1
     output_ready: EventWakeup | None = None
     # class-level so a thread built without __init__ stamps no read times
     enable_prof = False
@@ -662,7 +664,7 @@ class PreprocessWorkerThread:
         self.output_ready = output_ready
         self.idle_wait_ms = 20
         # Media load + process_prompt for several requests at once, for models
-        # that declare it; requests then wait in `_preparing` instead of in_queue.
+        # that declare it (see `_take_new_input`).
         self._prep_workers = preprocess_workers
         if preprocess_workers > 1:
             self._prep_pool = ThreadPoolExecutor(preprocess_workers, thread_name_prefix="preprocess")
@@ -1684,19 +1686,29 @@ class PreprocessWorkerThread:
         except Exception:  # noqa: BLE001 — the pass's other input still goes
             logger.exception("Input for request %s failed", pre_input.request_id)
 
-    def _pump_preprocess_pool(self, sends_pending: bool) -> bool:
-        """Prepare up to ``PREPROCESS_WORKERS`` requests at once on the pool and
-        hand every input on in arrival order. Until handed on, a request is in
-        the state of one still in ``in_queue``: nothing here tracks it yet."""
+    def _take_new_input(self, sends_pending: bool) -> bool:
+        """Start up to ``_prep_workers`` requests' prepares and hand every input
+        on in arrival order, while peers take what was already sent. On the
+        pool the prepares overlap; without one, a request is prepared as it is
+        handed on, one per pass. Appends hold no prepare slot. Until handed on,
+        an input is in the state of one still in ``in_queue``: nothing here
+        tracks it yet.
+
+        The order is global, not per request: a stream's append can wait behind
+        another request's prepare, but the conductor sees requests in the order
+        the API server took them, as with one worker."""
         did_work = False
         preparing = self._preparing
-        while not sends_pending and len(preparing) < self._prep_workers:
+        requests = sum(not isinstance(entry.input, ClientAppend) for entry in preparing)
+        while not sends_pending and requests < self._prep_workers:
             inputs = self._next_inputs()
-            if not inputs:
-                break
-            did_work = True
+            did_work = did_work or bool(inputs)
             for pre_input in inputs:
                 if isinstance(pre_input, ClientAppend):
+                    preparing.append(PreparingInput(pre_input))
+                    continue
+                requests += 1
+                if self._prep_pool is None:
                     preparing.append(PreparingInput(pre_input))
                     continue
                 profile = self._start_profile(pre_input) if self.timing_requested.is_set() else None
@@ -1704,10 +1716,12 @@ class PreprocessWorkerThread:
                 if self.wakeup is not None:
                     self.wakeup.register_future(future)
                 preparing.append(PreparingInput(pre_input, profile, future))
-        # as the inline path, nothing goes on to a peer that can't take what was already sent
+            if not inputs or isinstance(inputs[-1], ClientAppend):
+                break  # in_queue is empty, or this pass's appends are taken
         while not sends_pending and preparing and (preparing[0].prepared is None or preparing[0].prepared.done()):
             did_work = True
             self._take_input(*preparing.popleft())
+            sends_pending = self.communicator.flush()
         return did_work
 
     def _process_waiting_input(
@@ -1715,7 +1729,7 @@ class PreprocessWorkerThread:
         profile: DataWorkerProfile | None = None, prepared: Future | None = None,
     ) -> None:
         """``profile`` and ``prepared``: a request's, when the preprocess pool
-        started it (see `_pump_preprocess_pool`)."""
+        started it (see `_take_new_input`)."""
         if not self._is_pending(pre_input.request_id):
             # The API server let go of it while it waited (aborted, or its
             # call ended): nothing will read it, so nothing is sent. An abort
@@ -1826,11 +1840,7 @@ class PreprocessWorkerThread:
                 # New input. None while a peer can't take what we already
                 # sent: as a blocking send did, that holds new work back, so
                 # the outbox stays short and inputs wait undecoded.
-                if self._prep_pool is not None:
-                    did_work = self._pump_preprocess_pool(sends_pending) or did_work
-                for pre_input in [] if sends_pending or self._prep_pool is not None else self._next_inputs():
-                    did_work = True
-                    self._take_input(pre_input)
+                did_work = self._take_new_input(sends_pending) or did_work
             except Exception:
                 logger.exception("PreprocessWorkerThread error")
 

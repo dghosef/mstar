@@ -279,7 +279,8 @@ def test_a_bad_preprocess_workers_fails_startup(workers):
 
 def test_a_prepared_request_waits_while_a_peer_cannot_take_more():
     """As on the inline path, nothing is handed on to the conductor while
-    earlier sends are still queued for a peer that is backed up."""
+    earlier sends are still queued for a peer that is backed up, including a
+    send made by the hand-off just before it."""
     from mstar.api_server.data_worker import PreparingInput
     from mstar.api_server.request_types import PreprocessInput
 
@@ -287,11 +288,18 @@ def test_a_prepared_request_waits_while_a_peer_cannot_take_more():
     worker._prep_workers, worker.in_queue = 2, queue.Queue()
     done = Future()
     done.set_result(({}, {}, {}))
-    worker._preparing = deque([PreparingInput(PreprocessInput("r", "r", None, [], ["text"], {}), None, done)])
+    worker._preparing = deque(
+        PreparingInput(PreprocessInput(rid, rid, None, [], ["text"], {}), None, done) for rid in ("r", "s")
+    )
     taken = []
     worker._take_input = lambda *entry: taken.append(entry[0].request_id)
+    # each hand-off's send fills the peer until the next pass
+    worker.communicator = SimpleNamespace(flush=lambda: bool(taken))
 
-    PreprocessWorkerThread._pump_preprocess_pool(worker, sends_pending=True)
+    PreprocessWorkerThread._take_new_input(worker, sends_pending=True)
     assert taken == [], "a prepared request was sent to a peer that can't take what it was already sent"
-    PreprocessWorkerThread._pump_preprocess_pool(worker, sends_pending=False)
-    assert taken == ["r"]
+    PreprocessWorkerThread._take_new_input(worker, sends_pending=False)
+    assert taken == ["r"], "handed on behind a send the peer had not taken"
+    PreprocessWorkerThread._take_new_input(worker, sends_pending=False)
+    assert taken == ["r", "s"]
+
