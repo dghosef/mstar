@@ -206,11 +206,6 @@ def unlink_files(file_paths: dict[str, list[str]] | None) -> None:
                 pass
 
 
-def _preprocess_loop(**kwargs):
-    worker = PreprocessWorkerThread(**kwargs)
-    worker.run()
-
-
 def _kv_page_sizes(model: Model, model_config: dict) -> dict[str, int]:
     """Page size per KV resource whose prefix cache is on, after this deployment's YAML has been applied."""
     specs = model.get_node_resources()
@@ -284,32 +279,30 @@ class PreprocessWorker:
             enable_prof=enable_prof,
         )
 
-        self.thread = threading.Thread(
-            target=_preprocess_loop,
-            kwargs=dict(
-                in_queue=self.request_input_queue,
-                result_tensor_queue=self.result_tensor_input_queue,
-                out_queue=self.output_queue,
-                profile_queue=self.profile_queue,
-                cleanup_request_queue=self.cleanup_request_queue,
-                abort_request_queue=self.abort_request_queue,
-                reads_done_queue=self.reads_done_queue,
-                discard_tensor_queue=self.discard_tensor_queue,
-                stop_event=self.stop_event,
-                wakeup=self.wakeup,
-                output_ready=self.output_ready,
-                communicator=self.communicator,
-                tensor_manager=self.tensor_manager,
-                model=model,
-                enable_prof=enable_prof,
-                timing_requested=self.timing_requested,
-                worker_metrics_requested=self.worker_metrics_requested,
-                model_config=model_config,
-                preprocess_workers=prep_workers,
-                enable_nvtx=enable_nvtx,
-                is_pending=is_pending,
-            )
+        self.data_worker = PreprocessWorkerThread(
+            in_queue=self.request_input_queue,
+            result_tensor_queue=self.result_tensor_input_queue,
+            out_queue=self.output_queue,
+            profile_queue=self.profile_queue,
+            cleanup_request_queue=self.cleanup_request_queue,
+            abort_request_queue=self.abort_request_queue,
+            reads_done_queue=self.reads_done_queue,
+            discard_tensor_queue=self.discard_tensor_queue,
+            stop_event=self.stop_event,
+            wakeup=self.wakeup,
+            output_ready=self.output_ready,
+            communicator=self.communicator,
+            tensor_manager=self.tensor_manager,
+            model=model,
+            enable_prof=enable_prof,
+            timing_requested=self.timing_requested,
+            worker_metrics_requested=self.worker_metrics_requested,
+            model_config=model_config,
+            preprocess_workers=prep_workers,
+            enable_nvtx=enable_nvtx,
+            is_pending=is_pending,
         )
+        self.thread = threading.Thread(target=self.data_worker.run)
         self.thread.start()
 
     def report_preprocess_finish(self) -> None:
@@ -328,8 +321,11 @@ class PreprocessWorker:
         self._signal()
 
     def queue_depth(self) -> int:
-        """Requests submitted and not yet taken up by the data worker thread."""
-        return self.request_input_queue.qsize()
+        """Inputs submitted and not yet handed on to the conductor: queued, or
+        taken up and waiting their turn (``_preparing``, its length read from
+        this thread). One prepared on the data worker thread itself is not
+        counted."""
+        return self.request_input_queue.qsize() + len(self.data_worker._preparing)
 
     def _signal(self):
         """End the thread's idle wait: new work is queued. getattr: tests

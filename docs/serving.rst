@@ -890,9 +890,9 @@ work.
   those count the WAV sizes. Requests refused before they were submitted (an oversized
   body, a bad form) are not counted.
 - ``mstar_data_worker_queue_depth{model_name}``: gauge, read at scrape time, requests
-  submitted and not yet taken up by the data worker (the one it is working on is not
-  counted). A request whose client went away still counts until the data worker takes
-  it up.
+  submitted and not yet handed on to the conductor, including those the preprocess pool
+  is preparing (one the data worker prepares on its own thread is not counted). A
+  request whose client went away still counts until its turn comes and it is dropped.
 
 .. code-block:: bash
 

@@ -475,7 +475,7 @@ class ServingMetrics:
         )
         self.registry.register(_ScrapedGauge(
             "mstar_data_worker_queue_depth",
-            "Requests submitted and waiting for the data worker to take them up.",
+            "Requests submitted and not yet handed on to the conductor by the data worker.",
             model_name, data_worker_queue_depth,
         ))
 
