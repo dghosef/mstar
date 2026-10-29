@@ -125,24 +125,28 @@ def cp_attend(
 @triton.jit
 def _cp_embed_accumulate_kernel(
     Tok, W, P, Emb, Sum, Codes, group, s_w, s_p, s_emb, s_sum, s_codes,
-    H: tl.constexpr, HP: tl.constexpr, BLOCK: tl.constexpr, PROJ: tl.constexpr, INIT: tl.constexpr,
+    H: tl.constexpr, BLOCK: tl.constexpr, PROJ: tl.constexpr, INIT: tl.constexpr,
 ):
+    # programs [0, H / BLOCK) take a chunk of the embedding and the sum, the
+    # rest a chunk of the projected input
     b = tl.program_id(0)
+    c = tl.program_id(1)
     tok = tl.load(Tok + b)
-    offs = tl.arange(0, BLOCK)
-    for h0 in tl.static_range(0, H, BLOCK):
-        e = tl.load(W + tok * s_w + h0 + offs)
+    if c * BLOCK < H:
+        offs = c * BLOCK + tl.arange(0, BLOCK)
+        e = tl.load(W + tok * s_w + offs)
         if not PROJ:
-            tl.store(Emb + b * s_emb + h0 + offs, e)
+            tl.store(Emb + b * s_emb + offs, e)
         if INIT:
-            tl.store(Sum + b * s_sum + h0 + offs, e.to(Sum.dtype.element_ty))
+            tl.store(Sum + b * s_sum + offs, e.to(Sum.dtype.element_ty))
         else:
-            acc = tl.load(Sum + b * s_sum + h0 + offs)
-            tl.store(Sum + b * s_sum + h0 + offs, acc + e.to(acc.dtype))
-    if PROJ:
-        for h0 in tl.static_range(0, HP, BLOCK):
-            tl.store(Emb + b * s_emb + h0 + offs, tl.load(P + tok * s_p + h0 + offs))
-    tl.store(Codes + b * s_codes + group, tok.to(Codes.dtype.element_ty))
+            acc = tl.load(Sum + b * s_sum + offs)
+            tl.store(Sum + b * s_sum + offs, acc + e.to(acc.dtype))
+        if c == 0:
+            tl.store(Codes + b * s_codes + group, tok.to(Codes.dtype.element_ty))
+    else:
+        offs = c * BLOCK - H + tl.arange(0, BLOCK)
+        tl.store(Emb + b * s_emb + offs, tl.load(P + tok * s_p + offs))
 
 
 @torch.compiler.disable
@@ -160,12 +164,14 @@ def cp_embed_accumulate(
     bs, hidden = tokens.shape[0], weight.shape[1]
     table = weight if inputs is None else inputs
     assert weight.stride(1) == 1 and table.stride(1) == 1 and emb_sum.stride(1) == 1
-    assert hidden % 256 == 0 and table.shape[1] % 256 == 0
+    block = 256
+    assert hidden % block == 0 and table.shape[1] % block == 0
     emb = torch.empty(bs, table.shape[1], dtype=table.dtype, device=weight.device)
-    _cp_embed_accumulate_kernel[(bs,)](
+    chunks = hidden // block + (table.shape[1] // block if inputs is not None else 0)
+    _cp_embed_accumulate_kernel[(bs, chunks)](
         tokens, weight, table, emb, emb_sum, all_codes, group,
         weight.stride(0), table.stride(0), emb.stride(0), emb_sum.stride(0), all_codes.stride(0),
-        H=hidden, HP=table.shape[1], BLOCK=256, PROJ=inputs is not None, INIT=init, num_warps=4,
+        H=hidden, BLOCK=block, PROJ=inputs is not None, INIT=init, num_warps=2,
     )
     return emb
 
