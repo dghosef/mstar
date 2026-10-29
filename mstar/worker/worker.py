@@ -377,7 +377,12 @@ class _LazyHostOutputs(Mapping):
             landed = self._landed[name] = self._copy_name(name)
         return landed
 
-    def landed(self) -> dict[int, NameToTensorList]:
+    def landed(self, names=()) -> dict[int, NameToTensorList]:
+        """What was copied, ``names`` first copied too: one batched copy per
+        name for a host transport, which would otherwise copy each tensor on
+        its own."""
+        for name in names:
+            self._host(name)
         out: dict[int, NameToTensorList] = {}
         for name, by_rid in self._landed.items():
             for rid, value in by_rid.items():
@@ -3868,7 +3873,7 @@ class Worker:
                     graph_walk=graph_walk,
                     skip_cuda_sync=True,
                     cpu_tensors=(
-                        cpu_outputs.landed()
+                        cpu_outputs.landed(signals if self.tensor_manager.needs_cpu_tensor else ())
                         if isinstance(cpu_outputs, _LazyHostOutputs) else cpu_outputs
                     ),
                     ready_event=batch_N.node_batch.completion_event,
