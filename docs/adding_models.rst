@@ -1082,7 +1082,7 @@ methods are:
    EOS token: its consumer then never receives it, instead of finding and dropping it with
    a device read. ``check_stop_batched`` returns a ``BatchedStopCheck`` for the same, and a
    ``TokenStop`` declares it as ``withhold``: the outputs left unrouted on a row whose token
-   is a stop id.
+   is a stop id. The Qwen3-TTS Talker keeps its EOS frame out of the codec stream this way.
 
 ``on_request_added(self, request_id, request_info)`` (optional)
    Called on the worker's main thread when the request reaches the worker, before any of

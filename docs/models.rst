@@ -555,8 +555,8 @@ Qwen3-Omni notes
   start with a 25-frame chunk instead: first audio comes later, and the
   Talker needs only about 1.0 to 1.3x real time.
 - Numerics: the code predictor's residual adds fold into the next RMSNorm
-  (FlashInfer's fused add + norm) and its attention is a Triton kernel
-  (``cp_attention``), neither bit-exact with the unfused ops. Its 15 depth
+  (FlashInfer's fused add + norm) and its attention is one Triton kernel
+  (``cp_attend``, shared with Qwen3-TTS), neither bit-exact with the unfused ops. Its 15 depth
   steps feed each sampled code into the next, so small differences can change
   later codes at near-ties.
 - The audio encoder takes the clips of up to 16 requests a step and packs
@@ -606,46 +606,55 @@ Qwen3-TTS notes
   two kept in flight while the current one streams); set
   ``sentence_chunking: false`` (or ``true`` for shorter texts) per request.
 - Audio streams in a ramp of codec chunks: the first frame is decoded on its
-  own (first audio one Talker step after prefill), the next windows add 3, 8
-  and 16 frames, then 25 new frames behind up to 72 frames of already decoded
-  left context, the decoder transformer's sliding window. The
-  transformer stacks 8 such layers, so a window still differs slightly from a
-  whole-utterance decode once an utterance outgrows the context; 25 frames of
-  context differed far more. Each window size is a CUDA-graph bucket captured
-  for batch sizes 1 to 32 (densely: the codec's cost is per row, so a padding
-  row costs as much as a real one); the stream buffer reports how many leading
-  frames of a window are repeated context, and the codec trims their audio. The
-  scheduler batches each window size apart, so a stream's small first windows
-  are not padded to a full window's width or queued behind a batch of them. A
-  voice clone's reference tail (its last 72 frames) is the first window's context.
-- The codec runs its transformer over the whole window but its conv stack (all
-  but a few percent of the codec's time) only over the new frames plus the
-  stack's causal receptive field, derived from the decoder's modules at load
-  (10 frames for the 12 Hz decoder; the new frames' audio equals the
-  whole-window decode). It also fuses the SnakeBeta activations into one kernel.
+  own (first audio one Talker step after prefill), the next chunks add 3, 8
+  and 16 frames, then 25 frames a chunk. The decoder is causal, so the codec
+  decodes every frame once: per stream it keeps each causal conv's last input
+  samples, the transformer's sliding-window keys and values (71 per layer) and
+  the frame count, about 5 MiB in float32, in the ``codec_state`` recurrent
+  pool (``resources: {codec_state: {max_slots: N}}`` sizes it; 256 streams by
+  default). A stream's audio equals a whole-utterance decode. Each chunk width
+  is a CUDA-graph bucket captured for batch sizes 1 to 32 (densely: the
+  codec's cost is per row, so a padding row costs as much as a real one); the
+  scheduler batches each width apart, so a stream's small first chunks are not
+  padded to a full chunk's width or queued behind a batch of them. A voice
+  clone's stream leads with the reference's last 72 frames, decoded with the
+  first chunk to warm the state on the voice and trimmed from its audio.
+  The SnakeBeta activations run as one fused kernel. A deployment sets the
+  ramp and the steady chunk with ``model_kwargs: {codec_chunk_schedule: [1, 3,
+  8, 16], codec_chunk_frames: 25}``.
 - Talker prefill, the clone prefill included, replays a packed CUDA Graph for
   the smallest token bucket (32 to 1024 tokens) that holds the batch; a clone's
-  reference frames join the codec stream in ``postprocess``. Decode
-  always uses the whole-walk CUDA Graph (up to 64 rows a step), with the 15-step
-  CodePredictor loop captured inside it; request-local EOS suppression is
+  reference frames join the codec stream in ``postprocess``. Prefill and decode
+  are one combined walk (``talker_mixed``): up to four new prompts ride a decode
+  step instead of a prefill-only step every decode row waits behind, replaying
+  a packed capture sized to the decode batch. A decode-only step uses the
+  whole-walk CUDA Graph (up to 64 rows a step), with the 15-step CodePredictor
+  loop captured inside it; request-local EOS suppression is
   carried as a graph tensor input so replay does not consult capture-slot dummy
   request state. Residual ``subtalker_*`` sampling is per-request through the
   ``code_predictor`` aux sampler, so custom values neither block batching nor
   fall off the graph. On the 1.7B checkpoints the CodePredictor projects the
   Talker-width inputs through ``small_to_mtp_projection`` before its depth loop.
-  Its depth loop runs the same Triton kernels as Qwen3-Omni's code predictor
-  (``mstar.model.components.code_predictor_kernels``): q/k norm, RoPE and the
-  KV write in one launch per layer, then ``cp_attention``.
+  Its depth loop runs on the code predictor kernels
+  (``mstar.model.components.code_predictor_kernels``), five launches a layer:
+  each projection is one ``cp_linear`` launch with the RMSNorm folded into its
+  weight (a row scale from partial sums of squares its producer recorded), the
+  residual add or the SwiGLU in its epilogue, and the q/k norm, RoPE, KV write
+  and attention are one ``cp_attend`` launch (shared with Qwen3-Omni). Every
+  embedding table the loop reads is kept already projected by
+  ``small_to_mtp_projection``. None of this is bit-exact with the unfused
+  ops: the sampled residual codes can differ at near-ties.
 - ``configs/qwen3tts_1p7b_split.yaml`` (and ``configs/qwen3tts_split.yaml``
   for the 0.6B) runs the Codec on a second worker that
   shares GPU 0 (``rank_devices``) and caps the Talker KV pool so both fit.
   On its own it lowers first-audio latency at high concurrency; with
   ``mps: true`` in the YAML (see :doc:`serving`) the two workers' kernels also
   overlap, which raised c=32 throughput by about a fifth on an H100.
-- The codec decoder runs in float32 by default, reproducing the reference
-  decoder bit for bit. ``model_kwargs: {codec_dtype: bfloat16}`` in the
-  deployment YAML halves its GPU time when throughput matters more than
-  bit-exactness (the Talker is bf16 either way).
+- The codec decoder runs in float32 by default; ``configs/qwen3tts_1p7b.yaml``
+  serves it in bfloat16 (``model_kwargs: {codec_dtype: bfloat16}``, RMSNorm
+  and RoPE kept in float32), about 1.9x a codec step's speed on an H200 once
+  the captures keep cuDNN's searched conv plans (``capture_cudnn_benchmark``).
+  Its decode is compiled (Inductor) once for every capture.
 - Opt-in AudioSeal watermark on the codec's output (off by default; install
   ``pip install -e '.[audioseal]'``). Turn it on in the deployment YAML::
 

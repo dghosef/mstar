@@ -4,11 +4,30 @@
 # identical across sizes (28 layers, 8 KV heads, head_dim 128).
 model: "qwen3_tts_1p7b"
 max_seq_len: 32768
+# bf16 codec decoder (norms and RoPE stay fp32): ~1.9x a codec step's speed,
+# within the WER/speaker gate on this checkpoint
+model_kwargs:
+  codec_dtype: bfloat16
+  # A 4-frame first chunk (320 ms of audio, three Talker steps later): with a
+  # 1-frame one (80 ms) the next chunk arrived after the client had played it
+  # under load, the one pause behind the misses near capacity. The 4/8/16
+  # ramp holds 1.000 attainment through 80 req/s on Seed-TTS and 28 on the
+  # passages (H200), for +30-60 ms TTFA.
+  codec_chunk_schedule: [4, 8, 16]
 # The supported deployment image cannot build FlashInfer's Hopper FA3 JIT
 # kernels yet. Keep the model default on "auto" and pin this deployment to FA2.
 resources:
   talker_attn:
     flashinfer_backend: fa2
+  # Room for the requests that pile up past saturation: with the default pools
+  # an overload ran the KV pages and codec stream slots out and admit failures
+  # collapsed throughput (B at 80 req/s: 9.8 done/s, TTFA p99 119 s); with these
+  # it saturates softly (78/86/91 done/s at 80/88/96 req/s, TTFA p99 89-222 ms).
+  # Memory only: 70 GB peak on an H200.
+  talker_kv:
+    max_num_pages: 4096
+  codec_state:
+    max_slots: 512
 node_groups:
   - node_names: [Talker]
     ranks: [0]
