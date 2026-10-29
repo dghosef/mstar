@@ -1,10 +1,9 @@
 """The code predictor's kernels (Qwen3-Omni's and Qwen3-TTS's depth loops)
 against the op sequences they replace (GPU only).
 
-* ``cp_qk_norm_rope_kv_write``: q/k RMSNorm + RoPE and the dense-KV write,
-  against the same math in fp32 rounded to the cache dtype.
-* ``cp_embed_accumulate`` and ``cp_attention``: the index_select + add, and
-  causal attention over the depth cache.
+* ``cp_attend``: q/k RMSNorm + RoPE, the dense-KV write and causal attention
+  over the depth cache, against the same math in fp32.
+* ``cp_embed_accumulate``: the index_select + add.
 * Qwen3-TTS's depth loop, which calls them with its own config: against its
   layers run unfused.
 """
@@ -29,35 +28,46 @@ def _norm_rope(x: torch.Tensor, w: torch.Tensor, pos: torch.Tensor, eps: float, 
     return torch.cat([first * angle.cos() - second * angle.sin(), second * angle.cos() + first * angle.sin()], -1)
 
 
-@pytest.mark.parametrize("bs,seq_len,cache_pos", [(1, 1, 0), (5, 1, 7), (32, 1, 15), (3, 2, 4)])
-def test_cp_prologue_matches_the_unfused_ops(bs, seq_len, cache_pos):
-    from mstar.model.components.code_predictor_kernels import cp_qk_norm_rope_kv_write
+@pytest.mark.parametrize("bs,seq_len,cache_pos", [(1, 1, 0), (5, 1, 7), (32, 1, 15), (64, 1, 3), (3, 2, 0), (5, 2, 4)])
+def test_cp_attend_matches_the_unfused_ops(bs, seq_len, cache_pos):
+    """q/k RMSNorm + RoPE, the step's k/v written into the dense cache, and
+    causal attention over the depth positions so far, against the same math
+    in fp32 (q and k rounded to the cache dtype, as the unfused path stores
+    them)."""
+    from mstar.model.components.code_predictor_kernels import cp_attend
 
     torch.manual_seed(0)
-    hq, hkv, d, layers, max_bs, max_s = 16, 8, 128, 5, 32, 16
+    hq, hkv, d, layers, max_bs, max_s = 16, 8, 128, 5, 64, 16
     dev, dt = "cuda", torch.bfloat16
     qkv = torch.randn(bs, seq_len, (hq + 2 * hkv) * d, device=dev, dtype=dt)
     wq = torch.randn(d, device=dev, dtype=dt)
     wk = torch.randn(d, device=dev, dtype=dt)
     pos = torch.randint(0, 16, (bs, seq_len), device=dev)
     cache = torch.randn(layers, max_bs, 2, max_s, hkv, d, device=dev, dtype=dt)
-    ref_cache, ref_qkv = cache.clone(), qkv.clone()
+    ref_cache = cache.clone()
     flat_pos = pos.reshape(-1)
 
-    q, k, v = ref_qkv.split((hq * d, hkv * d, hkv * d), dim=-1)
-    q = _norm_rope(q.reshape(bs * seq_len, hq, d), wq, flat_pos, 1e-6, 1e6)
+    q, k, v = qkv.split((hq * d, hkv * d, hkv * d), dim=-1)
+    q = _norm_rope(q.reshape(bs * seq_len, hq, d), wq, flat_pos, 1e-6, 1e6).to(dt).view(bs, seq_len, hq, d)
     k = _norm_rope(k.reshape(bs * seq_len, hkv, d), wk, flat_pos, 1e-5, 1e6)
     view = ref_cache[:, :bs]
     view[2, :, 0, cache_pos:cache_pos + seq_len] = k.view(bs, seq_len, hkv, d).to(dt)
     view[2, :, 1, cache_pos:cache_pos + seq_len] = v.view(bs, seq_len, hkv, d)
 
-    cp_qk_norm_rope_kv_write(
+    out = cp_attend(
         qkv.view(bs * seq_len, -1), wq, wk, flat_pos, cache[:, :bs][2], cache_pos, seq_len,
         1e-6, 1e-5, 1e6, hq, hkv, d,
-    )
-    # the kernel rounds once to bf16 from the same fp32 arithmetic
-    torch.testing.assert_close(qkv[..., :hq * d].float(), q.view(bs, seq_len, -1), rtol=1.6e-2, atol=1e-2)
+    ).view(bs, seq_len, hq, d)
+    # the kernel rounds k once to bf16 from the same fp32 arithmetic
     torch.testing.assert_close(cache.float(), ref_cache.float(), rtol=1.6e-2, atol=1e-2)
+    kv = ref_cache[2, :bs].float()
+    for s in range(seq_len):
+        n = cache_pos + s + 1
+        kk = kv[:, 0, :n].repeat_interleave(hq // hkv, dim=2)  # (bs, n, hq, d)
+        vv = kv[:, 1, :n].repeat_interleave(hq // hkv, dim=2)
+        w = torch.softmax(torch.einsum("bhd,bnhd->bhn", q[:, s].float(), kk) / d ** 0.5, -1)
+        ref = torch.einsum("bhn,bnhd->bhd", w, vv)
+        torch.testing.assert_close(out[:, s].float(), ref, rtol=2e-2, atol=2e-2)
 
 
 @pytest.mark.parametrize("bs", [1, 8, 32])
@@ -80,24 +90,6 @@ def test_cp_embed_accumulate_matches_the_unfused_ops(bs):
     assert torch.equal(emb_sum, ref_sum)
     assert torch.equal(codes, ref_codes)
 
-
-
-@pytest.mark.parametrize("bs,seq,cache_pos", [(1, 1, 0), (4, 2, 0), (32, 1, 7), (3, 1, 15), (5, 2, 3)])
-def test_cp_attention_is_causal_attention_over_the_depth_cache(bs, seq, cache_pos):
-    from mstar.model.components.code_predictor_kernels import cp_attention
-
-    torch.manual_seed(4)
-    hq, hkv, d, depth = 16, 8, 128, 16
-    cache = torch.randn(bs, 2, depth, hkv, d, device="cuda", dtype=torch.bfloat16)
-    q = torch.randn(bs, seq, hq, d, device="cuda", dtype=torch.bfloat16)
-    out = cp_attention(q, cache[:, 0], cache[:, 1], cache_pos)
-    for s in range(seq):
-        n = cache_pos + s + 1
-        k = cache[:, 0, :n].float().repeat_interleave(hq // hkv, dim=2)  # (bs, n, hq, d)
-        v = cache[:, 1, :n].float().repeat_interleave(hq // hkv, dim=2)
-        w = torch.softmax(torch.einsum("bhd,bnhd->bhn", q[:, s].float(), k) / d ** 0.5, -1)
-        ref = torch.einsum("bhn,bnhd->bhd", w, v)
-        torch.testing.assert_close(out[:, s].float(), ref, rtol=2e-2, atol=2e-2)
 
 
 def _rms(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:

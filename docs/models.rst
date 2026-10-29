@@ -564,8 +564,8 @@ Qwen3-Omni notes
   start with a 25-frame chunk instead: first audio comes later, and the
   Talker needs only about 1.0 to 1.3x real time.
 - Numerics: the code predictor's residual adds fold into the next RMSNorm
-  (FlashInfer's fused add + norm) and its attention is a Triton kernel
-  (``cp_attention``), neither bit-exact with the unfused ops. Its 15 depth
+  (FlashInfer's fused add + norm) and its attention is one Triton kernel
+  (``cp_attend``), neither bit-exact with the unfused ops. Its 15 depth
   steps feed each sampled code into the next, so small differences can change
   later codes at near-ties.
 - The audio encoder takes the clips of up to 16 requests a step and packs
@@ -643,8 +643,8 @@ Qwen3-TTS notes
   fall off the graph. On the 1.7B checkpoints the CodePredictor projects the
   Talker-width inputs through ``small_to_mtp_projection`` before its depth loop.
   Its depth loop runs the same Triton kernels as Qwen3-Omni's code predictor
-  (``mstar.model.components.code_predictor_kernels``): q/k norm, RoPE and the
-  KV write in one launch per layer, then ``cp_attention``.
+  (``mstar.model.components.code_predictor_kernels``): q/k norm, RoPE, the
+  KV write and attention in one launch per layer (``cp_attend``).
 - ``configs/qwen3tts_1p7b_split.yaml`` (and ``configs/qwen3tts_split.yaml``
   for the 0.6B) runs the Codec on a second worker that
   shares GPU 0 (``rank_devices``) and caps the Talker KV pool so both fit.
