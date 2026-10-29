@@ -46,8 +46,9 @@ _ENDED_AT_PREFILL = "ended_at_prefill"
 
 class TokenStop(NamedTuple):
     """When an AR submodule's sampled token ends its decode loop: on a stop
-    id (unless the request's sampler config sets ``ignore_eos``), or once
-    the request has generated ``max_tokens`` tokens.
+    id, unless the request's sampler config sets ``ignore_eos``. The token
+    budget is the loop's cap (``Model.get_loop_caps``), which the runtime
+    enforces.
 
     Declared as ``ARNodeSubmodule.token_stop``; ``check_stop`` and
     ``check_stop_batched`` follow from it.
@@ -61,15 +62,11 @@ class TokenStop(NamedTuple):
     sampler: str
     # the only walk whose rows can stop the loop; None for every walk
     walk: str | None = None
-    # request-state key counting the tokens generated so far; None counts
-    # the loop's iterations, plus the token this step sampled
-    generated_key: str | None = None
     # walks that sample the reply's first token before the loop runs. A stop
     # id sampled there has no loop to stop, so the reply ends at the loop's
     # first step (``ARNodeSubmodule.ended_at_prefill``), whose ``buffer`` the
     # engine drops after postprocess, so the loop's client edge must carry
-    # ``buffer``. The loop count includes the prefill's token (a
-    # ``generated_key`` counter has to count it itself)
+    # ``buffer``
     prefill_walks: frozenset[str] = frozenset()
 
 
@@ -1205,22 +1202,13 @@ class ARNodeSubmodule(NodeSubmodule):
             return True
         # the set test first: a stop id is rare, and the config read behind
         # it goes through the info wrapper
-        on_stop_id = token in stop.stop_ids and not info.resource_configs[stop.sampler].ignore_eos
+        if token not in stop.stop_ids or info.resource_configs[stop.sampler].ignore_eos:
+            return False
         if prefill_walks and info.graph_walk in prefill_walks:
             # no loop on this walk to stop: the loop's first step will
-            if on_stop_id:
-                self.request_state(request_id).add(_ENDED_AT_PREFILL, True)
+            self.request_state(request_id).add(_ENDED_AT_PREFILL, True)
             return False
-        if not on_stop_id:
-            # read, never create: the check can run after the state was dropped
-            generated = (
-                info.dynamic_loop_iter_counts.get(stop.loop, 0) + (2 if prefill_walks else 1)
-                if stop.generated_key is None
-                else int(self.request_states.get(request_id, {}).get(stop.generated_key, 0))
-            )
-            if generated < info.max_tokens:
-                return False
-        # only a row of ``walk`` ends the loop; tested last, as most rows go on
+        # only a row of ``walk`` ends the loop
         return stop.walk is None or info.graph_walk == stop.walk
 
     def split_inputs(

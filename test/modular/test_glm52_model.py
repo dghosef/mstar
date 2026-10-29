@@ -310,23 +310,18 @@ def test_glm52_check_stop_continues_on_normal_token():
     assert sub.check_stop("r0", _fwd_info(), outputs) == set()
 
 
-def test_glm52_check_stop_ignore_eos_runs_to_max_tokens():
+def test_glm52_check_stop_ignore_eos_runs_to_the_loop_cap():
+    # the cap (``get_loop_caps``) ends the loop at max_tokens, not the stop check
     sub = _make_submodule(Glm52ModelConfig())
     outputs = {"new_token": [torch.tensor([154820])]}
     assert sub.check_stop("r0", _fwd_info(ignore_eos=True), outputs) == set()
-    # max_tokens counts every generated token, the prefill's included: 1 +
-    # iters+1. For max 8 the stop fires at decode iter 6 (8 total), not 7.
-    assert sub.check_stop(
-        "r0", _fwd_info(max_tokens=8, ignore_eos=True, iters=5), outputs,
-    ) == set()
-    assert sub.check_stop(
-        "r0", _fwd_info(max_tokens=8, ignore_eos=True, iters=6), outputs,
-    ) == {"decode_loop"}
+    assert sub.check_stop("r0", _fwd_info(max_tokens=8, ignore_eos=True, iters=6), outputs) == set()
 
 
 def test_glm52_check_stop_batched_agrees_with_check_stop():
     """One tolist for the batch, the same answer per request; a row the step has no token
-    for is skipped, as the per-request path skips a request without outputs."""
+    for is skipped, as the per-request path skips a request without outputs. A row at its
+    token budget goes on: the loop's cap ends it."""
     from mstar.model.submodule_base import HostRows
 
     sub = _make_submodule(Glm52ModelConfig())
@@ -342,9 +337,7 @@ def test_glm52_check_stop_batched_agrees_with_check_stop():
         rid: loops for rid, token in zip(rows, tokens, strict=True)
         if (loops := sub.check_stop(rid, infos[rid], {"new_token": [token[None]]}))
     }
-    assert batched == per_request == {
-        "eos": {"decode_loop"}, "budget": {"decode_loop"}, "ended": {"decode_loop"},
-    }
+    assert batched == per_request == {"eos": {"decode_loop"}, "ended": {"decode_loop"}}
 
 
 def _engine_postprocess(submodule, request_id, request_info, outputs):

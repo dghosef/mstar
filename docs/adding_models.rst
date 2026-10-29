@@ -1091,12 +1091,12 @@ methods are:
 ``check_stop(...) -> set[str] | StopCheck`` (optional)
    Runs off the GPU thread, and may read tensor values. Return the names of the ``Loop``
    objects to stop, for example after seeing the EOS token. This is how a decode loop
-   terminates. An AR submodule whose loop ends on a stop token or the token budget sets
+   terminates. An AR submodule whose loop ends on a stop token sets
    ``self.token_stop = TokenStop(...)`` in ``__init__`` instead of writing one; that also
    gives it ``check_stop_batched``, which checks a whole step off one host copy of its
-   tokens. When a prefill walk outside the loop samples the reply's first token, list it
-   in ``prefill_walks``: the token counts toward ``max_tokens`` (a ``generated_key``
-   counter has to include it), and a stop id sampled
+   tokens. The token budget is the loop's cap from ``get_loop_caps``, not a stop check.
+   When a prefill walk outside the loop samples the reply's first token, list it
+   in ``prefill_walks``: a stop id sampled
    there ends the loop at its first step, whose ``buffer`` the engine drops, so the loop
    has to emit the token under that name (GLM-5.2, Command A+).
    To also keep some of this step's outputs from being routed, return
