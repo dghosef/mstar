@@ -187,6 +187,9 @@ class TalkerSubmodule(ARNodeSubmodule):
         self._flag_stager = PinnedStager(torch.bool, numel=self.MAX_BATCH_SIZE)
         self._index_stager = PinnedStager(torch.long, numel=self.MAX_BATCH_SIZE)
         self._prefill_ids: dict[tuple[int, ...], torch.Tensor] = {}
+        # prefill embeddings that are the same for every request (special text
+        # tokens, the assistant role, codec tags), built once from the weights
+        self._fixed_embeds: dict[tuple, torch.Tensor] = {}
         # zero text condition for a mixed step's prompt rows, sliced per row
         self._zero_rows: torch.Tensor | None = None
 
@@ -296,16 +299,25 @@ class TalkerSubmodule(ARNodeSubmodule):
             self._prefill_ids[ids] = tensor
         return tensor
 
+    def _fixed_embed(self, key: tuple, build: Callable[[], torch.Tensor]) -> torch.Tensor:
+        """``build()``, once per key: a prefill embedding no request changes, so
+        a prompt's prefill does not re-run its lookups and projections."""
+        embed = self._fixed_embeds.get(key)
+        if embed is None:
+            embed = self._fixed_embeds[key] = build()
+        return embed
+
     def _special_text_embeds(
         self, dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Project TTS BOS/EOS/PAD once for official sequence construction."""
+        """TTS BOS/EOS/PAD, projected, for official sequence construction."""
         token_ids = self._device_ids((
             self.config.tts_bos_token_id,
             self.config.tts_eos_token_id,
             self.config.tts_pad_token_id,
         ))
-        bos, eos, pad = self._project_text(token_ids).to(dtype).chunk(3, dim=1)
+        special = self._fixed_embed(("special", dtype), lambda: self._project_text(token_ids).to(dtype))
+        bos, eos, pad = special.chunk(3, dim=1)
         return bos, eos, pad
 
     def _frame_embeds(self, codes: torch.Tensor) -> torch.Tensor:
@@ -389,8 +401,9 @@ class TalkerSubmodule(ARNodeSubmodule):
         # The speaker slot sits between the language tags and the codec PAD:
         # a built-in speaker's codec embedding, or the reference x-vector.
         speaker_tag = [speaker_id] if speaker_id >= 0 else []
-        codec_ids = self._device_ids((*codec_prefix, *speaker_tag, codec.codec_pad_id, codec.codec_bos_id))
-        codec_embeds = self.model.model.codec_embedding(codec_ids)
+        codec_key = (*codec_prefix, *speaker_tag, codec.codec_pad_id, codec.codec_bos_id)
+        codec_ids = self._device_ids(codec_key)
+        codec_embeds = self._fixed_embed(("codec", codec_key), lambda: self.model.model.codec_embedding(codec_ids))
         dtype = codec_embeds.dtype
         if not speaker_tag and speaker_embed is not None:
             speaker_vector = speaker_embed.to(device=self.get_device(), dtype=dtype).reshape(1, 1, -1)
@@ -405,7 +418,8 @@ class TalkerSubmodule(ARNodeSubmodule):
 
         # Tags: TTS PAD over every codec tag but the last, TTS BOS over the
         # codec PAD; the codec BOS pairs with text (or the reference) below.
-        role_embed = project(assistant_ids[:, :prefix_len])
+        # ``process_prompt`` checked that the role is the fixed ChatML prefix
+        role_embed = self._fixed_embed(("role", dtype), lambda: project(assistant_ids[:, :prefix_len]))
         tag_text = torch.cat([
             pad_embed.expand(-1, codec_embeds.shape[1] - 2, -1),
             bos_embed,
@@ -424,9 +438,7 @@ class TalkerSubmodule(ARNodeSubmodule):
                 [codec_embeds[:, -1:], self._frame_embeds(reference).to(dtype).unsqueeze(0)], dim=1
             )
             if not stream_text:
-                codec_pads = self.model.model.codec_embedding(
-                    codec_ids.new_full((1, text_embed.shape[1]), codec.codec_pad_id)
-                )
+                codec_pads = codec_embeds[:, -2:-1].expand(-1, text_embed.shape[1], -1)
                 pieces += [text_embed + codec_pads, codec_embed + pad_embed]
                 trailing = empty_trailing
             elif text_embed.shape[1] > codec_embed.shape[1]:
@@ -444,9 +456,8 @@ class TalkerSubmodule(ARNodeSubmodule):
             trailing = torch.cat([project(text_tokens[:, 1:]), eos_embed], dim=1)
         else:
             text_embed = torch.cat([project(text_tokens), eos_embed], dim=1)
-            codec_pads = self.model.model.codec_embedding(
-                codec_ids.new_full((1, text_embed.shape[1]), codec.codec_pad_id)
-            )
+            # the codec PAD tag's embedding, the second-to-last of the tags
+            codec_pads = codec_embeds[:, -2:-1].expand(-1, text_embed.shape[1], -1)
             pieces.append(text_embed + codec_pads)
             pieces.append(pad_embed + codec_embeds[:, -1:])
             # Nothing left to feed: every frame adds TTS PAD (empty stream).
