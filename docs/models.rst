@@ -560,13 +560,20 @@ Qwen3-Omni notes
   steps feed each sampled code into the next, so small differences can change
   later codes at near-ties.
 - The audio encoder takes the clips of up to 16 requests a step and packs
-  them along time in request order, starting a new call when the next clip
-  would take it past 300 s of audio, with attention windowed within each
-  clip. A clip's embeddings can differ at the last bit with what it is
-  batched beside, since the packed GEMMs' shapes change with the call's total
-  frames, and a prefix-cached audio prefix keeps the embeddings it was first
-  computed with, so a later request reusing it inherits that first batch's
-  rounding.
+  them along time in request order into one pass, with attention windowed
+  within each clip, while they fit its largest capture (8192 encoder rows,
+  about 630 s of audio). A larger step runs its clips one at a time, each
+  replaying the captured layers when it fits 8192 rows; only a clip over
+  8192 rows runs the layers eagerly. A
+  clip's embeddings can differ at the last bit with what it is batched
+  beside, since the packed GEMMs' shapes change with the pass's total rows,
+  and a prefix-cached audio prefix keeps the embeddings it was first computed
+  with, so a later request reusing it inherits that first batch's rounding.
+- The Thinker's text and audio prefill replay captured graphs on the ladder
+  ``128 ... 8192`` tokens (with 6144), so a burst of new prompts that batches
+  into one step of a few thousand tokens still replays; a longer step runs
+  eagerly. ``model_kwargs: prefill_token_buckets: [...]`` sets a deployment's
+  own ladder; each bucket adds captures and startup time.
 - The MoE layers route through the fused softmax-top-k kernel
   (``TopKRouter(fused_softmax_topk=True)``), which gives equal probabilities to
   the lower expert id where ``torch.topk`` may pick another.

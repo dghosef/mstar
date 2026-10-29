@@ -743,3 +743,17 @@ def test_bagel_keys_an_understood_image_and_otherwise_only_a_leading_text_span(b
     assert isinstance(_laid_out(bagel, interleaved, tensors=False)[0], dict), (
         "a prompt was laid out without the images that size it"
     )
+
+
+@pytest.mark.parametrize("ids,kept", [
+    # system turn cut, user kept, earlier assistant turn cut, the last turn kept whatever its role
+    ([9, 1, 2, 5, 5, 1, 3, 6, 1, 4, 7, 7, 1, 3, 8, 1, 4], [1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1]),
+    ([1, 2, 5], [1, 1, 1]),
+    ([5, 6], [1, 1]),
+])
+def test_the_talker_skips_system_and_earlier_assistant_turns(ids, kept):
+    pytest.importorskip("flashinfer")  # imported by Qwen3OmniModel's submodules
+    from mstar.model.qwen3_omni.submodules import talker_text_mask
+
+    config = SimpleNamespace(im_start_token_id=1, system_token_id=2, assistant_token_id=4)
+    assert talker_text_mask(torch.tensor(ids), config).tolist() == [bool(k) for k in kept]

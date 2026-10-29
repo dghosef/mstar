@@ -50,6 +50,8 @@ from mstar.engine.resources import (
     PagedKVConfig,
     PositionConfig,
     PositionSpec,
+    RaggedAttentionConfig,
+    RaggedAttentionSpec,
     ResourceReqConfig,
     SamplerSpec,
     SamplingReqConfig,
@@ -83,6 +85,7 @@ from mstar.model.multimodal import (
 from mstar.model.qwen3_omni.components.rope import get_rope_index_vision
 from mstar.model.qwen3_omni.components.talker import Qwen3OmniCodePredictor
 from mstar.model.qwen3_omni.config import (
+    AUDIO_ATTN,
     CODE_PRED_SAMPLER,
     TALKER_ATTN,
     TALKER_KV,
@@ -165,10 +168,13 @@ class Qwen3OmniModel(Model):
         self,
         model_path_hf: str,
         cache_dir: str | None = None,
+        prefill_token_buckets: list[int] | None = None,
         **kwargs,
     ):
         self.cache_dir = cache_dir
         self.model_path_hf = model_path_hf
+        # the Thinker's captured prefill ladder (`ThinkerSubmodule.PREFILL_TOKEN_BUCKETS`)
+        self.prefill_token_buckets = prefill_token_buckets
 
         self.CONVERTER = [
             WeightConverter(
@@ -227,6 +233,9 @@ class Qwen3OmniModel(Model):
     # Model ABC: resources
     # -------------------------------------------------------------------
     def get_node_resources(self) -> list[NodeResourceSpec]:
+        from mstar.model.qwen3_omni.submodules import AudioEncoderSubmodule
+
+        audio = self.config.audio_encoder
         thinker_kv = PagedKVConfig(
             num_layers=self.config.thinker_text.num_hidden_layers,
             num_kv_heads=self.config.thinker_text.num_key_value_heads,
@@ -298,7 +307,19 @@ class Qwen3OmniModel(Model):
                 nodes={"Talker"},
                 vocab_size=self.config.code_predictor.vocab_size,
                 enable_repetion_penalty=False,
-            )
+            ),
+            RaggedAttentionSpec(
+                resource_key=AUDIO_ATTN,
+                nodes={"audio_encoder"},
+                config=RaggedAttentionConfig(
+                    num_qo_heads=audio.encoder_attention_heads,
+                    num_kv_heads=audio.encoder_attention_heads,
+                    head_dim=audio.d_model // audio.encoder_attention_heads,
+                    dtype=torch.bfloat16,
+                    # a step's clips are one row of windows (see AudioEncoderSubmodule)
+                    max_segments_per_request=AudioEncoderSubmodule.MAX_WINDOWS,
+                ),
+            ),
         ]
 
     def get_request_resource_configs(
@@ -1585,6 +1606,7 @@ class Qwen3OmniModel(Model):
         return ThinkerSubmodule(
             thinker_model=thinker_model,
             config=self.config,
+            prefill_token_buckets=self.prefill_token_buckets,
         )
 
     def _create_talker_submodule(
