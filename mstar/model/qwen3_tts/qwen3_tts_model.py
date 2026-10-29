@@ -13,10 +13,10 @@ registry key.
 Architecture (two asynchronous partitions):
     Talker     - text/voice prefill, then autoregressive 16-group codec frames
     RefEncoder - (Base) reference clip -> x-vector + codec frames, feeds the prefill
-    Codec      - stateless speech-tokenizer decoder producing PCM chunks
+    Codec      - speech-tokenizer decoder producing PCM chunks, its state kept per stream
 
 Streaming topology:
-    Talker --[codec_tokens, ScheduledLeftContextChunkPolicy((1, 3, 8, 16), 25, 72)]--> Codec
+    Talker --[codec_tokens, ScheduledLeftContextChunkPolicy((1, 3, 8, 16), 25, 0)]--> Codec
 
 Request state machine:
     Talker: talker_prefill | talker_prefill_clone -> talker_decode loop -> done on EOS/token limit
@@ -58,6 +58,7 @@ from mstar.engine.resources import (
     SamplerSpec,
     SamplingReqConfig,
 )
+from mstar.engine.resources.recurrent import RecurrentStateConfig, RecurrentStateSpec
 from mstar.graph.base import (
     GraphEdge,
     GraphNode,
@@ -73,6 +74,7 @@ from mstar.model.qwen3_tts.config import (
     CHATML_ASSISTANT_PREFIX_TOKEN_IDS,
     CHATML_ASSISTANT_SUFFIX_TOKEN_IDS,
     CODE_PRED_SAMPLER,
+    CODEC_STATE,
     LANGUAGE_ID_KEY,
     PROMPT_LAYOUT_KEY,
     REF_CLIP_KEY,
@@ -390,6 +392,10 @@ class Qwen3TTSModel(Model):
     prompt processing, configuration, and output encoding.
     """
 
+    # Streams the codec state pool holds (about 5 MiB each in float32); a
+    # deployment sizes it with ``resources: {codec_state: {max_slots: ...}}``.
+    MAX_CODEC_STREAMS = 256
+
     def __init__(
         self,
         model_path_hf: str,
@@ -451,10 +457,13 @@ class Qwen3TTSModel(Model):
     # -----------------------------------------------------------------------
 
     def get_node_resources(self) -> list[NodeResourceSpec]:
-        """Talker paged KV + attention/position/sampler resources.
+        """Talker paged KV + attention/position/sampler resources, and the
+        Codec's per-stream decoder state.
 
         The CodePredictor's frame-local KV scratch is not a resource; the
         Talker submodule owns it (overwritten every step)."""
+        from mstar.model.qwen3_tts.components.incremental_codec import codec_state_blocks
+
         talker = self.config.talker
         cp = talker.code_predictor
         talker_kv = PagedKVConfig(
@@ -483,6 +492,16 @@ class Qwen3TTSModel(Model):
                 resource_key=CODE_PRED_SAMPLER, nodes={"Talker"},
                 vocab_size=cp.vocab_size,
                 enable_repetion_penalty=False,
+            ),
+            RecurrentStateSpec(
+                resource_key=CODEC_STATE, nodes={"Codec"},
+                config=RecurrentStateConfig(
+                    # the transformer's layers are named blocks
+                    num_layers=1,
+                    blocks=codec_state_blocks(self.config.codec, self.codec_dtype),
+                    # streams being decoded at once, + 1 for the pool's sink slot
+                    max_slots=self.MAX_CODEC_STREAMS + 1,
+                ),
             ),
         ]
 
@@ -603,14 +622,13 @@ class Qwen3TTSModel(Model):
         ]
 
     def get_partition_topology(self) -> PartitionTopology:
-        """Buffer codec frames in a ramp of chunks with left context.
+        """Buffer codec frames in a ramp of chunks of new frames.
 
         The first Codec invocation runs after ``chunk_schedule[0]`` frames so
-        audio starts flowing early; chunks then grow to ``chunk_frames``. Every
-        window after the first is preceded by up to ``left_context_frames``
-        already decoded frames to avoid boundary artifacts;
-        ``CodecSubmodule.postprocess`` removes the duplicated PCM prefix using
-        the context count the stream buffer reports for each window.
+        audio starts flowing early; chunks then grow to ``chunk_frames``. No
+        chunk repeats earlier frames: the codec keeps its decoder state per
+        stream (``CODEC_STATE``). Only an in-context clone's first chunk carries
+        context, the reference tail primed into the stream.
         """
         from mstar.model.qwen3_tts.submodules import CodecSubmodule
 
@@ -625,7 +643,7 @@ class Qwen3TTSModel(Model):
                     chunk_policy_factory=lambda: ScheduledLeftContextChunkPolicy(
                         schedule=codec.chunk_schedule,
                         chunk=codec.chunk_frames,
-                        left_context=codec.left_context_frames,
+                        left_context=0,
                     ),
                     batch_hold=ChunkBatchHold(
                         max_wait_s=self.codec_batch_hold_ms / 1000,
@@ -881,7 +899,7 @@ class Qwen3TTSModel(Model):
             LANGUAGE_ID_KEY: language_id,
             # set in every mode (0 without an in-context clone): the data worker
             # lays this over the request's own kwargs
-            self.CODEC_STREAM_LEAD_KEY: min(ref_frames, self.config.codec.left_context_frames),
+            self.CODEC_STREAM_LEAD_KEY: min(ref_frames, self.config.codec.clone_lead_frames),
         }
         clips = (tensors or {}).get("audio_inputs", [])
         if clips:
@@ -1031,9 +1049,6 @@ class Qwen3TTSModel(Model):
                 unpersist_tensors=[],
                 step_metadata={
                     "codec_chunk_frames": self.config.codec.chunk_frames,
-                    "codec_left_context_frames": (
-                        self.config.codec.left_context_frames
-                    ),
                     "codec_chunk_schedule": list(self.config.codec.chunk_schedule),
                 },
             )
