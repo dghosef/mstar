@@ -1231,7 +1231,7 @@ class Qwen3TTSModel(Model):
         )
         # The captured depth loop indexes all residual LM heads as one tensor;
         # consolidate after the individual checkpoint heads are loaded.
-        code_predictor.consolidate_stacked_weights()
+        code_predictor.consolidate_stacked_weights(talker.model.codec_embedding.weight)
         code_predictor.eval()
         return TalkerSubmodule(talker, code_predictor, self.config)
 

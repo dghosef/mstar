@@ -3,7 +3,7 @@ against the op sequences they replace (GPU only).
 
 * ``cp_attend``: q/k RMSNorm + RoPE, the dense-KV write and causal attention
   over the depth cache, against the same math in fp32.
-* ``cp_embed_accumulate``: the index_select + add.
+* ``cp_embed_accumulate``: the index_select + add, and the projected next input.
 * Qwen3-TTS's depth loop, which calls them with its own config: against its
   layers run unfused.
 """
@@ -70,12 +70,16 @@ def test_cp_attend_matches_the_unfused_ops(bs, seq_len, cache_pos):
         torch.testing.assert_close(out[:, s].float(), ref, rtol=2e-2, atol=2e-2)
 
 
-@pytest.mark.parametrize("bs", [1, 8, 32])
-def test_cp_embed_accumulate_matches_the_unfused_ops(bs):
+@pytest.mark.parametrize("bs,projected,init", [(1, False, False), (8, False, True), (32, True, False), (5, True, True)])
+def test_cp_embed_accumulate_matches_the_unfused_ops(bs, projected, init):
+    """The index_select + add (or, with ``init``, the sum's first term), the
+    code recorded, and the next input: the embedding, or its row of the
+    projected table."""
     from mstar.model.components.code_predictor_kernels import cp_embed_accumulate
 
     torch.manual_seed(2)
     weight = torch.randn(2048, 1024, device="cuda", dtype=torch.bfloat16)
+    table = torch.randn(2048, 512, device="cuda", dtype=torch.bfloat16) if projected else None
     tokens = torch.randint(0, 2048, (bs,), device="cuda")
     emb_sum = torch.randn(bs, 1024, device="cuda")
     codes = torch.randint(0, 2048, (bs, 16), device="cuda")
@@ -83,13 +87,12 @@ def test_cp_embed_accumulate_matches_the_unfused_ops(bs):
 
     ref_codes[:, 5] = tokens
     ref_emb = torch.nn.functional.embedding(tokens, weight)
-    ref_sum.add_(ref_emb)
+    ref_sum = ref_emb.float() if init else ref_sum.add_(ref_emb)
 
-    emb = cp_embed_accumulate(tokens, weight, emb_sum, codes, 5)
-    assert torch.equal(emb, ref_emb)
+    emb = cp_embed_accumulate(tokens, weight, emb_sum, codes, 5, inputs=table, init=init)
+    assert torch.equal(emb, ref_emb if table is None else torch.nn.functional.embedding(tokens, table))
     assert torch.equal(emb_sum, ref_sum)
     assert torch.equal(codes, ref_codes)
-
 
 
 def _rms(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
