@@ -78,9 +78,10 @@ def test_cosmos3_vae_decode_nodes_compile_without_comprehensive_padding(vae, com
     assert all(_padding_off(kw) for kw in compiles)
 
 
-def test_cosmos3_fast_decode_compiles_only_its_decoder_step(compiles, monkeypatch):
+def test_cosmos3_fast_decode_compiles_its_decoder_step_and_the_image_decode(compiles, monkeypatch):
     monkeypatch.delenv("COSMOS3_COMPILE_VAE", raising=False)
     # Its own VAE: the fast path casts and converts the node's instance in place.
     sub = Cosmos3VAEDecoderSubmodule(_tiny_vae(), Cosmos3Config(vae_decode_fast=True))
     assert sub._whole_clip is not None
-    assert len(compiles) == 1 and _padding_off(compiles[0])
+    # the stock decode, which images (one latent) take, then the clips' decoder step
+    assert len(compiles) == 2 and all(_padding_off(kw) for kw in compiles)

@@ -6,6 +6,7 @@ reallocated: a `torch.zeros` firing on a later, larger layout means a replay
 reads freed memory.
 """
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -180,6 +181,18 @@ class GDNPrefillWrapper(GDNWrapper):
         self._conv_metadata: ConvMetadata | None = None
         self._seqlens_cpu: torch.Tensor | None = None
 
+        # Snapshots: the kernel checkpoints every row's state each `_every`
+        # tokens, and the ones a row keeps are scattered into snapshot slots.
+        # `_snapshot_index` holds, per snapshot, the checkpoint, the token it
+        # ends at, and the slot. Padding entries write the sink.
+        self._every = 0
+        self._checkpoint_cu: torch.Tensor | None = None
+        self._snapshot_index: torch.Tensor | None = None
+        self._num_snapshots = 0
+        self._checkpoints: torch.Tensor | None = None
+        self._num_checkpoints = 0
+        self._conv_taps: torch.Tensor | None = None
+
     def _plan_conv(
         self, spans: list[int],
     ):
@@ -286,6 +299,9 @@ class GDNPrefillWrapper(GDNWrapper):
         spans: list[int],
         slots: torch.Tensor,
         has_state: torch.Tensor,
+        snapshots: Sequence[tuple[int, int, int]] = (),
+        every: int = 0,
+        checkpoints: torch.Tensor | None = None,
     ):
         # Before the fixup below: the tokens it hands the padding rows sit past
         # the real ones, where the mask zeroes them.
@@ -298,6 +314,10 @@ class GDNPrefillWrapper(GDNWrapper):
 
         self._plan_conv(spans)
         self._build_cu_buffer(spans)
+        # a captured graph checkpoints whether or not the step keeps any
+        self._every = every if snapshots or self._accelerator_graph else 0
+        if self._every:
+            self._plan_snapshots(spans, snapshots, checkpoints)
 
         self._build_mask(self._plan_tokens)
         num_rows = len(spans)
@@ -314,6 +334,49 @@ class GDNPrefillWrapper(GDNWrapper):
         token mask is all ones and selecting by it is a full-size no-op copy
         (~0.3 ms a layer on a 26k-token prefill)."""
         return not self._accelerator_graph and not self._plan_borrowed
+    def _plan_snapshots(
+        self, spans: list[int], snapshots: Sequence[tuple[int, int, int]],
+        checkpoints: torch.Tensor | None,
+    ):
+        every = self._every
+        rows = len(spans)
+        starts, checkpoint_cu = [0], [0]
+        for span in spans:
+            starts.append(starts[-1] + span)
+            checkpoint_cu.append(checkpoint_cu[-1] + span // every)
+        # under capture `rows` is the bucket's row count, and a row keeps at most two snapshots
+        capacity = (
+            min(2 * rows, self._max_num_tokens // every) if self._accelerator_graph else len(snapshots)
+        )
+        assert len(snapshots) <= capacity, f"{len(snapshots)} snapshots in a step captured for {capacity}"
+        pad = capacity - len(snapshots)
+        index = [
+            [checkpoint_cu[row] + offset // every - 1 for row, offset, _ in snapshots] + [0] * pad,
+            [starts[row] + offset for row, offset, _ in snapshots] + [0] * pad,
+            [slot for _, _, slot in snapshots] + [self._null_slot_id] * pad,
+        ]
+
+        if self._checkpoint_cu is None or self._checkpoint_cu.numel() < self._rows_capacity + 1:
+            self._checkpoint_cu = torch.zeros(self._rows_capacity + 1, dtype=torch.int64, device=self._device)
+        if self._snapshot_index is None or self._snapshot_index.shape[1] < capacity:
+            self._snapshot_index = torch.zeros((3, capacity), dtype=torch.int64, device=self._device)
+        pin = torch.accelerator.is_available()
+        self._checkpoint_cu[: rows + 1].copy_(
+            torch.tensor(checkpoint_cu, dtype=torch.int64, pin_memory=pin), non_blocking=True,
+        )
+        self._snapshot_index[:, :capacity].copy_(
+            torch.tensor(index, dtype=torch.int64, pin_memory=pin), non_blocking=True,
+        )
+        self._num_snapshots = capacity
+        self._num_checkpoints = checkpoint_cu[-1]
+        assert checkpoints is not None, "a step that keeps snapshots was planned without a checkpoint buffer"
+        assert self._num_checkpoints <= checkpoints.shape[0], (
+            f"{self._num_checkpoints} checkpoints in a buffer of {checkpoints.shape[0]}"
+        )
+        assert not self._accelerator_graph or self._checkpoints is None or checkpoints is self._checkpoints, (
+            "a larger eager step replaced the checkpoint buffer this graph was captured with"
+        )
+        self._checkpoints = checkpoints
 
     def run_conv(
         self,
@@ -324,6 +387,8 @@ class GDNPrefillWrapper(GDNWrapper):
         activation: str | None = "silu",
     ):
         from mstar.utils.causal_conv1d import causal_conv1d_fn
+        if self._every:
+            self._save_conv_snapshots(x, conv_layer)
         # the varlen kernel is feature-major
         out = causal_conv1d_fn(
             x=x.transpose(0, 1),
@@ -349,6 +414,15 @@ class GDNPrefillWrapper(GDNWrapper):
         # `cu_seqlens` range, so a capture bucket's padded tail keeps whatever
         # the previous replay left in that memory.
         return _masked_rows(out, self._plan_state.token_mask)
+
+    def _save_conv_snapshots(self, x: torch.Tensor, conv_layer: torch.Tensor):
+        """A snapshot's conv state is the inputs before its boundary, the
+        window a prefill ending there leaves in its slot."""
+        if self._conv_taps is None:
+            self._conv_taps = torch.arange(-conv_layer.shape[-1], 0, device=x.device)
+        index = self._snapshot_index[:, : self._num_snapshots]
+        window = (index[1, :, None] + self._conv_taps).clamp_min(0)
+        conv_layer.index_copy_(0, index[2], x[window].transpose(1, 2).to(conv_layer.dtype))
 
     def run(self, q, k, v, a, b, state, a_log, dt_bias):
         from flashinfer.gdn_prefill import chunk_gated_delta_rule
@@ -396,6 +470,14 @@ class GDNPrefillWrapper(GDNWrapper):
         # and v by `run_conv`, whose output they are, the gates here.
         g, beta = _chunked_gates(a, b, a_log, dt_bias, self._plan_state.token_mask)
 
+        snapshot_args = {}
+        if self._every:
+            checkpoints = self._checkpoints
+            snapshot_args = dict(
+                state_checkpoints=checkpoints,
+                checkpoint_cu_starts=self._checkpoint_cu[: self._plan_state.num_rows + 1],
+                checkpoint_every_n_tokens=self._every,
+            )
         out, final = chunk_gated_delta_rule(
             q=q, k=k, v=v,
             g=g,
@@ -407,6 +489,7 @@ class GDNPrefillWrapper(GDNWrapper):
             # ignored by this kernel (see `qk_l2norm_in_kernel`); the caller
             # has already normalised q and k
             use_qk_l2norm_in_kernel=False,
+            **snapshot_args,
         )
 
         if not self._has_sink_state:
@@ -419,6 +502,9 @@ class GDNPrefillWrapper(GDNWrapper):
             )
             final = torch.where(live.view(-1, 1, 1, 1), final, padded)
         state.index_copy_(0, addr, final.to(state.dtype))
+        if self._every:
+            index = self._snapshot_index[:, : self._num_snapshots]
+            state.index_copy_(0, index[2], checkpoints.index_select(0, index[0]).to(state.dtype))
         return out[:real_len]
 
 
@@ -627,6 +713,9 @@ class GDNMixedWrapper(GDNWrapper):
         spans: list[int],
         host_slots: tuple[int, ...],
         host_has_state: tuple[bool, ...],
+        snapshots: Sequence[tuple[int, int, int]] = (),
+        every: int = 0,
+        checkpoints: torch.Tensor | None = None,
     ):
         null = self._null_slot_id
         span = np.asarray(spans, dtype=np.int64)
@@ -687,7 +776,12 @@ class GDNMixedWrapper(GDNWrapper):
         # (its tail masked off); an eager one is sized to its prompt tokens,
         # and every other token of an eager step is a decode row's.
         self._front_len = None if self._accelerator_graph else len(front)
-        self._prefill.plan(pre_spans, pslot_buf[:cap], phas_buf[:cap])
+        # each snapshot's row, renumbered by its place among the chunked half's prompt rows
+        pre_row = {int(row): i for i, row in enumerate(prefill_rows)}
+        pre_snapshots = [(pre_row[row], offset, slot) for row, offset, slot in snapshots]
+        self._prefill.plan(
+            pre_spans, pslot_buf[:cap], phas_buf[:cap], pre_snapshots, every, checkpoints,
+        )
         self._decode.plan([1] * bs, dslot_buf[:bs])
 
     def _split(self, x: torch.Tensor):

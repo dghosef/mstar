@@ -222,12 +222,14 @@ def test_a_batch_hold_keeps_later_chunks_back_until_enough_are_ready():
         }),
         _stream_holds={"codes": ChunkBatchHold(max_wait_s=60.0, min_chunks=3)},
         _consumer_node_cache={"codes": "vocoder"},
+        _walk_driven_edges={},
         tensor_manager=SimpleNamespace(store_and_return_tensor_info=lambda rid, d, **k: {"codes": []}),
         _graph_runtime=SimpleNamespace(ingest_inputs_batch=lambda block, **k: []),
         _edge_block=list,
         _mark_stream_ingested=lambda rid, edge: ingested.append(rid),
     )
-    worker._pop_streaming_edge = lambda *a: Worker._pop_streaming_edge(worker, *a)
+    worker._pop_streaming_edge = lambda *a, **k: Worker._pop_streaming_edge(worker, *a, **k)
+    worker._enter_chunk_walk = lambda *a: Worker._enter_chunk_walk(worker, *a)
 
     uids = iter(range(1000))
 
