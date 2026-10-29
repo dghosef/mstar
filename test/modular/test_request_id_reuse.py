@@ -37,6 +37,7 @@ from mstar.api_server import entrypoint
 from mstar.api_server.data_worker import PreprocessWorker, PreprocessWorkerThread
 from mstar.api_server.entrypoint import request_id_in_use
 from mstar.api_server.request_types import APIServerMessage, RequestFailed, ResultChunk
+from mstar.streaming.topology import PartitionTopology
 from mstar.utils.ipc_format import (
     ConductorMessageType,
     NewRequestConductor,
@@ -50,6 +51,9 @@ TEXT = dict(input_modalities=["text"], output_modalities=["text"])
 
 
 class _Model:
+    def get_partition_topology(self):
+        return PartitionTopology(partitions=["default"])
+
     def process_prompt(self, *args, **kwargs):
         return None
 
@@ -66,6 +70,11 @@ class _Socket:
         self.polls = 0
         self.cond = threading.Condition()
 
+    def poll_for_messages(self, timeout_ms=1):
+
+        return False
+
+
     def get_all_new_messages(self):
         msgs = []
         while not self.inbox.empty():
@@ -77,6 +86,13 @@ class _Socket:
 
     def send(self, entity, msg):
         self.sent.append((entity, msg))
+
+    # the data worker's outbox encodes with this: identity, so sends arrive as objects
+    codec = SimpleNamespace(encode=lambda msg: msg)
+
+    def try_send_bytes(self, entity, msg):
+        self.send(entity, msg)
+        return True
 
     def deliver(self, message_type, body):
         self.inbox.put(WorkerMessage(message_type=message_type, body=body))
@@ -94,6 +110,11 @@ class _TensorManager:
 
     def register_for_send(self, request_id, tensor_infos):
         pass
+
+    def take_failed_reads(self):
+
+        return []
+
 
     def get_ready_tensors(self):
         return {}
@@ -373,7 +394,8 @@ def _run_message_thread(s, pw, chunks=(), messages=(), until=lambda: True):
     pw.get_profile_updates = lambda: []
     pw.finished_reading = lambda rid, drained: None
     s.communicator = SimpleNamespace(
-        get_all_new_messages=lambda: [messages.pop(0)] if messages else [],
+        poll_for_messages=lambda timeout_ms=1: False,
+            get_all_new_messages=lambda: [messages.pop(0)] if messages else [],
     )
     s.conductor_proc = None
     s._liveness_interval_s = 0.5
@@ -715,14 +737,14 @@ def test_a_stream_is_bound_to_its_submission_before_it_is_iterated():
 def test_an_openai_chat_stream_is_bound_before_it_is_iterated():
     """The chat stream is bound when it is made: Starlette first iterates it
     after the id is reused, and it still reads its own request's result."""
-    from mstar.api_server.openai.serving_chat import _stream
+    from mstar.api_server.openai.serving_chat import _stream_events
 
     pw = _PreprocessWorker()
     s = _api_server(pw)
     s.submit_request(text="first", request_id="X", **TEXT)
 
     async def run():
-        body = _stream(s, "m", "X", 24000)
+        body = _stream_events(s.iter_result_chunk_batches("X"), "m", "X", 24000)
         _complete(s, pw.inputs[0].request_id, b"first")
         s.submit_request(text="second", request_id="X", **TEXT)
         _complete(s, pw.inputs[1].request_id, b"second")

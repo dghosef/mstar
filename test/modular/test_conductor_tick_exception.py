@@ -6,6 +6,7 @@ request whose handling raises must fail on its own: its client gets the
 error, its concurrency slot is freed, and every other request in the same
 tick carries on.
 """
+import re
 from collections import Counter, deque
 from types import SimpleNamespace
 
@@ -97,7 +98,7 @@ def _conductor(*ticks, requests):
     batches = [list(t) for t in ticks]
     c.communicator = SimpleNamespace(
         send=lambda entity, msg: c.sent.append((entity, msg)),
-        get_all_new_messages=lambda: batches.pop(0) if batches else [],
+        poll_for_messages=lambda timeout_ms=1: False, get_all_new_messages=lambda: batches.pop(0) if batches else [],
     )
     c.model = _Model()
     c.enable_nvtx = False
@@ -105,7 +106,7 @@ def _conductor(*ticks, requests):
     c._startup_message_backlog = []
     c.requests = dict(requests)
     c.draining = {}
-    c._worker_load = Counter()
+    c._replica_load = Counter()
     c.waiting_queue = []
     c.max_concurrent_requests = None
     c._early_reads_done = {}
@@ -225,7 +226,7 @@ def _drained_ab():
     return [_reads_done(rid, entity) for rid in "ab" for entity in ("worker_0", PREPROCESS)]
 
 
-def test_a_failure_batch_whose_handling_raises_fails_every_request_it_names():
+def test_a_failure_batch_whose_handling_raises_fails_every_request_it_names(caplog):
     # A FAIL_REQUESTS body has no request_id, only ``errors``.
     c = _conductor([_fail_ab()], _drained_ab(), requests={"a": _request(), "b": _request()})
 
@@ -236,9 +237,13 @@ def test_a_failure_batch_whose_handling_raises_fails_every_request_it_names():
     failed = _to_client(c, "request_failed")
     assert set(failed) == {"a", "b"}
     for rid in "ab":
-        assert failed[rid].error_message == (
-            "Conductor error handling FAIL_REQUESTS: RuntimeError: bookkeeping failed"
-        )
+        # the client gets an error id; the exception text stays in the log
+        (error_id,) = re.fullmatch(
+            r"Conductor error handling FAIL_REQUESTS: internal error \(error id ([0-9a-f]{12})\)",
+            failed[rid].error_message,
+        ).groups()
+        (record,) = [r for r in caplog.records if f"[error id {error_id}]" in r.getMessage()]
+        assert "bookkeeping failed" in record.getMessage()
     assert not c.requests and not c.draining
 
 
@@ -258,7 +263,8 @@ def test_one_request_that_raises_in_a_failure_batch_keeps_the_others_errors():
     ]
     assert sorted(f.request_id for f in failed) == ["a", "b"], "a request was answered twice"
     by_rid = {f.request_id: f.error_message for f in failed}
-    assert "could not tear a down" in by_rid["a"]
+    assert re.search(r"^Conductor error .*: internal error \(error id [0-9a-f]{12}\)$", by_rid["a"])
+    assert "could not tear a down" not in by_rid["a"]
     assert by_rid["b"] == "worker failed b"
 
 

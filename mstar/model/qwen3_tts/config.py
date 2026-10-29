@@ -308,19 +308,23 @@ class Qwen3TTSCodecConfig:
         the shapes the codec captures CUDA graphs for; any other window (a
         terminal flush, a shorter reference tail) pads up to the next one.
         """
+        return sorted({window for window, _ in self.codec_window_contexts(lead_frames)})
+
+    def codec_window_contexts(self, lead_frames: Sequence[int] = (0,)) -> set[tuple[int, int]]:
+        """``(window, context)`` of every full window ``codec_windows`` lists."""
         left = self.left_context_frames
         windows = set()
         for lead in lead_frames:
             delivered = lead
             for size in self.chunk_schedule:
-                windows.add(min(left, delivered) + size)
+                windows.add((min(left, delivered) + size, min(left, delivered)))
                 delivered += size
             while True:
-                windows.add(min(left, delivered) + self.chunk_frames)
+                windows.add((min(left, delivered) + self.chunk_frames, min(left, delivered)))
                 if delivered >= left:
                     break
                 delivered += self.chunk_frames
-        return sorted(windows)
+        return windows
 
 
     def frames_for_samples(self, num_samples: int) -> int:

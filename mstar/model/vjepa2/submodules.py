@@ -133,6 +133,11 @@ class VJepa2EncoderSubmodule(NodeSubmodule):
         # scheduler actually co-batches concurrent requests.
         if len(batch.request_ids) < 2:
             return False
+        if self.config.predictor_kind != "ac":
+            # A 64-frame clip is 8192 tokens, enough to fill the GPU alone, so
+            # batching buys no throughput, while each new batch size cost a
+            # recompile that stalled the step 10-60 s.
+            return False
         shapes: set[tuple] = {
             tuple(inp.tensor_inputs["video_frames"].shape) for inp in model_inputs
         }
@@ -169,6 +174,8 @@ class VJepa2EncoderSubmodule(NodeSubmodule):
             replay_graph_walks=list(self._AC_ROLLOUT_WALKS),
             single_request_inputs=NodeInputs(tensor_inputs={"video_frames": clip}, input_seq_len=frames),
             capture_batch_sizes=[1, 2, 4],
+            # an acceleration subset: larger encoder batches run eager, as before the capture
+            caps_eager_batch_size=False,
             capture_forward_method="forward_batched",
             additional_key_info=self._ac_rollout_key(),
             input_seq_dims={"pixel_values_videos": 0},
@@ -345,42 +352,13 @@ class VJepa2PredictorSubmodule(ARNodeSubmodule):
     absent, falls back to full-context / full-target defaults.  Output is
     the predicted hidden tensor at the target positions.
 
-    Supports cross-request batching when ``encoder_hidden`` shapes agree
-    across the batch AND (if provided) mask shapes agree.  All-defaults is
-    the common case — the full-context / full-target masks are derived from
-    ``encoder_hidden.shape`` and so are trivially homogeneous when the
-    encoder outputs are.
+    Runs one request per step: see VJepa2EncoderSubmodule.can_batch.
     """
 
     def __init__(self, predictor: VJEPA2Predictor, config: VJepa2Config):
         super().__init__()
         self.predictor = predictor
         self.config = config
-
-    def can_batch(
-        self,
-        batch: ExecutingBatch,
-        model_inputs: list[ARNodeInputs],
-    ) -> bool:
-        # B=1 → sequential forward; see VJepa2EncoderSubmodule.can_batch
-        # for the full justification (AC warm-latency regression on
-        # forward_batched when it's the only path).
-        if len(batch.request_ids) < 2:
-            return False
-        enc_shapes: set[tuple] = {
-            _shape_key(inp.input_embeds) for inp in model_inputs
-        }
-        ctx_shapes: set[tuple | None] = {
-            _shape_key(inp.tensor_inputs.get("context_mask")) for inp in model_inputs
-        }
-        tgt_shapes: set[tuple | None] = {
-            _shape_key(inp.tensor_inputs.get("target_mask")) for inp in model_inputs
-        }
-        return (
-            len(enc_shapes) == 1
-            and len(ctx_shapes) == 1
-            and len(tgt_shapes) == 1
-        )
 
     def prepare_inputs(
         self,
@@ -419,7 +397,6 @@ class VJepa2PredictorSubmodule(ARNodeSubmodule):
         engine_inputs: ModelInputsFromEngine,
         inputs: list[ARNodeInputs],
     ) -> dict[str, torch.Tensor]:
-        # Sequential (len == 1) and batched (len > 1) share this path.
         encoder_hidden = torch.cat([
             inp.input_embeds for inp in inputs
         ], dim=0)
@@ -462,30 +439,6 @@ class VJepa2PredictorSubmodule(ARNodeSubmodule):
         predicted = self.predictor(encoder_hidden, ctx_list, tgt_list)
         logger.info("VJepa2PredictorSubmodule.forward: output shape=%s", tuple(predicted.shape))
         return {"predicted_hidden": [predicted]}
-
-    def forward_batched(
-        self,
-        graph_walk: str,
-        engine_inputs: ModelInputsFromEngine,
-        encoder_hidden: torch.Tensor,
-        context_mask: torch.Tensor | None = None,
-        target_mask: torch.Tensor | None = None,
-        **kwargs,
-    ) -> dict[str, NameToTensorList]:
-        request_ids = engine_inputs.request_ids
-
-        ctx_list = [context_mask]
-        tgt_list = [target_mask]
-        logger.info(
-            "VJepa2PredictorSubmodule.forward_batched: encoder_hidden=%s rids=%d",
-            tuple(encoder_hidden.shape),
-            len(request_ids),
-        )
-        predicted = self.predictor(encoder_hidden, ctx_list, tgt_list)  # [B, N_pred, D]
-        return {
-            rid: {"predicted_hidden": [predicted[i : i + 1]]}
-            for i, rid in enumerate(request_ids)
-        }
 
 
 class VJepa2RolloutPredictorSubmodule(ARNodeSubmodule):
@@ -1182,6 +1135,14 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
 
         return out
 
+    @staticmethod
+    def _leased_block_loop(engine_inputs: ModelInputsFromEngine) -> "PiecewiseAcceleratorGraphRunner | None":
+        """The block loop's runner when this step leased it; without a lease
+        the loop runs inline, under ``declare_step``'s own KV and attention."""
+        if BLOCK_LOOP_REGION in engine_inputs.piecewise_leases:
+            return engine_inputs.piecewise_runners[BLOCK_LOOP_REGION]
+        return None
+
     @torch.compiler.disable
     def _rollout_step(
         self,
@@ -1195,8 +1156,8 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
     ) -> torch.Tensor:
         """One AC rollout step using either the CUDA-graph or eager path.
 
-        The CUDA-graph path (when a ``block_loop`` PiecewiseCudaGraphRunner is
-        available on ``engine_inputs``):
+        The CUDA-graph path (``runner``: the step leased the ``block_loop``
+        region, so its own step was declared and planned):
           1. Preamble (predictor_embed + action/state concat) runs eagerly.
           2. Position tensors are computed eagerly (hoisted out of the graph).
           3. Block loop replays the captured graph.
@@ -1207,7 +1168,7 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
         """
         p = self.predictor
 
-        if runner is not None and runner.can_run(encoder_hidden.size(0)):
+        if runner is not None:
             # --- CUDA-graph path ---
             x, cond_tokens, b, t = p._prepare_sequence(
                 encoder_hidden, actions, states, extrinsics
@@ -1264,7 +1225,7 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
             t_0=request_info.dynamic_loop_iter_counts.get("rollout_loop", 0),
             extrinsics=extrinsics,
             request_ids=engine_inputs.request_ids,
-            runner=engine_inputs.piecewise_runners.get(BLOCK_LOOP_REGION),
+            runner=self._leased_block_loop(engine_inputs),
         )
 
         logger.info(
@@ -1306,7 +1267,7 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
             t_0=iter_idx,
             extrinsics=extrinsics,
             request_ids=engine_inputs.request_ids,
-            runner=engine_inputs.piecewise_runners.get(BLOCK_LOOP_REGION),
+            runner=self._leased_block_loop(engine_inputs),
         )
 
         return {

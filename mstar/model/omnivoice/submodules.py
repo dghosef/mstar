@@ -38,7 +38,6 @@ from mstar.model.omnivoice.components.backbone import (
 from mstar.model.omnivoice.components.codec import (
     decode_canvas,
     encode_reference,
-    post_process,
 )
 from mstar.model.omnivoice.components.unmask import (
     apply_reveal,
@@ -259,8 +258,14 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
             tokens = inputs["audio_tokens"][0].to(device)
             target_len = tokens.shape[-1]
 
-        cond_len = prefix_ids.shape[-1] + target_len
-        uncond_len = target_len if float(meta["guidance_scale"]) != 0 else 0
+        # the row's place in the step's packed canvas, built once here
+        item = CanvasItem(
+            request_id=fwd_info.request_id,
+            prefix_ids=prefix_ids,
+            prefix_audio_mask=prefix_audio_mask,
+            tokens=tokens.unsqueeze(0),
+            guidance_scale=float(meta["guidance_scale"]),
+        )
         return NodeInputs(
             tensor_inputs={
                 "prefix_ids": prefix_ids,
@@ -270,10 +275,10 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
             },
             # the iteration, for postprocess: at iteration 0 the loop counter
             # is not there yet, and reading the step edge would sync
-            kwargs={"request_id": fwd_info.request_id, "doc_lens": (cond_len, uncond_len), "step": k},
+            kwargs={"request_id": fwd_info.request_id, "item": item, "step": k},
             # The row's packed contribution: its conditional document plus,
             # with CFG on, the target again as the unconditional one.
-            input_seq_len=cond_len + uncond_len,
+            input_seq_len=sum(item.doc_pair),
         )
 
     def declare_step(
@@ -286,10 +291,10 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
         **kwargs,
     ) -> SubmoduleStep | None:
         """The eager path's attention layout; a leased replay plans its own."""
-        if not self.config.backbone_graphs or (piecewise_leases or {}).get(BACKBONE_LAYERS):
+        if (piecewise_leases or {}).get(BACKBONE_LAYERS):
             return None
         return self._attention_step(
-            request_ids, document_pairs([inp.kwargs["doc_lens"] for inp in inputs])
+            request_ids, document_pairs([inp.kwargs["item"].doc_pair for inp in inputs])
         )
 
     @staticmethod
@@ -348,8 +353,6 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
     def _logits(self, engine_inputs: ModelInputsFromEngine, canvas: PackedCanvas) -> torch.Tensor:
         """The step's target logits: from the captured layer stack when a
         bucket fits, else eagerly through the same ragged attention."""
-        if not self.config.backbone_graphs:
-            return self.backbone(canvas)
         position_ids = canvas.position_ids[0]
         static_inputs = {
             "input_ids": canvas.packed_ids[0].t(),
@@ -357,14 +360,11 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
             "pos_ids": position_ids.to(torch.int32),
         }
         num_requests = len(canvas.items)
-        runner = engine_inputs.piecewise_runners.get(BACKBONE_LAYERS)
-        if runner is not None and runner.can_run(num_requests, int(position_ids.shape[0])):
-            hidden = runner.run(
+        if BACKBONE_LAYERS in engine_inputs.piecewise_leases:
+            hidden = engine_inputs.piecewise_runners[BACKBONE_LAYERS].run(
                 static_inputs=static_inputs,
                 request_ids=list(engine_inputs.request_ids),
-                seq_lens=document_pairs([
-                    (item.cond_len, item.target_len if item.does_cfg else 0) for item in canvas.items
-                ]),
+                seq_lens=document_pairs([item.doc_pair for item in canvas.items]),
                 real_bs=num_requests,
             ).get_view("hidden")
         else:
@@ -381,25 +381,14 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
 
         Canvases differ in length per request, so there is no padded collation
         here; the batch is one packed sequence with a document boundary per
-        CFG branch, and ``engine_inputs.per_request_info`` carries the
-        per-request guidance scale that decides each item's layout.
+        CFG branch, laid out from each row's ``CanvasItem`` (``prepare_inputs``),
+        whose guidance scale decides its documents.
         """
         device = self.get_device()
-        items = [
-            CanvasItem(
-                request_id=rid,
-                prefix_ids=row.tensor_inputs["prefix_ids"],
-                prefix_audio_mask=row.tensor_inputs["prefix_audio_mask"],
-                tokens=row.tensor_inputs["audio_tokens"].unsqueeze(0),
-                guidance_scale=float(
-                    engine_inputs.per_request_info[rid].step_metadata["guidance_scale"]
-                ),
-            )
-            for rid, row in zip(engine_inputs.request_ids, inputs, strict=True)
-        ]
+        items = [row.kwargs["item"] for row in inputs]
         return {
             "items": items,
-            "canvas": build_packed_canvas(items, self.config.audio_mask_id, device),
+            "canvas": build_packed_canvas(items, device),
         }
 
     def max_batch_size(self, graph_walk: str):
@@ -581,15 +570,17 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
 
 
 class OmniVoiceCode2WavSubmodule(_SingleRequestMixin, NodeSubmodule):
-    """Decode the finished canvas and apply the reference's output shaping.
+    """Decode the finished canvas to the codec's float waveform.
 
-    Emits ``audio_output``, 1-D **int16 PCM** at the codec's sample rate: the
-    speech handler concatenates node output straight into a WAV container, so
-    the conversion belongs here, as it does for orpheus and qwen3_tts.
+    Emits ``audio_output``, 1-D float32 at the codec's sample rate, and nothing
+    else happens here: the reference's output shaping (silence trim, level,
+    fade, pad) and the PCM16 conversion run in ``OmniVoiceModel.postprocess``
+    on the API side. Done in this step they synced the host and held up the
+    unmask loop of every other request.
 
     A canvas that still holds a MASK cell means the loop ended early, which
-    would decode to noise — that is a fault, not a degraded result, so it
-    raises rather than emitting.
+    would decode to noise -- a fault, not a degraded result. The step poisons
+    such a waveform with NaN (no host sync here), and ``postprocess`` refuses it.
     """
 
     disable_torch_compile = True
@@ -607,43 +598,16 @@ class OmniVoiceCode2WavSubmodule(_SingleRequestMixin, NodeSubmodule):
         inputs: NameToTensorList,
         **kwargs,
     ) -> NodeInputs:
-        tensor_inputs = {"audio_tokens": inputs["audio_tokens"][0]}
-        ref_rms = inputs.get("ref_rms")
-        if ref_rms:
-            tensor_inputs["ref_rms"] = ref_rms[0]
-        return NodeInputs(tensor_inputs=tensor_inputs)
+        return NodeInputs(tensor_inputs={"audio_tokens": inputs["audio_tokens"][0]})
 
     def forward(
         self,
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
         audio_tokens: torch.Tensor,
-        ref_rms: torch.Tensor | None = None,
         **kwargs,
     ) -> NameToTensorList:
-        info = engine_inputs.single_request_info
-        meta = info.step_metadata
-
-        remaining = int((audio_tokens == self.config.audio_mask_id).sum().item())
-        if remaining:
-            raise RuntimeError(
-                f"OmniVoice canvas for request {info.request_id} still holds "
-                f"{remaining} masked cells at decode; the unmask loop ended early."
-            )
-
         waveform = decode_canvas(self.codec, audio_tokens)
-        waveform = post_process(
-            waveform,
-            config=self.config,
-            # None means "no reference to match" and selects peak
-            # normalisation instead; that is a different code path, not a
-            # default value, so it must stay None rather than become 0.
-            ref_rms=None if ref_rms is None else float(ref_rms.reshape(-1)[0]),
-            pad_duration=float(meta.get("pad_duration", 0.1)),
-            fade_duration=float(meta.get("fade_duration", 0.1)),
-            enabled=bool(meta.get("postprocess_output", True)),
-        )
-        pcm16 = (
-            torch.from_numpy(waveform).float().clamp(-1, 1).mul(32767).to(torch.int16)
-        )
-        return {"audio_output": [pcm16]}
+        masked = (audio_tokens == self.config.audio_mask_id).any()
+        waveform = torch.where(masked, torch.full_like(waveform, float("nan")), waveform)
+        return {"audio_output": [waveform]}

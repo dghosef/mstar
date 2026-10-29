@@ -64,9 +64,10 @@ def test_segments_rebuild_the_prompt(model, modalities):
     )
     grids = out.metadata[IMAGE_GRIDS_KEY]
     out = out.new_input_tensors
-    assert grids == [tuple(g.tolist()) for g in out["image_grid_thw"]]
+    # the grids ride as host ints, never as a tensor signal
+    assert "image_grid_thw" not in out
     segments = out["text_inputs"]
-    assert len(out["image_grid_thw"]) == n_images
+    assert len(grids) == n_images
     assert len(out["pixel_values"]) == n_images
 
     # Re-render the same prompt to get the ids the split came from.
@@ -121,7 +122,6 @@ def test_schedule_matches_the_split(model):
     signals = {
         "text_inputs": list(out["text_inputs"]),
         "pixel_values": list(out["pixel_values"]),
-        "image_grid_thw": list(out["image_grid_thw"]),
     }
     schedule = model._prefill_schedule(modalities, signals, host_grids={IMAGE_GRIDS_KEY: host_grids})
 
@@ -139,21 +139,17 @@ def test_schedule_matches_the_split(model):
     assert list(step.image_grids) == host_grids
 
     # the nth tag of a kind takes the nth tensor of that kind, in order
-    for name in ("text_inputs", "pixel_values", "image_grid_thw"):
+    for name in ("text_inputs", "pixel_values"):
         got = step.input_tensors[name]
         assert len(got) == len(signals[name])
         for a, b in zip(got, signals[name], strict=True):
             assert a is b
 
-    # the grid has to reach both halves of the walk: the encoder lays out its
-    # patches with it, the LLM places the 3D positions with it. The LLM also
-    # reads the text spans now.
+    # the encoder reads the patches, the LLM the text spans; both take the
+    # grids from the step metadata
     edges = type(model)._walk_inputs(step)
     nodes = {(edge.next_node, edge.name) for edge in edges}
-    assert ("vision_encoder", "pixel_values") in nodes
-    assert ("vision_encoder", "image_grid_thw") in nodes
-    assert ("LLM", "image_grid_thw") in nodes
-    assert ("LLM", "text_inputs") in nodes
+    assert nodes == {("vision_encoder", "pixel_values"), ("LLM", "text_inputs")}
     # and each edge hands over every tensor of its name, not just the first
     by_name = {edge.name: edge for edge in edges if edge.next_node == "LLM"}
     assert len(by_name["text_inputs"].tensor_info) == len(signals["text_inputs"])
@@ -199,8 +195,9 @@ def test_image_only_message_renders_an_empty_text_span(model):
     out = model.process_prompt(
         None, ["image"], ["text"], tensors={"image_inputs": [an_image()]},
     )
+    assert len(out.metadata[IMAGE_GRIDS_KEY]) == 1
     out = out.new_input_tensors
-    assert len(out["pixel_values"]) == 1 and len(out["image_grid_thw"]) == 1
+    assert len(out["pixel_values"]) == 1
     # the template's framing around the image: a span before it and one after
     assert len(out["text_inputs"]) == 2
 

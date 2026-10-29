@@ -85,7 +85,7 @@ from mstar.model.qwen3_tts.config import (
 )
 from mstar.model.submodule_base import NodeSubmodule
 from mstar.streaming.chunk_policy import ScheduledLeftContextChunkPolicy
-from mstar.streaming.topology import Connection, PartitionTopology, StreamingGraphEdge
+from mstar.streaming.topology import ChunkBatchHold, Connection, PartitionTopology, StreamingGraphEdge
 
 
 def clip_digest(clip: torch.Tensor) -> str:
@@ -400,8 +400,14 @@ class Qwen3TTSModel(Model):
         self.cache_dir = cache_dir
         # Server-init knob (deployment YAML ``model_kwargs``): the speech
         # codec decoder's dtype. float32 reproduces the reference decoder
-        # bit for bit; bfloat16 roughly halves the codec's GPU time.
+        # bit for bit. bfloat16 is not faster on B300: cuDNN's heuristics run
+        # several of its convs on a kernel without tensor cores.
         self.codec_dtype = codec_dtype(kwargs.get("codec_dtype", "float32"))
+        # Server-init knob: how long a codec window other than a stream's first
+        # may wait for windows of other requests to batch with (0 turns it off).
+        # A codec step costs several times its cost per row, and under load
+        # windows become ready one or two per Talker step.
+        self.codec_batch_hold_ms = float(kwargs.get("codec_batch_hold_ms", 40.0))
         # Server-init knob: opt-in AudioSeal watermark on the codec's output
         # (``mstar.model.audio_watermark``). Checked here so a missing package
         # fails the server at startup, not at the first request.
@@ -607,6 +613,8 @@ class Qwen3TTSModel(Model):
         ``CodecSubmodule.postprocess`` removes the duplicated PCM prefix using
         the context count the stream buffer reports for each window.
         """
+        from mstar.model.qwen3_tts.submodules import CodecSubmodule
+
         codec = self.config.codec
         return PartitionTopology(
             partitions=["Talker", "Codec"],
@@ -620,6 +628,10 @@ class Qwen3TTSModel(Model):
                         chunk=codec.chunk_frames,
                         left_context=codec.left_context_frames,
                     ),
+                    batch_hold=ChunkBatchHold(
+                        max_wait_s=self.codec_batch_hold_ms / 1000,
+                        min_chunks=CodecSubmodule.MAX_BATCH_SIZE,
+                    ) if self.codec_batch_hold_ms > 0 else None,
                 ),
             ],
         )

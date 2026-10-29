@@ -8,11 +8,14 @@ model never imports a sibling model.
 
 from __future__ import annotations
 
+import functools
 import logging
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 import torch
 from torch import nn
+
+from mstar.model.components.diffusion.exact_norm import exact_rms_norm
 
 logger = logging.getLogger(__name__)
 
@@ -44,15 +47,31 @@ def exclude_from_compile(transformer: nn.Module, types: Sequence[type] = EXACT_O
     forward: each excluded module's forward becomes a dynamo graph break, so inductor only
     fuses the pointwise chains around the GEMMs and attention. A module is excluded by type
     (``types``) or, when ``types`` include the norms, with a ``compile_exact_op = True`` class
-    attribute. Returns the number of modules excluded."""
+    attribute. A torch ``RMSNorm`` runs :func:`exact_rms_norm` (torch's eager result, several times
+    faster on the per-head q/k norms). Returns the number of modules excluded."""
     types = tuple(types)
     with_marked = any(t in EXACT_OP_CLASSES["norms"] for t in types)
     count = 0
     for module in transformer.modules():
         if isinstance(module, types) or (with_marked and getattr(module, "compile_exact_op", False)):
-            module.forward = torch._dynamo.disable(module.forward)
+            forward = module.forward
+            if type(module) is nn.RMSNorm:
+                forward = functools.partial(_exact_rms_norm_forward, module)
+            module.forward = torch._dynamo.disable(forward)
             count += 1
     return count
+
+
+def excluded_from_compile(module: nn.Module) -> bool:
+    """Whether :func:`exclude_from_compile` took ``module`` out of the compiled graph: it
+    replaces the module's forward with an instance attribute."""
+    return "forward" in vars(module)
+
+
+def _exact_rms_norm_forward(module: nn.RMSNorm, x: torch.Tensor) -> torch.Tensor:
+    if len(module.normalized_shape) != 1:
+        return torch.nn.functional.rms_norm(x, module.normalized_shape, module.weight, module.eps)
+    return exact_rms_norm(x, module.weight, module.eps)
 
 
 def compile_transformer_forward(
@@ -79,16 +98,46 @@ def compile_transformer_forward(
     )
 
 
-def with_inductor_rounding(compiled, *, eager_rounding: bool):
+def with_inductor_rounding(compiled, *, eager_rounding: bool, deterministic: bool = False):
     """Wrap a compiled callable so ``emulate_precision_casts`` is in effect for the
     traces it builds, and only for those. This works with torch.compile's lazy
     compilation, and post-torch 2.12 per-thread config behavior, without introducing
-    a global config change.
+    a global config change. ``deterministic`` also builds them with the engine's
+    deterministic compile option (``accelerator_graph_runner.
+    deterministic_inductor_options``): no on-device benchmarking that changes
+    numerics, so every process compiles the same kernels.
     """
     import torch._inductor.config as inductor_config
 
+    options = {"emulate_precision_casts": eager_rounding}
+    if deterministic:
+        from mstar.engine.accelerator_graph_runner import deterministic_inductor_options
+
+        options.update(deterministic_inductor_options())
+
     def forward(*args, **kwargs):
-        with inductor_config.patch(emulate_precision_casts=eager_rounding):
+        with inductor_config.patch(**options):
             return compiled(*args, **kwargs)
 
     return forward
+
+
+def compile_blocks(blocks: Iterable[nn.Module], *, autotune: bool = False, **compile_kwargs) -> None:
+    """Compile each block's forward in place, rounding every intermediate where
+    eager does (``emulate_precision_casts``): by default under Inductor's
+    defaults in its deterministic mode, so every process compiles the same
+    kernels; with ``autotune`` under the -O level's options, whose kernel picks
+    are per process. ``compile_kwargs`` go to ``torch.compile`` (static shapes
+    and no full graph unless overridden). For a transformer whose blocks keep
+    an eager call in the middle (a cache write, a ragged attention), so each
+    block traces into graphs around it once.
+    """
+    if autotune:
+        from mstar.engine.accelerator_graph_runner import compile_kwargs as level_kwargs
+
+        compile_kwargs = {**level_kwargs(None), **compile_kwargs}
+    compile_kwargs = {"fullgraph": False, "dynamic": False, **compile_kwargs}
+    for block in blocks:
+        block.forward = with_inductor_rounding(
+            torch.compile(block.forward, **compile_kwargs), eager_rounding=True, deterministic=not autotune,
+        )

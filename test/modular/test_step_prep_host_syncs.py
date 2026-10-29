@@ -21,6 +21,7 @@ CPU only, no weights.
 
 from __future__ import annotations
 
+import dataclasses
 from types import SimpleNamespace
 
 import pytest
@@ -82,7 +83,19 @@ def _assert_same(got: NodeInputs | None, want: NodeInputs | None):
         assert torch.equal(got.tensor_inputs[key], value), key
     assert got.input_seq_len == want.input_seq_len
     assert got.resource_step_info == want.resource_step_info
-    assert got.kwargs == want.kwargs
+    assert got.kwargs.keys() == want.kwargs.keys()
+    for key, value in want.kwargs.items():
+        assert _same(got.kwargs[key], value), key
+
+
+def _same(a, b) -> bool:
+    """Equal, comparing tensors (and dataclasses holding them, such as
+    OmniVoice's ``CanvasItem``) by value."""
+    if torch.is_tensor(a):
+        return torch.equal(a, b)
+    if dataclasses.is_dataclass(a):
+        return all(_same(getattr(a, f.name), getattr(b, f.name)) for f in dataclasses.fields(a))
+    return a == b
 
 
 def _check_schedule(prepare, walk_fwd, edge_inputs, loop, steps):
@@ -237,13 +250,16 @@ def _cosmos3(monkeypatch=None, capture=False):
         monkeypatch.setenv("COSMOS3_GEN_CAPTURE_VIDEO", "64x64x9")
         monkeypatch.setenv("COSMOS3_DISABLE_PREFILL_ACCELERATOR_GRAPH", "1")
         monkeypatch.delenv("COSMOS3_DISABLE_ACCELERATOR_GRAPH", raising=False)
+    from mstar.model.cosmos3.tests.test_rotary_table import stand_in_rotary
+
+    config = Cosmos3Config(compile_denoise=False)
     transformer = SimpleNamespace(
         proj_in=SimpleNamespace(weight=torch.zeros(1, dtype=torch.float32)),
         sp_group=SimpleNamespace(world_size=1), comm_group=SimpleNamespace(world_size=1),
+        _rotary=stand_in_rotary(config),
     )
     sub = Cosmos3DiTSubmodule(
-        transformer=transformer, config=Cosmos3Config(compile_denoise=False),
-        scheduler=UniPCMultistepScheduler(),
+        transformer=transformer, config=config, scheduler=UniPCMultistepScheduler(),
     )
     sub.get_device = lambda: torch.device("cpu")
     if capture:
@@ -364,18 +380,25 @@ class _PageableH2D(TorchFunctionMode):
 
 def test_higgs_loopback_decode_prep_copies_no_pageable_index(monkeypatch):
     """A device loop-back decode step whose rows include one fresh off its prefill overlays
-    that row's token by index: the index goes up through pinned memory, not a blocking copy
-    (every request's first decode step takes this path). The meta device stands in for the
-    accelerator."""
+    that row's token through the sampler's ``overwrite_rows`` (every request's first decode
+    step takes this path), and its prep makes no pageable host-to-device copy of its own. The
+    meta device stands in for the accelerator; on it the row stager takes its host branch, so
+    the pinned upload itself is not exercised here."""
+    from mstar.engine.resources.sampler.resource import SamplerResource
     from mstar.model.higgs_audio.config import SAMPLER, HiggsAudioModelConfig
     from mstar.model.higgs_audio.submodules import HiggsAudioLLMSubmodule
     from mstar.model.submodule_base import ARNodeInputs
-    from mstar.utils import h2d
 
-    monkeypatch.setattr(h2d.DeviceCapability, "of", staticmethod(lambda device: SimpleNamespace(pin_memory=True)))
-    monkeypatch.setattr(_T, "pin_memory", lambda self: self)
+    class _Sampler:
+        # the real overlay, over a stand-in for the slot masters
+        overwrite_rows = SamplerResource.overwrite_rows
+        _row_stager = None
+
+        def loopback_tokens(self, rids):
+            return torch.zeros(len(rids), dtype=torch.long, device="meta")
+
     sub = HiggsAudioLLMSubmodule(None, HiggsAudioModelConfig())
-    sampler = SimpleNamespace(loopback_tokens=lambda rids: torch.zeros(len(rids), dtype=torch.long, device="meta"))
+    sampler = _Sampler()
     engine_inputs = SimpleNamespace(resources={SAMPLER: sampler}, request_ids=["fresh", "looped"])
     inputs = [
         ARNodeInputs(input_ids=torch.zeros(1, dtype=torch.long, device="meta"), input_seq_len=1),
@@ -385,3 +408,49 @@ def test_higgs_loopback_decode_prep_copies_no_pageable_index(monkeypatch):
         out = sub.preprocess("decode", engine_inputs, inputs)
     assert h2d_copies.copies == []
     assert out["input_ids"].shape == (2,)
+
+
+def test_higgs_encoder_prep_reads_no_tensor():
+    """The audio encoder's per-chunk embedding counts come from the step
+    metadata ``process_prompt`` filled, not off a lengths tensor."""
+    from mstar.model.higgs_audio.config import HiggsAudioModelConfig
+    from mstar.model.higgs_audio.higgs_audio_model import HiggsAudioModel
+    from mstar.model.higgs_audio.submodules import HiggsAudioEncoderSubmodule
+
+    config = HiggsAudioModelConfig()
+    lens = [400, 400, 123]
+    valid = [config.encoder_output_length(n) for n in lens]
+    model = SimpleNamespace(config=config, INTERNAL_KWARGS=HiggsAudioModel.INTERNAL_KWARGS)
+    (key,) = model.INTERNAL_KWARGS
+    sub = HiggsAudioEncoderSubmodule(None, None, config)
+    features = torch.zeros(len(lens), config.audio_num_mel_bins, 400)
+    with _HostReads() as reads:
+        row = sub.prepare_inputs("prefill_audio", _fwd("r", "prefill_audio", {key: lens}), {
+            "audio_features": [features],
+        })
+    assert reads.reads == []
+    assert row.kwargs["valid_lengths"] == valid and row.input_seq_len == len(lens)
+
+
+def test_qwen3_omni_audio_encoder_prep_reads_no_tensor():
+    """A clip's encoder rows and its step's layout come off its tensor's
+    shape, with no host read of a lengths tensor."""
+    from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import _get_feat_extract_output_lengths
+
+    from mstar.model.qwen3_omni.submodules import AudioEncoderSubmodule
+
+    encoder = SimpleNamespace(n_window=50, n_window_infer=400)
+    sub = AudioEncoderSubmodule(encoder, SimpleNamespace())
+    rows = []
+    for frames in (1234, 3000):
+        with _HostReads() as reads:
+            rows.append(sub.prepare_inputs("prefill_audio", _fwd("r", "prefill_audio"), {
+                "audio_features": [torch.zeros(128, frames)], "audio_seqlens": [torch.tensor([frames])],
+            }))
+        assert reads.reads == []
+        assert rows[-1].input_seq_len == int(_get_feat_extract_output_lengths(torch.tensor(frames), 50))
+    with _HostReads() as reads:
+        layout = sub.layout([1234, 3000])
+    assert reads.reads == []
+    assert layout.counts == [row.input_seq_len for row in rows]
+    assert sub.max_batch_size("prefill_audio") == AudioEncoderSubmodule.MAX_BATCH_SIZE

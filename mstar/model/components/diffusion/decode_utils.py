@@ -1,8 +1,8 @@
 """VAE decode for the DiT scaffold: the compiled decode and the batch splitting
 that keeps it on shapes it was warmed with.
 
-``VAE_DECODE_BATCH_SIZES`` is the scaffold's default ladder; a model may pass its
-own to the decoder submodule.
+A compiled decoder warms ``geometric_batch_sizes`` up to its max batch, capped at
+``VAE_MAX_DECODE_BATCH``, and splits a larger batch into those sizes.
 """
 
 from __future__ import annotations
@@ -19,7 +19,9 @@ logger = logging.getLogger(__name__)
 
 VAE_COMPILE_MODE = "max-autotune-no-cudagraphs"
 
-VAE_DECODE_BATCH_SIZES = (1, 2, 4, 8)
+# each compiled size costs ~30-60 s of autotuning at a cold start (the dit, by
+# contrast, captures every batch size up to the maximum)
+VAE_MAX_DECODE_BATCH = 8
 
 
 def compile_vae_decode(vae: nn.Module):
@@ -35,7 +37,11 @@ def compile_vae_decode(vae: nn.Module):
     candidate conv kernels, two server processes can pick different ones (64 dB apart on the same
     seeds). An "exact" compile that keeps GroupNorm and SiLU on the eager kernels is bit-exact but
     slower than eager (111 vs 89 ms), so the exactness knob for the VAE is ``vae_compile: false``.
+    The compiled decode also folds each nearest-x2 upsample into its conv (``UpStage.fold_upsample``).
     """
+    for module in vae.modules():
+        if callable(getattr(module, "fold_upsample", None)):
+            module.fold_upsample()
     return with_inductor_rounding(
         torch.compile(vae.decode, fullgraph=False, dynamic=False, mode=VAE_COMPILE_MODE),
         eager_rounding=True,

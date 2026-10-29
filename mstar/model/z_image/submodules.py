@@ -1,6 +1,6 @@
 """Z-Image-Turbo node submodules on the DiT scaffold.
 
-    text_encoder -> ZImageTextEncoderSubmodule  Qwen3-4B layer-35 hidden states, unpadded prompt length
+    text_encoder -> ZImageTextEncoderSubmodule  Qwen3-4B layer-35 hidden states (the shared Qwen3 node)
     dit          -> ZImageDenoiseSubmodule      DenoiseLoopSubmodule + the Z-Image transformer, fp32 Euler
     vae_decoder  -> ZImageVaeDecoderSubmodule   FLUX.1 VAE decode (scaling/shift latents) -> uint8 image
 
@@ -23,15 +23,17 @@ from torch import nn
 
 from mstar.communication.tensors import NameToTensorList
 from mstar.conductor.request_info import CurrentForwardPassInfo
+from mstar.engine.accelerator_graph_config import geometric_batch_sizes
 from mstar.model.components.diffusion.compile_utils import compile_transformer_forward
 from mstar.model.components.diffusion.decode_utils import (
-    VAE_DECODE_BATCH_SIZES,
+    VAE_MAX_DECODE_BATCH,
     compile_vae_decode,
     decode_in_chunks,
 )
 from mstar.model.components.diffusion.denoise_loop import LATENTS, DenoiseLoopSubmodule
 from mstar.model.components.diffusion.flow_match import FlowMatchSchedule, euler_step
 from mstar.model.components.diffusion.image_io import pixels_to_uint8
+from mstar.model.components.diffusion.qwen3.submodule import TEXT_EMBEDS, Qwen3TextEncoderSubmodule
 from mstar.model.submodule_base import NodeInputs, NodeSubmodule
 from mstar.model.z_image.components.transformer import (
     ATTENTION_SPANS,
@@ -46,8 +48,7 @@ from mstar.model.z_image.config import SEQ_MULTIPLE, ZImageConfig
 
 logger = logging.getLogger(__name__)
 
-TEXT_INPUTS, TEXT_EMBEDS, IMAGE_OUTPUT = "text_inputs", "text_embeds", "image_output"
-TEXT_MASK = "text_mask"
+IMAGE_OUTPUT = "image_output"
 CAP_PAD_MASK = "cap_pad_mask"
 
 
@@ -86,123 +87,20 @@ def shape_from_metadata(config: ZImageConfig, step_metadata: dict) -> ZShape:
 # text_encoder
 # ---------------------------------------------------------------------------
 
-class ZImageTextEncoderSubmodule(NodeSubmodule):
+class ZImageTextEncoderSubmodule(Qwen3TextEncoderSubmodule):
     """Caption features ``[1, cap_len, 2560]`` for one request: Qwen3 hidden states after
     layer 35 at the real token positions, zero elsewhere (the DiT swaps those rows for its
-    learned pad token). ``text_inputs`` arrives unpadded; rows are right-padded to the
-    encoder's ``max_sequence_length`` (512), as the reference pipeline pads them: the real
-    tokens' values do not depend on the padding mathematically, but the attention kernel's
-    accumulation order does, so the padded length is part of bit-exactness. Requests of any
-    length batch together.
+    learned pad token), cut to the padded caption length. The batching, padding and capture
+    are the shared Qwen3 text-encoder node's."""
 
-    Rows are padded on the device in ``prepare_inputs``, and the batched forward emits the
-    whole ``[B, 512, 2560]`` batch, cut per request in ``unpack_packed_outputs``. The forward
-    then has fixed shapes and no host syncs, so it is captured per batch size
-    (``capture_batch_sizes``). A batch with a prompt that fills all 512 tokens runs the
-    encoder's unmasked path eagerly."""
+    def __init__(self, encoder: nn.Module, config: ZImageConfig, **kwargs):
+        super().__init__(encoder, config.text_encoder, **kwargs)
 
-    disable_torch_compile = True
-    # the batched forward's whole output, cut per request after the forward
-    PACKED_EMBEDS = "__text_embeds__"
-
-    def __init__(
-        self, encoder: nn.Module, config: ZImageConfig, max_batch_size: int = 16,
-        capture_walk: str | None = None, capture_batch_sizes: Sequence[int] = (),
-    ):
-        super().__init__()
-        self.encoder = encoder
-        self.config = config
-        self._max_batch_size = max_batch_size
-        self._capture_walk = capture_walk
-        self._capture_batch_sizes = [b for b in capture_batch_sizes if b <= max_batch_size]
-
-    def _pad_row(self, ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """``ids [L]`` -> right-padded ``(ids, mask)``, each ``[max_sequence_length]`` int64,
-        built where ``ids`` lives (device ops only, no host round trip)."""
-        width = self.config.text_encoder.max_sequence_length
-        n = int(ids.shape[0])
-        padded = torch.full((width,), self.config.text_encoder.pad_token_id, dtype=torch.long, device=ids.device)
-        padded[:n].copy_(ids)
-        mask = torch.zeros(width, dtype=torch.long, device=ids.device)
-        mask[:n] = 1
-        return padded, mask
-
-    def prepare_inputs(self, graph_walk, fwd_info, inputs: NameToTensorList, **kwargs) -> NodeInputs:
-        ids = inputs[TEXT_INPUTS][0]
-        padded, mask = self._pad_row(ids)
-        return NodeInputs(
-            tensor_inputs={TEXT_INPUTS: padded, TEXT_MASK: mask},
-            input_seq_len=self.config.text_encoder.max_sequence_length,
-            # the real token count, from the shape: where this row's output is cut
-            resource_step_info=int(ids.shape[0]),
-        )
-
-    def can_batch(self, batch, model_inputs) -> bool:
-        return len(model_inputs) > 1
-
-    def max_batch_size(self, graph_walk: str):
-        return self._max_batch_size
-
-    def cg_key_info(self, graph_walk: str, per_request_info, per_request_input_metadata=None, **kwargs):
-        """True when every real row is a padded prompt (``text_len`` in the step metadata): the
-        masked path, the only captured one. Padding rows of a captured bucket carry no metadata."""
-        del graph_walk, per_request_input_metadata, kwargs
-        width = self.config.text_encoder.max_sequence_length
-        lengths = [info.step_metadata.get("text_len") for info in per_request_info.values() if info.step_metadata]
-        return bool(lengths) and all(n is not None and n < width for n in lengths)
-
-    def preprocess(self, graph_walk, engine_inputs, inputs: list[NodeInputs]) -> dict:
-        lengths = [inp.resource_step_info for inp in inputs]
-        return {
-            TEXT_INPUTS: torch.stack([inp.tensor_inputs[TEXT_INPUTS] for inp in inputs]),
-            TEXT_MASK: torch.stack([inp.tensor_inputs[TEXT_MASK] for inp in inputs]),
-            "lengths": lengths,
-            # any padded row puts the batch on the masked path, as the reference batches it
-            "padded": any(n < self.config.text_encoder.max_sequence_length for n in lengths),
-        }
-
-    def _encode(self, ids: torch.Tensor, mask: torch.Tensor, padded: bool | None = None) -> torch.Tensor:
-        device = self.get_device()
-        mask = mask.to(device)
-        hidden = self.encoder(ids.to(device), mask, padded=padded).to(self.encoder.dtype)
+    def request_embeds(self, hidden: torch.Tensor, text_len: int) -> torch.Tensor:
+        cut = hidden[:, : padded_length(text_len)]
         # zero the pad rows: the DiT replaces them, and the parity tests compare real rows only
-        return hidden * mask.to(dtype=hidden.dtype)[..., None]
-
-    def forward(self, graph_walk, engine_inputs, text_inputs, text_mask, lengths, padded=None, **kwargs):
-        hidden = self._encode(text_inputs, text_mask, padded)
-        return {TEXT_EMBEDS: [hidden[:, : padded_length(lengths[0])]]}
-
-    def forward_batched(self, graph_walk, engine_inputs, text_inputs, text_mask, padded=None, **kwargs):
-        return {self.PACKED_EMBEDS: self._encode(text_inputs, text_mask, padded)}
-
-    def unpack_packed_outputs(self, static_output, request_ids, real_seq_lens, inputs, per_request_info):
-        hidden = static_output.get(self.PACKED_EMBEDS)
-        if hidden is None:
-            return {}
-        # cloned: a captured forward's output buffer is overwritten by the next replay
-        return {
-            rid: {TEXT_EMBEDS: [hidden[i : i + 1, : padded_length(inp.resource_step_info)].clone()]}
-            for i, (rid, inp) in enumerate(zip(request_ids, inputs, strict=True))
-        }
-
-    def get_accelerator_graph_configs(self, device: torch.device, tp_world_size: int = 1):
-        if self._capture_walk is None or not self._capture_batch_sizes:
-            return []
-        from mstar.engine.accelerator_graph_config import BatchedAcceleratorGraphConfig
-
-        # a padding row: a one-token prompt, so every query row attends to something
-        ids, mask = self._pad_row(torch.zeros(1, dtype=torch.long, device=device))
-        single = NodeInputs(tensor_inputs={TEXT_INPUTS: ids, TEXT_MASK: mask},
-                            input_seq_len=int(ids.shape[0]), resource_step_info=1)
-        return [BatchedAcceleratorGraphConfig(
-            capture_graph_walk=self._capture_walk,
-            single_request_inputs=single,
-            additional_key_info=True,
-            compile=False,
-            capture_batch_sizes=list(self._capture_batch_sizes),
-            caps_eager_batch_size=False,
-            input_seq_dims={TEXT_INPUTS: 0, TEXT_MASK: 0},
-        )]
+        real = torch.arange(cut.shape[1], device=cut.device) < text_len
+        return cut * real.to(cut.dtype)[None, :, None]
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +114,9 @@ class ZImageDenoiseSubmodule(DenoiseLoopSubmodule):
     casts to bf16 only for the transformer). Per-shape layout: image-token pad mask and the
     complex rotary tables for the image and caption spans.
     """
+
+    # the noise is a function of the latent grid and the seed alone
+    PREFETCH_SEEDS = True
 
     def __init__(
         self, transformer: nn.Module, config: ZImageConfig, *, loop_name: str, attn_resource_key: str | None,
@@ -330,7 +231,7 @@ class ZImageVaeDecoderSubmodule(NodeSubmodule):
 
     def __init__(
         self, vae: nn.Module, config: ZImageConfig, max_batch_size: int = 8, compile_decode: bool = False,
-        warmup_grids: Sequence[tuple[int, int]] = (), decode_batch_sizes: Sequence[int] = VAE_DECODE_BATCH_SIZES,
+        warmup_grids: Sequence[tuple[int, int]] = (),
     ):
         super().__init__()
         self.vae = vae
@@ -339,7 +240,9 @@ class ZImageVaeDecoderSubmodule(NodeSubmodule):
         # see KleinVaeDecoderSubmodule: static per-size compiles, warmed at load, larger batches split
         self._compiled = bool(compile_decode)
         self._decode_one = compile_vae_decode(vae) if compile_decode else vae.decode
-        self._decode_batch_sizes = tuple(decode_batch_sizes) if compile_decode else ()
+        self._decode_batch_sizes = (
+            tuple(geometric_batch_sizes(min(max_batch_size, VAE_MAX_DECODE_BATCH))) if compile_decode else ()
+        )
         self._warmed: set[tuple[int, int, int]] = set()  # shapes the compiled decode was warmed with
         # see KleinVaeDecoderSubmodule: clear requires_grad before warming, or dynamo
         # guards on it and the first served decode recompiles inside the request

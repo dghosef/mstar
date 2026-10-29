@@ -119,7 +119,13 @@ def _pointer(tensor: torch.Tensor):
 
 def _bagel_request(model, prompt, input_modalities, output_modalities, kwargs):
     from mstar.conductor.request_info import DEFAULT_PARTITION
-    from mstar.model.bagel.submodules import IMAGE_SENTINELS, VAEEncoderSubmodule, vit_patches, vit_preprocess
+    from mstar.model.bagel.submodules import (
+        DENOISE_WALKS,
+        IMAGE_SENTINELS,
+        VAEEncoderSubmodule,
+        vit_patches,
+        vit_preprocess,
+    )
 
     cfg = model.config
     images = [torch.rand(3, 480, 640)] if "image" in input_modalities else []
@@ -127,14 +133,18 @@ def _bagel_request(model, prompt, input_modalities, output_modalities, kwargs):
     tensors = {"text_inputs": out.new_input_tensors.get("text_inputs", []),
                "image_inputs": out.new_input_tensors.get("image_inputs", images)}
     signals = {name: [_pointer(t) for t in by_name] for name, by_name in tensors.items()}
-    fwd = model.get_initial_forward_pass_args(DEFAULT_PARTITION, input_modalities, output_modalities, signals, kwargs)
+    # what the data worker folds into model_kwargs from process_prompt
+    stamped = {key: value for key, value in out.metadata.items() if key != "kv_layout"}
+    fwd = model.get_initial_forward_pass_args(
+        DEFAULT_PARTITION, input_modalities, output_modalities, signals, {**kwargs, **stamped},
+    )
     metadata = fwd.full_metadata
     by_uuid = {id(t): t for by_name in tensors.values() for t in by_name}
     later = []
     while not model.get_partition_forward_pass_args(DEFAULT_PARTITION, metadata, {}).request_done:
         if not metadata.is_prefill:
             later.append(metadata.graph_walk)
-            if metadata.graph_walk in ("image_gen", "image_gen_cfg"):
+            if metadata.graph_walk in DENOISE_WALKS:
                 break
     config = model.get_request_resource_configs({DEFAULT_PARTITION: fwd}, kwargs)["kv"]
     cap = model.get_loop_caps(max_output_tokens=6)["decode_loop"]
@@ -192,11 +202,15 @@ class _BagelPool:
     def step(self, walk: str, rows: dict, guided: dict) -> None:
         from mstar.engine.resources import StepContext
         from mstar.engine.resources.step import SubmoduleStep
+        from mstar.model.bagel.submodules import CFG_BRANCHES
         from mstar.model.submodule_base import ARNodeInputs
 
         inputs = []
         for rid, count in rows.items():
             inputs.append(ARNodeInputs(input_seq_len=count, resource_step_info=guided[rid]))
+            if walk.startswith("image_gen"):
+                # every label a guided request holds, as an in-interval step stamps it
+                inputs[-1].kwargs[CFG_BRANCHES] = 3 if guided[rid] else 1
             if walk not in {"prefill_text", "decode"}:
                 positions = torch.zeros(count, dtype=torch.int32)
                 inputs[-1].custom_pos_ids = dict.fromkeys(("main", "cfg_text", "cfg_img"), positions)
@@ -220,7 +234,7 @@ def _bagel_checks(monkeypatch):
         manager_mod, "KVTransferManager", lambda *a, **kw: SimpleNamespace(remove_request=lambda rid: None),
     )
     model = _bagel()
-    model.config.num_timesteps = 3
+    model.config.num_timesteps, model.config.timestep_shift = 3, 3.0
     return model
 
 
@@ -303,6 +317,21 @@ class _Cosmos3Tokenizer:
 
     def convert_tokens_to_ids(self, token):
         return 2
+
+
+@pytest.mark.parametrize("max_tokens", [1, 2, 64])
+def test_command_a_plus_caps_decode_where_its_stop_check_ends_it(max_tokens):
+    from mstar.model.command_a_plus.command_a_plus_model import CommandAPlusModel
+    from mstar.model.command_a_plus.submodules import CommandAPlusLLMSubmodule
+
+    llm = CommandAPlusLLMSubmodule(None, SimpleNamespace(eos_token_id=0), image_token_id=1)
+
+    cap = CommandAPlusModel.get_loop_caps(object.__new__(CommandAPlusModel), max_output_tokens=max_tokens)
+
+    assert cap["decode_loop"] == _stops_after(
+        llm.check_stop, "decode_loop", "decode", 2048,
+        {"new_token": [torch.tensor([NOT_EOS])]}, max_tokens=max_tokens,
+    ), "the cap and the stop check end decode on different iterations"
 
 
 @pytest.mark.parametrize("max_tokens", [1, 64])
@@ -440,7 +469,7 @@ def test_higgs_caps_decode_where_its_stop_check_ends_it(max_tokens):
     ), "the cap and the stop check end decode on different iterations"
 
 
-def test_higgs_lays_out_the_prefill_steps_it_schedules():
+def test_higgs_lays_out_the_prefill_step_it_runs():
     from mstar.model.higgs_audio.config import KV_CACHE
 
     model = _higgs()
@@ -449,10 +478,12 @@ def test_higgs_lays_out_the_prefill_steps_it_schedules():
     )
     [layout] = output.metadata["kv_layout"][KV_CACHE].values()
     tensors = output.new_input_tensors
-    schedule = model._build_prefill_schedule({name: tensors[name] for name in tensors})
+    args = model.get_initial_forward_pass_args(
+        "main", ["audio"], ["text"], {name: tensors[name] for name in tensors}, output.metadata,
+    )
 
-    assert [span.walk for span in layout.spans] == [walk for walk, _ in schedule]
-    audio = sum(model.config.encoder_output_length(int(n)) for n in tensors["audio_feature_lens"][0].tolist())
+    assert [span.walk for span in layout.spans] == [args.full_metadata.graph_walk]
+    audio = sum(model.config.encoder_output_length(n) for n in output.metadata["audio_feature_lens"])
     text = sum(ids.numel() for ids in tensors["text_inputs"])
     assert sum(span.length for span in layout.spans) == text + audio
 
@@ -467,6 +498,24 @@ def test_qwen3_5_caps_decode_where_its_stop_check_ends_it(max_tokens):
     cap = Qwen3_5DenseModel.get_loop_caps(object.__new__(Qwen3_5DenseModel), max_output_tokens=max_tokens)
 
     assert cap["decode_loop"] == _stops_after(
+        llm.check_stop, "decode_loop", "decode", 2048,
+        {"new_token": [torch.tensor([NOT_EOS])]}, max_tokens=max_tokens,
+    ), "the cap and the stop check end decode on different iterations"
+
+
+@pytest.mark.parametrize("max_tokens", [1, 2, 64])
+def test_glm52_caps_decode_where_its_stop_check_ends_it(max_tokens):
+    from mstar.model.glm52.glm52_model import Glm52Model
+    from mstar.model.glm52.submodules import Glm52LLMSubmodule
+
+    model = Glm52Model(model_path_hf="", tokenizer_mode="byte")
+    language_model = torch.nn.Module()
+    language_model.lm_head = torch.nn.Identity()
+    llm = Glm52LLMSubmodule(language_model, model.config)
+
+    cap = model.get_loop_caps(max_output_tokens=max_tokens)["decode_loop"]
+
+    assert cap == _stops_after(
         llm.check_stop, "decode_loop", "decode", 2048,
         {"new_token": [torch.tensor([NOT_EOS])]}, max_tokens=max_tokens,
     ), "the cap and the stop check end decode on different iterations"
@@ -522,7 +571,7 @@ def test_qwen3_tts_caps_decode_where_its_stop_check_ends_it(max_tokens):
     from test_qwen3_tts_model import _make_model
 
     talker = _tiny_qwen3_tts_talker()
-    outputs = {"new_token": [torch.tensor(NOT_EOS)]}
+    outputs = {"layer0_codes": [torch.tensor(NOT_EOS)]}
     talker.request_state("r").add_all(generated_frames=0)
     talker.postprocess("r", SimpleNamespace(graph_walk="talker_prefill"), outputs)
 
@@ -626,14 +675,16 @@ def test_vjepa2_lays_out_a_frame_per_rollout_iteration(extrinsics):
 
 
 def _whisper():
-    from transformers import WhisperFeatureExtractor
-
+    from mstar.model.components.audio_features import LogMelSpectrogram
     from mstar.model.whisper.config import WhisperModelConfig
     from mstar.model.whisper.whisper_model import WhisperModel
 
     model = object.__new__(WhisperModel)
     model.config = WhisperModelConfig(lang_to_id={"<|en|>": 50259}, task_to_id={"transcribe": 50360})
-    model.feature_extractor = WhisperFeatureExtractor(feature_size=model.config.num_mel_bins)
+    model.log_mel = LogMelSpectrogram(
+        num_mel_bins=model.config.num_mel_bins, sampling_rate=model.config.sampling_rate,
+        n_fft=model.config.n_fft, hop_length=model.config.hop_length, chunk_length=model.config.chunk_length,
+    )
     return model
 
 
@@ -652,24 +703,32 @@ def test_whisper_caps_decode_where_its_stop_check_ends_it(max_tokens):
     ), "the cap and the stop check end decode on different iterations"
 
 
+@pytest.mark.parametrize("language", ["en", None], ids=["forced", "detected"])
 @pytest.mark.parametrize("seconds", [1.0, 29.0, 45.0])
-def test_whisper_lays_out_the_forced_prompt_and_the_encoders_whole_window(seconds):
-    from transformers import WhisperConfig
-    from transformers.models.whisper.modeling_whisper import WhisperEncoder
-
-    from mstar.model.whisper.config import CONTEXT_LABEL, CROSS_KV_CACHE, KV_CACHE
+def test_whisper_lays_out_the_forced_prompt_and_the_encoders_whole_window(seconds, language):
+    from mstar.model.whisper.config import (
+        CONTEXT_LABEL,
+        CROSS_KV_CACHE,
+        DETECT_LANGUAGE_WALK,
+        KV_CACHE,
+        PREFILL_PROMPT_WALK,
+        PREFILL_WALK,
+    )
 
     model = _whisper()
     clip = torch.zeros(int(seconds * 16000))
+    kwargs = {} if language is None else {"language": language}
 
-    output = model.process_prompt(None, ["audio"], ["text"], tensors={"audio_inputs": [clip]})
+    output = model.process_prompt(None, ["audio"], ["text"], tensors={"audio_inputs": [clip]}, **kwargs)
 
-    layout = output.metadata["kv_layout"]
-    assert [span.length for span in layout[KV_CACHE]["main"].spans] == [len(output.new_input_tensors["text_inputs"][0])]
-    encoder = WhisperEncoder(WhisperConfig(
-        d_model=16, encoder_layers=1, encoder_attention_heads=2, encoder_ffn_dim=32,
-        num_mel_bins=model.config.num_mel_bins, max_source_positions=model.config.max_source_positions,
-    )).eval()
-    with torch.no_grad():
-        rows = encoder(output.new_input_tensors["audio_features"][0][None]).last_hidden_state.shape[1]
-    assert [span.length for span in layout[CROSS_KV_CACHE][CONTEXT_LABEL].spans] == [rows]
+    layout, tensors = output.metadata["kv_layout"], output.new_input_tensors
+    prompt = len(tensors["text_inputs"][0])
+    spans = [(span.walk, span.length) for span in layout[KV_CACHE]["main"].spans]
+    if language is None:
+        # detection commits the prompt up to <|sot|>; the prompt walk, the detected token and the tail
+        assert spans == [(DETECT_LANGUAGE_WALK, prompt), (PREFILL_PROMPT_WALK, 1 + len(tensors["prompt_tail"][0]))]
+    else:
+        assert spans == [(PREFILL_WALK, prompt)]
+    # the encoder pads every clip to its 30 s window, so the context is always this many rows
+    rows = [span.length for span in layout[CROSS_KV_CACHE][CONTEXT_LABEL].spans]
+    assert rows == [model.config.max_source_positions]

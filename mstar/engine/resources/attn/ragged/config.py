@@ -27,6 +27,8 @@ class RaggedAttnBackend(Enum):
     # the platform's default, decided when the resource is built
     AUTO = "auto"
     FLASHINFER = "flashinfer"
+    # FA3 (AITER on ROCm) varlen; YAML name matches AttnBackend.DENSE
+    DENSE = "dense"
 
 
 @dataclass(frozen=True)
@@ -64,7 +66,8 @@ class RaggedAttentionConfig:
     # Per-request ceiling sizing a CUDA-graph bucket: a capture at batch size
     # `bs` gets `bs` times this. A "segment" is an independently-attending
     # span, not a request — a request carrying several images contributes
-    # several.
+    # several. A `one_row_per_step` region replays a whole step as one row,
+    # so there this is the ceiling for every segment of the step.
     max_segments_per_request: int = 1
     # Only for a runner that buckets by batch size alone; elsewhere the
     # bucket's own token count is the ceiling and this stays None.
@@ -73,18 +76,11 @@ class RaggedAttentionConfig:
     backend: RaggedAttnBackend = RaggedAttnBackend.AUTO
     flashinfer_backend: str = "auto"
 
-    # Whether the node's ranks split the attention heads. True (tensor
-    # parallelism, Ulysses sequence parallelism): each rank's resource is sized
-    # for its slice of the heads. False: every rank attends with all the heads,
-    # for a node whose ranks divide other work -- Wan2.2's CFG parallelism, one
-    # guidance branch per rank, is the one user.
-    shard_heads: bool = True
-
     # Whether a compiled caller keeps the attention in its graph, as the
-    # ``mstar::ragged_attention`` op, rather than breaking there per layer. On for
-    # a compiled, uncaptured region whose fusions around attention pay (Wan2.2's
-    # DiT); off by default, since tracing a whole transformer as one graph per
-    # capture bucket costs startup time and capture memory (Z-Image: +2.6 GiB).
+    # ``mstar::ragged_attention`` op, rather than breaking there per layer. For
+    # a compiled, uncaptured region whose fusions around attention pay; off by
+    # default, since tracing a whole transformer as one graph per capture
+    # bucket costs startup time and capture memory (Z-Image: +2.6 GiB).
     compile_op: bool = False
 
     # Activation dtype of the q / k / v the node hands the kernel (and of its

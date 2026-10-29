@@ -198,3 +198,85 @@ def test_stream_polls_are_skipped_only_when_no_request_owns_a_buffer():
     assert not Worker._streams_possible(worker)
     worker._stream_buffer_rids.add(7)
     assert Worker._streams_possible(worker)
+
+
+def test_a_batch_hold_keeps_later_chunks_back_until_enough_are_ready():
+    """``ChunkBatchHold``: a stream's first chunk goes at once; later ones wait
+    until ``min_chunks`` are ready across requests, also from a speculative
+    build's poll, and nothing waits while the worker is idle."""
+    import torch
+
+    from mstar.streaming.topology import ChunkBatchHold
+
+    rids = ["a", "b", "c"]
+    buffers = {
+        rid: StreamBuffer(request_id=rid, edge_name="codes", from_partition="LLM",
+                          policy=FixedChunkPolicy(chunk_size=1))
+        for rid in rids
+    }
+    ingested = []
+    worker = SimpleNamespace(
+        request_state=SimpleNamespace(per_request_info={
+            rid: SimpleNamespace(stream_buffers={"codes": buf}, stream_buffers_by_consumer={"vocoder": {"codes": buf}})
+            for rid, buf in buffers.items()
+        }),
+        _stream_holds={"codes": ChunkBatchHold(max_wait_s=60.0, min_chunks=3)},
+        _consumer_node_cache={"codes": "vocoder"},
+        _walk_driven_edges={},
+        tensor_manager=SimpleNamespace(store_and_return_tensor_info=lambda rid, d, **k: {"codes": []}),
+        _graph_runtime=SimpleNamespace(ingest_inputs_batch=lambda block, **k: []),
+        _edge_block=list,
+        _mark_stream_ingested=lambda rid, edge: ingested.append(rid),
+    )
+    worker._pop_streaming_edge = lambda *a, **k: Worker._pop_streaming_edge(worker, *a, **k)
+    worker._enter_chunk_walk = lambda *a: Worker._enter_chunk_walk(worker, *a)
+
+    uids = iter(range(1000))
+
+    def push(rid, n):
+        for _ in range(n):
+            uid = f"t{next(uids)}"
+            buffers[rid].pre_read_register(uid)
+            buffers[rid].put(uid, torch.zeros(1))
+
+    push("a", 1)
+    Worker._poll_stream_buffers(worker, idle=False)
+    assert ingested == ["a"], "a stream's first chunk is never held"
+    push("a", 1)
+    push("b", 1)
+    Worker._poll_stream_buffers(worker, idle=False)
+    assert ingested == ["a", "b"], "a's second chunk waits; b's first does not"
+    assert Worker._poll_stream_buffers_for_speculation(worker, "a", "vocoder") == [], (
+        "a speculative build took the chunk the hold keeps back"
+    )
+    push("b", 1)
+    Worker._poll_stream_buffers(worker, idle=False)
+    assert ingested == ["a", "b"]
+    Worker._poll_stream_buffers(worker, idle=True)
+    assert sorted(ingested[2:]) == ["a", "b"], "an idle worker releases what it held"
+    for rid in rids:
+        push(rid, 2)
+    Worker._poll_stream_buffers(worker, idle=False)
+    assert sorted(ingested[4:]) == ["c"]
+    push("c", 1)
+    Worker._poll_stream_buffers(worker, idle=False)
+    assert sorted(ingested[5:]) == ["a", "b", "c"], "min_chunks ready across requests releases them all"
+
+
+def test_a_lockstep_leader_holds_its_streams_and_a_follower_does_not():
+    """A batch hold applies on the rank that picks a lockstep node's rows (its
+    leader) and on unreplicated nodes; a follower ingests its chunks at once."""
+    from mstar.streaming.topology import ChunkBatchHold
+
+    hold = ChunkBatchHold(max_wait_s=60.0, min_chunks=3)
+    consumers = {"codes": "codec", "frames": "talker", "text": "detok"}
+    worker = Worker.__new__(Worker)
+    worker._my_consumer_connections = [
+        SimpleNamespace(edge_name=edge, batch_hold=hold) for edge in consumers
+    ]
+    worker._consumer_node_cache = consumers
+    worker.parallel_nodes = {"codec", "talker"}
+    worker.parallel_leader_nodes = {"codec"}
+    assert worker._build_stream_holds() == {"codes": hold, "text": hold}, (
+        "only a node this rank follows ingests unheld"
+    )

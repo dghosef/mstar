@@ -27,7 +27,13 @@ import torch
 from torch import nn
 
 from mstar.distributed.communication import CommGroup
-from mstar.model.components import ParallelSparseMoeBlock, RMSNorm
+from mstar.model.components import (
+    MoeParallelConfig,
+    MoeParallelMixin,
+    RMSNorm,
+    TopKRouter,
+    instantiate_moe_block,
+)
 from mstar.model.components.distributed import ParallelGatedMLP
 from mstar.model.qwen3_omni.components.attention import Qwen3OmniAttention
 from mstar.model.qwen3_omni.config import THINKER_ATTN, THINKER_KV, THINKER_POS, Qwen3OmniModelConfig
@@ -36,18 +42,21 @@ from mstar.model.qwen3_omni.config import THINKER_ATTN, THINKER_KV, THINKER_POS,
 class Qwen3OmniThinkerLayer(nn.Module):
     """Single Thinker decoder layer: attention + MoE/dense MLP.
 
-    Uses ``ParallelSparseMoeBlock`` for most layers, and a dense
-    ``ParallelGatedMLP`` (SiLU SwiGLU) for layers in ``mlp_only_layers``.
+    Uses the MoE block ``instantiate_moe_block`` picks for ``moe_parallel``
+    for most layers, and a dense ``ParallelGatedMLP`` (SiLU SwiGLU) for
+    layers in ``mlp_only_layers``.
 
     Args:
         config: top-level Qwen3-Omni model configuration.
         layer_idx: index of this layer in the stack.
         comm_group: TP communication group for MoE/MLP sharding.
+        moe_parallel: TP or EP for the routed experts; TP when None.
     """
 
     def __init__(
         self, config: Qwen3OmniModelConfig, layer_idx: int,
         comm_group: CommGroup | None = None,
+        moe_parallel: MoeParallelConfig | None = None,
     ):
         super().__init__()
         tc = config.thinker_text
@@ -83,15 +92,20 @@ class Qwen3OmniThinkerLayer(nn.Module):
             and tc.num_experts > 0
             and (layer_idx + 1) % tc.decoder_sparse_step == 0
         )
+        self.is_moe = use_moe
         if use_moe:
-            self.mlp = ParallelSparseMoeBlock(
+            self.mlp = instantiate_moe_block(
                 hidden_size=tc.hidden_size,
                 moe_intermediate_size=tc.moe_intermediate_size,
                 num_experts=tc.num_experts,
                 num_experts_per_tok=tc.num_experts_per_tok,
                 norm_topk_prob=tc.norm_topk_prob,
                 comm_group=comm_group,
-                fused_softmax_topk=True,
+                moe_parallel=moe_parallel,
+                router=TopKRouter(
+                    tc.hidden_size, tc.num_experts, tc.num_experts_per_tok,
+                    norm_topk_prob=tc.norm_topk_prob, fused_softmax_topk=True,
+                ),
             )
         else:
             self.mlp = ParallelGatedMLP(
@@ -104,52 +118,59 @@ class Qwen3OmniThinkerLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
         cos_sin_3d: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         mrope_section: Optional[list[int]] = None,
-    ) -> torch.Tensor:
-        """
+        token_valid: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """One layer with its residual adds deferred into the next norm (FlashInfer's
+        fused add + RMSNorm, in place).
+
         Args:
-            hidden_states: [tokens, hidden_size]
+            hidden_states: [tokens, hidden_size], the previous layer's MLP output,
+                or the layer input when ``residual`` is None.
+            residual: [tokens, hidden_size], the residual stream before that output.
             cos_sin_3d: (cos, sin) for 3D MRoPE, each [tokens, head_dim].
             mrope_section: section sizes for interleaved 3D MRoPE.
+            token_valid: [tokens] bool; False rows are padding the MoE skips.
 
         Returns:
-            hidden_states: [tokens, hidden_size]
+            (this layer's MLP output, the residual stream before it)
         """
-        # Pre-attention norm + self-attention + residual
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm.forward_residual(hidden_states, residual)
         hidden_states = self.self_attn(
             hidden_states,
             cos_sin_3d=cos_sin_3d,
             mrope_section=mrope_section,
         )
-        hidden_states = residual + hidden_states
-
-        # Post-attention norm + MLP/MoE + residual
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-
-        return hidden_states
+        hidden_states, residual = self.post_attention_layernorm.forward_residual(hidden_states, residual)
+        if token_valid is not None and self.is_moe:
+            return self.mlp(hidden_states, token_valid=token_valid), residual
+        return self.mlp(hidden_states), residual
 
 
 class Qwen3OmniThinkerTextModel(nn.Module):
     """Inner text model (maps to ``thinker.model.*`` in HF weights)."""
 
-    def __init__(self, config: Qwen3OmniModelConfig, comm_group: CommGroup | None = None):
+    def __init__(
+        self, config: Qwen3OmniModelConfig, comm_group: CommGroup | None = None,
+        moe_parallel: MoeParallelConfig | None = None,
+    ):
         super().__init__()
         tc = config.thinker_text
         self.embed_tokens = nn.Embedding(tc.vocab_size, tc.hidden_size)
         self.layers = nn.ModuleList([
-            Qwen3OmniThinkerLayer(config, layer_idx=i, comm_group=comm_group)
+            Qwen3OmniThinkerLayer(config, layer_idx=i, comm_group=comm_group, moe_parallel=moe_parallel)
             for i in range(tc.num_hidden_layers)
         ])
         self.norm = RMSNorm(tc.hidden_size, eps=tc.rms_norm_eps)
 
 
-class Qwen3OmniThinkerModel(nn.Module):
+class Qwen3OmniThinkerModel(MoeParallelMixin, nn.Module):
     """Thinker: MoE transformer backbone for Qwen3-Omni.
 
     HF weight layout::
@@ -165,7 +186,10 @@ class Qwen3OmniThinkerModel(nn.Module):
     - Layer-N hidden states (``accept_hidden_layer``) for Talker conditioning
     """
 
-    def __init__(self, config: Qwen3OmniModelConfig, comm_group: CommGroup | None = None):
+    def __init__(
+        self, config: Qwen3OmniModelConfig, comm_group: CommGroup | None = None,
+        moe_parallel: MoeParallelConfig | None = None,
+    ):
         super().__init__()
         tc = config.thinker_text
 
@@ -173,9 +197,11 @@ class Qwen3OmniThinkerModel(nn.Module):
         self.num_layers = tc.num_hidden_layers
         self.accept_hidden_layer = config.accept_hidden_layer
 
-        self.model = Qwen3OmniThinkerTextModel(config, comm_group=comm_group)
+        self.model = Qwen3OmniThinkerTextModel(config, comm_group=comm_group, moe_parallel=moe_parallel)
 
         self.lm_head = nn.Linear(tc.hidden_size, tc.vocab_size, bias=False)
+
+        self.init_moe_parallel(moe_parallel)
 
     def _deepstack_process(
         self, hidden_states: torch.Tensor, visual_embeds: torch.Tensor
@@ -192,6 +218,7 @@ class Qwen3OmniThinkerModel(nn.Module):
         mrope_section: Optional[list[int]] = None,
         deepstack_visual_embeds: list[torch.Tensor] | None = None,
         label: str = "main",
+        num_valid_tokens: torch.Tensor | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
         Args:
@@ -200,6 +227,8 @@ class Qwen3OmniThinkerModel(nn.Module):
             cos_sin_3d: (cos, sin) for 3D MRoPE, each [tokens, head_dim].
             mrope_section: section sizes for interleaved 3D MRoPE,
                 e.g. [24, 20, 20].
+            num_valid_tokens: ``(1,)`` real token count; rows past it are
+                CUDA-graph padding. Used only under ``mask_padding``.
             label: the plan key every layer runs against. The stream's
                 stored length and position counter advance when the runner
                 commits the declared step (vision prefill declares its
@@ -213,20 +242,26 @@ class Qwen3OmniThinkerModel(nn.Module):
         """
         hidden_states = input_embeds
 
-        # Capture input embeddings BEFORE any transformer layers
+        # Capture input embeddings BEFORE any transformer layers (the first
+        # fused norm adds into the residual stream in place)
         layer_0_embed = hidden_states.clone()
         layer_n_hidden = None
+        token_valid = self.moe_token_valid(hidden_states, num_valid_tokens)
 
         # The label and layer index are cursors on the shared resources: bind
         # the label once, advance the index per layer. Passing them as
         # arguments instead would make inductor specialize on the int.
         self.model.layers[0].self_attn.attend.bind_step(label)
+        residual = None
         for layer_idx, decoder_layer in enumerate(self.model.layers):
             decoder_layer.self_attn.attend.set_layer_idx(layer_idx)
-            hidden_states = decoder_layer(
+            # a layer's output is ``residual + hidden_states``
+            hidden_states, residual = decoder_layer(
                 hidden_states,
+                residual,
                 cos_sin_3d=cos_sin_3d,
                 mrope_section=mrope_section,
+                token_valid=token_valid,
             )
 
             # add visual features to the hidden states of first several layers
@@ -238,9 +273,9 @@ class Qwen3OmniThinkerModel(nn.Module):
 
             # Capture hidden states at the accept_hidden_layer for Talker
             if layer_idx == self.accept_hidden_layer:
-                layer_n_hidden = hidden_states.clone()
+                layer_n_hidden = residual + hidden_states
 
         # Final layer norm
-        hidden_states = self.model.norm(hidden_states)
+        hidden_states, _ = self.model.norm.forward_residual(hidden_states, residual)
 
         return hidden_states, layer_0_embed, layer_n_hidden

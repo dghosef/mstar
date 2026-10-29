@@ -136,6 +136,7 @@ def expected_counts(reports: list[WorkerGraphsDone]) -> dict[str, int]:
     """What the conductor puts in ``request_complete``, from the real handler."""
     conductor = Conductor.__new__(Conductor)
     conductor.enable_prof = False
+    conductor.producer_triggered_partitions = set()
     request = RequestData(
         persist_signals={}, persist_signal_ref_cnt={},
         worker_graph_to_workers={0: [WORKER], 1: [WORKER]}, all_worker_graph_ids={0, 1},
@@ -254,6 +255,11 @@ class _ScriptedApiComm:
         self.server, self.batches, self.req = server, list(batches), req
         self.released_before = []
 
+    def poll_for_messages(self, timeout_ms=1):
+
+        return False
+
+
     def get_all_new_messages(self):
         self.released_before.append(self.req.event.is_set())
         if not self.batches:
@@ -333,6 +339,7 @@ def test_every_rank_reports_the_chunks_it_sent():
     every rank's report rather than only rank 0's."""
     conductor = Conductor.__new__(Conductor)
     conductor.enable_prof = False
+    conductor.producer_triggered_partitions = set()
     request = RequestData(
         persist_signals={}, persist_signal_ref_cnt={},
         worker_graph_to_workers={0: ["worker_0", "worker_1"]}, all_worker_graph_ids={0},

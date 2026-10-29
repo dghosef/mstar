@@ -20,10 +20,11 @@ import torch.nn.functional as F
 from torch import nn
 
 from mstar.distributed.communication import CommGroup
-from mstar.model.components import ParallelSparseMoeBlockWithSharedExpert, RMSNorm
+from mstar.model.components import ParallelSparseMoeBlockWithSharedExpert, RMSNorm, TopKRouter
+from mstar.model.components.code_predictor_kernels import DepthAttention, DepthKV
+from mstar.model.components.decoder_layer import DecoderLayer, run_layers
 from mstar.model.components.distributed import ParallelGatedMLP
 from mstar.model.qwen3_omni.components.attention import Qwen3OmniAttention
-from mstar.model.qwen3_omni.components.cp_kernels import cp_attention, cp_qk_norm_rope_kv_write
 from mstar.model.qwen3_omni.config import TALKER_ATTN, TALKER_KV, TALKER_POS, Qwen3OmniModelConfig, TalkerTextConfig
 
 # ---------------------------------------------------------------------------
@@ -98,26 +99,28 @@ class Qwen3OmniTalkerLayer(nn.Module):
                 comm_group=comm_group,
             ),
             comm_group=comm_group,
-            fused_softmax_topk=True,
+            router=TopKRouter(
+                hidden_size, config.num_experts, config.num_experts_per_tok,
+                norm_topk_prob=config.norm_topk_prob, fused_softmax_topk=True,
+            ),
         )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        # ---------- self-attention with pre-norm ----------
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+        residual: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Returns (this layer's MLP output, the residual stream before it): the
+        residual adds are deferred into the next norm (FlashInfer's fused add +
+        RMSNorm, in place). ``residual`` None means ``hidden_states`` is the input."""
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm.forward_residual(hidden_states, residual)
         hidden_states = self.self_attn(hidden_states=hidden_states)
-        hidden_states = residual + hidden_states
-
-        # ---------- MoE FFN with pre-norm ----------
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-
-        return hidden_states
+        hidden_states, residual = self.post_attention_layernorm.forward_residual(hidden_states, residual)
+        return self.mlp(hidden_states), residual
 
 
 # ---------------------------------------------------------------------------
@@ -160,11 +163,12 @@ class Qwen3OmniTalkerLanguageModel(nn.Module):
         # the label once, advance the index per layer. Passing them as
         # arguments instead would make inductor specialize on the int.
         self.layers[0].self_attn.attend.bind_step(label)
+        residual = None
         for layer_idx, decoder_layer in enumerate(self.layers):
             decoder_layer.self_attn.attend.set_layer_idx(layer_idx)
-            hidden_states = decoder_layer(hidden_states=hidden_states)
+            hidden_states, residual = decoder_layer(hidden_states, residual)
 
-        hidden_states = self.norm(hidden_states)
+        hidden_states, _ = self.norm.forward_residual(hidden_states, residual)
         return hidden_states
 
 
@@ -252,7 +256,7 @@ class Qwen3OmniTalkerModel(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-class Qwen3OmniCodePredictorLayer(nn.Module):
+class Qwen3OmniCodePredictorLayer(DecoderLayer):
     """Single Code Predictor decoder layer (attention + dense MLP, no MoE).
 
     Uses QK-norm, standard 1D RoPE (no 3D MRoPE).
@@ -260,37 +264,24 @@ class Qwen3OmniCodePredictorLayer(nn.Module):
 
     def __init__(self, hidden_size: int, intermediate_size: int,
                  num_heads: int, num_kv_heads: int, head_dim: int,
-                 rms_norm_eps: float, rope_theta: float):
-        super().__init__()
-        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
-        self.self_attn = Qwen3OmniAttention(
-            hidden_size=hidden_size,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-            head_dim=head_dim,
-            rope_theta=rope_theta,
-            rms_norm_eps=rms_norm_eps,
-            use_mrope=False,
+                 rms_norm_eps: float, rope_theta: float, depth: DepthKV):
+        super().__init__(
+            self_attn=DepthAttention(
+                depth,
+                hidden_size=hidden_size,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                rope_theta=rope_theta,
+                rms_norm_eps=rms_norm_eps,
+            ),
+            mlp=ParallelGatedMLP(
+                hidden_size=hidden_size, intermediate_size=intermediate_size,
+                activation="silu",
+            ),
+            input_layernorm=RMSNorm(hidden_size, eps=rms_norm_eps),
+            post_attention_layernorm=RMSNorm(hidden_size, eps=rms_norm_eps),
         )
-        self.post_attention_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
-        self.mlp = ParallelGatedMLP(
-            hidden_size=hidden_size, intermediate_size=intermediate_size,
-            activation="silu",
-        )
-
-    def forward(self, hidden_states, *, label: str, layer_idx: int):
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-        )
-        hidden_states = residual + hidden_states
-
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-        return hidden_states
 
 
 class Qwen3OmniCodePredictorInnerModel(nn.Module):
@@ -299,7 +290,7 @@ class Qwen3OmniCodePredictorInnerModel(nn.Module):
     Contains layers, norm, and per-layer codec embeddings.
     """
 
-    def __init__(self, config: Qwen3OmniModelConfig):
+    def __init__(self, config: Qwen3OmniModelConfig, depth: DepthKV):
         super().__init__()
         cp = config.code_predictor
 
@@ -312,6 +303,7 @@ class Qwen3OmniCodePredictorInnerModel(nn.Module):
                 head_dim=cp.head_dim,
                 rms_norm_eps=cp.rms_norm_eps,
                 rope_theta=cp.rope_theta,
+                depth=depth,
             )
             for _ in range(cp.num_hidden_layers)
         ])
@@ -324,19 +316,6 @@ class Qwen3OmniCodePredictorInnerModel(nn.Module):
             nn.Embedding(cp.vocab_size, cp.hidden_size)
             for _ in range(num_residual)
         ])
-
-    def forward(self, hidden_states: torch.Tensor, *, label: str):
-        """
-        Just runs the inner layers; does NOT run embedding.
-        """
-        # cursors on the shared resources; see AttentionCallable
-        self.layers[0].self_attn.attend.bind_step(label)
-        for layer_idx, decoder_layer in enumerate(self.layers):
-            self.layers[layer_idx].self_attn.attend.set_layer_idx(layer_idx)
-            hidden_states = decoder_layer(hidden_states)
-        hidden_states = self.norm(hidden_states)
-        # the advance is the runner's now, off the step declaration
-        return hidden_states
 
     def get_input_embeddings(self):
         """Return the codec embedding list (for HF compatibility)."""
@@ -354,21 +333,20 @@ class Qwen3OmniCodePredictor(nn.Module):
         talker.code_predictor.lm_head.{0-30}.weight
 
     The Code Predictor runs 15 autoregressive steps (for residual codebooks
-    1..15) in float32 for precision.
+    1..15).
 
-    Two forward paths:
-      * ``forward(embed, cache_manager)``  -- paged-FlashInfer eager path,
-        used as a fallback when CUDA graphs are disabled.
-      * ``forward_depth_unrolled(...)``   -- SDPA + dense-KV path that runs
-        every layer with per-token position IDs and a static KV cache tensor.
-        This is what the unrolled CUDA graph captures.
+    ``forward_depth_unrolled(...)`` runs every layer over a static dense KV
+    cache, through the ``depth`` cursor that each depth step binds; the
+    unrolled CUDA graph captures it.
     """
 
     def __init__(self, config: Qwen3OmniModelConfig):
         super().__init__()
         cp = config.code_predictor
 
-        self.model = Qwen3OmniCodePredictorInnerModel(config)
+        # the frame-local KV cache its layers attend over; see forward_depth_unrolled
+        self.depth = DepthKV()
+        self.model = Qwen3OmniCodePredictorInnerModel(config, self.depth)
 
         # Per-layer output heads for residual layers 1..(G-1)
         num_residual = config.num_code_groups - 1
@@ -384,14 +362,12 @@ class Qwen3OmniCodePredictor(nn.Module):
         # tensor is assigned later once the per-head weights exist on the
         # target device. Shape: ``[num_residual, vocab, hidden]``.
         # The unrolled MTP graph indexes this with a Python-static int at
-        # capture time (Option P), which is fixed-address and graph-safe.
+        # capture time, which is fixed-address and graph-safe.
         self.register_buffer(
             "lm_head_weight",
             torch.empty(num_residual, cp.vocab_size, cp.hidden_size),
             persistent=False,
         )
-
-        self._num_residual = num_residual
 
     def consolidate_stacked_weights(self) -> None:
         """Stack per-head ``nn.Linear`` weights into ``lm_head_weight``.
@@ -399,11 +375,10 @@ class Qwen3OmniCodePredictor(nn.Module):
         Must be called once after ``load_weights_from_hf_shards`` has
         populated the ``lm_head`` ModuleList. Replaces the placeholder
         ``lm_head_weight`` buffer with a real, contiguous tensor on the
-        same device/dtype as the per-head weights. After this call, the
-        unrolled graph path uses ``lm_head_weight[i]`` instead of
-        ``lm_head[i].weight``. The per-head ``nn.Linear`` modules are kept
-        (used by the eager fallback path) -- the duplicated memory is
-        ~120 MB, small relative to the full Qwen3-Omni checkpoint.
+        same device/dtype as the per-head weights. The depth loop reads
+        ``lm_head_weight[i]``; the per-head ``nn.Linear`` modules stay only
+        as the weight loader's targets, a ~120 MB duplicate, small relative
+        to the full Qwen3-Omni checkpoint.
         """
         stacked = torch.stack(
             [lm.weight.data for lm in self.lm_head], dim=0,
@@ -413,53 +388,18 @@ class Qwen3OmniCodePredictor(nn.Module):
         # placeholder created in __init__ with the real device tensor.
         self.lm_head_weight = stacked
 
-    def forward(self, *args):
-        return self.model(*args)
-
-    def get_embedding(self, group_idx: int):
-        assert group_idx > 0
-        return self.model.codec_embedding[group_idx-1]
-
-    def get_lm_head(self, group_idx: int):
-        assert group_idx > 0
-        return self.lm_head[group_idx-1]
-
-    @property
-    def codec_embedding(self):
-        """Alias for submodule access."""
-        return self.model.codec_embedding
-
-    @torch.compiler.disable
-    def _apply_rope(self, q_rot, k_rot, flat_pos, rope_theta):
-        # moved to its own function for torch.compile purposes
-        # imported here so the package imports without flashinfer (CPU tests)
-        import flashinfer
-
-        return flashinfer.rope.apply_rope_pos_ids(
-            q_rot, k_rot,
-            pos_ids=flat_pos,
-            rope_theta=rope_theta,
-            interleave=False,
-        )
-
     # ------------------------------------------------------------------
-    # SDPA + dense-KV depth forward (for unrolled CUDA-graph capture)
+    # Dense-KV depth forward (for unrolled CUDA-graph capture)
     # ------------------------------------------------------------------
-    def forward_depth_unrolled(
-        self,
-        inputs_embeds: torch.Tensor,
-        position_ids: torch.Tensor,
-        kv_cache: torch.Tensor,
-        cache_pos: int,
-    ) -> torch.Tensor:
-        """Run one "slice" of the code-predictor AR loop with SDPA + dense KV.
+    def forward_depth_unrolled(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
+        """Run one "slice" of the code-predictor AR loop over a dense KV cache,
+        attending through ``DepthAttention``'s Triton kernels. Bind the slice
+        first with ``depth.bind_step``, once per call: the depth loop binds it,
+        not this frame, which would compile once per ``cache_pos``.
 
-        This is the CUDA-graph-compatible replacement for the paged-FlashInfer
-        attention path. It is safe to call repeatedly inside a single
-        ``torch.cuda.graph`` capture because:
+        It is safe to call repeatedly inside a single graph capture because:
 
           * The KV cache is a preallocated dense tensor (no plan() call).
-          * Position IDs come in directly (no PlanState bookkeeping).
           * Write/read slices use Python-static ``cache_pos`` / ``seq_len`` so
             the captured kernel sees identical shapes every replay.
 
@@ -467,66 +407,12 @@ class Qwen3OmniCodePredictor(nn.Module):
             inputs_embeds: ``[bs, seq_len, hidden_size]``. ``seq_len`` is 2 for
                 the initial "prefill" call (``[last_hidden, c0_embed]``) and 1
                 for every subsequent decode iteration.
-            position_ids: ``[bs, seq_len]`` int tensor with the absolute
-                position of each input token within the depth sequence.
-            kv_cache: ``[n_layers, bs, 2, max_seq_len, n_kv_heads, head_dim]``
-                dense tensor preallocated by the runner. The runner zeroes it
-                at the start of every graph replay so stale state cannot leak.
-            cache_pos: write offset into ``kv_cache``'s seq-len axis. The new
-                K/V tokens land at ``[cache_pos : cache_pos + seq_len]``.
 
         Returns:
             ``[bs, seq_len, hidden_size]`` final hidden states after the code
             predictor's 5 layers + final RMSNorm. The caller is responsible
             for applying the per-codebook LM head.
         """
-        hidden_states = inputs_embeds
-        bs, seq_len, hidden_size = hidden_states.shape
-
-        first_attn = self.model.layers[0].self_attn
-        n_kv_heads = first_attn.num_kv_heads
-        n_q_heads = first_attn.num_heads
-        head_dim = first_attn.head_dim
-
-        # FlashInfer's rope kernels require bf16; the rest of the code
-        # predictor runs at the weights' native dtype (fp32 for quality per
-        # the KVCacheEngine.has_autocast=False invariant).
-        flat_pos = position_ids.reshape(-1)
-
-        # Each residual add rides in the next RMSNorm (FlashInfer's fused
-        # add + norm, in place on the stream's own tensors), so the input
-        # embeddings, which the caller owns, are added out of place first.
-        residual = None
-        for layer_idx, layer in enumerate(self.model.layers):
-            attn = layer.self_attn
-            if residual is None:
-                residual = hidden_states
-                hidden_states = layer.input_layernorm(hidden_states)
-            else:
-                hidden_states, residual = layer.input_layernorm.forward_residual(hidden_states, residual)
-
-            qkv = F.linear(hidden_states, layer.self_attn.qkv_proj.weight)
-            q_size = n_q_heads * head_dim
-            # q normed and roped in place; k (normed, roped) and v into the cache
-            # at cache_pos .. cache_pos + seq_len.
-            cp_qk_norm_rope_kv_write(
-                qkv.view(bs * seq_len, -1), attn.q_norm.weight, attn.k_norm.weight,
-                flat_pos, kv_cache[layer_idx], cache_pos, seq_len,
-                attn.q_norm.variance_epsilon, attn.k_norm.variance_epsilon,
-                float(attn.rope_theta), n_q_heads, n_kv_heads, head_dim,
-            )
-            q = qkv[..., :q_size].view(bs, seq_len, n_q_heads, head_dim)
-
-            # Each new token attends causally over the depth positions so far.
-            attn_out = cp_attention(q, kv_cache[layer_idx, :, 0], kv_cache[layer_idx, :, 1], cache_pos)
-            attn_out = attn.o_proj(attn_out.reshape(bs, seq_len, -1))
-            if layer_idx == 0:
-                residual = residual + attn_out
-                hidden_states = layer.post_attention_layernorm(residual)
-            else:
-                hidden_states, residual = layer.post_attention_layernorm.forward_residual(attn_out, residual)
-            hidden_states = layer.mlp(hidden_states)
-
-        # Final norm.
-        hidden_states, _ = self.model.norm.forward_residual(hidden_states, residual)
-        return hidden_states
+        # the residual stream is updated in place, so it starts from a copy of
+        # the input embeddings, which the caller owns
+        return run_layers(self.model.layers, inputs_embeds.clone(), self.model.norm)

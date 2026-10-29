@@ -46,8 +46,9 @@ def _sdpa_varlen(
     # so packed images don't attend across boundaries, then run SDPA.
     total_len, num_heads, head_dim = q.shape
     if cu_seqlens.numel() == 2 and not causal:
-        # One image (the unbatched ViT path): nothing to isolate, and without a mask SDPA can
-        # take its flash / cuDNN kernels instead of the masked memory-efficient one.
+        # One image (the unbatched ViT path, when flash-attn is not installed): nothing to
+        # isolate, and without a mask SDPA can take its flash / cuDNN kernels instead of the
+        # masked memory-efficient one.
         out = scaled_dot_product_attention(
             q.transpose(0, 1).unsqueeze(0), k.transpose(0, 1).unsqueeze(0),
             v.transpose(0, 1).unsqueeze(0), scale=scale,

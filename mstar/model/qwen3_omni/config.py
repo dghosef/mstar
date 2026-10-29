@@ -29,6 +29,8 @@ THINKER_POS = "thinker_pos"
 TALKER_POS = "talker_pos"
 
 THINKER_SAMPLER = "thinker_sampler"
+# the audio encoder's windowed attention over a step's packed clips
+AUDIO_ATTN = "audio_attn"
 # combined walk of the Thinker's text/audio prefill and decode
 THINKER_MIXED = "thinker_mixed"
 TALKER_SAMPLER = "talker_sampler"
@@ -156,6 +158,7 @@ class AudioEncoderConfig:
     encoder_attention_heads: int = 20
     output_dim: int = 3584
     max_source_positions: int = 1500
+    n_window: int = 50
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> AudioEncoderConfig:

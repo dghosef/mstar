@@ -6,15 +6,20 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from mstar.engine.resources.sampler.resource import SamplerResource
 from mstar.model.qwen3_5.config import SAMPLER
 from mstar.model.qwen3_5.submodules import LLMSubmodule
 
 
 class _Sampler:
+    # the real row override: a routed row's token over the master's
+    overwrite_rows = SamplerResource.overwrite_rows
+
     def __init__(self, masters=True, tokens=None):
         self.has_slot_masters = masters
         self.tokens = tokens
         self.asked = None
+        self._row_stager = None
 
     def loopback_tokens(self, request_ids):
         self.asked = list(request_ids)
@@ -22,7 +27,7 @@ class _Sampler:
 
 
 def _sub(sampler):
-    sub = LLMSubmodule.__new__(LLMSubmodule)
+    sub = LLMSubmodule(None, SimpleNamespace(stop_token_ids=frozenset()))
     sub.node_resources = {SAMPLER: sampler}
     return sub
 
@@ -219,10 +224,3 @@ def test_sampler_keeps_slot_masters_only_for_a_node_that_reads_them(monkeypatch)
     off = SamplerResource(vocab_size=None, enable_repetion_penalty=False, device=torch.device("cpu"))
     off.enable_device_loopback_reader()
     assert off._keep_last_token is False
-
-
-def test_the_loop_back_read_is_declared_per_submodule():
-    from mstar.model.submodule_base import NodeSubmodule
-
-    assert LLMSubmodule.reads_device_loopback is True
-    assert NodeSubmodule.reads_device_loopback is False

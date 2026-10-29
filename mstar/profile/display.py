@@ -58,6 +58,8 @@ def pretty_print_profile(prof: RequestProfile, filename=None):
 
     # ---- timeline ---------------------------------------------------------
     t = prof.timing
+    starts = [g.first_start for g in prof.graph_timings if g.first_start is not None]
+    ends = [g.last_end for g in prof.graph_timings if g.last_end is not None]
     # Ordered checkpoints; consecutive pairs that are both present become a
     # labelled stage. Missing checkpoints (e.g. conductor-side) collapse so the
     # surrounding stages still join up.
@@ -65,6 +67,9 @@ def pretty_print_profile(prof: RequestProfile, filename=None):
         ("recv", t.recv_time),
         ("preprocess done", t.preprocess_finish_time),
         ("conductor ingest", t.conductor_ingest_time),
+        ("worker start", min(starts) if starts else None),
+        ("worker end", max(ends) if ends else None),
+        ("last output read", t.last_output_read_time),
         ("first chunk", t.first_chunk_time),
         ("last chunk", t.last_chunk_time),
         ("conductor done", t.conductor_finish_time),
@@ -84,6 +89,8 @@ def pretty_print_profile(prof: RequestProfile, filename=None):
             lines.append(f"   {a_label + ' → ' + b_label:<40} {_ms(a_ts, b_ts)}")
         # Total spans the first to last recorded checkpoint.
         lines.append(f"   {'total':<40} {_ms(present[0][1], present[-1][1])}")
+        if t.output_postprocess_s:
+            lines.append(f"   {'output postprocess (sum)':<40} {t.output_postprocess_s * 1e3:8.1f} ms")
     else:
         lines.append(" Timeline: (no timing recorded)")
 

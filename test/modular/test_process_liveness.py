@@ -95,7 +95,7 @@ def _conductor(procs, inbox=()):
     c.sent = []
     c.communicator = SimpleNamespace(
         send=lambda entity, msg: c.sent.append((entity, msg)),
-        get_all_new_messages=_inbox(inbox),
+        poll_for_messages=lambda timeout_ms=1: False, get_all_new_messages=_inbox(inbox),
     )
     c.worker_ids = [f"worker_{i}" for i in range(len(procs))]
     c._worker_processes = list(procs)
@@ -105,7 +105,7 @@ def _conductor(procs, inbox=()):
     c._next_liveness_check = 0.0
     c.requests = {}
     c.draining = {}
-    c._worker_load = Counter()
+    c._replica_load = Counter()
     c.waiting_queue = []
     return c
 
@@ -296,12 +296,13 @@ def test_stopping_data_worker_drops_tracked_requests():
         setattr(wt, name, queue.Queue())
     wt.stop_event = threading.Event()
     wt.stop_event.set()
-    wt.communicator = SimpleNamespace(get_all_new_messages=lambda: [])
+    wt.communicator = SimpleNamespace(poll_for_messages=lambda timeout_ms=1: False, get_all_new_messages=lambda: [])
     cleaned = []
     wt.tensor_manager = SimpleNamespace(
         force_cleanup_request=cleaned.append,
         has_inflight_reads=lambda rid: False,
         get_ready_tensors=lambda: {},
+        take_failed_reads=lambda: [],
     )
     wt.in_flight_requests = {"r1", "r2"}
     wt.tensor_uuid_to_metadata_per_request = {"r2": {}}
@@ -328,7 +329,7 @@ def _api_server(conductor_proc, inbox=()):
     server = make_test_api_server(
         conductor_proc=conductor_proc,
         _liveness_interval_s=0.0,
-        communicator=SimpleNamespace(get_all_new_messages=_inbox(inbox)),
+        communicator=SimpleNamespace(poll_for_messages=lambda timeout_ms=1: False, get_all_new_messages=_inbox(inbox)),
         preprocess_worker=SimpleNamespace(
             get_profile_updates=lambda: [], get_result_chunks=lambda: []
         ),

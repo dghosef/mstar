@@ -14,7 +14,12 @@ import torch
 sys.path.insert(0, ".")
 
 from mstar.model.components.diffusion.flow_match import FlowMatchConfig, FlowMatchSchedule, euler_step  # noqa: E402
-from mstar.model.components.diffusion.image_io import encode_image, pixels_to_uint8, uint8_to_png  # noqa: E402
+from mstar.model.components.diffusion.image_io import (  # noqa: E402
+    encode_image,
+    image_output_format,
+    pixels_to_uint8,
+    uint8_to_png,
+)
 from mstar.model.components.diffusion.qwen3.encoder import Qwen3RMSNorm, qwen3_rotary_tables  # noqa: E402
 
 
@@ -148,6 +153,17 @@ def test_encode_image_honours_the_openai_output_knobs():
     assert webp[:4] == b"RIFF" and _decode(webp).shape == image.shape
     with pytest.raises(ValueError, match="output_format"):
         encode_image(image, {"output_format": "gif"})
+
+
+@pytest.mark.parametrize("knob, value", [
+    ("output_compression", 101), ("output_compression", "high"), ("png_compress_level", 10),
+    ("png_compress_level", -1),
+])
+def test_an_output_knob_encode_image_cannot_apply_fails_at_intake(knob, value):
+    """Models check the request with image_output_format before generating, so it must
+    refuse what encode_image would refuse (or misapply) after the denoise."""
+    with pytest.raises(ValueError, match=knob):
+        image_output_format({knob: value})
 
 
 @pytest.mark.parametrize("shape", [(3, 40, 8), (3, 16, 4, 6)])

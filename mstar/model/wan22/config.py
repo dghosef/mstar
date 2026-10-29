@@ -85,9 +85,10 @@ class Wan22Config:
     # on and off).
     compile_dit_sizes: tuple[str, ...] | None = None
 
-    # The DiT's attention kernel: "flashinfer" runs both attentions through the
-    # engine's ragged resources (FlashInfer's ragged prefill, FA3 on Hopper);
-    # "sdpa" runs torch SDPA, the reference pipeline's kernel.
+    # The DiT's self-attention kernel: "flashinfer" runs it through the engine's
+    # ragged resource (FlashInfer's ragged prefill, FA3 on Hopper); "sdpa" runs
+    # torch SDPA, the reference pipeline's kernel. The cross-attention always
+    # runs SDPA.
     attention_backend: str = "flashinfer"
 
     # VAE-decode tiling policy: "auto" decodes untiled when free VRAM comfortably

@@ -58,6 +58,11 @@ class EngineResourceInfo:
     """
     device: torch.device
     joint_comm_group: JointGroups | None = None
+    # how many ways the node's ranks split its attention heads; each builder
+    # sizes head counts by it. None means every rank of ``joint_comm_group``
+    # (1 without one); the engine passes the node's own count
+    # (``NodeSubmodule.splits_heads``).
+    head_shards: int | None = None
     transfer_engine_info: "TransferEngineInfo | None" = None
     kv_dtype: torch.dtype = torch.bfloat16
     # Whether this logical resource has consumers in another worker instance.
@@ -71,6 +76,11 @@ class EngineResourceInfo:
     max_rows_in_combined: "Mapping[str, int | None]" = field(
         default_factory=dict
     )
+
+    def __post_init__(self):
+        if self.head_shards is None:
+            group = self.joint_comm_group
+            object.__setattr__(self, "head_shards", 1 if group is None else group.world_size)
 
     def dependency(self, key: str) -> NodeResourceSpec:
         spec = self.dependencies.get(key)
@@ -122,6 +132,14 @@ class Resource(ABC):
         True if anything opened."""
         return False
 
+    def close_prefix_cache(self) -> None:
+        """Undo `enable_prefix_cache`. Called before any request."""
+        return
+
+    def bind_dependencies(self, resources: Mapping[str, "Resource"]) -> None:
+        """The live resources this one's spec names in `depends_on`, once all are built."""
+        return
+
     def resolve_cached_prefix(
         self, rid: str, node_name: str, graph_walk: str, inputs: Any,
     ) -> CachedPrefix | None:
@@ -130,6 +148,13 @@ class Resource(ABC):
         None leaves the answer to other resources; 0 tokens means nothing can be skipped.
         """
         return None
+
+    def cap_cached_prefix(
+        self, rid: str, node_name: str, graph_walk: str, prefix: CachedPrefix,
+    ) -> CachedPrefix:
+        """The longest prefix up to ``prefix`` this resource can serve, for a
+        resource that holds only some lengths."""
+        return prefix
 
     def apply_cached_prefix(
         self, rid: str, node_name: str, graph_walk: str,

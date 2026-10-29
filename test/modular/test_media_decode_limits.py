@@ -274,6 +274,25 @@ def test_vjepa2_refuses_sampled_frames_over_the_budget_before_decoding(monkeypat
     assert pulled == []
 
 
+@pytest.mark.parametrize("rollout_horizon, decoded", [(0, 64), (4, 8)])
+def test_vjepa2_ac_decodes_only_the_frames_its_walk_encodes(monkeypatch, rollout_horizon, decoded):
+    from mstar.model.vjepa2.vjepa2_model import VJepa2Model
+
+    pulled = []
+    _fake_torchcodec(monkeypatch, pulled, _Metadata(num_frames=1000, height=64, width=64))
+    model = VJepa2Model("unused", skip_weight_loading=True, predictor_kind="ac")
+    loaded = model.load_video("clip.mp4", "cpu")
+    assert pulled == []
+    out = model.process_prompt(
+        None, ["video"], ["video"],
+        tensors={"video_inputs": [loaded.data]}, input_metadata={"video_inputs": [loaded.metadata]},
+        actions=[[0.0] * 7] * 4, states=[[0.0] * 7] * 4, rollout_horizon=rollout_horizon,
+    ).new_input_tensors
+    assert pulled == loaded.metadata["sampled_indices"][:decoded]
+    assert out["video_frames"][0].shape[0] == decoded
+    assert out["video_inputs"] == []
+
+
 def _mp4(path, frames, side=64):
     av = pytest.importorskip("av")
     import numpy as np
@@ -610,6 +629,28 @@ def test_vjepa2_without_frame_size_in_the_header_decodes_one_frame_to_check(monk
     with pytest.raises(ValueError, match="MSTAR_MAX_VIDEO_PIXELS"):
         model.load_video("clip.mp4", "cpu")
     assert pulled == [0]
+
+
+@pytest.mark.parametrize("cpus,expected", [(1, 1), (3, 3), (64, 8)])
+def test_video_decodes_thread_within_the_usable_cpus(monkeypatch, cpus, expected):
+    """FFmpeg threads per decode follow the CPUs the process may use (affinity and
+    cgroup quota), at most 8, and not the API server's small preprocessing pool."""
+    from mstar.model import media_limits
+    from mstar.model.vjepa2.vjepa2_model import VJepa2Model
+
+    monkeypatch.setattr(torch, "get_num_threads", lambda: 1)
+    monkeypatch.setattr(media_limits, "usable_cpus", lambda: cpus)
+    media_limits.video_decode_threads.cache_clear()  # read once per process
+    monkeypatch.setenv("MSTAR_MAX_VIDEO_PIXELS", str(64 * 64 * 4))
+    opened = []
+    _fake_torchcodec(monkeypatch, [], opened=opened)
+    vjepa2 = object.__new__(VJepa2Model)
+    vjepa2.config = types.SimpleNamespace(frames_per_clip=64)
+    for load in (lambda: Model.load_video(None, "clip.mp4", "cpu"), lambda: vjepa2.load_video("clip.mp4", "cpu")):
+        with pytest.raises(ValueError, match="MSTAR_MAX_VIDEO_PIXELS"):
+            load()
+    media_limits.video_decode_threads.cache_clear()
+    assert [kw["num_ffmpeg_threads"] for kw in opened] == [expected, expected]
 
 
 def test_probe_reads_torchcodec_metadata_without_a_scan(monkeypatch):

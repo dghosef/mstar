@@ -152,14 +152,24 @@ class Wan22Model(Model):
                     head_dim=cfg.attention_head_dim,
                     # one segment per guidance branch
                     max_segments_per_request=2,
-                    # CFG-parallel: the dit's two ranks split guidance branches, not heads
-                    shard_heads=False,
                     # the DiT is compiled, not captured: keep attention in its graph
                     compile_op=True,
                     dtype=torch.bfloat16,
                 ),
             ),
         ]
+
+    def validate_config_yaml(self, config: dict, config_path: str) -> None:
+        """Refuse a dit lockstep instance (``sp_size``) of any size but 1 or 2:
+        the dit splits its two CFG branches over the instance and nothing else,
+        so more ranks would only recompute the same step."""
+        for group in config.get("node_groups") or []:
+            size = group.get("sp_size", 1)
+            if "dit" in group.get("node_names", []) and size not in (1, 2):
+                raise ValueError(
+                    f"Wan2.2 runs its dit on one rank or CFG-parallel on two (sp_size: 2); "
+                    f"got sp_size: {size!r} in {config_path}."
+                )
 
     def get_default_sharding_config(self) -> ShardingConfig:
         # CFG-parallel, through the sp slot: the dit's lockstep group (sp_size) is
@@ -769,6 +779,8 @@ class Wan22Model(Model):
             self._refresh_checkpoint_defaults()
             transformer = build_wan22_dit(
                 self.config, self.model_path_hf, device=device, cache_dir=self.cache_dir,
+                # serving numerics, like the compile: the reference gates build with compile_dit off
+                fuse_ffn_gelu=self.config.compile_dit,
             )
             return Wan22DitSubmodule(transformer, self.config, sp_group=sp_group)
         logger.warning("Wan2.2 has no submodule for node %r; running it dummy.", node_name)

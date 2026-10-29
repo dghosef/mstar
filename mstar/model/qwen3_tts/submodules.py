@@ -56,7 +56,7 @@ from mstar.engine.engine import ExecutingBatch
 from mstar.engine.resources import AttentionStep, KVStep, PositionStep, SamplerStep, Segment, SlotLease, SubmoduleStep
 from mstar.engine.resources.sampler.resource import SamplerResource
 from mstar.model.audio_watermark import AudioSealWatermarker, WatermarkStream
-from mstar.model.qwen3_tts.components.conv_stack import causal_receptive_field_frames, conv_stack
+from mstar.model.qwen3_tts.components.conv_stack import causal_receptive_field_frames, flat_conv_stack, leading_cuts
 from mstar.model.qwen3_tts.components.snake import fuse_snake_activations
 from mstar.model.qwen3_tts.components.speaker_encoder import (
     Qwen3TTSMelFrontEnd,
@@ -167,6 +167,8 @@ class TalkerSubmodule(ARNodeSubmodule):
             loop="talker_decode_loop", buffer="layer0_codes",
             stop_ids=frozenset({config.talker.codec_eos_token_id}),
             sampler=TALKER_SAMPLER, generated_key="generated_frames",
+            # EOS is not a codebook index: the codec never sees that frame
+            withhold=("codec_tokens",),
         )
         self._suppress_mask: torch.Tensor | None = None
         self._decode_last_token_indices: torch.Tensor | None = None
@@ -556,9 +558,8 @@ class TalkerSubmodule(ARNodeSubmodule):
         CODE_PRED_SAMPLER belongs to whoever runs the depth loop. The region
         declares it whenever it holds a slot for this step, so declaring it
         here too would plan and commit it twice; when the region has no slot
-        the loop runs inline and this step owns it. Keyed off the lease rather
-        than the walk, which disagreed with ``_run_frame`` — that picks inline
-        vs piecewise from what the runner can actually serve.
+        the loop runs inline and this step owns it. The forward replays the
+        region exactly when it holds this lease (``_run_depth_loop_piecewise``).
         """
         del slot_lease
         steps = {
@@ -619,7 +620,7 @@ class TalkerSubmodule(ARNodeSubmodule):
         return {
             "talker_input_embeds": codec_embed_sum,
             "codec_tokens": all_codes,
-            "new_token": layer0_codes,
+            "layer0_codes": layer0_codes,
         }
 
     def _depth_loop(
@@ -647,13 +648,14 @@ class TalkerSubmodule(ARNodeSubmodule):
         pos = torch.zeros(batch_size, 1, dtype=torch.int32, device=device)
         # Position 0 conditions the depth decoder on the Talker hidden state.
         # Each following position consumes the previous group's embedding.
-        self.code_predictor.forward_depth_unrolled(
-            last_hidden.unsqueeze(1), pos, cp_cache, cache_pos=0
-        )
+        depth = self.code_predictor.depth
+        depth.bind_step(cp_cache, pos, cache_pos=0)
+        self.code_predictor.forward_depth_unrolled(last_hidden.unsqueeze(1))
         for group_idx in range(1, self.num_codes):
             pos.fill_(group_idx)
+            depth.bind_step(cp_cache, pos, cache_pos=group_idx)
             cp_hidden = self.code_predictor.forward_depth_unrolled(
-                codec_embed.unsqueeze(1), pos, cp_cache, cache_pos=group_idx
+                codec_embed.unsqueeze(1)
             ).squeeze(1)
             cp_logits = torch.matmul(
                 cp_hidden,
@@ -696,12 +698,12 @@ class TalkerSubmodule(ARNodeSubmodule):
         ``talker_prefill``, which is eager because it is variable-length. Left
         eager, this loop costs ~4x its captured time.
         """
-        runner = engine_inputs.piecewise_runners.get(DEPTH_LOOP_REGION)
-        batch_size = layer0_codes.shape[0]
-        if runner is None or not runner.can_run(batch_size=batch_size):
+        # a step replays the region exactly when it leased it, which is when
+        # the region (not ``declare_step``) declared CODE_PRED_SAMPLER
+        if DEPTH_LOOP_REGION not in engine_inputs.piecewise_leases:
             return None
-
-        output = runner.run(
+        batch_size = layer0_codes.shape[0]
+        output = engine_inputs.piecewise_runners[DEPTH_LOOP_REGION].run(
             static_inputs={
                 "last_hidden": last_hidden,
                 "layer0_codes": layer0_codes,
@@ -747,7 +749,7 @@ class TalkerSubmodule(ARNodeSubmodule):
         return {
             "talker_input_embeds": [output["talker_input_embeds"]],
             "codec_tokens": [output["codec_tokens"][:1]],
-            "new_token": [output["new_token"]],
+            "layer0_codes": [output["layer0_codes"]],
         }
 
     def forward_batched(
@@ -766,10 +768,12 @@ class TalkerSubmodule(ARNodeSubmodule):
         del graph_walk
         # One frame per row: the engine clones each batch tensor once and the
         # stop check copies one host buffer, rather than three of each per
-        # request. A clone prefill's reference frames join in ``postprocess``.
+        # request; the stop buffer is the row output of the same name, so it
+        # shares that clone. A clone prefill's reference frames join in
+        # ``postprocess``.
         return BatchedModelOutput(
             row_outputs=output,
-            check_stop_buffers={"layer0_codes": output["new_token"]},
+            check_stop_buffers={"layer0_codes": output["layer0_codes"]},
         )
 
     def postprocess(
@@ -781,7 +785,7 @@ class TalkerSubmodule(ARNodeSubmodule):
     ) -> None:
         """Expose the stop token and advance metadata without a GPU sync.
 
-        Whole-graph replay and eager execution normally retain ``new_token``.
+        Whole-graph replay and eager execution normally retain ``layer0_codes``.
         ``codec_tokens`` is the routed output, though, so use its first codebook
         as a fallback.  This keeps EOS detection correct even if an execution
         path filters the sampler-only output before slow-path ``check_stop``.
@@ -791,9 +795,7 @@ class TalkerSubmodule(ARNodeSubmodule):
             outputs["codec_tokens"] = self._codec_stream_items(
                 request_info.graph_walk, request_id, outputs["codec_tokens"][-1],
             )
-        if "new_token" in outputs:
-            outputs["layer0_codes"] = outputs.pop("new_token")
-        elif "layer0_codes" not in outputs and "codec_tokens" in outputs:
+        if "layer0_codes" not in outputs and "codec_tokens" in outputs:
             codec_tokens = outputs["codec_tokens"][-1]
             outputs["layer0_codes"] = [codec_tokens.reshape(-1)[0]]
         if "layer0_codes" in outputs:
@@ -1001,8 +1003,8 @@ class CodecSubmodule(ARNodeSubmodule):
         self.watermarker = watermarker
         # Base streams may lead with a full reference tail: capture those windows too.
         leads = (0, config.codec.left_context_frames) if config.supports_reference_audio else (0,)
-        self.windows = config.codec.codec_windows(leads)
-        self.max_window = self.windows[-1]
+        windows = config.codec.codec_windows(leads)
+        self.max_window = windows[-1]
         self.total_upsample = 1
         for factor in (
             *config.codec.upsample_rates,
@@ -1012,6 +1014,29 @@ class CodecSubmodule(ARNodeSubmodule):
         fuse_snake_activations(decoder)
         self.conv_context = self._split_conv_context(decoder, config) if config.codec.split_decode else None
         self.split_decode = self.conv_context is not None
+        self._trim: dict[int, int] = {}
+        if self.split_decode:
+            # Windows whose conv stack decodes its full span differ only in the
+            # transformer's length, a small fixed cost, so they share the widest
+            # bucket and batch together (one step instead of one per window size).
+            full = self.conv_frames(self.max_window)
+            windows = [w for w in windows if self.conv_frames(w) < full] + [self.max_window]
+        self.windows = windows
+        if self.split_decode:
+            # The conv stack's context frames matter only for the first, low-rate
+            # modules: each module skips the leading samples no wanted output reads
+            # (``leading_cuts``), so the audio-rate modules, nearly all the cost,
+            # run over the new frames and a few samples. A bucket's cut is the
+            # least lead (new frames' first conv frame) of the windows it holds.
+            for window, context in config.codec.codec_window_contexts(leads):
+                bucket = self._bucket(window)
+                lead = min(context, self.conv_context)
+                self._trim[bucket] = min(self._trim.get(bucket, lead), lead)
+            self._flat_stack = flat_conv_stack(decoder)
+            self._cuts = {
+                trim: leading_cuts(self._flat_stack, trim * self.total_upsample)
+                for trim in range(self.conv_context + 1)
+            }
         self._conv_start_stager = PinnedStager(torch.long, numel=self.MAX_BATCH_SIZE)
 
     @staticmethod
@@ -1062,47 +1087,40 @@ class CodecSubmodule(ARNodeSubmodule):
         input_metadata: InputMetadata = EMPTY_INPUT_METADATA,
         **kwargs: Any,
     ) -> ARNodeInputs:
-        """Remove EOS frames and pad one stream window to its capture bucket.
+        """Pad one stream window to its capture bucket.
 
         Input arrives as ``[frames, code_groups]``. The official decoder wants
         ``[quantizers, frames]``; every request is padded to the smallest
         captured window that fits so the ramp's windows and the terminal tail
-        all replay CUDA graphs.
+        all replay CUDA graphs. Every item is a frame: the Talker withholds
+        its EOS frame from the stream (``TokenStop.withhold``).
         """
         del graph_walk, kwargs
         chunk = self._codec_chunk(input_metadata)
         state = self.request_state(fwd_info.rid_handle)
-        codes = inputs["codec_tokens"][0].to(
-            device=self.get_device(), dtype=torch.long
-        )
+        received = inputs.get("codec_tokens")
+        if received:
+            codes = received[0].to(device=self.get_device(), dtype=torch.long)
+        else:
+            # a stream whose first frame was EOS ends with an empty chunk
+            codes = torch.zeros(0, self.config.num_code_groups, dtype=torch.long, device=self.get_device())
         # Items are one frame each, ``[groups]`` or ``[1, groups]`` (a row
         # view of the Talker's batch output), so the window flattens to frames.
         if codes.shape[-1] != self.config.num_code_groups:
             raise ValueError(
                 f"Expected codec tokens with shape (frames, groups), got {codes.shape}"
             )
-        codes = codes.reshape(-1, self.config.num_code_groups)
-        num_items = codes.shape[0]
-        # EOS belongs to Talker loop control and is not a valid codec codebook
-        # index for waveform reconstruction. It is only ever the last frame of
-        # a stream, so the leading context count is unaffected. A sync: which
-        # window holds that frame is not known on the host.
-        codes = codes[
-            codes[:, 0] != self.config.talker.codec_eos_token_id,
-            :self.config.codec.num_quantizers,
-        ]
+        codes = codes.reshape(-1, self.config.num_code_groups)[:, :self.config.codec.num_quantizers]
         frames = codes.shape[0]
-        context = min(chunk.context_items if chunk is not None else 0, frames)
+        context = chunk.context_items if chunk is not None else 0
         # First window frame the conv stack decodes: the new frames' conv context.
         conv_start = context - min(context, self.conv_context) if self.split_decode else 0
-        # The bucket is chosen from the window's item count (EOS included) so
-        # that ``cg_key_info``, which only sees the stream chunk info, agrees.
-        bucket = self._bucket(max(chunk.num_items if chunk is not None else num_items, 1))
+        bucket = self._bucket(max(frames, 1))
         if frames < bucket:
             codes = torch.nn.functional.pad(codes, (0, 0, 0, bucket - frames))
         logger.debug(
-            "codec %s: window items=%d context=%d frames=%d bucket=%d final=%s",
-            fwd_info.request_id, num_items, context, frames, bucket, chunk is not None and chunk.is_final,
+            "codec %s: window context=%d frames=%d bucket=%d final=%s",
+            fwd_info.request_id, context, frames, bucket, chunk is not None and chunk.is_final,
         )
         state.add("codec_bucket", bucket)   # graph-key fallback when a caller has no stream chunk info
         # The window's geometry rides with this pass: under speculative
@@ -1115,6 +1133,16 @@ class CodecSubmodule(ARNodeSubmodule):
                 "is_final": chunk is not None and chunk.is_final,
             },
         )
+
+    def _batch_trim(self, width: int, inputs: list[ARNodeInputs]) -> int:
+        """Conv frames the batch's conv stack starts after: its bucket's cut,
+        or less when a row's new frames start earlier (a window the chunk
+        schedule does not produce), which then runs eagerly."""
+        trim = self._trim.get(width, 0)
+        for item in inputs:
+            if "context" in item.kwargs:
+                trim = min(trim, item.kwargs["context"] - item.kwargs["conv_start"])
+        return trim
 
     def preprocess(
         self,
@@ -1139,12 +1167,16 @@ class CodecSubmodule(ARNodeSubmodule):
         conv_start = torch.empty(len(inputs), dtype=torch.long, device=codec_tokens.device)
         # capture-time inputs carry no geometry: 0 is a valid start
         self._conv_start_stager.copy_(conv_start, [item.kwargs.get("conv_start", 0) for item in inputs])
-        return {"codec_tokens": codec_tokens, "conv_start": conv_start}
+        trim = self._batch_trim(width, inputs) if self.split_decode else 0
+        for item in inputs:
+            item.kwargs["trim"] = trim   # where this step's audio starts, for postprocess
+        # an int: a capture bakes its bucket's cut in, and replays only batches that share it
+        return {"codec_tokens": codec_tokens, "conv_start": conv_start, "trim": trim}
 
-    def _decode(self, codec_tokens: torch.Tensor, conv_start: torch.Tensor) -> torch.Tensor:
+    def _decode(self, codec_tokens: torch.Tensor, conv_start: torch.Tensor, trim: int = 0) -> torch.Tensor:
         """Decode windows to PCM16: per request, the audio of window frames
-        ``conv_start`` .. ``conv_start + conv_frames(width)`` (all of it when
-        the decoder is not split)."""
+        ``conv_start + trim`` .. ``conv_start + conv_frames(width)`` (all of it
+        when the decoder is not split)."""
         if not self.split_decode:
             wav = self.decoder(codec_tokens)
         else:
@@ -1160,9 +1192,10 @@ class CodecSubmodule(ARNodeSubmodule):
             # that out of its audio.
             index = (conv_start.view(-1, 1) + torch.arange(length, device=hidden.device)).clamp_(max=width - 1)
             hidden = hidden.gather(2, index.unsqueeze(1).expand(-1, hidden.shape[1], -1))
-            for module in conv_stack(decoder):
-                hidden = module(hidden)
-            wav = hidden
+            cuts, final_cut = self._cuts[trim]
+            for module, cut in zip(self._flat_stack, cuts, strict=True):
+                hidden = module(hidden[..., cut:] if cut else hidden)
+            wav = hidden[..., final_cut:]
         return (wav.clamp(-1, 1) * 32767).to(torch.int16).squeeze(1)
 
     def forward(
@@ -1174,8 +1207,8 @@ class CodecSubmodule(ARNodeSubmodule):
         **kwargs: Any,
     ) -> NameToTensorList:
         """One request's window (``[1, quantizers, frames]``) -> its ``[samples]`` audio."""
-        del graph_walk, engine_inputs, kwargs
-        return {"audio_chunk": [self._decode(codec_tokens, conv_start)[0]]}
+        del graph_walk, engine_inputs
+        return {"audio_chunk": [self._decode(codec_tokens, conv_start, kwargs.get("trim", 0))[0]]}
 
     def forward_batched(
         self,
@@ -1183,14 +1216,13 @@ class CodecSubmodule(ARNodeSubmodule):
         engine_inputs: ModelInputsFromEngine,
         codec_tokens: torch.Tensor,
         conv_start: torch.Tensor,
+        trim: int = 0,
         **kwargs: Any,
-    ) -> dict[str, NameToTensorList]:
-        del graph_walk, kwargs
-        wavs = self._decode(codec_tokens, conv_start)
-        return {
-            request_id: {"audio_chunk": [wavs[i]]}
-            for i, request_id in enumerate(engine_inputs.request_ids)
-        }
+    ) -> BatchedModelOutput:
+        del graph_walk, engine_inputs, kwargs
+        # one batch tensor, row i for request i: a pure tensor function to
+        # compile, and one clone per step rather than one per request
+        return BatchedModelOutput(row_outputs={"audio_chunk": self._decode(codec_tokens, conv_start, trim)})
 
     def postprocess(
         self,
@@ -1213,7 +1245,7 @@ class CodecSubmodule(ARNodeSubmodule):
             raise ValueError("codec postprocess needs the pass's inputs for its window geometry")
         frames = int(inputs.kwargs["frames"])
         context = int(inputs.kwargs["context"])
-        conv_start = int(inputs.kwargs.get("conv_start", 0))
+        conv_start = int(inputs.kwargs.get("conv_start", 0)) + int(inputs.kwargs.get("trim", 0))
         start = (context - conv_start) * self.total_upsample
         end = (frames - conv_start) * self.total_upsample
         audio = outputs["audio_chunk"][0].reshape(-1)   # one request's samples, whatever the batch shape
@@ -1348,7 +1380,11 @@ class CodecSubmodule(ARNodeSubmodule):
                 ),
                 additional_key_info=window,
                 capture_batch_sizes=self.CAPTURE_BATCH_SIZES,
-                compile=False,
+                # Inductor fuses the conv stack's pads, adds and layout copies
+                # (~20-30% of a window's GPU time); ~55-60 dB SNR against the
+                # eager decode. "default" mode: no autotuning per capture.
+                compile=True,
+                compile_mode="default",
             )
             for window in self.windows
         ]
@@ -1356,7 +1392,7 @@ class CodecSubmodule(ARNodeSubmodule):
     def can_use_accelerator_graphs(
         self, batch: ExecutingBatch, model_inputs: list[NodeInputs]
     ) -> bool:
-        return (
+        if not (
             batch.graph_walk == "codec_chunk"
             and self.can_batch(batch, model_inputs)
             and all(
@@ -1364,6 +1400,12 @@ class CodecSubmodule(ARNodeSubmodule):
                 in {(self.config.codec.num_quantizers, window) for window in self.windows}
                 for item in model_inputs
             )
+        ):
+            return False
+        # the capture of the batch's widest bucket bakes in that bucket's cut
+        width = max(item.tensor_inputs["codec_tokens"].shape[-1] for item in model_inputs)
+        return (
+            (not self.split_decode or self._batch_trim(width, model_inputs) == self._trim.get(width, 0))
             and super().can_use_accelerator_graphs(batch, model_inputs)
         )
 
