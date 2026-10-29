@@ -680,7 +680,7 @@ class PreprocessWorkerThread:
         self._prep_workers = preprocess_workers
         if preprocess_workers > 1:
             self._prep_pool = ThreadPoolExecutor(preprocess_workers, thread_name_prefix="preprocess")
-        # inputs in arrival order, each a request's prepare on the pool or an append
+        # inputs in arrival order, waiting to be handed on (`PreparingInput`)
         self._preparing: deque[PreparingInput] = deque()
         self._encode_pool = ThreadPoolExecutor(
             max_workers=encode_workers(), thread_name_prefix="mstar-encode",
