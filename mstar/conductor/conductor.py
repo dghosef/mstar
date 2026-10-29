@@ -2253,6 +2253,11 @@ class Conductor:
                 range_push("conductor.run_loop")
 
             try:
+                # Wait for the next message rather than sleeping a fixed tick: a
+                # message that lands mid-sleep waited out the rest of it, on every
+                # hop of a request (walk transitions, completions), and a 1 ms
+                # sleep on a busy host often lasts several.
+                self.communicator.poll_for_messages(timeout_ms=1)
                 done_partition_forwards: list[tuple[str, str, bool]] = []
 
                 startup_backlog = self._startup_message_backlog
@@ -2306,8 +2311,3 @@ class Conductor:
             # Outside the try above so DeadWorkerError leaves the loop instead of
             # being logged as a main-loop error and retried.
             self._poll_worker_liveness()
-            # Wait for the next message rather than sleeping a fixed tick: a
-            # message that lands mid-sleep waited out the rest of it, on every
-            # hop of a request (walk transitions, completions), and a 1 ms
-            # sleep on a busy host often lasts several.
-            self.communicator.poll_for_messages(timeout_ms=1)

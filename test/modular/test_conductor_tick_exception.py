@@ -152,6 +152,21 @@ def test_two_healthy_requests_complete_in_one_tick():
     assert _to_client(c, "request_failed") == {}
 
 
+def test_a_failed_wait_for_messages_does_not_end_the_loop():
+    """A transport error from the idle wait (ZMQError, the Rust runtime's
+    RuntimeError) is a failed pass, not the conductor's exit."""
+    c = _conductor([_done("a")], requests={"a": _request()})
+    fails = [RuntimeError("socket closed")]
+
+    def poll(timeout_ms=1):
+        if fails:
+            raise fails.pop()
+        return False
+    c.communicator.poll_for_messages = poll
+    _run(c)
+    assert "a" in _to_client(c, "request_complete")
+
+
 def test_a_failing_pass_does_not_strand_the_other_requests_in_its_tick():
     c = _conductor(
         [_done("bad"), _done("good")],
