@@ -340,13 +340,12 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
        rendezvouses. Default 512.
    * - ``preprocess_workers``
      - *(optional)* Requests whose media load and ``process_prompt`` the API server
-       runs at once, on a thread pool, a positive integer (anything else fails at
-       startup); unset keeps the model's ``Model.PREPROCESS_WORKERS`` (8 for
-       V-JEPA2, 4 for V-JEPA2-AC, 1 otherwise). 1 prepares one request at a time
-       on the data-worker thread. Above 1 the model's ``load_*`` and
-       ``process_prompt`` must be thread-safe, so raise it only for a model
-       whose class sets more than 1. Requests are still handed to the conductor
-       in arrival order.
+       runs at once, on a thread pool: an integer from 1 to the model's
+       ``Model.PREPROCESS_WORKERS``, which is also the default (anything else fails
+       at startup). A model class sets that above 1 only when its ``load_*`` and
+       ``process_prompt`` are thread-safe, so a deployment may lower it but not
+       raise it. 1 prepares one request at a time on the data-worker thread.
+       Requests are still handed to the conductor in arrival order.
    * - ``api_switch_interval_s``
      - *(optional)* GIL switch interval of the API server process, in seconds
        (``sys.setswitchinterval``), a positive number (anything else fails at

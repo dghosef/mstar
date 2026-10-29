@@ -3,6 +3,7 @@ and is woken by a producer's signal, a finished tensor read or shutdown,
 instead of sleeping 1 ms and sweeping its queues."""
 from __future__ import annotations
 
+import os
 import queue
 import select
 import threading
@@ -10,6 +11,8 @@ import time
 from collections import deque
 from concurrent.futures import Future
 from types import SimpleNamespace
+
+import pytest
 
 from mstar.api_server.data_worker import InlineToken, PreprocessWorkerThread
 from mstar.communication.event import EventWakeup
@@ -237,7 +240,7 @@ def test_pooled_preprocessing_overlaps_requests_and_keeps_arrival_order():
         profile_queue=queue.Queue(), cleanup_request_queue=queue.Queue(),
         abort_request_queue=queue.Queue(), reads_done_queue=queue.Queue(),
         discard_tensor_queue=queue.Queue(), stop_event=stop, communicator=comm,
-        tensor_manager=_StoreTM(), model=model, wakeup=wakeup,
+        tensor_manager=_StoreTM(), model=model, wakeup=wakeup, preprocess_workers=2,
     )
     t = threading.Thread(target=worker.run, daemon=True)
     t.start()
@@ -255,6 +258,20 @@ def test_pooled_preprocessing_overlaps_requests_and_keeps_arrival_order():
     wakeup.signal()
     t.join(timeout=2.0)
     assert not t.is_alive()
+
+
+@pytest.mark.parametrize("workers", [0, "2", 3])
+def test_a_bad_preprocess_workers_fails_startup(workers):
+    """Not a dead data-worker thread under a server that comes up; nor more
+    prepares at once than the model class declares safe (2 here)."""
+    from mstar.api_server.data_worker import PreprocessWorker
+    from mstar.communication.communicator import CommProtocol
+
+    with pytest.raises(ValueError, match="preprocess_workers"):
+        PreprocessWorker(
+            model=_SlowModel(), model_config={"preprocess_workers": workers},
+            tensor_comm_protocol=CommProtocol.SHM, socket_path_prefix=f"/tmp/mstar-pw{os.getpid()}",
+        )
 
 
 def test_a_prepared_request_waits_while_a_peer_cannot_take_more():

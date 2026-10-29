@@ -1850,10 +1850,10 @@ torch's default. It does not size video decoding: each torchcodec decode that as
 threads, no more than the CPUs the process may use (the same affinity and cgroup quota).
 
 A model whose media load and ``process_prompt`` are thread-safe can also prepare several
-requests at once on a thread pool with ``PREPROCESS_WORKERS`` on the class (V-JEPA2 uses
-8; the default 1 prepares them one at a time on the data-worker thread), which a
-deployment overrides with ``preprocess_workers`` (see :doc:`serving`). Requests are still
-handed on in arrival order.
+requests at once on a thread pool by setting ``PREPROCESS_WORKERS`` on the class above 1
+(the default 1 prepares them one at a time on the data-worker thread). The class value is
+a ceiling: a deployment may lower it with ``preprocess_workers`` (see :doc:`serving`), not
+raise it. Requests are still handed on in arrival order.
 
 .. _tensor-parallelism:
 

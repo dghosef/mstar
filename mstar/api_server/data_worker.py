@@ -178,12 +178,18 @@ class PreparingInput(NamedTuple):
 
 
 def preprocess_workers(model: Model | None, model_config: dict | None) -> int:
-    """``preprocess_workers`` from the serving config, else the model's ``PREPROCESS_WORKERS``."""
+    """``preprocess_workers`` from the serving config, else the model's
+    ``PREPROCESS_WORKERS``. The class value is also the ceiling: it says how
+    many prepares its ``load_*`` and ``process_prompt`` are safe to run at once."""
     if model is None:
         return 1
-    workers = (model_config or {}).get("preprocess_workers", getattr(model, "PREPROCESS_WORKERS", 1))
-    if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
-        raise ValueError(f"preprocess_workers must be a positive integer, got {workers!r}")
+    ceiling = model.PREPROCESS_WORKERS
+    workers = (model_config or {}).get("preprocess_workers", ceiling)
+    if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= ceiling:
+        raise ValueError(
+            f"preprocess_workers must be an integer from 1 to {type(model).__name__}.PREPROCESS_WORKERS "
+            f"({ceiling}), got {workers!r}"
+        )
     return workers
 
 
@@ -227,6 +233,8 @@ class PreprocessWorker:
         is_pending: Callable[[str], bool] | None = None,
     ):
         check_media_limits()
+        # here, not on the thread: a bad value must stop startup
+        prep_workers = preprocess_workers(model, model_config)
         self.request_input_queue = queue.Queue()
         self.result_tensor_input_queue = queue.Queue()
         self.cleanup_request_queue = queue.Queue()
@@ -294,6 +302,7 @@ class PreprocessWorker:
                 timing_requested=self.timing_requested,
                 worker_metrics_requested=self.worker_metrics_requested,
                 model_config=model_config,
+                preprocess_workers=prep_workers,
                 enable_nvtx=enable_nvtx,
                 is_pending=is_pending,
             )
@@ -571,6 +580,7 @@ class PreprocessWorkerThread:
         model: Model | None = None,
         enable_prof: bool=False,
         model_config: dict | None = None,
+        preprocess_workers: int = 1,
         enable_nvtx: bool=False,
         wakeup: EventWakeup | None = None,
         output_ready: EventWakeup | None = None,
@@ -653,10 +663,9 @@ class PreprocessWorkerThread:
         self.idle_wait_ms = 20
         # Media load + process_prompt for several requests at once, for models
         # that declare it; requests then wait in `_preparing` instead of in_queue.
-        workers = preprocess_workers(model, model_config)
-        self._prep_workers = workers
-        if workers > 1:
-            self._prep_pool = ThreadPoolExecutor(workers, thread_name_prefix="preprocess")
+        self._prep_workers = preprocess_workers
+        if preprocess_workers > 1:
+            self._prep_pool = ThreadPoolExecutor(preprocess_workers, thread_name_prefix="preprocess")
         # inputs in arrival order, each a request's prepare on the pool or an append
         self._preparing: deque[PreparingInput] = deque()
         self._encode_pool = ThreadPoolExecutor(
