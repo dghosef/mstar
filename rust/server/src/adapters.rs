@@ -279,6 +279,7 @@ pub enum Adapter {
     Orpheus,
     Cosmos3,
     Cosmos3Edge,
+    Qwen3TTS,
 }
 
 impl Adapter {
@@ -292,6 +293,7 @@ impl Adapter {
             "OrpheusAdapter" => Some(Adapter::Orpheus),
             "Cosmos3Adapter" => Some(Adapter::Cosmos3),
             "Cosmos3EdgeAdapter" => Some(Adapter::Cosmos3Edge),
+            "Qwen3TTSAdapter" => Some(Adapter::Qwen3TTS),
             _ => None,
         }
     }
@@ -301,7 +303,7 @@ impl Adapter {
     }
 
     pub fn supports_speech(&self) -> bool {
-        matches!(self, Adapter::Qwen3Omni | Adapter::Orpheus)
+        matches!(self, Adapter::Qwen3Omni | Adapter::Orpheus | Adapter::Qwen3TTS)
     }
 
     pub fn supports_images(&self) -> bool {
@@ -389,13 +391,31 @@ impl Adapter {
                     parts,
                 })
             }
-            Adapter::Orpheus | Adapter::Cosmos3 => {
+            Adapter::Orpheus | Adapter::Cosmos3 | Adapter::Qwen3TTS => {
                 Err("chat is not supported by this model".to_string())
             }
         }
     }
 
+    /// `OpenAIAdapter.speech_chunk_min_chars`: inputs at least this long are
+    /// synthesized as sentence chunks.
+    fn speech_chunk_min_chars(&self) -> Option<usize> {
+        match self {
+            Adapter::Qwen3TTS => Some(600),
+            _ => None,
+        }
+    }
+
     pub fn speech_to_request(&self, req: &SpeechRequest) -> Result<SubmitArgs, String> {
+        let mut args = self.speech_args(req)?;
+        let requested = args.model_kwargs.remove("sentence_chunking");
+        if let Some(text) = single_chunk(&req.input, requested.as_ref(), self.speech_chunk_min_chars())? {
+            args.text = Some(text);
+        }
+        Ok(args)
+    }
+
+    fn speech_args(&self, req: &SpeechRequest) -> Result<SubmitArgs, String> {
         match self {
             Adapter::Qwen3Omni => {
                 let mut mk: Map<String, Value> = req.extra.clone().into_iter().collect();
@@ -441,6 +461,46 @@ impl Adapter {
                         max_tokens_key: None,
                     },
                 );
+                Ok(SubmitArgs {
+                    tokens: None,
+                    text: Some(req.input.clone()),
+                    file_paths: BTreeMap::new(),
+                    input_modalities: vec!["text".to_string()],
+                    output_modalities: vec!["audio".to_string()],
+                    model_kwargs: mk,
+                    parts: Vec::new(),
+                })
+            }
+            Adapter::Qwen3TTS => {
+                let mut mk: Map<String, Value> = req.extra.clone().into_iter().collect();
+                if let Some(v) = &req.voice {
+                    mk.insert("voice".to_string(), Value::from(v.clone()));
+                }
+                // OpenAI's field is `instructions`; the model reads `instruct`.
+                if let Some(i) = mk.remove("instructions").filter(truthy) {
+                    set_default(&mut mk, "instruct", i);
+                }
+                apply_sampling(
+                    &mut mk,
+                    Sampling {
+                        temperature: req.temperature.clone(),
+                        top_p: req.top_p.clone(),
+                        seed: req.seed,
+                        max_tokens: None,
+                        temperature_key: "temperature",
+                        top_p_key: "top_p",
+                        max_tokens_key: None,
+                    },
+                );
+                // Not a Qwen3-TTS control: forwarded so the server reports it ignored.
+                if let Some(speed) = req.speed {
+                    set_default(&mut mk, "speed", json_num(speed));
+                }
+                if mk.remove("ref_audio").is_some_and(|r| truthy(&r)) {
+                    return Err("ref_audio (voice cloning) is not supported by the Rust \
+                                frontend; use the Python frontend"
+                        .to_string());
+                }
                 Ok(SubmitArgs {
                     tokens: None,
                     text: Some(req.input.clone()),
@@ -641,6 +701,38 @@ fn text_chat(
     })
 }
 
+/// The speech text when it is one sentence chunk, as `serving_speech._plan_chunks`
+/// plans it: `None` when chunking is off (`sentence_chunking: false`, or unset
+/// and the input shorter than `min_chars`), the stripped text when it fits one
+/// chunk. An input that would split is refused, since this frontend does not
+/// synthesize sentence chunks yet.
+fn single_chunk(
+    text: &str,
+    requested: Option<&Value>,
+    min_chars: Option<usize>,
+) -> Result<Option<String>, String> {
+    let chunked = match requested {
+        Some(Value::Bool(false)) => false,
+        None | Some(Value::Null) => min_chars.is_some_and(|m| text.chars().count() >= m),
+        Some(_) => true,
+    };
+    let stripped = text.trim();
+    if !chunked || stripped.is_empty() {
+        return Ok(None);
+    }
+    if stripped.chars().count() <= SPEECH_CHUNK_MAX_CHARS {
+        return Ok(Some(stripped.to_string()));
+    }
+    Err(format!(
+        "this input is synthesized as sentence chunks, which the Rust frontend does not \
+         do yet; send sentence_chunking: false or use the Python frontend (inputs of more \
+         than {SPEECH_CHUNK_MAX_CHARS} characters split)"
+    ))
+}
+
+/// `OpenAIAdapter.speech_chunk_max_chars`.
+const SPEECH_CHUNK_MAX_CHARS: usize = 400;
+
 /// `chat_template_kwargs.enable_thinking` read as `Cosmos3EdgeAdapter` does:
 /// `(kwargs or {})`, then `bool(kwargs["enable_thinking"])` when it has the
 /// key. A falsy value is no kwargs; a value Python cannot look the key up in
@@ -811,6 +903,7 @@ mod tests {
             ("OrpheusAdapter", Adapter::Orpheus),
             ("Cosmos3Adapter", Adapter::Cosmos3),
             ("Cosmos3EdgeAdapter", Adapter::Cosmos3Edge),
+            ("Qwen3TTSAdapter", Adapter::Qwen3TTS),
         ] {
             assert_eq!(Adapter::from_python(class), Some(adapter));
         }
@@ -916,6 +1009,31 @@ mod tests {
                 assert!(args.is_ok(), "{fields} refused a plain chat on {adapter:?}");
             }
         }
+    }
+
+    fn qwen3_tts_speech(fields: &str) -> Result<SubmitArgs, String> {
+        let req: SpeechRequest = serde_json::from_str(&format!("{{{fields}}}")).unwrap();
+        Adapter::Qwen3TTS.speech_to_request(&req)
+    }
+
+    #[test]
+    fn a_qwen3_tts_input_is_one_chunk_or_refused_as_serving_speech_plans_it() {
+        let long = "Word. ".repeat(100); // 600 characters
+        let text = |fields: &str| qwen3_tts_speech(fields).map(|a| a.text.unwrap());
+        assert_eq!(text(r#""input":" Hi. ""#).unwrap(), " Hi. ", "a short input was changed");
+        assert_eq!(text(r#""input":" Hi. ","sentence_chunking":true"#).unwrap(), "Hi.");
+        assert_eq!(text(&format!(r#""input":"{long}","sentence_chunking":false"#)).unwrap(), long);
+        for fields in [format!(r#""input":"{long}""#), format!(r#""input":"{long}","sentence_chunking":1"#)] {
+            assert!(text(&fields).unwrap_err().contains("sentence_chunking: false"), "{fields}");
+        }
+        let args = qwen3_tts_speech(r#""input":"Hi.","sentence_chunking":false"#).unwrap();
+        assert!(!args.model_kwargs.contains_key("sentence_chunking"), "the switch reached the model");
+    }
+
+    #[test]
+    fn a_qwen3_tts_voice_clone_is_refused() {
+        let err = qwen3_tts_speech(r#""input":"Hi.","ref_audio":"data:audio/wav;base64,AA==""#).unwrap_err();
+        assert!(err.contains("ref_audio"), "{err}");
     }
 
     /// A fresh upload directory, removed on drop. Request media must be inline

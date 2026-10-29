@@ -53,7 +53,6 @@ NOT_PORTED = {
     ("FishS2ProAdapter", "speech"),
     ("KokoroAdapter", "speech"),
     ("OmniVoiceAdapter", "speech"),
-    ("Qwen3TTSAdapter", "speech"),
     ("DiffusionImageAdapter", "images"),
     ("LTX25Adapter", "videos"),
     ("Wan22Adapter", "videos"),
@@ -239,6 +238,37 @@ def test_a_chat_reaches_the_backend_as_the_python_adapter_builds_it(cls, fields,
     assert sub["mk"] == want.model_kwargs
     assert [asdict(p) for p in sub["parts"]] == [asdict(p) for p in want.prompt_parts]
     assert rust_files == _files(want.file_paths) == {"image": [base64.b64decode(PNG)]}
+
+
+SPEECH = {
+    "model": "ignored", "input": "  Hello there, 世界.  ", "voice": "Vivian",
+    "instructions": "Speak slowly.", "language": "English",
+    "temperature": 0.6, "top_p": 0.9, "seed": 7, "speed": 1.25,
+    "top_k": 30, "repetition_penalty": 1.05, "ref_audio": "", "ref_text": "kept",
+}
+
+
+def test_a_qwen3_tts_speech_reaches_the_backend_as_the_python_adapter_builds_it(tmp_path):
+    """voice, instructions -> instruct, sampling, a sent speed and the extra_body
+    knobs; an empty ref_audio is dropped."""
+    model = _model_of("Qwen3TTSAdapter")
+    stub = _StubAPIServer()
+    with _model_stack(model, stub) as (port, _upload):
+        status, data = _post(port, ROUTES["speech"][0], SPEECH, timeout=30)
+        assert status == 200, data
+        (sub,) = stub.submitted
+    try:
+        from mstar.api_server.openai.protocol import SpeechRequest
+        req = SpeechRequest(**SPEECH)
+    except ImportError:  # the CI Rust job runs without pydantic
+        declared = {"input", "model", "voice", "speed", "temperature", "top_p", "seed"}
+        req = types.SimpleNamespace(**SPEECH, model_fields_set=set(SPEECH),
+                                    model_extra={k: v for k, v in SPEECH.items() if k not in declared})
+    want = ADAPTER_REGISTRY[model].speech_to_request(req, tmp_path)
+
+    assert (sub["text"], sub["in"], sub["out"]) == (want.text, want.input_modalities, want.output_modalities)
+    assert sub["mk"] == want.model_kwargs
+    assert not sub["files"] and not want.file_paths
 
 
 # ── both frontends answer a chat the same way ────────────────────────────────

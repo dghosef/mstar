@@ -576,7 +576,10 @@ ported class is served. Chat is served for every model the Python frontend serve
 it for. Some speech, image and video adapters, and the transcription and realtime
 routes, are not ported yet (``NOT_PORTED`` in
 ``test/rust/test_rust_openai_adapters.py``); there ``mstar-server`` answers 404,
-logs a warning at startup, and ``/generate`` still works.
+logs a warning at startup, and ``/generate`` still works. A ported speech
+adapter answers 400 where Python would split the input into sentence chunks or
+clone a voice from ``ref_audio``; send ``sentence_chunking: false`` or use the
+Python frontend.
 
 Troubleshooting
 ---------------

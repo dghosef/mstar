@@ -164,9 +164,8 @@ pub struct SpeechRequest {
     pub voice: Option<String>,
     #[serde(default = "default_wav")]
     pub response_format: String,
-    /// Accepted for OpenAI compatibility (kept out of `extra`); playback-rate
-    /// adjustment is not applied, as in mstar.
-    #[allow(dead_code)]
+    /// Kept out of `extra`; playback-rate adjustment is not applied, as in
+    /// mstar. An adapter forwards a sent one so the server reports it ignored.
     #[serde(default, deserialize_with = "flex::opt_f64")]
     pub speed: Option<f64>,
     /// `bool | None` in Python (default False); accept an explicit `null`
