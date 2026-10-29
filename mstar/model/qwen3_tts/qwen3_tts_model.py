@@ -395,6 +395,9 @@ class Qwen3TTSModel(Model):
     # Streams the codec state pool holds (about 5 MiB each in float32); a
     # deployment sizes it with ``resources: {codec_state: {max_slots: ...}}``.
     MAX_CODEC_STREAMS = 256
+    # A held codec chunk goes once its stream has this little audio left to
+    # play: a codec step plus the trip to the client, with margin.
+    CODEC_MIN_SLACK_S = 0.25
 
     def __init__(
         self,
@@ -648,6 +651,9 @@ class Qwen3TTSModel(Model):
                     batch_hold=ChunkBatchHold(
                         max_wait_s=self.codec_batch_hold_ms / 1000,
                         min_chunks=CodecSubmodule.MAX_BATCH_SIZE,
+                        # a frame plays for upsample / rate seconds: release before a stream runs dry
+                        item_seconds=codec.decode_upsample_rate / codec.output_sample_rate,
+                        min_slack_s=self.CODEC_MIN_SLACK_S,
                     ) if self.codec_batch_hold_ms > 0 else None,
                 ),
             ],

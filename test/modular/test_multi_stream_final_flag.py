@@ -246,6 +246,32 @@ def test_a_batch_hold_keeps_later_chunks_back_until_enough_are_ready():
     assert sorted(ingested[5:]) == ["a", "b", "c"], "min_chunks ready across requests releases them all"
 
 
+def test_a_batch_hold_releases_a_stream_about_to_run_dry():
+    """With a playback deadline, a held chunk goes once its stream's popped
+    items have played out to ``min_slack_s``, however long ``max_wait_s`` is."""
+    from mstar.streaming.topology import ChunkBatchHold
+
+    buf = StreamBuffer(request_id="a", edge_name="codes", from_partition="LLM", policy=FixedChunkPolicy(chunk_size=1))
+    request_state = SimpleNamespace(per_request_info={
+        "a": SimpleNamespace(stream_buffers={"codes": buf}, stream_buffers_by_consumer={"vocoder": {"codes": buf}}),
+    })
+    tensor_manager = SimpleNamespace(
+        increment_ref_batch_uniform=lambda uuids: None, dereference_batch_uniform=lambda uuids: None,
+    )
+    streams = StreamBufferManager(request_state, tensor_manager, [Connection(
+        from_partition="LLM", to_partition=PARTITION, edge_name="codes",
+        chunk_policy_factory=lambda: FixedChunkPolicy(chunk_size=1),
+        batch_hold=ChunkBatchHold(max_wait_s=60.0, min_chunks=3, item_seconds=0.5, min_slack_s=0.2),
+    )])
+    for uid in ("t0", "t1"):
+        buf.pre_read_register(uid)
+        buf.put(uid, uid)
+    assert [rid for rid, _ in streams.poll(False)] == ["a"], "the first chunk goes at once"
+    assert streams.poll(False) == [], "one item (0.5 s) popped just now: plenty of slack, so it waits"
+    buf._first_pop_at -= 0.35   # 0.15 s of that audio left to play
+    assert [rid for rid, _ in streams.poll(False)] == ["a"]
+
+
 def test_a_lockstep_leader_holds_its_streams_and_a_follower_does_not():
     """A batch hold applies on the rank that picks a lockstep node's rows (its
     leader) and on unreplicated nodes; a follower ingests its chunks at once."""
