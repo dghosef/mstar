@@ -406,7 +406,7 @@ def cmd_timing(args):
                     ms = _time(_graph(fn), args.iters)
                     rows.append(dict(arm=f"incr_{lay}", compiled=compiled, B=B, new=new, context=0, width=new, ms=ms))
                     print(json.dumps(rows[-1]), flush=True)
-    for B in args.batches:   # fixed small chunks (VoxServe's 10)
+    for B in args.batches:   # fixed small chunks (--extra-widths frames, default 10 and 12)
         for new in args.extra_widths:
             for lay, incr in incrs.items():
                 fn = incr_step_fn(incr, pools[lay], B, new, True)
