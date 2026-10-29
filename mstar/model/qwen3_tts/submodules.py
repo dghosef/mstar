@@ -152,12 +152,12 @@ class TalkerSubmodule(ARNodeSubmodule):
     # eager alternative costs ~20 ms of launch overhead per request.
     PREFILL_TOKEN_BUCKETS = [32, 64, 128, 256, 512, 1024]
     PREFILL_CAPTURE_BATCH_SIZES = [1, 2, 4, 8]
-    # A mixed step is a decode batch plus up to MIXED_MAX_PREFILL_ROWS prompts.
-    # Its captures run to the decode cap (one below it would split the batch),
-    # with the decode buckets' row counts: every padding row costs a depth loop.
+    # A mixed step is a decode batch plus up to MIXED_MAX_PREFILL_ROWS prompts,
+    # which keeps it in the captured token buckets. Its captures run to the
+    # decode cap: one below it would split the batch.
     MIXED_MAX_PREFILL_ROWS = 4
-    MIXED_CAPTURE_BATCH_SIZES = [2, 4, 8, 16, 24, 32, 48, 64]
-    MIXED_TOKEN_BUCKETS = [32, 64, 128, 192, 256, 384, 512, 768, 1024]
+    MIXED_CAPTURE_BATCH_SIZES = [4, 8, 16, 32, 48, 64]
+    MIXED_TOKEN_BUCKETS = [64, 128, 256, 512, 1024]
     CHATML_ASSISTANT_PREFIX_TOKEN_IDS = CHATML_ASSISTANT_PREFIX_TOKEN_IDS
     CHATML_ASSISTANT_SUFFIX_TOKEN_IDS = CHATML_ASSISTANT_SUFFIX_TOKEN_IDS
 
@@ -580,7 +580,7 @@ class TalkerSubmodule(ARNodeSubmodule):
             self._zero_rows = packed_embeds.new_zeros(max(longest, self.MIXED_TOKEN_BUCKETS[-1]), packed_embeds.shape[1])
         zeros = self._zero_rows
         return torch.cat([
-            item.kwargs["text_condition"].view(1, -1) if "text_condition" in item.kwargs
+            item.kwargs["text_condition"].view(1, -1) if item.graph_walk == "talker_decode"
             else zeros[:item.input_seq_len]
             for item in inputs
         ], dim=0)
@@ -863,8 +863,10 @@ class TalkerSubmodule(ARNodeSubmodule):
         return self.MAX_BATCH_SIZE
 
     def max_rows_in_combined(self, graph_walk: str) -> int | None:
-        # bounds a mixed step's tokens to its captured buckets
-        return None if graph_walk == "talker_decode" else self.MIXED_MAX_PREFILL_ROWS
+        # the cap is per walk: split MIXED_MAX_PREFILL_ROWS over the prefill walks
+        if graph_walk == "talker_decode":
+            return None
+        return self.MIXED_MAX_PREFILL_ROWS // (2 if self.config.supports_reference_audio else 1)
 
     def get_accelerator_graph_configs(
         self, device: torch.device, tp_world_size: int = 1
@@ -992,7 +994,7 @@ class TalkerSubmodule(ARNodeSubmodule):
     ) -> bool:
         """Replay the whole decode graph or a packed prefill; sampling params
         are read from buffers, so no request's settings can disqualify it."""
-        if batch.graph_walk not in ("talker_decode", "talker_prefill", "talker_prefill_clone", TALKER_MIXED) or not self.can_batch(
+        if batch.graph_walk not in ("talker_decode", "talker_prefill", "talker_prefill_clone") or not self.can_batch(
             batch, model_inputs
         ):
             return False
