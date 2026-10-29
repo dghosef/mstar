@@ -26,6 +26,8 @@ from mstar.model.submodule_base import (
     ModelInputsFromEngine,
     NodeInputs,
     NodeSubmodule,
+    StopKind,
+    StopPolicy,
     TokenStop,
 )
 from mstar.streaming.stream_buffer import StreamChunkInfo
@@ -200,7 +202,9 @@ class OrpheusLLMSubmodule(ARNodeSubmodule):
             engine_inputs=engine_inputs,
             text_inputs=text_inputs
         )
-        # row i is request i; a per-rid dict here would guard the compiled frame on the ids
+        # Row i is request i; a per-rid dict here would guard the compiled frame
+        # on the ids. As the stop buffers too, the stop check reads one host
+        # copy of the rows, and the declared stop policies run in the runtime.
         return BatchedModelOutput(
             row_outputs={"new_token": new_tokens},
             check_stop_buffers={"new_token": new_tokens},
@@ -217,6 +221,13 @@ class OrpheusLLMSubmodule(ARNodeSubmodule):
         if "new_token" not in outputs:
             return
         outputs["text_inputs"] = outputs["new_token"]
+
+    def get_stop_policies(self, graph_walk: str) -> dict[str, StopPolicy]:
+        # token_stop's EOS / token-budget test, on every walk
+        stop = self.token_stop
+        return {stop.loop: StopPolicy(
+            StopKind.AR, token_signal=stop.buffer, eos_tokens=stop.stop_ids, sampler=stop.sampler,
+        )}
 
 
 class SNACDecoderSubmodule(NodeSubmodule):

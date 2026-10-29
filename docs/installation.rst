@@ -246,6 +246,9 @@ The GPU model families depend on:
 
 - **FlashInfer** (``flashinfer-python``) — paged attention and continuous batching for the
   autoregressive backbones (every model with a ``KV_CACHE`` node runs attention through it).
+  Pinned to the version the attention wrappers' direct planner calls were checked against
+  (``DIRECT_PLAN_FLASHINFER_VERSIONS`` in ``mstar/engine/resources/attn/wrappers.py``); on any
+  other version they fall back to FlashInfer's own ``plan()``.
 - **flash-attn** — used by Qwen3-Omni and by LingBot-World's ``reference_numerics`` mode. **Not installed by any extra**; install it separately
   (see `flash-attn (Qwen3-Omni, LingBot-World)`_).
 - **flash-attn-4** — Waypoint's flex-attention ``FLASH`` backend. **Not installed by any
@@ -556,6 +559,11 @@ it. Then opt in:
    cargo build --release --manifest-path rust/server/Cargo.toml
    mstar serve qwen3_omni --rust-frontend
    # or, with an explicit config: mstar-serve --config <model.yaml> --rust-frontend
+
+Use it when benchmarking or tuning streaming throughput: its output path costs
+about 8 µs of API-server CPU per streamed token against 18 µs for the Python
+frontend (``benchmark/api_output_path``), so at high token rates the Python
+frontend, not the model, can be the limit.
 
 The binary is resolved via ``--rust-frontend-bin`` / ``MSTAR_SERVER_BIN`` /
 the environment's scripts directory / ``$PATH`` / the in-repo build. Its knobs

@@ -13,7 +13,7 @@ import torch
 from mstar.communication.tensors import StoredOutputs
 from mstar.engine.engine import ExecutingBatch
 from mstar.engine.resources import StepContext
-from mstar.graph.runtime.base import FreedTensors, RouteOutput
+from mstar.graph.runtime.base import FreedTensors, PhasedPostprocess, RouteOutput
 from mstar.model.submodule_base import BatchedModelOutput
 from mstar.utils.containers import RecentSet
 from mstar.utils.ipc_format import (
@@ -25,9 +25,16 @@ from mstar.utils.ipc_format import (
 )
 from mstar.worker.micro_scheduler import ScheduledBatch
 from mstar.worker.rid_table import RidTable
+from mstar.worker.stream_buffers import StreamBufferManager
 from mstar.worker.worker import Worker
 
 # ── worker ──────────────────────────────────────────────────────────────────
+
+class _StubRuntime(SimpleNamespace, PhasedPostprocess):
+    """Stubbed phase methods under the reference begin / resume."""
+
+    supports_inline_emit = False
+
 
 def _worker(
     known_rids=("X",), in_flight=(), draining=(), reads_done=(),
@@ -36,6 +43,7 @@ def _worker(
     w = Worker.__new__(Worker)
     w.worker_id = "w0"
     w._phase_period = 0
+    w._stop_token_signal = {}  # no declared stop policies: check_stop decides
     w.is_tp_follower = is_follower
     w.sent = []
     w.cleared = []
@@ -51,8 +59,9 @@ def _worker(
     w._pending_removes = {}
     # Identity interning: these tests use the rid string as its own handle, so
     # the string/handle split is exercised without a real runtime.
-    w._graph_runtime = SimpleNamespace(
+    w._graph_runtime = _StubRuntime(
         get_rid_handle=lambda r: r if r in known_rids else None,
+        register_stop_limits=lambda rid, info: None,
         get_rid_string=lambda h: h,
         remove_request=lambda h: None,
         # The TP fan-out reads the sharding config off the runtime now; no
@@ -85,6 +94,7 @@ def _worker(
         has_inflight_reads=lambda rid: inflight_reads,
         force_cleanup_request=lambda rid: w.forced.append(rid), # noqa: PLW0108
     )
+    w.streams = StreamBufferManager(w.request_state, w.tensor_manager, [])
     return w
 
 
@@ -203,7 +213,7 @@ def test_a_walk_the_cache_served_whole_is_still_routed():
     )
     w.engine_manager.get_engine = lambda node: SimpleNamespace(
         check_stop_for_batch=lambda batch, outputs, **kwargs: {},
-        extend_prefix_chains=lambda batch, outputs, **kwargs: None,
+        step_finished=lambda batch, outputs, **kwargs: None,
         materialize_publish=lambda batch, rids: None,
     )
     w.request_state.get_fwd_info = lambda rid, partition: None
@@ -398,7 +408,6 @@ def test_add_new_request_hands_off_the_handle_not_the_string():
     w.worker_id = "w0"
     w._draining_rids = set()
     w._unprocessed_messages = {}
-    w._my_consumer_connections = []
     w._last_active = {}
     rids = RidTable()
     rids.intern("other")  # so X's handle is 1, not 0
@@ -406,6 +415,7 @@ def test_add_new_request_hands_off_the_handle_not_the_string():
         add_request=lambda request_id, **kw: rids.intern(request_id),
         get_rid_handle=rids.handle, get_rid_string=rids.name,
         get_sharding_config=lambda h: None,
+        register_stop_limits=lambda rid, info: None,
     )
     seen = {}
 
@@ -419,6 +429,7 @@ def test_add_new_request_hands_off_the_handle_not_the_string():
         per_request_info={}, add_request=_state_add,
     )
     w.engine_manager = SimpleNamespace(
+        engine=SimpleNamespace(publisher_nodes={}, skip_publish=lambda rid, keys: None),
         evictable_nodes=lambda: ["n"],
         add_request=lambda rid, cfgs, info: seen.setdefault("engine", rid),
     )
@@ -427,6 +438,7 @@ def test_add_new_request_hands_off_the_handle_not_the_string():
         start_read_tensors=lambda rid, inputs, graph_walk: [],
     )
     w.wakeup_event = SimpleNamespace(register_futures=lambda f: None)
+    w.streams = StreamBufferManager(w.request_state, w.tensor_manager, [])
     info = SimpleNamespace(resource_configs={}, graph_walk="g", partition_name="p")
     Worker._add_new_request(w, SimpleNamespace(
         request_id="X", request_info=info, initial_inputs=[],

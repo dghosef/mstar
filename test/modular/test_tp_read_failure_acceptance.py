@@ -59,6 +59,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from mstar.graph.runtime.base import PhasedPostprocess
 from mstar.utils.ipc_format import WorkerMessageType
 
 HERE = Path(__file__).resolve().parent
@@ -374,7 +375,7 @@ def _engine(rank, group, kv, prefix_cache, graph_runtime):
     return engine
 
 
-class _Graph:
+class _Graph(PhasedPostprocess):
     """The graph runtime and request state of one rank, for one node: a row is
     ready once each of its walk's inputs landed, and what the rank routes and
     sends is reported to the parent."""
@@ -636,6 +637,7 @@ def _worker(rank, scenario, comm, graph, engine, tm, group):
     from mstar.distributed.communication import CommGroup, JointGroups
     from mstar.utils.containers import RecentSet
     from mstar.worker.micro_scheduler import MicroScheduler
+    from mstar.worker.stream_buffers import StreamBufferManager
     from mstar.worker.worker import _REMOVED_RIDS_KEEP, Worker
 
     w = Worker.__new__(Worker)
@@ -646,7 +648,6 @@ def _worker(rank, scenario, comm, graph, engine, tm, group):
     w._max_consecutive_spec = 1
     w._device_loopback = {}
     w._host_rows_slot = 0
-    w._stream_buffer_rids = set()
     w._phase_period = 0
     w._phase_buf = {}
     w._gpu_spans = []
@@ -692,8 +693,9 @@ def _worker(rank, scenario, comm, graph, engine, tm, group):
     w._streaming_edge_names = set()
     w._consumer_node_cache = {}
     w._stream_partition = {}
-    w._stream_holds = {}
+    w.streams = StreamBufferManager(w.request_state, w.tensor_manager, [])
     w._innermost_loop_by_node = {}
+    w._stop_token_signal = {}  # no declared stop policies: check_stop decides
     w._metrics = None
     for setup in _DESIGN_SETUP:
         if hasattr(w, setup):

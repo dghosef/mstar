@@ -32,7 +32,7 @@ import test_tp_read_failure_acceptance as acc  # the two-rank harness
 import torch
 import torch.nn.functional as F
 from test_failed_tensor_read import _failed_future, _read, _shm_manager
-from test_micro_scheduler import NODE, WALK, _Engine, _Manager
+from test_micro_scheduler import NODE, WALK, _Engine, _Manager, _Runtime
 
 import mstar.communication.wire_types  # noqa: F401  (registers the tags)
 from mstar.communication.tensors import StoredOutputs
@@ -43,6 +43,7 @@ from mstar.graph.base import GraphEdge, TensorPointerInfo
 from mstar.graph.runtime.base import ColumnarEdgeSpecs, SpeculationPrepOutput
 from mstar.utils.ipc_format import OffloadDelta, ScheduleTPNode, WorkerMessageType
 from mstar.worker.micro_scheduler import MicroScheduler, ScheduledBatch
+from mstar.worker.stream_buffers import StreamBufferManager
 from mstar.worker.worker import Speculation, Worker
 
 # ── two ranks through Worker.run (the acceptance harness) ─────────────────
@@ -188,6 +189,7 @@ def _check_rank(rank, layout, failed_here, store, out):
         )
         tp, sp = _groups(rank, layout)
         w = Worker.__new__(Worker)
+        w.streams = StreamBufferManager(SimpleNamespace(per_request_info={}), None, [])  # no streams
         w.scheduler = SimpleNamespace(read_failed_rids=set(failed_here))
         w.parallel_groups = SimpleNamespace(
             get_joint_group_for_node=lambda node: JointGroups(tp_group=tp, sp_group=sp),
@@ -248,6 +250,9 @@ def _follower_scheduler(ready, read_failed=()):
         engine_manager=SimpleNamespace(get_engine=lambda n: _Engine()),
         parallel_leader_nodes=set(),
     )
+    # the graph-level scan over the manager's queues, as the worker's runtime
+    manager.runtime = _Runtime()
+    manager.runtime._manager = manager
     sched.runtime = manager.runtime
     sched.read_failed_rids.update(read_failed)
     return sched, manager
@@ -332,6 +337,7 @@ def test_a_read_that_fails_after_its_request_failed_still_goes_to_the_check(tmp_
     sched.fail_rids({"r1"})
     tm, _ = _shm_manager(tmp_path)
     w = Worker.__new__(Worker)
+    w.streams = StreamBufferManager(SimpleNamespace(per_request_info={}), tm, [])  # no streams
     w.scheduler, w.request_state, w.tensor_manager = sched, manager, tm
     w.wakeup_event = SimpleNamespace(drain=lambda: None)
     w.enable_nvtx = False
@@ -390,7 +396,11 @@ def _spec_follower(read_failed, continuing, fresh, head_rids):
     w.engine_manager = SimpleNamespace(get_engine=lambda n: SimpleNamespace(
         release_cached_prefix=lambda batch: w.released.extend(batch.request_ids),
     ))
-    w.tensor_manager = SimpleNamespace(get_tensor=lambda uuid: torch.zeros(1))
+    w.tensor_manager = SimpleNamespace(
+        get_tensor=lambda uuid: torch.zeros(1),
+        get_tensors=lambda uuids: [torch.zeros(1) for _ in uuids],
+    )
+    w.streams = StreamBufferManager(SimpleNamespace(per_request_info={}), w.tensor_manager, [])  # no streams
 
     w.continuing, w.inputs = [], []
 
@@ -409,7 +419,7 @@ def _spec_follower(read_failed, continuing, fresh, head_rids):
             is_new_iter=False, is_same_node=True,
         )
 
-    w._assemble_speculation = assemble
+    w._spec_builder = SimpleNamespace(assemble=assemble)
     pending = SimpleNamespace(
         tp_seq=0, node_name=NODE, graph_walk=WALK,
         batch=ScheduledBatch(node_name=NODE, graph_walk=WALK,
@@ -479,7 +489,7 @@ def test_a_voided_speculations_unread_row_stays_out_of_the_next_read_checked_hea
         read_failed=["f1"], continuing=["c0"], fresh=["f0", "f1"], head_rids=["c0", "f0", "f1"],
     )
     spec = Worker._try_follow_speculation(w, pending)
-    spec.continuing_rids = set(w.continuing[-1])  # as ``_assemble_speculation`` sets it
+    spec.continuing_rids = set(w.continuing[-1])  # as ``SpeculationBuilder.assemble`` sets it
     manager = w.request_state
 
     # what ``_maybe_clear_spec`` gives back
@@ -508,6 +518,7 @@ FOLLOWERS = ["w0", "w1"]
 def _leader(tmp_path, streamed=()):
     tm, _ = _shm_manager(tmp_path)
     w = Worker.__new__(Worker)
+    w.streams = StreamBufferManager(SimpleNamespace(per_request_info={}), tm, [])  # no streams
     w.worker_id = "w0"
     w.parallel_nodes, w.parallel_leader_nodes = {NODE}, {NODE}
     w.is_tp_follower, w.enable_nvtx = False, False

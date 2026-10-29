@@ -204,9 +204,7 @@ class PerRequestInfo:
 
     Everything graph-shaped -- node/loop routing, the sharding config, the
     worker graph ids, the live queues -- belongs to PythonGraphRuntime. What
-    is left is the forward-pass info (a wire object) and the stream buffers
-    (which hold real tensors), neither of which can live behind the runtime's
-    contract.
+    is left is the forward-pass info (a wire object) and the stream buffers.
     """
     # edge_name -> StreamBuffer
     stream_buffers: dict[str, StreamBuffer] = field(default_factory=dict)
@@ -232,6 +230,13 @@ class RequestStateManager:
     # definitions. Used to find a node's partition in the colocated case.
     node_to_partition: dict[str, str] = field(default_factory=dict)
 
+    # partition -> rid -> current_fwd_info, the same objects as above, so a
+    # batch's infos are one C-level map rather than three lookups per row.
+    # Handle-keyed: purged in remove_request.
+    _fwd_by_partition: dict[str, dict[int, CurrentForwardPassInfo]] = field(
+        default_factory=dict, repr=False,
+    )
+
     def add_request(self, request_id: int, current_fwd_info: CurrentForwardPassInfo):
         """Register a partition for a request, adding the request if new.
 
@@ -239,12 +244,16 @@ class RequestStateManager:
         once per partition for a given request_id.
         """
         info = self.per_request_info.setdefault(request_id, PerRequestInfo())
-        info.per_partition_info[current_fwd_info.partition_name] = (
+        partition = current_fwd_info.partition_name
+        info.per_partition_info[partition] = (
             PerPartitionInfo(current_fwd_info=current_fwd_info)
         )
+        self._fwd_by_partition.setdefault(partition, {})[request_id] = current_fwd_info
 
     def remove_request(self, request_id: int):
         self.per_request_info.pop(request_id, None)
+        for by_rid in self._fwd_by_partition.values():
+            by_rid.pop(request_id, None)
 
     def update_request_info(
         self, request_id: int,
@@ -260,6 +269,9 @@ class RequestStateManager:
             return
         if current_fwd_info is not None:
             part_info.current_fwd_info = current_fwd_info
+            self._fwd_by_partition.setdefault(partition_name, {})[request_id] = (
+                current_fwd_info
+            )
         if resource_publish_info is not None:
             part_info.current_fwd_info.update_publish_info(resource_publish_info)
 
@@ -293,6 +305,12 @@ class RequestStateManager:
         return self.per_request_info[request_id].per_partition_info[
             partition_name
         ].current_fwd_info
+
+    def fwd_infos(
+        self, request_ids: list[int], partition_name: str,
+    ) -> list[CurrentForwardPassInfo]:
+        """``get_fwd_info`` for each rid, in order; KeyError if one has none."""
+        return list(map(self._fwd_by_partition[partition_name].__getitem__, request_ids))
 
     def get_pending_publish_info(
         self, request_id: int, partition_name: str,
