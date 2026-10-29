@@ -1616,9 +1616,16 @@ def sample_accelerator_graphable_gpu(
 ) -> torch.Tensor:
     """Deterministic per-batch top-k/top-p sampling for graph-captured code.
 
-    Routes through the fused Triton prep kernel (``fused_temperature_softmax``)
-    so the CUDA-graph path can apply the same sign-aware repetition penalty as
-    the regular ``Sampler``, then samples with
+    On CUDA, a vocabulary of at most ``FUSED_SAMPLE_MAX_VOCAB`` without
+    ``min_p``, ``history`` or ``order`` draws in one ``fused_sample`` launch:
+    per-row seeds, so batch-invariant, but its cuts rank on bf16-truncated
+    keys (see ``_fused_sample_kernel``), and the eager ``Sampler`` path
+    (``_sample_cuda``) keeps FlashInfer, so for those vocabularies an eager
+    and a captured step draw differently for the same seed.
+
+    Otherwise it routes through the fused Triton prep kernel
+    (``fused_temperature_softmax``) so the CUDA-graph path can apply the same
+    sign-aware repetition penalty as the regular ``Sampler``, then samples with
     ``flashinfer.sampling.top_k_top_p_sampling_from_probs`` (``deterministic=True``
     — the graph-safe variant that avoids CPU-seeded RNG paths). Greedy rows keep
     ``temperature == 0`` in the device buffer and the prep kernel turns them into
@@ -1690,12 +1697,13 @@ def sample_accelerator_graphable_gpu(
             if _needs_explicit_filter(history, order):
                 return _filter_floor_and_draw(probs, top_k, top_p, seed, offset, history, order).to(torch.int64)
             top_k = torch.where(top_k > 0, top_k, logits.shape[1])
-            # NOTE: this is NOT batch-invariant. FlashInfer reads only row 0's seed
+            # NOTE: this FlashInfer path (not ``fused_sample``'s) is NOT
+            # batch-invariant. FlashInfer reads only row 0's seed
             # and offset and folds the row index into philox, so identical (probs,
             # seed, offset) yield different tokens at different batch positions.
             # Sampling is thus reproducible only within a fixed batch layout; under
             # continuous batching (shifting positions) a request's stream is not.
-            # Measured in test/sampling_test/flashinfer_batch_test.py.
+            # Measured in test/sampling_test/flashinfer_batch_test.py (raw FlashInfer).
             samples = flashinfer.sampling.top_k_top_p_sampling_from_probs(
                 probs, top_k, top_p, deterministic=True,
                 seed=seed, offset=offset,
