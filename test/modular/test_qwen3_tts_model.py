@@ -32,6 +32,7 @@ from mstar.model.qwen3_tts.config import (
     REF_CLIP_KEY,
     SPEAKER_ID_KEY,
     TALKER_ATTN,
+    TALKER_MIXED,
     TALKER_SAMPLER,
     Qwen3TTSCodecConfig,
     Qwen3TTSCodePredictorConfig,
@@ -1380,7 +1381,18 @@ def test_qwen3_tts_talker_preprocess_packs_the_tensors_the_per_row_device_copies
     _assert_same_tensor(packed["suppress_eos"], _old_flags([True, True, True]))
     _assert_same_tensor(packed["input_embeds"], torch.cat([row.input_embeds for row in prefill]))
 
+    # A mixed step packs each row as its own walk would: a decode row with its
+    # text condition, a prompt row as built.
     configs = {c.capture_graph_walk: c for c in submodule.get_accelerator_graph_configs(torch.device("cpu"))}
+    mixed_rows = [rows[0], prefill[0], rows[1], prefill[2], *configs[TALKER_MIXED].get_node_inputs(2, 0)]
+    packed = submodule.preprocess(TALKER_MIXED, engine_inputs, mixed_rows)
+    _assert_same_tensor(packed["input_embeds"], torch.cat([
+        rows[0].input_embeds + rows[0].kwargs["text_condition"], prefill[0].input_embeds,
+        rows[1].input_embeds + rows[1].kwargs["text_condition"], prefill[2].input_embeds,
+    ]))
+    _assert_same_tensor(packed["last_token_indices"], torch.tensor([1, 15, 1, 14, 0, 0]).cumsum(0) - 1)
+    _assert_same_tensor(packed["suppress_eos"], _old_flags([flags[0], True, flags[1], True, True, True]))
+
     decode_config, prefill_config = configs["talker_decode"], configs["talker_prefill"]
     # Replay pads with template rows (CudaGraphRunner.pad_inputs): EOS suppressed, zero-token prefills.
     padded = [rows[0], rows[1], *decode_config.get_node_inputs(2, 0)]
