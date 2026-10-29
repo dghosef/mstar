@@ -628,7 +628,9 @@ Qwen3-TTS notes
   padded to a full chunk's width or queued behind a batch of them. A voice
   clone's stream leads with the reference's last 72 frames, decoded with the
   first chunk to warm the state on the voice and trimmed from its audio.
-  The SnakeBeta activations run as one fused kernel.
+  The SnakeBeta activations run as one fused kernel. A deployment sets the
+  ramp and the steady chunk with ``model_kwargs: {codec_chunk_schedule: [1, 3,
+  8, 16], codec_chunk_frames: 25}``.
 - Talker prefill, the clone prefill included, replays a packed CUDA Graph for
   the smallest token bucket (32 to 1024 tokens) that holds the batch; a clone's
   reference frames join the codec stream in ``postprocess``. Decode
