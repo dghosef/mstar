@@ -255,14 +255,15 @@ class Qwen3TTSCodecConfig:
     # turns reference audio into codec frames for voice cloning.
     encoder_config: dict[str, Any] = field(default_factory=dict)
 
-    # M* stream policy: the codec pops a ramp of small chunks first (the first
-    # frame alone, so first audio leaves one Talker step after prefill; the
+    # M* stream policy: the codec pops a ramp of small chunks first (four
+    # frames first: a client plays 320 ms of audio while the next chunk is
+    # made, where one frame's 80 ms ran dry under load; the
     # decoder is causal, so a frame's audio does not depend on how it was
     # chunked), then ``chunk_frames`` new frames per call, each preceded by up
     # to ``left_context_frames`` already decoded frames. That context defaults
     # to the decoder transformer's ``sliding_window``: with less, the streamed
     # audio drifts from a whole decode (25 frames gave 25-39 dB SNR).
-    chunk_schedule: tuple[int, ...] = (1, 3, 8, 16)
+    chunk_schedule: tuple[int, ...] = (4, 8, 16)
     chunk_frames: int = 25
     left_context_frames: int | None = None
     # Context the conv stack after the transformer sees. It is causal, so the
