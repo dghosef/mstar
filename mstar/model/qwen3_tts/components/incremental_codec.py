@@ -177,12 +177,15 @@ class IncrementalDecoder(nn.Module):
             xs = torch.cat([state[name], x], 1)
             new[name] = _tail(xs, lengths * rate[0], keep, 1)
             c = module.conv
-            x4 = xs.transpose(1, 2).unsqueeze(2)   # [B, C, 1, T], a channels-last view
             if transposed:
+                # Kernel 2 * stride: input i writes outputs i*stride .. i*stride + 2*stride - 1, so
+                # each output block is its input's first half plus the previous input's second.
                 stride = c.stride[0]
                 rate[0] *= stride
-                y = F.conv_transpose2d(x4, c.weight.unsqueeze(2), c.bias, stride=(1, stride))
-                return y.squeeze(2).transpose(1, 2)[:, stride: stride + x.shape[1] * stride]
+                y = _tconv_gemm(xs, c).unflatten(2, (2, stride))       # [B, 1 + T, 2, stride, C]
+                y = y[:, 1:, 0] + y[:, :-1, 1]
+                return y.flatten(1, 2) + c.bias
+            x4 = xs.transpose(1, 2).unsqueeze(2)   # [B, C, 1, T], a channels-last view
             y = F.conv2d(x4, c.weight.unsqueeze(2), c.bias, dilation=(1, c.dilation[0]), groups=c.groups)
             return y.squeeze(2).transpose(1, 2)
 
@@ -193,9 +196,8 @@ class IncrementalDecoder(nn.Module):
         h = F.conv1d(xs, pre.weight, pre.bias)
         h = self._transformer(h.transpose(1, 2), state, new, lengths)   # [B, T, latent]
         for tconv, convnext in decoder.upsample:
-            c = tconv.conv
-            h = F.conv_transpose2d(h.transpose(1, 2).unsqueeze(2), c.weight.unsqueeze(2), c.bias,
-                                   stride=(1, c.stride[0])).squeeze(2).transpose(1, 2)
+            c = tconv.conv   # kernel == stride: each input writes its own output block
+            h = _tconv_gemm(h, c).flatten(1, 2) + c.bias
             rate[0] *= c.stride[0]
             y = convnext.pwconv2(convnext.act(convnext.pwconv1(convnext.norm(conv(h)))))
             h = h + convnext.gamma * y
@@ -214,6 +216,15 @@ def _snake(module: nn.Module, x: torch.Tensor) -> torch.Tensor:
     """``FusedSnakeBeta`` over a time-major ``x [B, T, C]``, in fp32 as its kernel computes."""
     x32 = x.float()
     return (x32 + module.inv_beta * torch.sin(x32 * module.alpha).pow(2)).to(x.dtype)
+
+
+def _tconv_gemm(x: torch.Tensor, conv: nn.Module) -> torch.Tensor:
+    """Every input sample's transposed-conv output, one GEMM: ``x [B, T, C_in]`` ->
+    ``[B, T, kernel, C_out]`` (no bias, no overlap-add). A tensor-core GEMM where
+    cuDNN runs these transposed convs on its fp32 dgrad engine."""
+    weight = conv.weight   # [C_in, C_out, kernel], laid out [C_in, kernel, C_out] (_to_channels_last)
+    y = x @ weight.permute(0, 2, 1).reshape(weight.shape[0], -1)
+    return y.unflatten(2, (weight.shape[2], weight.shape[1]))
 
 
 def _to_channels_last(conv: nn.Module) -> None:
