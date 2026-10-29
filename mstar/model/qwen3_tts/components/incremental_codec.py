@@ -134,24 +134,25 @@ class IncrementalDecoder(nn.Module):
         rel = qpos[:, :, None] - kpos[:, None, :]
         # the cached keys a stream has not produced yet sit at negative positions
         mask = ((kpos[:, None, :] >= 0) & (rel >= 0) & (rel < self.window))[:, None]
-        cos, sin = transformer.rotary_emb(h, qpos)
+        # RMSNorm and RoPE in fp32 whatever the decoder's dtype (as VoxServe's bf16 codec keeps them)
+        cos, sin = transformer.rotary_emb(h.float(), qpos)
         cos, sin = cos[:, None], sin[:, None]
         for i, layer in enumerate(self.layers):
             attn = layer.self_attn
-            hn = layer.input_layernorm(h)
+            hn = _rms_norm(layer.input_layernorm, h)
             q, k, v = (
                 proj(hn).view(batch, width, self.heads, self.head_dim).transpose(1, 2)
                 for proj in (attn.q_proj, attn.k_proj, attn.v_proj)
             )
-            q = q * cos + _rotate_half(q) * sin
-            k = k * cos + _rotate_half(k) * sin
+            q = (q.float() * cos + _rotate_half(q.float()) * sin).to(v.dtype)
+            k = (k.float() * cos + _rotate_half(k.float()) * sin).to(v.dtype)
             keys = torch.cat([state[f"k{i}"], k], 2)
             values = torch.cat([state[f"v{i}"], v], 2)
             o = F.scaled_dot_product_attention(q, keys, values, attn_mask=mask, scale=attn.scaling)
             h = h + layer.self_attn_layer_scale(attn.o_proj(o.transpose(1, 2).reshape(batch, width, -1)))
-            h = h + layer.mlp_layer_scale(layer.mlp(layer.post_attention_layernorm(h)))
+            h = h + layer.mlp_layer_scale(layer.mlp(_rms_norm(layer.post_attention_layernorm, h)))
             new[f"k{i}"], new[f"v{i}"] = _tail(keys, lengths, self.cache, 2), _tail(values, lengths, self.cache, 2)
-        return transformer.output_proj(transformer.norm(h))
+        return transformer.output_proj(_rms_norm(transformer.norm, h))
 
     def forward(
         self, codes: torch.Tensor, state: Mapping[str, torch.Tensor], lengths: torch.Tensor,
@@ -210,6 +211,14 @@ class IncrementalDecoder(nn.Module):
         wav = conv(_snake(decoder.decoder[-2], h))
         new[FRAMES] = state[FRAMES] + lengths.view(-1, 1)
         return wav.clamp(-1, 1).squeeze(-1), new
+
+
+def _rms_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    """The decoder's RMSNorm computed in fp32 (the reference multiplies its
+    weight after casting back to the input dtype)."""
+    x32 = x.float()
+    x32 = x32 * torch.rsqrt(x32.pow(2).mean(-1, keepdim=True) + norm.variance_epsilon)
+    return (norm.weight.float() * x32).to(x.dtype)
 
 
 def _snake(module: nn.Module, x: torch.Tensor) -> torch.Tensor:
