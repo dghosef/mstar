@@ -98,18 +98,21 @@ _LAZY_PUBLISH = os.environ.get("MSTAR_LAZY_PUBLISH", "1") == "1"
 
 
 @contextmanager
-def _cudnn_benchmark(enabled: bool) -> Iterator[None]:
-    """``torch.backends.cudnn.benchmark`` on for the block when ``enabled``
-    (``NodeSubmodule.capture_cudnn_benchmark``), restored after."""
-    if not enabled:
-        yield
-        return
-    previous = torch.backends.cudnn.benchmark
-    torch.backends.cudnn.benchmark = True
-    try:
-        yield
-    finally:
-        torch.backends.cudnn.benchmark = previous
+def _capture_scope(submodule_mgmt) -> Iterator[None]:
+    """The node's fp32 precision, and ``torch.backends.cudnn.benchmark`` on
+    when it asks (``NodeSubmodule.capture_cudnn_benchmark``), restored after:
+    the kernels a capture (and the compile inside it) picks are what every
+    replay runs."""
+    with fp32_precision_scope(submodule_mgmt.fp32_precision):
+        if not submodule_mgmt.submodule.capture_cudnn_benchmark:
+            yield
+            return
+        previous = torch.backends.cudnn.benchmark
+        torch.backends.cudnn.benchmark = True
+        try:
+            yield
+        finally:
+            torch.backends.cudnn.benchmark = previous
 
 
 def checkpoint_identity(path: str | Path) -> bytes:
@@ -747,11 +750,7 @@ class Engine:
 
         for node_name, submodule_mgmt in self._submodules.items():
             runner = ag_runners[node_name]
-            benchmark = submodule_mgmt.submodule.capture_cudnn_benchmark
-            # the kernels a capture (and the compile inside it) picks are what
-            # every replay runs, so it happens under the node's precision
-            with self._capture_into(plan, node_name) as planned, \
-                    fp32_precision_scope(submodule_mgmt.fp32_precision), _cudnn_benchmark(benchmark):
+            with self._capture_into(plan, node_name) as planned, _capture_scope(submodule_mgmt):
                 runner.warmup_and_capture(planned)
             if plan is not None or runner.any_graphs:
                 submodule_mgmt.capture_runner = runner
@@ -761,7 +760,7 @@ class Engine:
             captured: dict[str, PiecewiseAcceleratorGraphRunner] = {}
             with self._capture_into(plan, f"{node_name} piecewise") as planned:
                 for label, pw_runner in piecewise[node_name].items():
-                    with fp32_precision_scope(submodule_mgmt.fp32_precision), _cudnn_benchmark(benchmark):
+                    with _capture_scope(submodule_mgmt):
                         pw_runner.warmup_and_capture(
                             None if planned is None else {bucket for region, bucket in planned if region == label}
                         )
@@ -813,8 +812,7 @@ class Engine:
             for node_name, submodule_mgmt in self._submodules.items():
                 # sizing runs the forwards and captures (a sized capture runs none of its own),
                 # so under the node's precision and cuDNN search too
-                with fp32_precision_scope(submodule_mgmt.fp32_precision), \
-                        _cudnn_benchmark(submodule_mgmt.submodule.capture_cudnn_benchmark):
+                with _capture_scope(submodule_mgmt):
                     pools[node_name] = size(ag_runners[node_name])
                     # one pool for all of a node's regions (see `_build_piecewise_runners`)
                     pools[f"{node_name} piecewise"] = {
