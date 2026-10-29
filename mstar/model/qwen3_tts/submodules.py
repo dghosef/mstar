@@ -1041,7 +1041,11 @@ class CodecSubmodule(ARNodeSubmodule):
         del graph_walk, kwargs
         chunk = self._codec_chunk(input_metadata)
         state = self.request_state(fwd_info.rid_handle)
-        codes = inputs["codec_tokens"][0].to(device=self.get_device(), dtype=torch.long)
+        items = inputs["codec_tokens"]
+        # The producer-done flush of a drained stream carries no frames: it only ends the stream.
+        codes = (items[0] if items else torch.empty(0, self.config.num_code_groups)).to(
+            device=self.get_device(), dtype=torch.long,
+        )
         # Items are one frame each, ``[groups]`` or ``[1, groups]`` (a row
         # view of the Talker's batch output), so the chunk flattens to frames.
         if codes.shape[-1] != self.config.num_code_groups:

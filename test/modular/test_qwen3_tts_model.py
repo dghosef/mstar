@@ -1986,11 +1986,10 @@ def test_qwen3_tts_streamed_codec_audio_matches_one_whole_decode(captured):
                 continue
             chunk = stream.pop_chunk()
             data = chunk.data["data"]
-            if data is None:
-                del streams[rid]
-                continue
+            # a drained stream's final flush has no frames: the worker hands over an empty input
             items[rid] = submodule.prepare_inputs(
-                "codec_chunk", SimpleNamespace(request_id=rid, rid_handle=rid), {"codec_tokens": [data.reshape(-1, 4)]},
+                "codec_chunk", SimpleNamespace(request_id=rid, rid_handle=rid),
+                {"codec_tokens": [] if data is None else [data.reshape(-1, 4)]},
                 input_metadata=InputMetadata(stream_chunks={"codec_tokens": chunk.info}),
             )
             if chunk.is_final:
@@ -2006,6 +2005,36 @@ def test_qwen3_tts_streamed_codec_audio_matches_one_whole_decode(captured):
             assert expected.float().std() > 1000   # a real signal, not silence or clipping
             assert got.shape == expected.shape, (rid, got.shape, expected.shape)
             assert (got.int() - expected.int()).abs().max().item() <= 1, rid
+
+
+def test_qwen3_tts_codec_ends_a_stream_on_an_empty_final_flush():
+    """A stream whose last chunk was popped before the producer finished ends on
+    a final flush with no frames (no context rides it): the codec emits nothing
+    for it, and the stream ends."""
+    config = _tiny_model_config()   # schedule (1,), chunk 3
+    codec = config.codec
+    submodule = _tiny_codec(config)
+    driver = _CodecDriver(submodule)
+    stream = StreamBuffer(request_id="r", edge_name="codec_tokens", from_partition="Talker",
+                          policy=ScheduledLeftContextChunkPolicy(codec.chunk_schedule, codec.chunk_frames, 0))
+    fwd = SimpleNamespace(request_id="r", rid_handle="r")
+    for i in range(4):
+        stream.pre_read_register(f"t{i}")
+        stream.put(f"t{i}", torch.randint(0, 32, (4,)))
+    audio = []
+    while stream.has_chunk_ready():
+        chunk = stream.pop_chunk()
+        item = submodule.prepare_inputs("codec_chunk", fwd, {"codec_tokens": [chunk.data["data"].reshape(-1, 4)]},
+                                        input_metadata=InputMetadata(stream_chunks={"codec_tokens": chunk.info}))
+        audio.append(driver.step({"r": item})["r"]["audio_chunk"][0])
+    stream.signal_done(4)
+    final = stream.pop_chunk()
+    assert final.data["data"] is None and final.is_final
+    item = submodule.prepare_inputs("codec_chunk", fwd, {"codec_tokens": []},
+                                    input_metadata=InputMetadata(stream_chunks={"codec_tokens": final.info}))
+    assert (item.kwargs["frames"], item.kwargs["is_final"]) == (0, True)
+    assert driver.step({"r": item})["r"]["audio_chunk"][0].numel() == 0
+    assert sum(a.numel() for a in audio) == 4 * submodule.total_upsample
 
 
 def test_qwen3_tts_codec_state_is_the_declared_pool_and_released_with_the_request():
