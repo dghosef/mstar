@@ -1730,7 +1730,7 @@ class _CodecDriver:
         if captured:
             bs = next(b for b in self.BUCKETS if b >= len(rids))
             rows += [f"pad{i}" for i in range(bs - len(rids))]
-            width = max(item.tensor_inputs["codec_tokens"].shape[-1] for item in inputs)
+            width = max(self.node._row_bucket(item) for item in inputs)
             ctx.slot_lease = SlotLease(slot=0, bucket=BucketKey("codec_chunk", bs, bs, width))
             ctx.set_padded_rids(tuple(rows))
             inputs = inputs + [inputs[0]] * (bs - len(rids))
@@ -1799,8 +1799,8 @@ def test_qwen3_tts_codec_postprocess_uses_its_own_pass_geometry():
     first = prepare(torch.ones(3, 4, dtype=torch.long), 2)   # a clone's first chunk
     second = prepare(torch.ones(1, 4, dtype=torch.long), 0)
     assert (first.kwargs, second.kwargs) == (
-        {"frames": 3, "context": 2, "is_final": False},
-        {"frames": 1, "context": 0, "is_final": False},
+        {"frames": 3, "bucket": 3, "context": 2, "is_final": False},
+        {"frames": 1, "bucket": 1, "context": 0, "is_final": False},
     )
 
     out_first = {"audio_chunk": [torch.arange(12)]}
@@ -2151,12 +2151,16 @@ def test_qwen3_tts_codec_takes_every_item_as_a_frame_and_pads_to_capture_shape()
         )}),
     )
 
-    # Three frames pad up to the smallest captured width (3), the one
-    # `cg_key_info` picks from the chunk info alone.
-    packed = prepared.tensor_inputs["codec_tokens"]
-    assert packed.shape == (4, 3)
-    assert packed.t().tolist() == codes.tolist()
-    assert prepared.kwargs == {"frames": 3, "context": 1, "is_final": True}
+    # Three frames take the smallest captured width (3), the one
+    # `cg_key_info` picks from the chunk info alone; preprocess lays the
+    # batch out as [B, quantizers, width].
+    assert prepared.tensor_inputs["codec_tokens"].tolist() == codes.tolist()
+    assert prepared.kwargs == {"frames": 3, "bucket": 3, "context": 1, "is_final": True}
+    packed = submodule.preprocess(
+        "codec_chunk", ModelInputsFromEngine(request_ids=[], per_request_info={}), [prepared],
+    )["codec_tokens"]
+    assert packed.shape == (1, 4, 3)
+    assert packed[0].t().tolist() == codes.tolist()
     assert submodule.request_state("request")["codec_bucket"] == 3
     assert submodule.cg_key_info("codec_chunk", {"request": None}, {
         "request": InputMetadata(stream_chunks={"codec_tokens": StreamChunkInfo(1, 1, 3, True)}),
@@ -2167,8 +2171,8 @@ def test_qwen3_tts_codec_takes_every_item_as_a_frame_and_pads_to_capture_shape()
         "codec_chunk", SimpleNamespace(request_id="empty", rid_handle="empty"), {},
         input_metadata=InputMetadata(stream_chunks={"codec_tokens": StreamChunkInfo(0, 0, 0, True)}),
     )
-    assert empty.tensor_inputs["codec_tokens"].shape == (4, 1)
-    assert empty.kwargs["frames"] == empty.kwargs["context"] == 0
+    assert empty.tensor_inputs["codec_tokens"].shape == (0, 4)
+    assert empty.kwargs["frames"] == empty.kwargs["context"] == 0 and empty.kwargs["bucket"] == 1
     outputs = {"audio_chunk": [torch.arange(4)]}
     submodule.postprocess("empty", None, outputs, inputs=empty)
     assert outputs["audio_chunk"][0].numel() == 0
@@ -2177,7 +2181,7 @@ def test_qwen3_tts_codec_takes_every_item_as_a_frame_and_pads_to_capture_shape()
     one = submodule.prepare_inputs(
         "codec_chunk", SimpleNamespace(request_id="one", rid_handle="one"), {"codec_tokens": [codes[:1]]},
     )
-    assert one.tensor_inputs["codec_tokens"].shape == (4, 1)
+    assert one.tensor_inputs["codec_tokens"].shape == (1, 4) and one.kwargs["bucket"] == 1
     with pytest.raises(ValueError, match="maximum is 3"):
         submodule.prepare_inputs(
             "codec_chunk", SimpleNamespace(request_id="big", rid_handle="big"),
@@ -2212,14 +2216,14 @@ def test_qwen3_tts_streaming_policy_ramps_and_flushes_only_new_tail_audio():
     assert tail.data["data"].flatten().tolist() == [4]
     assert (tail.context_items, tail.is_final) == (0, True)
 
-    # The codec pads the tail to the 1-frame bucket and emits all of it.
+    # The tail takes the 1-frame bucket and the codec emits all of it.
     codec = _tiny_codec(config)
     prepared = codec.prepare_inputs(
         "codec_chunk", SimpleNamespace(request_id="request", rid_handle="request"),
         {"codec_tokens": [tail.data["data"].view(1, 1).expand(1, 4)]},
         input_metadata=InputMetadata(stream_chunks={"codec_tokens": tail.info}),
     )
-    assert prepared.tensor_inputs["codec_tokens"].shape == (4, 1)
+    assert prepared.tensor_inputs["codec_tokens"].shape == (1, 4) and prepared.kwargs["bucket"] == 1
     outputs = {"audio_chunk": [torch.arange(4)]}
     codec.postprocess("request", None, outputs, inputs=prepared)
     assert outputs["audio_chunk"][0].tolist() == [0, 1, 2, 3]
@@ -2268,7 +2272,7 @@ def test_qwen3_tts_codec_stream_carries_no_eos_and_ends_on_the_last_frames(num_f
             "codec_chunk", fwd, inputs, input_metadata=InputMetadata(stream_chunks={"codec_tokens": chunk.info}),
         )
         assert item.kwargs["frames"] == chunk.num_items
-        assert (item.tensor_inputs["codec_tokens"][0, :chunk.num_items] != eos).all()
+        assert (item.tensor_inputs["codec_tokens"][:chunk.num_items, 0] != eos).all()
         row = driver.step({"r": item})["r"]
         windows.append((chunk.info, row["audio_chunk"][0].numel()))
 
@@ -2286,7 +2290,7 @@ def test_qwen3_tts_codec_stream_carries_no_eos_and_ends_on_the_last_frames(num_f
 def test_qwen3_tts_codec_batches_and_declares_accelerator_graphs():
     submodule = _tiny_codec()   # widths [1, 3]
     model_inputs = [
-        ARNodeInputs(tensor_inputs={"codec_tokens": torch.zeros(4, 3, dtype=torch.long)})
+        ARNodeInputs(tensor_inputs={"codec_tokens": torch.zeros(3, 4, dtype=torch.long)})
         for _ in range(2)
     ]
     batch = ExecutingBatch(
@@ -2317,7 +2321,7 @@ def test_qwen3_tts_codec_batches_and_declares_accelerator_graphs():
         assert set(graph_config.replay_graph_walks) == {"codec_chunk"}
         assert graph_config.capture_batch_sizes == [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 28, 32]
         assert graph_config.single_request_inputs.tensor_inputs["codec_tokens"].shape == (
-            4, graph_config.additional_key_info,
+            graph_config.additional_key_info, 4,
         )
     assert submodule.max_batch_size("codec_chunk") == 32
     # The batch's capture key is the bucket its requests pad to: read off the
@@ -2336,7 +2340,7 @@ def test_qwen3_tts_codec_batches_and_declares_accelerator_graphs():
     submodule.request_state("b").add("codec_bucket", 1)
     assert submodule.cg_key_info("codec_chunk", {"a": None, "b": None}) == 3
 
-    mixed = model_inputs + [ARNodeInputs(tensor_inputs={"codec_tokens": torch.ones(4, 1, dtype=torch.long)},
+    mixed = model_inputs + [ARNodeInputs(tensor_inputs={"codec_tokens": torch.ones(1, 4, dtype=torch.long)},
                                          kwargs={"frames": 1})]
     assert submodule.can_batch(batch, mixed)
     assert submodule.can_use_accelerator_graphs(batch, mixed)
@@ -2357,8 +2361,8 @@ def test_qwen3_tts_codec_preprocess_stages_lengths_in_one_copy():
     engine_inputs = ModelInputsFromEngine(request_ids=[], per_request_info={})
 
     def chunk(width: int, frames: int) -> ARNodeInputs:
-        return ARNodeInputs(tensor_inputs={"codec_tokens": torch.randint(0, 32, (4, width))},
-                            kwargs={"frames": frames, "context": 0})
+        return ARNodeInputs(tensor_inputs={"codec_tokens": torch.randint(0, 32, (frames, 4))},
+                            kwargs={"frames": frames, "bucket": width, "context": 0})
 
     (template,) = [
         c for c in submodule.get_accelerator_graph_configs(torch.device("cpu")) if c.additional_key_info == 3
@@ -2380,7 +2384,7 @@ def test_qwen3_tts_codec_single_forward_yields_one_request_samples():
     chunks whenever a chunk carried context (the truncation seen at c=8)."""
     submodule = _tiny_codec()
     driver = _CodecDriver(submodule)
-    chunk = ARNodeInputs(tensor_inputs={"codec_tokens": torch.ones(4, 3, dtype=torch.long)},
+    chunk = ARNodeInputs(tensor_inputs={"codec_tokens": torch.ones(3, 4, dtype=torch.long)},
                          kwargs={"frames": 3, "context": 2})
     raw = driver.step({"r": chunk}, single=True, postprocess=False)["r"]
     assert raw["audio_chunk"][0].shape == (12,)

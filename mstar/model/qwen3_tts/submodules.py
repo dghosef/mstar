@@ -1113,11 +1113,11 @@ class CodecSubmodule(ARNodeSubmodule):
         input_metadata: InputMetadata = EMPTY_INPUT_METADATA,
         **kwargs: Any,
     ) -> ARNodeInputs:
-        """Pad the chunk to its capture bucket.
+        """The chunk's ``[frames, quantizers]`` codes and its capture bucket.
 
-        Input arrives as ``[frames, code_groups]``; the decoder wants
-        ``[quantizers, frames]``. Every item is a frame: the Talker withholds
-        its EOS frame from the stream (``TokenStop.withhold``).
+        Every item is a frame: the Talker withholds its EOS frame from the
+        stream (``TokenStop.withhold``). ``preprocess`` pads and transposes
+        the batch's chunks in one copy.
         """
         del graph_walk, kwargs
         chunk = self._codec_chunk(input_metadata)
@@ -1137,15 +1137,16 @@ class CodecSubmodule(ARNodeSubmodule):
         frames = codes.shape[0]
         context = min(chunk.context_items if chunk is not None else 0, frames)
         bucket = self._bucket(max(frames, 1))
-        if frames < bucket:
-            codes = torch.nn.functional.pad(codes, (0, 0, 0, bucket - frames))
         state.add("codec_bucket", bucket)   # graph-key fallback when a caller has no stream chunk info
         # The chunk's geometry rides with this pass: under speculative
         # scheduling the next chunk of the same request is prepared before
         # this one is postprocessed, so request state would be overwritten.
         return ARNodeInputs(
-            tensor_inputs={"codec_tokens": codes.t().contiguous()},
-            kwargs={"frames": frames, "context": context, "is_final": chunk is not None and chunk.is_final},
+            tensor_inputs={"codec_tokens": codes},
+            kwargs={
+                "frames": frames, "bucket": bucket, "context": context,
+                "is_final": chunk is not None and chunk.is_final,
+            },
         )
 
     def declare_step(
@@ -1163,7 +1164,7 @@ class CodecSubmodule(ARNodeSubmodule):
             segments=[Segment(rid, "main", 1) for rid in request_ids],
             steps={CODEC_STATE: RecurrentStep()},
             # the widest bucket, as cg_key_info derives it before prepare_inputs
-            cg_key_info=max(item.tensor_inputs["codec_tokens"].shape[-1] for item in inputs),
+            cg_key_info=max(self._row_bucket(item) for item in inputs),
         )
 
     def preprocess(
@@ -1172,17 +1173,31 @@ class CodecSubmodule(ARNodeSubmodule):
         engine_inputs: ModelInputsFromEngine,
         inputs: list[ARNodeInputs],
     ) -> dict[str, torch.Tensor]:
-        """Stack the batch's chunks, padded to its widest bucket, and their real lengths."""
+        """The batch's chunks as ``[B, quantizers, width]``, padded to its widest
+        bucket, and their real lengths.
+
+        A batch keeps to one bucket (``split_batches_by_capture_key``) and
+        most chunks fill it, so one stack of transposed views is the whole
+        copy; only a short chunk (a terminal flush) is padded first.
+        """
         del graph_walk, engine_inputs
-        windows = [item.tensor_inputs["codec_tokens"] for item in inputs]
-        width = max(window.shape[-1] for window in windows)
-        codec_tokens = torch.stack([
-            torch.nn.functional.pad(window, (0, width - window.shape[-1])) for window in windows
-        ])
+        width = max(self._row_bucket(item) for item in inputs)
+        windows = []
+        for item in inputs:
+            window = item.tensor_inputs["codec_tokens"]
+            if window.shape[0] < width:
+                window = torch.nn.functional.pad(window, (0, 0, 0, width - window.shape[0]))
+            windows.append(window.t())
+        codec_tokens = torch.stack(windows)
         lengths = torch.empty(len(inputs), dtype=torch.long, device=codec_tokens.device)
         # capture-time inputs carry no geometry: a full row
         self._lengths_stager.copy_(lengths, [item.kwargs.get("frames", width) for item in inputs])
         return {"codec_tokens": codec_tokens, "lengths": lengths}
+
+    @staticmethod
+    def _row_bucket(item: ARNodeInputs) -> int:
+        """The bucket a row's chunk pads to; a capture template is a full one."""
+        return item.kwargs.get("bucket") or item.tensor_inputs["codec_tokens"].shape[0]
 
     def _decode(
         self, engine_inputs: ModelInputsFromEngine, codec_tokens: torch.Tensor, lengths: torch.Tensor,
@@ -1360,7 +1375,7 @@ class CodecSubmodule(ARNodeSubmodule):
                     input_seq_len=1,
                     tensor_inputs={
                         "codec_tokens": torch.zeros(
-                            self.config.codec.num_quantizers, window, dtype=torch.long, device=device,
+                            window, self.config.codec.num_quantizers, dtype=torch.long, device=device,
                         )
                     },
                 ),
@@ -1378,11 +1393,7 @@ class CodecSubmodule(ARNodeSubmodule):
         return (
             batch.graph_walk == "codec_chunk"
             and self.can_batch(batch, model_inputs)
-            and all(
-                item.tensor_inputs["codec_tokens"].shape
-                in {(self.config.codec.num_quantizers, window) for window in self.windows}
-                for item in model_inputs
-            )
+            and all(self._row_bucket(item) in self.windows for item in model_inputs)
             and super().can_use_accelerator_graphs(batch, model_inputs)
         )
 
