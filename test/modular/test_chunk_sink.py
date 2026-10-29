@@ -75,12 +75,15 @@ def _chunk(key, data, modality="text", **metadata):
 
 
 def _one_pass(server, monkeypatch):
-    """``_process_messages`` for one pass: its end-of-pass sleep stops it."""
+    """``_process_messages`` for one pass: its end-of-pass wait (or an
+    error's sleep) stops it."""
+    stop = lambda *_a, **_k: setattr(server, "running", False)  # noqa: E731
     shim = types.SimpleNamespace(
         monotonic=ep.time.monotonic, time=ep.time.time, perf_counter=ep.time.perf_counter,
-        sleep=lambda _s: setattr(server, "running", False),
+        sleep=stop,
     )
     monkeypatch.setattr(ep, "time", shim)
+    monkeypatch.setattr(server.communicator, "poll_for_messages", stop, raising=False)
     server.running = True
     server._process_messages()
     monkeypatch.undo()

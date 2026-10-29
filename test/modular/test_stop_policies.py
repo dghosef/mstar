@@ -14,14 +14,21 @@ import torch
 
 from mstar.model.orpheus.submodules import OrpheusLLMSubmodule
 from mstar.model.qwen3_5.submodules import LLMSubmodule
+from mstar.model.submodule_base import TokenStop
 
 LOOP = "decode_loop"
 EOS = (7, 9)
 
+# each model's ``token_stop`` as its ``__init__`` declares it, which both
+# ``check_stop`` and ``get_stop_policies`` read
 MODELS = {
-    "qwen3_5": (LLMSubmodule, SimpleNamespace(stop_token_ids=frozenset(EOS)),
-                ("decode", "prefill_text", "prefill_vision")),
-    "orpheus": (OrpheusLLMSubmodule, SimpleNamespace(stop_token_id=EOS[0]), ("prefill", "decode")),
+    "qwen3_5": (LLMSubmodule, TokenStop(
+        loop=LOOP, buffer="new_token", stop_ids=frozenset(EOS), sampler="sampler",
+        walk="decode", loopback_signal="text_inputs",
+    ), ("decode", "prefill_text", "prefill_vision")),
+    "orpheus": (OrpheusLLMSubmodule, TokenStop(
+        loop=LOOP, buffer="new_token", stop_ids=frozenset(EOS[:1]), sampler="sampler",
+    ), ("prefill", "decode")),
 }
 
 
@@ -41,11 +48,11 @@ def _info(rng, walk, sampler):
 @pytest.mark.parametrize("model", sorted(MODELS))
 @pytest.mark.parametrize("seed", range(8))
 def test_declared_policies_stop_the_rows_check_stop_does(model, seed):
-    cls, config, walks = MODELS[model]
+    cls, token_stop, walks = MODELS[model]
     sampler = _sampler_key(cls)
     sub = cls.__new__(cls)
     torch.nn.Module.__init__(sub)
-    sub.config = config
+    sub.token_stop = token_stop._replace(sampler=sampler)
     rng = np.random.default_rng(seed)
     for walk in walks:
         policies = sub.get_stop_policies(walk)
