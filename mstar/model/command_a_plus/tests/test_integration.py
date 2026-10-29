@@ -32,7 +32,7 @@ from mstar.model.command_a_plus.submodules import CommandAPlusLLMSubmodule, Comm
 from mstar.model.command_a_plus.tests.test_backbone import bind_test_resources
 from mstar.model.command_a_plus.tests.test_weight_loading import checkpoint
 from mstar.model.multimodal import PromptPart
-from mstar.model.submodule_base import ModelInputsFromEngine
+from mstar.model.submodule_base import ModelInputsFromEngine, StopCheck
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tiny_config.json"
 
@@ -43,23 +43,6 @@ def info(walk="prefill", max_tokens=6, ignore_eos=False, index=0):
         resource_configs={SAMPLER: SamplingReqConfig(ignore_eos=ignore_eos)},
         dynamic_loop_iter_counts={"decode_loop": index} if walk == "decode" else {},
     )
-
-
-def engine_postprocess(submodule, request_id, request_info, outputs):
-    """``postprocess`` as ``Engine._postprocess_batch`` runs it, the engine's own
-    tail included (it drops the closing token of a reply that ended at prefill)."""
-    from mstar.engine.engine import Engine
-    from mstar.model.submodule_base import BatchedModelOutput
-
-    failures = {}
-    batch = SimpleNamespace(
-        node_name="llm", request_ids=[request_id], inputs=[None],
-        per_request_info_wrapped={request_id: request_info}, failed_requests=failures,
-        register_failure=failures.__setitem__, step_context=SimpleNamespace(graph_walk=request_info.graph_walk),
-    )
-    engine = SimpleNamespace(_submodules={"llm": SimpleNamespace(submodule=submodule, piecewise_runners={})})
-    Engine._postprocess_batch(engine, batch, BatchedModelOutput(per_rid_outputs={request_id: outputs}))
-    assert not failures, failures
 
 
 class ToyLM(nn.Module):
@@ -122,9 +105,10 @@ class NodeTests(unittest.TestCase):
                 self.assertEqual(self.node.check_stop("a", info(ignore_eos=ignore_eos), prefill), set())
                 request = info("decode", ignore_eos=ignore_eos)
                 decode = {"new_token": [torch.tensor([7])]}
-                engine_postprocess(self.node, "a", request, decode)
-                self.assertEqual("new_token" not in decode, ends)
-                self.assertEqual(self.node.check_stop("a", request, decode), {"decode_loop"} if ends else set())
+                self.node.postprocess("a", request, decode)
+                # the closing step's token came after the reply's last: withheld
+                closes = StopCheck({"decode_loop"}, withheld=("new_token",))
+                self.assertEqual(self.node.check_stop("a", request, decode), closes if ends else set())
                 self.node.cleanup_request("a")
                 self.assertNotIn("a", self.node.request_states)
 

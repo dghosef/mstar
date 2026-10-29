@@ -1097,8 +1097,9 @@ methods are:
    tokens. The token budget is the loop's cap from ``get_loop_caps``, not a stop check.
    When a prefill walk outside the loop samples the reply's first token, list it
    in ``prefill_walks``: a stop id sampled
-   there ends the loop at its first step, whose ``buffer`` the engine drops, so the loop
-   has to emit the token under that name (GLM-5.2, Command A+).
+   there ends the loop at its first step, which withholds its ``buffer`` (see
+   ``StopCheck`` below), so the loop has to emit the token under that name (GLM-5.2,
+   Command A+).
    To also keep some of this step's outputs from being routed, return
    ``StopCheck(stops, withheld=(names...))``, for example a frame streamed alongside the
    EOS token: its consumer then never receives it, instead of finding and dropping it with
