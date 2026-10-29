@@ -1110,7 +1110,8 @@ class CodecSubmodule(ARNodeSubmodule):
         if received:
             codes = received[0].to(device=self.get_device(), dtype=torch.long)
         else:
-            # a stream whose first frame was EOS ends with an empty chunk
+            # A frameless chunk only ends the stream: the producer-done flush of a
+            # drained stream, or one whose first frame was the withheld EOS.
             codes = torch.zeros(0, self.config.num_code_groups, dtype=torch.long, device=self.get_device())
         # Items are one frame each, ``[groups]`` or ``[1, groups]`` (a row
         # view of the Talker's batch output), so the chunk flattens to frames.
