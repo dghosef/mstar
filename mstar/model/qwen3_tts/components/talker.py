@@ -231,6 +231,8 @@ class Qwen3TTSCodePredictor(nn.Module):
             nn.Linear(cp.hidden_size, cp.vocab_size, bias=False)
             for _ in range(config.num_code_groups - 1)
         ])
+        # projected embedding tables, built after weight loading
+        self.input_tables: list[torch.Tensor] | None = None
         self.register_buffer(
             # Populated after weight loading. A single contiguous tensor lets
             # the piecewise loop select a residual head without traversing a
@@ -244,23 +246,42 @@ class Qwen3TTSCodePredictor(nn.Module):
             persistent=False,
         )
 
-    def consolidate_stacked_weights(self) -> None:
-        """Pack the 15 loaded LM heads into graph-friendly contiguous storage."""
+    def consolidate_stacked_weights(self, talker_codec_embedding: torch.Tensor) -> None:
+        """Pack the 15 loaded LM heads into graph-friendly contiguous storage,
+        and, on checkpoints that project the depth inputs, every embedding
+        table the depth loop reads already projected (``input_tables``): a
+        step's input is then a row lookup, not a GEMM over the looked-up
+        row. ``talker_codec_embedding`` embeds group 0, whose embedding is the
+        depth sequence's second input."""
         self.lm_head_weight = torch.stack([
             head.weight.data for head in self.lm_head
         ]).contiguous()
+        self.input_tables = None
+        if isinstance(self.small_to_mtp_projection, nn.Linear):
+            with torch.no_grad():
+                self.input_tables = [
+                    self.small_to_mtp_projection(table).contiguous()
+                    for table in [talker_codec_embedding]
+                    + [emb.weight for emb in self.model.codec_embedding[:-1]]
+                ]
 
     def forward_depth_unrolled(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
-        """Run all CodePredictor layers for one depth token, the step bound
-        first with ``depth.bind_step``, once per call. Unlike the Talker's,
-        the cache it binds is frame-local scratch space: every generated frame
-        starts at ``cache_pos=0`` and overwrites it. The depth loop binds the
-        step, not this frame, which would compile once per ``cache_pos``.
+        """Run all CodePredictor layers for one depth token in the Talker
+        width (``[batch, 1, talker_hidden]``), projected first; see
+        ``forward_depth_step``."""
+        return self.forward_depth_step(self.small_to_mtp_projection(inputs_embeds))
 
-        ``inputs_embeds`` is ``[batch, 1, talker_hidden]``; the returned
-        hidden state is ``[batch, 1, predictor_hidden]``.
+    def forward_depth_step(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Run all CodePredictor layers for one depth token already in the
+        predictor width, the step bound first with ``depth.bind_step``, once
+        per call. Unlike the Talker's, the cache it binds is frame-local
+        scratch space: every generated frame starts at ``cache_pos=0`` and
+        overwrites it. The depth loop binds the step, not this frame, which
+        would compile once per ``cache_pos``.
+
+        ``hidden_states`` is ``[batch, 1, predictor_hidden]``, as is the
+        returned hidden state.
         """
-        hidden_states = self.small_to_mtp_projection(inputs_embeds)
         if hidden_states.shape[1] != 1:
             raise ValueError("CodePredictor decode expects exactly one token")
         # the stream starts from a copy, since the projection is the identity

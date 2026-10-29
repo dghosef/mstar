@@ -56,6 +56,7 @@ from mstar.engine.engine import ExecutingBatch
 from mstar.engine.resources import AttentionStep, KVStep, PositionStep, SamplerStep, Segment, SlotLease, SubmoduleStep
 from mstar.engine.resources.sampler.resource import SamplerResource
 from mstar.model.audio_watermark import AudioSealWatermarker, WatermarkStream
+from mstar.model.components.code_predictor_kernels import cp_embed_accumulate
 from mstar.model.qwen3_tts.components.conv_stack import causal_receptive_field_frames, flat_conv_stack, leading_cuts
 from mstar.model.qwen3_tts.components.snake import fuse_snake_activations
 from mstar.model.qwen3_tts.components.speaker_encoder import (
@@ -176,6 +177,7 @@ class TalkerSubmodule(ARNodeSubmodule):
 
         # Lazy frame-local CodePredictor KV scratch, overwritten every step.
         self._cp_kv_cache: torch.Tensor | None = None
+        self._cp_positions: torch.Tensor | None = None
 
     def _get_suppress_mask(self) -> torch.Tensor:
         """Cache the checkpoint's static invalid-token mask on the worker GPU."""
@@ -243,6 +245,15 @@ class TalkerSubmodule(ARNodeSubmodule):
                 device=self.get_device(),
             )
         return self._cp_kv_cache[:, :batch_size]
+
+    def _get_cp_positions(self) -> torch.Tensor:
+        """``[num_codes, MAX_BATCH_SIZE, 1]`` depth positions, row ``g`` all
+        ``g``: each depth step binds a slice, so a captured step needs no fill."""
+        if self._cp_positions is None:
+            self._cp_positions = torch.arange(
+                self.num_codes, dtype=torch.int32, device=self.get_device(),
+            )[:, None, None].expand(self.num_codes, self.MAX_BATCH_SIZE, 1).contiguous()
+        return self._cp_positions
 
     def _project_text(self, token_ids: torch.Tensor) -> torch.Tensor:
         """Map tokenizer embeddings into the Talker hidden width."""
@@ -634,37 +645,39 @@ class TalkerSubmodule(ARNodeSubmodule):
         decode graph, or on its own by the piecewise runner.
         """
         batch_size = layer0_codes.shape[0]
-        device = layer0_codes.device
+        cp = self.code_predictor
+        tables = cp.input_tables
+        talker_table = self.model.model.codec_embedding.weight
         all_codes = torch.empty(
-            batch_size, self.num_codes, dtype=torch.long, device=device
+            batch_size, self.num_codes, dtype=torch.long, device=layer0_codes.device
         )
-        all_codes[:, 0] = layer0_codes
-        codec_embed = self.model.model.codec_embedding(layer0_codes)
-        codec_embed_sum = codec_embed.clone()
+        codec_embed_sum = torch.empty(
+            batch_size, talker_table.shape[1], dtype=talker_table.dtype, device=layer0_codes.device
+        )
+        # group 0 starts the sum; its (projected) embedding is position 1's input
+        embed = cp_embed_accumulate(
+            layer0_codes, talker_table, codec_embed_sum, all_codes, 0,
+            inputs=None if tables is None else tables[0], init=True,
+        )
 
         cp_cache = self._get_cp_kv_cache(batch_size)
-        pos = torch.zeros(batch_size, 1, dtype=torch.int32, device=device)
+        positions = self._get_cp_positions()
         # Position 0 conditions the depth decoder on the Talker hidden state.
         # Each following position consumes the previous group's embedding.
-        depth = self.code_predictor.depth
-        depth.bind_step(cp_cache, pos, cache_pos=0)
-        self.code_predictor.forward_depth_unrolled(last_hidden.unsqueeze(1))
+        depth = cp.depth
+        depth.bind_step(cp_cache, positions[0, :batch_size], cache_pos=0)
+        cp.forward_depth_unrolled(last_hidden.unsqueeze(1))
         for group_idx in range(1, self.num_codes):
-            pos.fill_(group_idx)
-            depth.bind_step(cp_cache, pos, cache_pos=group_idx)
-            cp_hidden = self.code_predictor.forward_depth_unrolled(
-                codec_embed.unsqueeze(1)
-            ).squeeze(1)
-            cp_logits = torch.matmul(
-                cp_hidden,
-                self.code_predictor.lm_head_weight[group_idx - 1].t(),
-            )
+            depth.bind_step(cp_cache, positions[group_idx, :batch_size], cache_pos=group_idx)
+            cp_hidden = cp.forward_depth_step(embed.unsqueeze(1)).squeeze(1)
+            cp_logits = torch.matmul(cp_hidden, cp.lm_head_weight[group_idx - 1].t())
             codes = sample_codes(cp_logits)
-            all_codes[:, group_idx] = codes
-            codec_embed = self.code_predictor.model.codec_embedding[
-                group_idx - 1
-            ](codes)
-            codec_embed_sum.add_(codec_embed)
+            last = group_idx == self.num_codes - 1
+            embed = cp_embed_accumulate(
+                codes, cp.model.codec_embedding[group_idx - 1].weight, codec_embed_sum,
+                all_codes, group_idx,
+                inputs=None if tables is None or last else tables[group_idx],
+            )
         return all_codes, codec_embed_sum
 
     def _code_predictor_piecewise_capture(

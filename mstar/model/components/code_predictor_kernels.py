@@ -124,39 +124,50 @@ def cp_attend(
 
 @triton.jit
 def _cp_embed_accumulate_kernel(
-    Tok, W, Emb, Sum, Codes, group, s_w, s_emb, s_sum, s_codes,
-    H: tl.constexpr, BLOCK: tl.constexpr,
+    Tok, W, P, Emb, Sum, Codes, group, s_w, s_p, s_emb, s_sum, s_codes,
+    H: tl.constexpr, HP: tl.constexpr, BLOCK: tl.constexpr, PROJ: tl.constexpr, INIT: tl.constexpr,
 ):
     b = tl.program_id(0)
     tok = tl.load(Tok + b)
     offs = tl.arange(0, BLOCK)
     for h0 in tl.static_range(0, H, BLOCK):
         e = tl.load(W + tok * s_w + h0 + offs)
-        tl.store(Emb + b * s_emb + h0 + offs, e)
-        acc = tl.load(Sum + b * s_sum + h0 + offs)
-        tl.store(Sum + b * s_sum + h0 + offs, acc + e.to(acc.dtype))
+        if not PROJ:
+            tl.store(Emb + b * s_emb + h0 + offs, e)
+        if INIT:
+            tl.store(Sum + b * s_sum + h0 + offs, e.to(Sum.dtype.element_ty))
+        else:
+            acc = tl.load(Sum + b * s_sum + h0 + offs)
+            tl.store(Sum + b * s_sum + h0 + offs, acc + e.to(acc.dtype))
+    if PROJ:
+        for h0 in tl.static_range(0, HP, BLOCK):
+            tl.store(Emb + b * s_emb + h0 + offs, tl.load(P + tok * s_p + h0 + offs))
     tl.store(Codes + b * s_codes + group, tok.to(Codes.dtype.element_ty))
 
 
 @torch.compiler.disable
 def cp_embed_accumulate(
     tokens: torch.Tensor, weight: torch.Tensor, emb_sum: torch.Tensor,
-    all_codes: torch.Tensor, group: int,
+    all_codes: torch.Tensor, group: int, inputs: torch.Tensor | None = None,
+    init: bool = False,
 ) -> torch.Tensor:
     """For a depth step's sampled ``tokens (bs,)``: record them as ``all_codes[:, group]``,
     look up their embeddings in ``weight (V, H)`` and add those to ``emb_sum (bs, H)`` in
-    its dtype. Returns the embeddings, the next depth step's input. One launch for what
-    was an index_select, a copy and a promoting add."""
+    its dtype (or, with ``init``, start the sum from them). Returns the next depth step's
+    input: the embeddings, or their rows of ``inputs (V, H')`` when given (the embedding
+    table already projected to the predictor's width). One launch for what was an
+    index_select, a copy, a promoting add and the input projection."""
     bs, hidden = tokens.shape[0], weight.shape[1]
-    assert weight.stride(1) == 1 and emb_sum.stride(1) == 1 and hidden % 256 == 0
-    emb = torch.empty(bs, hidden, dtype=weight.dtype, device=weight.device)
+    table = weight if inputs is None else inputs
+    assert weight.stride(1) == 1 and table.stride(1) == 1 and emb_sum.stride(1) == 1
+    assert hidden % 256 == 0 and table.shape[1] % 256 == 0
+    emb = torch.empty(bs, table.shape[1], dtype=table.dtype, device=weight.device)
     _cp_embed_accumulate_kernel[(bs,)](
-        tokens, weight, emb, emb_sum, all_codes, group,
-        weight.stride(0), emb.stride(0), emb_sum.stride(0), all_codes.stride(0),
-        H=hidden, BLOCK=256, num_warps=4,
+        tokens, weight, table, emb, emb_sum, all_codes, group,
+        weight.stride(0), table.stride(0), emb.stride(0), emb_sum.stride(0), all_codes.stride(0),
+        H=hidden, HP=table.shape[1], BLOCK=256, PROJ=inputs is not None, INIT=init, num_warps=4,
     )
     return emb
-
 
 
 class DepthKV:
