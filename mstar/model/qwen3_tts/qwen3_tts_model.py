@@ -426,6 +426,19 @@ class Qwen3TTSModel(Model):
         # Rejects unknown ``tts_model_type`` values; every supported variant
         # is handled below through the config's capability properties.
         self.config = Qwen3TTSModelConfig.from_pretrained(self.local_dir)
+        # Server-init knobs: the codec's chunk ramp and steady chunk, in frames
+        # (a bigger first chunk gives a client more audio to play while the
+        # next one is made; a smaller one, earlier first audio).
+        codec = self.config.codec
+        if kwargs.get("codec_chunk_schedule") is not None:
+            codec.chunk_schedule = tuple(int(n) for n in kwargs["codec_chunk_schedule"])
+        if kwargs.get("codec_chunk_frames") is not None:
+            codec.chunk_frames = int(kwargs["codec_chunk_frames"])
+        if not codec.chunk_schedule or min(*codec.chunk_schedule, codec.chunk_frames) < 1:
+            raise ValueError(
+                f"codec_chunk_schedule {codec.chunk_schedule} and codec_chunk_frames {codec.chunk_frames} "
+                "must be positive frame counts"
+            )
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.local_dir,
