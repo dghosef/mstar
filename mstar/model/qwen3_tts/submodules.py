@@ -51,6 +51,7 @@ from mstar.engine.accelerator_graph_config import (
     PiecewiseBatchedConfig,
     PiecewiseCallInputs,
     PiecewiseCaptureShape,
+    decode_rows_then_prompt,
 )
 from mstar.engine.engine import ExecutingBatch
 from mstar.engine.resources import AttentionStep, KVStep, PositionStep, SamplerStep, Segment, SlotLease, SubmoduleStep
@@ -76,6 +77,7 @@ from mstar.model.qwen3_tts.config import (
     SPEAKER_ID_KEY,
     TALKER_ATTN,
     TALKER_KV,
+    TALKER_MIXED,
     TALKER_POS,
     TALKER_SAMPLER,
     Qwen3TTSModelConfig,
@@ -146,6 +148,12 @@ class TalkerSubmodule(ARNodeSubmodule):
     # eager alternative costs ~20 ms of launch overhead per request.
     PREFILL_TOKEN_BUCKETS = [32, 64, 128, 256, 512, 1024]
     PREFILL_CAPTURE_BATCH_SIZES = [1, 2, 4, 8]
+    # A mixed step is a decode batch plus up to MIXED_MAX_PREFILL_ROWS prompts.
+    # Its captures run to the decode cap (one below it would split the batch),
+    # with the decode buckets' row counts: every padding row costs a depth loop.
+    MIXED_MAX_PREFILL_ROWS = 4
+    MIXED_CAPTURE_BATCH_SIZES = [2, 4, 8, 16, 24, 32, 48, 64]
+    MIXED_TOKEN_BUCKETS = [32, 64, 128, 192, 256, 384, 512, 768, 1024]
     CHATML_ASSISTANT_PREFIX_TOKEN_IDS = CHATML_ASSISTANT_PREFIX_TOKEN_IDS
     CHATML_ASSISTANT_SUFFIX_TOKEN_IDS = CHATML_ASSISTANT_SUFFIX_TOKEN_IDS
 
@@ -173,6 +181,8 @@ class TalkerSubmodule(ARNodeSubmodule):
         self._flag_stager = PinnedStager(torch.bool, numel=self.MAX_BATCH_SIZE)
         self._index_stager = PinnedStager(torch.long, numel=self.MAX_BATCH_SIZE)
         self._prefill_ids: dict[tuple[int, ...], torch.Tensor] = {}
+        # zero text condition for a mixed step's prompt rows, sliced per row
+        self._zero_rows: torch.Tensor | None = None
 
         # Lazy frame-local CodePredictor KV scratch, overwritten every step.
         self._cp_kv_cache: torch.Tensor | None = None
@@ -530,6 +540,8 @@ class TalkerSubmodule(ARNodeSubmodule):
             last_token_indices = self._get_decode_last_token_indices(len(inputs))
         else:
             packed_embeds = torch.cat(input_embeds, dim=0)
+            if graph_walk == TALKER_MIXED:
+                packed_embeds = packed_embeds + self._mixed_text_conditions(inputs, packed_embeds)
             last_token_indices = torch.empty(len(inputs), dtype=torch.long, device=self.get_device())
             self._index_stager.copy_(last_token_indices, [end - 1 for end in itertools.accumulate(seq_lens)])
 
@@ -541,6 +553,21 @@ class TalkerSubmodule(ARNodeSubmodule):
             "last_token_indices": last_token_indices,
             "suppress_eos": self._get_batch_suppress_eos(inputs),
         }
+
+    def _mixed_text_conditions(
+        self, inputs: list[ARNodeInputs], packed_embeds: torch.Tensor,
+    ) -> torch.Tensor:
+        """A mixed step's per-token text condition: a decode row's own, zeros
+        over a prompt row (its text is already in its embeddings)."""
+        longest = max(item.input_seq_len for item in inputs)
+        if self._zero_rows is None or self._zero_rows.shape[0] < longest:
+            self._zero_rows = packed_embeds.new_zeros(max(longest, self.MIXED_TOKEN_BUCKETS[-1]), packed_embeds.shape[1])
+        zeros = self._zero_rows
+        return torch.cat([
+            item.kwargs["text_condition"].view(1, -1) if "text_condition" in item.kwargs
+            else zeros[:item.input_seq_len]
+            for item in inputs
+        ], dim=0)
 
     def declare_step(
         self,
@@ -810,7 +837,7 @@ class TalkerSubmodule(ARNodeSubmodule):
         together freely.
         """
         return (
-            batch.graph_walk in {"talker_prefill", "talker_prefill_clone", "talker_decode"}
+            batch.graph_walk in {"talker_prefill", "talker_prefill_clone", "talker_decode", TALKER_MIXED}
             and bool(model_inputs)
             and len(model_inputs) <= self.MAX_BATCH_SIZE
         )
@@ -818,6 +845,10 @@ class TalkerSubmodule(ARNodeSubmodule):
     def max_batch_size(self, graph_walk: str) -> int:
         del graph_walk
         return self.MAX_BATCH_SIZE
+
+    def max_rows_in_combined(self, graph_walk: str) -> int | None:
+        # bounds a mixed step's tokens to its captured buckets
+        return None if graph_walk == "talker_decode" else self.MIXED_MAX_PREFILL_ROWS
 
     def get_accelerator_graph_configs(
         self, device: torch.device, tp_world_size: int = 1
@@ -851,7 +882,15 @@ class TalkerSubmodule(ARNodeSubmodule):
             capture_batch_sizes=self.PREFILL_CAPTURE_BATCH_SIZES,
             compile=False,
         )
-        return [prefill, BatchedAcceleratorGraphConfig(
+        mixed = PackedAcceleratorGraphConfig(
+            capture_graph_walk=TALKER_MIXED,
+            capture_token_lengths=self.MIXED_TOKEN_BUCKETS,
+            make_node_input=prefill_input,
+            capture_batch_sizes=self.MIXED_CAPTURE_BATCH_SIZES,
+            token_layout=decode_rows_then_prompt,
+            compile=False,
+        )
+        return [prefill, mixed, BatchedAcceleratorGraphConfig(
             capture_graph_walk="talker_decode",
             single_request_inputs=ARNodeInputs(
                 input_embeds=torch.zeros(
@@ -937,7 +976,7 @@ class TalkerSubmodule(ARNodeSubmodule):
     ) -> bool:
         """Replay the whole decode graph or a packed prefill; sampling params
         are read from buffers, so no request's settings can disqualify it."""
-        if batch.graph_walk not in ("talker_decode", "talker_prefill", "talker_prefill_clone") or not self.can_batch(
+        if batch.graph_walk not in ("talker_decode", "talker_prefill", "talker_prefill_clone", TALKER_MIXED) or not self.can_batch(
             batch, model_inputs
         ):
             return False
