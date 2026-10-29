@@ -654,7 +654,8 @@ Qwen3-TTS notes
 - Under load a codec chunk other than a stream's first waits up to 40 ms for
   chunks of other requests to batch with (``model_kwargs:
   {codec_batch_hold_ms: 40}``, 0 turns it off): a codec step costs several
-  times its cost per row.
+  times its cost per row. It goes sooner once its stream has less than 0.25 s
+  of audio left to play (``ChunkBatchHold``'s playback deadline).
 - Opt-in AudioSeal watermark on the codec's output (off by default; install
   ``pip install -e '.[audioseal]'``). Turn it on in the deployment YAML::
 
