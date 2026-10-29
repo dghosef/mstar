@@ -30,9 +30,6 @@ warmup_requests:
   - text: warmup
     output_modalities: [video]
     model_kwargs: {num_frames: 121, num_inference_steps: 4}
-    # Two at once as well: a cross-request batch compiles its own denoise
-    # graph per batch size (5-12 s on a cold compile cache).
-    concurrency: [1, 2]
   - text: warmup
     files: [hf://nvidia/Cosmos3-Edge/assets/example_i2v_input.jpg]
     output_modalities: [video]

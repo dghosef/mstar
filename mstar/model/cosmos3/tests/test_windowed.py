@@ -383,21 +383,6 @@ def test_action_batches_hold_one_shape_signature() -> None:
     assert not batches("a", "d")
 
 
-def test_video_batches_hold_one_latent_shape() -> None:
-    """The compiled batched denoise step specializes on each request's latent
-    shape, so a generation batch holds one, as an action batch holds one
-    signature: a mix would compile on a live request."""
-    sub = _dit()
-    for rid, shape in (("a", (1, 48, 31, 30, 40)), ("b", (1, 48, 31, 30, 40)), ("c", (1, 48, 31, 60, 80))):
-        sub.request_state(rid).add_all(cond={}, uncond={}, latent_shape=shape)
-
-    def batches(*rids):
-        return sub.can_batch(SimpleNamespace(graph_walk=C.VIDEO_GEN_WALK, request_ids=list(rids)), [None] * len(rids))
-
-    assert batches("a", "b")
-    assert not batches("a", "c")
-
-
 def test_batched_action_step_reads_contiguous_gen_position_ids() -> None:
     """The compiled batched action step guards on input strides, so the gen-token
     position ids it gets must not be views whose stride is the prompt length."""
