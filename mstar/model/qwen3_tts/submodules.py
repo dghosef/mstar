@@ -970,6 +970,9 @@ class CodecSubmodule(ARNodeSubmodule):
     # capture's gather and scatter stay outside it
     disable_torch_compile = True
     disable_autocast = True
+    # cuDNN times its conv algorithms per captured shape: its heuristic pick
+    # for the channels-last convs can be several times slower (bf16 most of all)
+    capture_cudnn_benchmark = True
 
     # The codec's cost is linear in rows, so every padding row of a bucket
     # costs a real row's decode: the buckets are dense.
