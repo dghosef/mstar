@@ -95,14 +95,57 @@ def test_cp_embed_accumulate_matches_the_unfused_ops(bs, projected, init):
     assert torch.equal(codes, ref_codes)
 
 
+@pytest.mark.parametrize("rows", [1, 16, 37, 64])
+def test_cp_linear_matches_the_unfused_ops(rows):
+    """Each ``cp_linear`` mode against its op sequence in fp32: the folded
+    RMSNorm (row sums of squares from x, and from a producer's partials), the
+    residual add, silu-gate and bias epilogues."""
+    from mstar.model.components.code_predictor_kernels import cp_linear, depth_partials
+
+    torch.manual_seed(3)
+    dev, dt, h = "cuda", torch.bfloat16, 1024
+    x = torch.randn(rows, h, device=dev, dtype=dt)
+    norm_w = torch.rand(h, device=dev, dtype=dt) + 0.5
+    w = torch.randn(512, h, device=dev, dtype=dt) * 0.05
+    up = torch.randn(512, h, device=dev, dtype=dt) * 0.05
+    w_res = torch.randn(h, 2048, device=dev, dtype=dt) * 0.05
+    bias = torch.randn(h, device=dev, dtype=dt)
+    a = torch.randn(rows, 2048, device=dev, dtype=dt)
+    partials = depth_partials(torch.device(dev))
+    folded = (w.float() * norm_w.float()).to(dt)
+    xn = x.float() * torch.rsqrt(x.float().pow(2).mean(-1, keepdim=True) + 1e-6)
+
+    def close(got, want):
+        torch.testing.assert_close(got.float(), want, rtol=2e-2, atol=2e-2 * want.abs().max().item())
+
+    close(cp_linear(x, folded, norm_eps=1e-6), xn @ folded.float().t())
+    up_f = (up.float() * norm_w.float()).to(dt)
+    close(cp_linear(x, folded, up=up_f, norm_eps=1e-6),
+          torch.nn.functional.silu(xn @ folded.float().t()) * (xn @ up_f.float().t()))
+    # a residual add records the stream's partial sums; the next norm reads them
+    stream = x.clone()
+    cp_linear(a, w_res, out=stream, residual=True, partials=partials)
+    want = x.float() + a.float() @ w_res.float().t()
+    close(stream, want)
+    sn = stream.float() * torch.rsqrt(stream.float().pow(2).mean(-1, keepdim=True) + 1e-6)
+    close(cp_linear(stream, folded, norm_eps=1e-6, partials=partials, n_part=h // 16), sn @ folded.float().t())
+    out = cp_linear(a, w_res, bias=bias, partials=partials)
+    close(out, a.float() @ w_res.float().t() + bias.float())
+    on = out.float() * torch.rsqrt(out.float().pow(2).mean(-1, keepdim=True) + 1e-6)
+    close(cp_linear(out, folded, norm_eps=1e-6, partials=partials, n_part=h // 16), on @ folded.float().t())
+
+
 def _rms(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps) * weight.float()
 
 
 def test_qwen3_tts_depth_loop_matches_its_layers_unfused():
     """Qwen3-TTS's depth loop drives the kernels with its own head counts, eps
-    and RoPE theta: a frame's 16 depth steps against the same layers over the
-    whole frame at once, norms, RoPE and causal attention in fp32."""
+    and RoPE theta: a frame's 16 depth steps (``depth_step``, the fused
+    projections and ``cp_attend``) against the same layers over the whole frame
+    at once, norms, RoPE and causal attention in fp32, compared as each
+    position's logits."""
+    from mstar.model.components.code_predictor_kernels import depth_partials
     from mstar.model.qwen3_tts.components.talker import Qwen3TTSCodePredictor
     from mstar.model.qwen3_tts.config import (
         Qwen3TTSCodePredictorConfig,
@@ -119,18 +162,23 @@ def test_qwen3_tts_depth_loop_matches_its_layers_unfused():
             param.data.uniform_(0.5, 1.5)  # a skipped or swapped norm weight shows
         else:
             param.data.normal_(std=0.02)
+    predictor.consolidate_stacked_weights(
+        torch.randn(config.talker.vocab_size, config.talker.hidden_size, device="cuda", dtype=torch.bfloat16),
+    )
     hq, hkv, d = cp.num_attention_heads, cp.num_key_value_heads, cp.head_dim
     bs, depth = 3, config.num_code_groups
     x = torch.randn(bs, depth, config.talker.hidden_size, device="cuda", dtype=torch.bfloat16)
 
     cache = torch.zeros(cp.num_hidden_layers, bs, 2, depth, hkv, d, device="cuda", dtype=torch.bfloat16)
     pos = torch.zeros(bs, 1, dtype=torch.int32, device="cuda")
+    partials = depth_partials(torch.device("cuda"))
     got = []
     with torch.no_grad():
         for s in range(depth):
             pos.fill_(s)
             predictor.depth.bind_step(cache, pos, cache_pos=s)
-            got.append(predictor.forward_depth_unrolled(x[:, s:s + 1]))
+            step_in, n_part = predictor.depth_input(x[:, s], partials)
+            got.append(predictor.depth_step(step_in, partials, n_part, head=max(s - 1, 0)))
 
         # the projection is the identity at these widths; linears run in bf16
         h = x.float()
@@ -148,5 +196,8 @@ def test_qwen3_tts_depth_loop_matches_its_layers_unfused():
             h = h + attn.o_proj(out.transpose(1, 2).reshape(bs, depth, -1).bfloat16()).float()
             h = h + layer.mlp(_rms(h, layer.post_attention_layernorm.weight, cp.rms_norm_eps).bfloat16()).float()
         want = _rms(h, predictor.model.norm.weight, cp.rms_norm_eps)
+        heads = predictor.lm_head_weight.float()
+        want = torch.stack([want[:, s] @ heads[max(s - 1, 0)].t() for s in range(depth)], 1)
 
-    torch.testing.assert_close(torch.cat(got, dim=1).float(), want, rtol=5e-2, atol=1e-1)
+    got = torch.stack(got, 1).float()
+    torch.testing.assert_close(got, want, rtol=5e-2, atol=5e-2 * want.abs().max().item())
