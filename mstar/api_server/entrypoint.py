@@ -928,9 +928,6 @@ class APIServer:
                     self._fail_pending_for_dead_conductor(exited)
                     return
             try:
-                # wakes at once for a conductor or worker message, or a chunk
-                # from the data worker (PreprocessWorker.output_ready)
-                self.communicator.poll_for_messages(timeout_ms=1)
                 with self.request_lock:
                     if len(self.recently_completed) > 0:
                         self._prune_recently_completed()
@@ -1140,6 +1137,9 @@ class APIServer:
                         )
                 if to_wake:
                     notify_many(to_wake.values())
+                # wakes at once for a conductor or worker message, or a chunk
+                # from the data worker (PreprocessWorker.output_ready)
+                self.communicator.poll_for_messages(timeout_ms=1)
             except Exception:
                 if self.running:
                     logger.exception("Error in message processing loop")
