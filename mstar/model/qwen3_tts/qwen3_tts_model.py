@@ -79,6 +79,7 @@ from mstar.model.qwen3_tts.config import (
     SPEAKER_ID_KEY,
     TALKER_ATTN,
     TALKER_KV,
+    TALKER_MIXED,
     TALKER_POS,
     TALKER_SAMPLER,
     Qwen3TTSModelConfig,
@@ -576,6 +577,15 @@ class Qwen3TTSModel(Model):
                 talker_prefill_node([*self.PREFILL_INPUTS, "speaker_embed", "ref_codes"]),
             ])
         return walks
+
+    def get_combined_graph_walks(self) -> dict[str, dict[str, set[str]]]:
+        # A prefill is the decode forward over a longer row (both emit one
+        # frame per row), so a new prompt can ride the decode step instead of
+        # a step of its own that every decode row waits behind.
+        walks = {"talker_prefill", "talker_decode"}
+        if self.config.supports_reference_audio:
+            walks.add("talker_prefill_clone")
+        return {"Talker": {TALKER_MIXED: walks}}
 
     # -----------------------------------------------------------------------
     # Asynchronous partitions and stream buffering

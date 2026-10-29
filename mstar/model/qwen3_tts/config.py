@@ -32,6 +32,9 @@ TALKER_ATTN = "talker_attn"
 TALKER_POS = "talker_pos"
 TALKER_SAMPLER = "talker_sampler"
 CODE_PRED_SAMPLER = "code_predictor"
+# combined walk of the Talker's prefills and decode: a new prompt rides a
+# decode step (Model.get_combined_graph_walks)
+TALKER_MIXED = "talker_mixed"
 
 # Step-metadata keys ``process_prompt`` settles on the host for the prefill:
 # ``[instruct_len, text_len, stream_text, ref_text_len, ref_frames]``, the
