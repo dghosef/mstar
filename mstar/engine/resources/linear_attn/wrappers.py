@@ -5,13 +5,13 @@ their addresses, so they are sized to the bucket on first plan and never
 reallocated: a `torch.zeros` firing on a later, larger layout means a replay
 reads freed memory.
 """
-import functools
 from abc import ABC, abstractmethod
-from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
 import torch
+
+from mstar.platforms.compile import compiled
 
 # Must match `BLOCK_M` in mstar/utils/causal_conv1d/kernels.py, which passes it
 # as an explicit constexpr rather than autotuning it.
@@ -109,17 +109,6 @@ class ConvMetadata:
 def _with_room(t: torch.Tensor, rows: int) -> torch.Tensor:
     """``t`` with ``rows`` zeroed rows appended along dim 0."""
     return torch.cat((t, t.new_zeros((rows, *t.shape[1:]))), dim=0)
-
-
-@functools.cache
-def compiled(fn: Callable, dynamic: bool | None = None) -> Callable:
-    """``fn`` under ``torch.compile`` and the platform's inductor overrides,
-    built on first use, once the process knows its device. The GDN
-    resource's elementwise helpers sit outside the engine's compiled
-    forward, so they compile here."""
-    from mstar.platforms.compile import with_inductor_overrides
-
-    return with_inductor_overrides(torch.compile(fn, dynamic=dynamic))
 
 
 # The chunked path's elementwise work around its kernels, compiled into one

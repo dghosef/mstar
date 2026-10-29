@@ -22,24 +22,23 @@ from mstar.engine.resources.linear_attn.wrappers import (
     GDNMixedWrapper,
     GDNPrefillWrapper,
     GDNWrapper,
-    compiled,
 )
 from mstar.engine.resources.recurrent.config import DeltaNetGeometry
 from mstar.engine.resources.recurrent.pool import NO_SLOT, SINK_SLOT, RecurrentAddressing
 from mstar.engine.resources.spec import CombinedSplit
 from mstar.engine.resources.step import Segment, SlotLease, StepContext
+from mstar.platforms.compile import compiled
 from mstar.utils.causal_conv1d import PAD_SLOT_ID
 
 logger = logging.getLogger(__name__)
 
 
+# Run compiled: eager, the normalize is four full-size passes per tensor (fp32
+# copy, norm, divide, cast); compiled, one. Not dynamic=True: a symbolic head dim
+# made the reduction ~3x slower; the token count goes dynamic on its own at the
+# second size.
 def _l2norm(t: torch.Tensor) -> torch.Tensor:
     return torch.nn.functional.normalize(t.float(), dim=-1).to(t.dtype)
-
-
-# Eager, the normalize is four full-size passes per tensor (fp32 copy, norm,
-# divide, cast); compiled, one. Not dynamic=True: a symbolic head dim made the
-# reduction ~3x slower; the token count goes dynamic on its own at the second size.
 
 
 # What each arch's chunked prefill kernel will read as its packed state.
