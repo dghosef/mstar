@@ -13,7 +13,7 @@ from mstar.communication.tensors import NameToTensorList, TensorCommunicationMan
 from mstar.graph.base import GraphEdge, GraphSection
 from mstar.graph.runtime.base import ColumnarEdgeSpecs, EdgeSpec, InputTensors
 from mstar.streaming.stream_buffer import StreamBuffer, StreamChunkInfo, StreamingEdge, collate
-from mstar.streaming.topology import ChunkBatchHold, Connection
+from mstar.streaming.topology import ChunkBatchHold, Connection, StreamingGraphEdge
 from mstar.worker.node_manager_utils import RequestStateManager
 
 
@@ -35,6 +35,23 @@ def consumer_nodes(
                 if conn.edge_name in node.input_names:
                     cache[conn.edge_name] = node.name
     return cache
+
+
+def producer_nodes(
+    connections: list[Connection], walks: dict[str, GraphSection],
+) -> dict[str, Connection]:
+    """Map each node that streams into a real-time connection
+    (``item_seconds`` set) to that connection."""
+    paced = {conn.edge_name: conn for conn in connections if conn.item_seconds is not None}
+    producers: dict[str, Connection] = {}
+    if not paced:
+        return producers
+    for section in walks.values():
+        for node in section.get_nodes().values():
+            for edge in node.outputs:
+                if isinstance(edge, StreamingGraphEdge) and edge.name in paced:
+                    producers[node.name] = paced[edge.name]
+    return producers
 
 
 class StreamBufferManager:
@@ -67,6 +84,11 @@ class StreamBufferManager:
         # the rids that own a buffer; empty for a text model, so a speculation
         # skips its per-row stream polls
         self._rids: set[int] = set()
+        # producer node -> the real-time stream (``Connection.item_seconds``)
+        # it feeds here, which `by_deadline` orders its rows by
+        self.paced: dict[str, Connection] = (
+            producer_nodes(connections, walks) if connections and walks else {}
+        )
 
     def possible(self) -> bool:
         """Whether any live request owns a stream buffer."""
@@ -96,6 +118,24 @@ class StreamBufferManager:
                 lead = request_info.stream_lead_items.get(conn.edge_name)
                 if lead:
                     sbuf.prime_context(lead)
+
+    def by_deadline(self, request_ids: list[int], node_name: str) -> list[int]:
+        """``request_ids`` (rows of ``node_name``, a node in ``paced``) in
+        playback-deadline order: rows whose stream has not reached its
+        consumer yet (time to first audio) first, then the least playback in
+        hand; stable, so ties keep their order."""
+        conn = self.paced[node_name]
+        infos = self._request_state.per_request_info
+        now = time.monotonic()
+        neg_inf = float("-inf")
+
+        def slack(rid: int) -> float:
+            info = infos.get(rid)
+            sbuf = None if info is None else info.stream_buffers.get(conn.edge_name)
+            s = None if sbuf is None else sbuf.playback_slack(now, conn.item_seconds)
+            return neg_inf if s is None else s
+
+        return sorted(request_ids, key=slack)
 
     def remove_request(self, request_id: int) -> None:
         self._rids.discard(request_id)

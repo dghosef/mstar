@@ -71,6 +71,12 @@ class Connection:
     # None: hand each chunk to the consumer as soon as it is ready
     batch_hold: ChunkBatchHold | None = None
     limits: ClientStreamLimits | None = None
+    # A real-time stream: how long one new item plays at the client once its
+    # first chunk reaches the consumer. When the producer node has more rows
+    # than its step holds, the rows closest to running dry go first
+    # (``StreamBufferManager.by_deadline``). Only where the consumer runs on
+    # the producer's worker; None: rows keep their order.
+    item_seconds: float | None = None
 
 
 @dataclass

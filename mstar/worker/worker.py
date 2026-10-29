@@ -2672,6 +2672,13 @@ class Worker:
             [r for r in walk_rids if not self._is_tearing_down(r)]
             if self._teardowns_pending() else walk_rids
         )
+        if (
+            max_continuing is not None and len(candidates) > max_continuing
+            and spec_node_name in self.streams.paced
+        ):
+            # The cut keeps the first rows: the ones nearest running dry,
+            # rather than whichever came first.
+            candidates = self.streams.by_deadline(candidates, spec_node_name)
         prep = self._spec_preparer.prepare(
             batch_N, spec_node_name, graph_walk, candidates, max_continuing, laps,
         )

@@ -631,6 +631,8 @@ class Qwen3TTSModel(Model):
                         max_wait_s=self.codec_batch_hold_ms / 1000,
                         min_chunks=CodecSubmodule.MAX_BATCH_SIZE,
                     ) if self.codec_batch_hold_ms > 0 else None,
+                    # a frame plays for upsample / rate seconds (80 ms)
+                    item_seconds=codec.decode_upsample_rate / codec.output_sample_rate,
                 ),
             ],
         )

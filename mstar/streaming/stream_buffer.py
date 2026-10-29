@@ -1,3 +1,4 @@
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import NamedTuple
@@ -105,6 +106,10 @@ class StreamBuffer:
     _num_items_expected = 0
     # when the ready chunk a ``ChunkBatchHold`` is holding was first seen ready
     _held_since: float | None = None
+    # when the first chunk was popped, and the new (non-context) items popped
+    # since: what a playback deadline counts from
+    _first_pop_at: float | None = None
+    _new_items_popped: int = 0
 
     def prime_context(self, context_items: int) -> None:
         """The first ``context_items`` items the producer sends are context only
@@ -195,6 +200,13 @@ class StreamBuffer:
     def release_hold(self) -> None:
         self._held_since = None
 
+    def playback_slack(self, now: float, item_seconds: float) -> float | None:
+        """How far the popped new items' playback runs ahead of ``now``, if it
+        started when the first chunk was popped; None before the first chunk."""
+        if self._first_pop_at is None:
+            return None
+        return self._first_pop_at + self._new_items_popped * item_seconds - now
+
     def pop_chunk(self) -> StreamChunk:
         """Pop the next chunk. Only call when has_chunk_ready() is True.
 
@@ -244,6 +256,9 @@ class StreamBuffer:
         )
         self._delivered_end = max(self._delivered_end, offset + len(items))
         self._chunks_popped += 1
+        if self._first_pop_at is None:
+            self._first_pop_at = time.monotonic()
+        self._new_items_popped += len(items) - chunk.context_items
         return chunk
 
     def store_uningested_edge(self, streaming_edge: StreamingEdge):

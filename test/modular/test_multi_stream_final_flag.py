@@ -20,7 +20,7 @@ from mstar.streaming.stream_buffer import (  # noqa: E402
     StreamChunkInfo,
     StreamingEdge,
 )
-from mstar.streaming.topology import Connection  # noqa: E402
+from mstar.streaming.topology import Connection, StreamingGraphEdge  # noqa: E402
 from mstar.worker.executing_batch import make_executing_batch  # noqa: E402
 from mstar.worker.micro_scheduler import ScheduledBatch  # noqa: E402
 from mstar.worker.stream_buffers import StreamBufferManager  # noqa: E402
@@ -283,3 +283,39 @@ def test_stream_polls_are_skipped_only_while_no_request_owns_a_buffer():
     assert streams.possible()
     streams.remove_request(7)
     assert not streams.possible(), "a removed request's handle no longer counts"
+
+
+def test_a_real_time_streams_producer_rows_go_in_playback_deadline_order():
+    """``Connection.item_seconds``: the node that streams into it is paced, and
+    its rows sort by the playback popped since their first chunk less the time
+    since; a row whose first chunk has not gone (time to first audio) first."""
+    walk = SimpleNamespace(get_nodes=lambda: {
+        "talker": SimpleNamespace(name="talker", input_names=[], outputs=[
+            StreamingGraphEdge(next_node="vocoder", name="codes", target_partition=PARTITION),
+        ]),
+        "vocoder": SimpleNamespace(name="vocoder", input_names=["codes"], outputs=[]),
+    })
+    buffers = {
+        rid: StreamBuffer(request_id=rid, edge_name="codes", from_partition="LLM",
+                          policy=FixedChunkPolicy(chunk_size=2))
+        for rid in ("a", "b", "c", "d")
+    }
+    request_state = SimpleNamespace(per_request_info={
+        rid: SimpleNamespace(stream_buffers={"codes": buf}) for rid, buf in buffers.items()
+    })
+    streams = StreamBufferManager(request_state, None, [Connection(
+        from_partition="LLM", to_partition=PARTITION, edge_name="codes",
+        chunk_policy_factory=lambda: FixedChunkPolicy(chunk_size=2), item_seconds=0.5,
+    )], {"main": walk})
+    uids = iter(range(1000))
+    # a: three chunks out, b: one, c: two, d: none yet
+    for rid, chunks in {"a": 3, "b": 1, "c": 2, "d": 0}.items():
+        for _ in range(2 * chunks):
+            uid = next(uids)
+            buffers[rid].pre_read_register(uid)
+            buffers[rid].put(uid, uid)
+        for _ in range(chunks):
+            buffers[rid].pop_chunk()
+
+    assert list(streams.paced) == ["talker"]
+    assert streams.by_deadline(["a", "b", "c", "d"], "talker") == ["d", "b", "c", "a"]
