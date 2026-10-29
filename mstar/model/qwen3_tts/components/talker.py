@@ -24,6 +24,7 @@ from torch import nn
 from mstar.distributed.communication import CommGroup
 from mstar.model.components import RMSNorm
 from mstar.model.components.code_predictor_kernels import (
+    STREAM_TILE,
     DepthAttention,
     DepthKV,
     DepthWeights,
@@ -287,7 +288,8 @@ class Qwen3TTSCodePredictor(nn.Module):
         ``depth_step``."""
         proj = self.small_to_mtp_projection
         if isinstance(proj, nn.Linear):
-            return cp_linear(last_hidden, proj.weight, bias=proj.bias, partials=partials), proj.weight.shape[0] // 16
+            x = cp_linear(last_hidden, proj.weight, bias=proj.bias, partials=partials)
+            return x, proj.weight.shape[0] // STREAM_TILE
         return last_hidden.clone(), 0
 
     def depth_step(

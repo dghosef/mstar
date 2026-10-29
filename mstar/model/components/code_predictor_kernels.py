@@ -31,6 +31,9 @@ from mstar.utils.attention import rms_norm_rope
 # the consumer, so the RMSNorm needs no pass of its own and stays deterministic.
 _MAX_PARTIALS = 64
 _MAX_ROWS = 64
+# the output tile of a projection that starts or updates a residual stream: one
+# row partial per tile, so a stream of width H leaves H / STREAM_TILE of them
+STREAM_TILE = 16
 EMBED_BLOCK = 256
 
 
@@ -313,7 +316,13 @@ def _cp_linear_kernel(
     """``O[:, tile] = X @ W[tile]^T`` for a few rows. NORM: 0 none, 1 the rows'
     RMS from X itself, 2 from ``n_part`` partial sums in P. EPI: 0 store, 1 add
     into the residual stream O and record the tile's partial sums, 2 silu(X W^T)
-    * (X W2^T), 3 add the bias B and record the partial sums."""
+    * (X W2^T), 3 add the bias B and record the partial sums.
+
+    Under 16 rows (BLOCK_M < 16) a tile is a few output columns reduced on CUDA
+    cores, many programs of one warp each: there a tensor-core tile would be
+    mostly padding, and more programs keep more weight loads in flight. That
+    mode takes the norm from X and records no partials."""
+    GEMV: tl.constexpr = BLOCK_M < 16
     pid = tl.program_id(0)
     rn = pid * BLOCK_N + tl.arange(0, BLOCK_N)
     rm = tl.arange(0, BLOCK_M)
@@ -327,9 +336,17 @@ def _cp_linear_kernel(
         if NORM == 1:
             xf = x.to(tl.float32)
             ss += tl.sum(xf * xf, 1)
-        acc = tl.dot(x, tl.trans(tl.load(W + rn[:, None] * s_w + (k0 + rk)[None, :])), acc)
+        w = tl.load(W + rn[:, None] * s_w + (k0 + rk)[None, :])
+        if GEMV:
+            acc += tl.sum(x.to(tl.float32)[:, None, :] * w.to(tl.float32)[None, :, :], 2)
+        else:
+            acc = tl.dot(x, tl.trans(w), acc)
         if EPI == 2:
-            acc2 = tl.dot(x, tl.trans(tl.load(W2 + rn[:, None] * s_w + (k0 + rk)[None, :])), acc2)
+            w2 = tl.load(W2 + rn[:, None] * s_w + (k0 + rk)[None, :])
+            if GEMV:
+                acc2 += tl.sum(x.to(tl.float32)[:, None, :] * w2.to(tl.float32)[None, :, :], 2)
+            else:
+                acc2 = tl.dot(x, tl.trans(w2), acc2)
     if NORM == 2:
         t = tl.arange(0, NP)
         ss = tl.sum(tl.load(P + t[:, None] * MAX_ROWS + rm[None, :], mask=(t < n_part)[:, None], other=0.0), 0)
@@ -346,7 +363,7 @@ def _cp_linear_kernel(
         acc = acc + tl.load(B + rn).to(tl.float32)[None, :]
     y = acc.to(O.dtype.element_ty)
     tl.store(o, y, mask=rows)
-    if EPI % 2 == 1:  # a residual stream's start or update (1, 3): its row partials
+    if EPI % 2 == 1 and not GEMV:  # a residual stream's start or update (1, 3): its row partials
         yf = y.to(tl.float32)
         tl.store(P + pid * MAX_ROWS + rm, tl.sum(yf * yf, 1))
 
@@ -368,7 +385,9 @@ def cp_linear(
     * ``bias``: add it.
 
     With ``residual`` or ``bias`` the output's partial sums of squares go to
-    ``partials`` (one row per output tile), for the next norm.
+    ``partials`` (one row per output tile), for the next norm. One or two
+    rows run as a CUDA-core reduction that takes its norm from ``x`` instead,
+    so they neither record nor read partials.
 
     One launch, tiles over N: at a few rows each tile streams its slice of the
     weight, and cuBLAS's split-K, the add + norm and the activation would be
@@ -380,20 +399,30 @@ def cp_linear(
         out = torch.empty(rows, n, device=x.device, dtype=x.dtype)
     if not x.is_cuda:
         return _cp_linear_torch(x, w, out, norm_eps, residual, up, bias)
-    # tuned at 1-64 rows on an H200 (harness lin_sweep): up to 32 rows, two
-    # warps and wide K steps keep a tile's weight loads in flight
-    block_m = max(16, triton.next_power_of_2(rows))
-    block_n = 32 if epi == 2 or (n >= 4096 and block_m >= 32) else 16
-    block_k, warps, stages = (128, 4, 5) if block_m >= 64 else (256, 2, 4)
+    # tuned on an H200 (harness lin_sweep, gemv_sweep): one or two rows reduce
+    # on CUDA cores, a warp per few columns; up to 32 rows two warps and wide K
+    # steps keep a tile's weight loads in flight
+    if rows == 1:
+        block_m, block_n, block_k, warps, stages = 1, 2 if n >= 2048 and epi == 0 else 1, 1024, 1, 2
+        norm = 0 if norm_eps is None else 1  # no row partials in this mode
+    elif rows == 2:
+        block_n = 4 if epi == 1 or (epi == 0 and n < 4096) else 2
+        block_m, block_k, warps, stages = 2, 1024, 2 if epi == 1 else 1, 2
+        norm = 0 if norm_eps is None else 1
+    else:
+        block_m = max(16, triton.next_power_of_2(rows))
+        block_n = STREAM_TILE if epi in (1, 3) else 32 if epi == 2 or (n >= 4096 and block_m >= 32) else 16
+        block_k, warps, stages = (128, 4, 5) if block_m >= 64 else (256, 2, 4)
+        norm = 0 if norm_eps is None else (2 if n_part else 1)
     assert rows <= _MAX_ROWS and n % block_n == 0 and k % block_k == 0 and w.stride(1) == 1 and x.stride(1) == 1
-    if epi in (1, 3):
+    if epi in (1, 3) and block_m >= 16:
         assert n // block_n <= _MAX_PARTIALS and partials is not None
     _cp_linear_kernel[(n // block_n,)](
         x, w, up if up is not None else w, out, bias if bias is not None else w,
         partials if partials is not None else out,
         rows, k, norm_eps or 0.0, n_part,
         x.stride(0), w.stride(0), out.stride(0),
-        NORM=0 if norm_eps is None else (2 if n_part else 1), EPI=epi,
+        NORM=norm, EPI=epi,
         NP=_MAX_PARTIALS, MAX_ROWS=_MAX_ROWS,
         BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
         num_warps=warps, num_stages=stages,
@@ -436,9 +465,9 @@ def run_depth_layers(
         qkv = cp_linear(x, w.qkv[i], norm_eps=w.eps, partials=partials, n_part=n_part)
         att = depth(attn, qkv.view(bs, 1, -1)).view(bs, -1)
         cp_linear(att, w.o[i], out=x, residual=True, partials=partials)
-        act = cp_linear(x, w.gate[i], up=w.up[i], norm_eps=w.eps, partials=partials, n_part=x.shape[1] // 16)
+        act = cp_linear(x, w.gate[i], up=w.up[i], norm_eps=w.eps, partials=partials, n_part=x.shape[1] // STREAM_TILE)
         cp_linear(act, w.down[i], out=x, residual=True, partials=partials)
-        n_part = x.shape[1] // 16
+        n_part = x.shape[1] // STREAM_TILE
     if head is None:
         return None
     return cp_linear(x, w.heads[head], norm_eps=w.eps, partials=partials, n_part=n_part)

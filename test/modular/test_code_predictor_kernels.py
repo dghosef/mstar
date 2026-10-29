@@ -100,7 +100,7 @@ def test_cp_linear_matches_the_unfused_ops(rows):
     """Each ``cp_linear`` mode against its op sequence in fp32: the folded
     RMSNorm (row sums of squares from x, and from a producer's partials), the
     residual add, silu-gate and bias epilogues."""
-    from mstar.model.components.code_predictor_kernels import cp_linear, depth_partials
+    from mstar.model.components.code_predictor_kernels import STREAM_TILE, cp_linear, depth_partials
 
     torch.manual_seed(3)
     dev, dt, h = "cuda", torch.bfloat16, 1024
@@ -128,11 +128,11 @@ def test_cp_linear_matches_the_unfused_ops(rows):
     want = x.float() + a.float() @ w_res.float().t()
     close(stream, want)
     sn = stream.float() * torch.rsqrt(stream.float().pow(2).mean(-1, keepdim=True) + 1e-6)
-    close(cp_linear(stream, folded, norm_eps=1e-6, partials=partials, n_part=h // 16), sn @ folded.float().t())
+    close(cp_linear(stream, folded, norm_eps=1e-6, partials=partials, n_part=h // STREAM_TILE), sn @ folded.float().t())
     out = cp_linear(a, w_res, bias=bias, partials=partials)
     close(out, a.float() @ w_res.float().t() + bias.float())
     on = out.float() * torch.rsqrt(out.float().pow(2).mean(-1, keepdim=True) + 1e-6)
-    close(cp_linear(out, folded, norm_eps=1e-6, partials=partials, n_part=h // 16), on @ folded.float().t())
+    close(cp_linear(out, folded, norm_eps=1e-6, partials=partials, n_part=h // STREAM_TILE), on @ folded.float().t())
 
 
 def _rms(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
