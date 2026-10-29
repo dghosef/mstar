@@ -81,6 +81,31 @@ class TokenStop(NamedTuple):
     # ``buffer``. The loop count includes the prefill's token (a
     # ``generated_key`` counter has to count it itself)
     prefill_walks: frozenset[str] = frozenset()
+    # outputs left unrouted on a row whose token is a stop id, ``ignore_eos``
+    # or not (``StopCheck.withheld``): a frame streamed beside the stop token
+    # is loop control, and only the stop check's host copy tells it from data
+    withhold: tuple[str, ...] = ()
+
+
+class StopCheck(NamedTuple):
+    """``check_stop``'s answer when the step also has outputs that are not data.
+
+    ``withheld`` names outputs of this step the worker leaves unrouted for the
+    request, e.g. a frame streamed beside a stop token: a streaming edge then
+    gets no item for it, so its consumer needs no device read to find and drop
+    it. A plain ``set`` return is the same as ``StopCheck(stops)``.
+    """
+
+    stops: set[str] | frozenset[str] = frozenset()
+    withheld: tuple[str, ...] = ()
+
+
+class BatchedStopCheck(NamedTuple):
+    """``StopCheck`` for ``check_stop_batched``: rid -> loops to stop and
+    rid -> withheld outputs, rids with none left out of each."""
+
+    stops: dict[str, set[str]]
+    withheld: dict[str, tuple[str, ...]]
 
 
 if TYPE_CHECKING:
@@ -899,7 +924,8 @@ class NodeSubmodule(torch.nn.Module, ABC):
         the stop check already copies to the host, as signal name -> the name
         of the row-addressed stop buffer holding it. The worker then sends
         those values inline, one frame per step, instead of one tensor per
-        request. Only for a walk whose emit edge is not persisted."""
+        request, and the API server hands each to ``Model.postprocess`` as
+        a list of ints. Only for a walk whose emit edge is not persisted."""
         del graph_walk
         return {}
 
@@ -1097,7 +1123,7 @@ class NodeSubmodule(torch.nn.Module, ABC):
         self, request_id: str,
         request_info: CurrentForwardPassInfo,
         outputs: dict[str, list[torch.Tensor]],
-    ) -> set[str]:
+    ) -> set[str] | StopCheck:
         """
         Return the set of dynamic-loop names that should stop after this step.
 
@@ -1112,6 +1138,10 @@ class NodeSubmodule(torch.nn.Module, ABC):
         will run for that rid and its output discarded — the standard
         1-wasted-step cost for any stop signal.
 
+        A ``StopCheck`` also names outputs of this step that are not routed
+        (``StopCheck.withheld``), decided off the same read; it may withhold
+        without stopping.
+
         Default: no stops.
         """
         return set()
@@ -1120,12 +1150,13 @@ class NodeSubmodule(torch.nn.Module, ABC):
         self, request_ids: list[str],
         request_infos: dict[str, CurrentForwardPassInfo],
         host_rows: HostRows,
-    ) -> dict[str, set[str]] | None:
+    ) -> dict[str, set[str]] | BatchedStopCheck | None:
         """``check_stop`` for the whole batch at once, off the host rows.
 
-        Optional. Returns rid -> loops to stop (rids with none left out), and
-        must agree with ``check_stop`` for every rid. None, or a raise, falls
-        back to the per-request path.
+        Optional. Returns rid -> loops to stop (rids with none left out), or a
+        ``BatchedStopCheck`` for a submodule whose ``check_stop`` withholds,
+        and must agree with ``check_stop`` for every rid. None, or a raise,
+        falls back to the per-request path.
         """
         return None
 
@@ -1196,7 +1227,7 @@ class ARNodeSubmodule(NodeSubmodule):
         self, request_id: str,
         request_info: CurrentForwardPassInfo,
         outputs: dict[str, list[torch.Tensor]],
-    ) -> set[str]:
+    ) -> set[str] | StopCheck:
         stop = self.token_stop
         if stop is None:
             return super().check_stop(request_id, request_info, outputs)
@@ -1205,13 +1236,16 @@ class ARNodeSubmodule(NodeSubmodule):
             return {stop.loop} if stop.prefill_walks and self.ended_at_prefill(request_id) else set()
         # a row's first element, as ``HostRows.first_values`` reads it
         token = outputs[stop.buffer][0].reshape(-1)[0].item()
-        return {stop.loop} if self._token_stops(request_id, token, request_info) else set()
+        stops = {stop.loop} if self._token_stops(request_id, token, request_info) else set()
+        if stop.withhold and token in stop.stop_ids:
+            return StopCheck(stops, withheld=stop.withhold)
+        return stops
 
     def check_stop_batched(
         self, request_ids: list[str],
         request_infos: dict[str, CurrentForwardPassInfo],
         host_rows: HostRows,
-    ) -> dict[str, set[str]] | None:
+    ) -> dict[str, set[str]] | BatchedStopCheck | None:
         stop = self.token_stop
         if stop is None:
             return super().check_stop_batched(request_ids, request_infos, host_rows)
@@ -1219,7 +1253,16 @@ class ARNodeSubmodule(NodeSubmodule):
         if pairs is None:
             return None
         verdict = self._token_stops
-        return {rid: {stop.loop} for rid, token in pairs if verdict(rid, token, request_infos[rid])}
+        if not stop.withhold:
+            return {rid: {stop.loop} for rid, token in pairs if verdict(rid, token, request_infos[rid])}
+        stops: dict[str, set[str]] = {}
+        withheld: dict[str, tuple[str, ...]] = {}
+        for rid, token in pairs:
+            if verdict(rid, token, request_infos[rid]):
+                stops[rid] = {stop.loop}
+            if token in stop.stop_ids:
+                withheld[rid] = stop.withhold
+        return BatchedStopCheck(stops, withheld)
 
     def ended_at_prefill(self, request_id: str) -> bool:
         """Whether a walk in ``token_stop.prefill_walks`` sampled a stop id for

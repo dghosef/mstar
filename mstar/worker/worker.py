@@ -316,7 +316,7 @@ _HOST_ROWS_RING = 4
 _HOST_SPANS_PURPOSE = tuple(f"output_spans{slot}" for slot in range(_HOST_ROWS_RING))
 
 
-class _LazyPerRid:
+class _LazyPerRid(Mapping):
     """``Worker._rows_to_per_rid`` on demand: the per-rid host dicts are built
     the first time a consumer reads them. The batched stop check, the row store
     and the inline emit read the rows directly, so in the common decode step
@@ -334,14 +334,8 @@ class _LazyPerRid:
             self._built = Worker._rows_to_per_rid(self._host, self._request_ids)
         return self._built
 
-    def get(self, key, default=None):
-        return self._dict().get(key, default)
-
     def __getitem__(self, key):
         return self._dict()[key]
-
-    def __contains__(self, key) -> bool:
-        return key in self._dict()
 
     def __iter__(self):
         return iter(self._dict())
@@ -349,9 +343,7 @@ class _LazyPerRid:
     def __len__(self) -> int:
         return len(self._request_ids)
 
-    def __bool__(self) -> bool:
-        return bool(self._request_ids)
-
+    # the built dict's own views, rather than Mapping's per-key lookups
     def items(self):
         return self._dict().items()
 
@@ -360,6 +352,76 @@ class _LazyPerRid:
 
     def values(self):
         return self._dict().values()
+
+
+class _LazyHostOutputs(Mapping):
+    """Per-rid host copies of a step's outputs, copied one output name at a time
+    on first read (``copy_name(name) -> {rid: host value}``).
+
+    The stop check reads at most the sampled token, and a loop that stops on
+    its iteration count reads nothing, so copying every output down each step
+    paid for transfers nobody read. Outputs that leave by a host transport are
+    copied by the send instead; ``landed`` hands it what was copied here.
+    """
+
+    __slots__ = ("_source", "_copy_name", "_landed")
+
+    def __init__(self, source: dict, copy_name: Callable[[str], dict]):
+        self._source = source
+        self._copy_name = copy_name
+        self._landed: dict[str, dict] = {}
+
+    def _host(self, name: str) -> dict:
+        landed = self._landed.get(name)
+        if landed is None:
+            landed = self._landed[name] = self._copy_name(name)
+        return landed
+
+    def landed(self) -> dict[int, NameToTensorList]:
+        out: dict[int, NameToTensorList] = {}
+        for name, by_rid in self._landed.items():
+            for rid, value in by_rid.items():
+                out.setdefault(rid, {})[name] = value
+        return out
+
+    def get(self, rid, default=None):
+        row = self._source.get(rid)
+        if row is None:
+            return default
+        return _LazyHostRow(self, rid, row) if isinstance(row, dict) else row
+
+    def __getitem__(self, rid):
+        row = self._source[rid]
+        return _LazyHostRow(self, rid, row) if isinstance(row, dict) else row
+
+    def __iter__(self):
+        return iter(self._source)
+
+    def __len__(self) -> int:
+        return len(self._source)
+
+
+class _LazyHostRow(Mapping):
+    """One request's view of ``_LazyHostOutputs``: reading a name copies it."""
+
+    __slots__ = ("_parent", "_rid", "_row")
+
+    def __init__(self, parent: _LazyHostOutputs, rid, row: dict):
+        self._parent, self._rid, self._row = parent, rid, row
+
+    def __getitem__(self, name):
+        value = self._row[name]
+        # only a list of tensors has anything to copy
+        return self._parent._host(name)[self._rid] if isinstance(value, list) else value
+
+    def __contains__(self, name) -> bool:
+        return name in self._row
+
+    def __iter__(self):
+        return iter(self._row)
+
+    def __len__(self) -> int:
+        return len(self._row)
 
 
 class Worker:
@@ -3566,8 +3628,9 @@ class Worker:
         _pp_stage("completion_event_sync")
         # Waited on above, so the spans have landed; cut before anything reads
         # the outputs: the stop check, the store, a streaming edge.
+        empty_spans: dict[int, list[str]] = {}
         if outputs.output_spans and batch_N.batch.request_to_worker_graph:
-            self._crop_to_spans(outputs)
+            empty_spans = self._crop_to_spans(outputs)
             _pp_stage("crop_spans")
         if self.enable_nvtx:
             range_pop(synchronize=False)
@@ -3591,6 +3654,16 @@ class Worker:
             )
         # the same host copy, before stops, so a request ending here still indexes its pages
         engine.extend_prefix_chains(batch_N.node_batch, cpu_outputs, host_rows=host_rows)
+        # What the stop check withheld (``StopCheck.withheld``), and an output
+        # cut to an empty span, is not stored, so not routed: a streaming edge
+        # then carries no item for the row, and the producer's item count
+        # leaves it out as well.
+        for withheld in (batch_N.node_batch.withheld_outputs, empty_spans):
+            for rid, names in withheld.items():
+                rid_outputs = outputs.get(rid)
+                if rid_outputs:
+                    for name in names:
+                        rid_outputs.pop(name, None)
 
         # Stream-terminated loop: a stream-consuming node inside a loop has no
         # internal stop signal (unlike a self-EOS loop), so when it consumes the
@@ -3794,7 +3867,10 @@ class Worker:
                     node_name=batch_N.node_name,
                     graph_walk=graph_walk,
                     skip_cuda_sync=True,
-                    cpu_tensors=cpu_outputs,
+                    cpu_tensors=(
+                        cpu_outputs.landed()
+                        if isinstance(cpu_outputs, _LazyHostOutputs) else cpu_outputs
+                    ),
                     ready_event=batch_N.node_batch.completion_event,
                 )
             return stored
@@ -4143,7 +4219,7 @@ class Worker:
         return host
 
     @staticmethod
-    def _crop_to_spans(outputs: "BatchedModelOutput") -> None:
+    def _crop_to_spans(outputs: "BatchedModelOutput") -> dict[int, list[str]]:
         """Cut each row of a spanned output to its span along the last dim
         (``NodeSubmodule.spanned_outputs``). Called once the step's completion
         event has fired, so the spans staged behind the step are on the host.
@@ -4151,10 +4227,14 @@ class Worker:
         a second name that ``postprocess`` or ``unpack_packed_outputs`` gave
         the same list is cut with it. Two names the forward returned on its own
         get their own lists from the engine and keep their own widths.
+
+        Returns rid -> the outputs whose span is empty, which the caller leaves
+        out of the store as it does a withheld output.
         """
         spans = outputs.host_spans or outputs.output_spans
         per_rid = outputs.per_rid_outputs
         cut = False
+        empty: dict[int, list[str]] = {}
         for name, span in spans.items():
             # columns, not a [start, end] list per row
             starts, ends = span.t().tolist()
@@ -4163,6 +4243,8 @@ class Worker:
                 tensors = row.get(name) if row is not None else None
                 if not tensors:
                     continue
+                if end <= start:
+                    empty.setdefault(rid, []).append(name)
                 for i, tensor in enumerate(tensors):
                     if start > 0 or end < tensor.shape[-1]:
                         tensors[i] = tensor[..., max(start, 0):max(end, 0)]
@@ -4170,6 +4252,7 @@ class Worker:
         if cut:
             # the views no longer describe the stored rows
             outputs.row_views = None
+        return empty
 
     def _get_pinned_d2h_buffer(
         self,
@@ -4305,17 +4388,19 @@ class Worker:
                 HostRows(tuple(row_rids), host),
             )
 
-        cpu_per_rid: dict = {}
+        # Shared by every name copied this step, so two names never land in
+        # one pinned buffer.
         buffer_indices: dict[tuple[str, torch.dtype, int], int] = defaultdict(int)
-        with side:
-            for rid, name_to_list in source.items():
-                if not isinstance(name_to_list, dict):
-                    cpu_per_rid[rid] = name_to_list
-                    continue
-                cpu_per_rid[rid] = {}
-                for name, tensors in name_to_list.items():
+
+        def copy_name(name: str) -> dict:
+            host: dict = {}
+            with side:
+                for rid, name_to_list in source.items():
+                    if not isinstance(name_to_list, dict) or name not in name_to_list:
+                        continue
+                    tensors = name_to_list[name]
                     if not isinstance(tensors, list):
-                        cpu_per_rid[rid][name] = tensors
+                        host[rid] = tensors
                         continue
                     new_list = []
                     for t in tensors:
@@ -4331,10 +4416,11 @@ class Worker:
                             new_list.append(cpu_t)
                         else:
                             new_list.append(t)
-                    cpu_per_rid[rid][name] = new_list
-        side.synchronize()
+                    host[rid] = new_list
+            side.synchronize()
+            return host
 
-        return cpu_per_rid, None
+        return _LazyHostOutputs(source, copy_name), None
 
     def _removal_step_reached(self, body: RemoveRequest) -> bool:
         """Whether this rank has consumed the step rank 0 released these pages
