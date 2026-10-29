@@ -1392,26 +1392,24 @@ class _IdentityNorm(torch.nn.Module):
 
 
 def _fake_cp_kernels(monkeypatch, calls=None):
-    """The code predictor's Triton kernels on CPU: the prologue writes k and v
-    into the cache without norm or rope, and attention is SDPA over the depth
-    positions so far."""
+    """The code predictor's attention kernel on CPU: k and v written into the
+    cache without norm or rope, and SDPA over the depth positions so far."""
     import mstar.model.components.code_predictor_kernels as kernels
 
-    def prologue(qkv, wq, wk, pos, kv_layer, cache_pos, seq_len, eps_q, eps_k, theta, hq, hkv, d):
-        k, v = qkv[:, hq * d:].view(-1, seq_len, 2, hkv, d).unbind(2)
+    def attend(qkv, wq, wk, pos, kv_layer, cache_pos, seq_len, eps_q, eps_k, theta, hq, hkv, d):
+        q, k, v = qkv.view(-1, seq_len, hq + 2 * hkv, d).split((hq, hkv, hkv), dim=2)
         kv_layer[:, 0, cache_pos:cache_pos + seq_len] = k
         kv_layer[:, 1, cache_pos:cache_pos + seq_len] = v
-
-    def attention(q, k_cache, v_cache, cache_pos):
-        n = cache_pos + q.shape[1]
+        n = cache_pos + seq_len
         if calls is not None:
-            calls.append((q.shape, k_cache.shape, v_cache.shape, n))
-        return torch.nn.functional.scaled_dot_product_attention(
-            q.transpose(1, 2), k_cache[:, :n].transpose(1, 2), v_cache[:, :n].transpose(1, 2), enable_gqa=True,
+            calls.append((q.shape, kv_layer[:, 0].shape, kv_layer[:, 1].shape, n))
+        out = torch.nn.functional.scaled_dot_product_attention(
+            q.transpose(1, 2), kv_layer[:, 0, :n].transpose(1, 2), kv_layer[:, 1, :n].transpose(1, 2),
+            enable_gqa=True,
         ).transpose(1, 2)
+        return out.reshape(-1, hq * d)
 
-    monkeypatch.setattr(kernels, "cp_qk_norm_rope_kv_write", prologue)
-    monkeypatch.setattr(kernels, "cp_attention", attention)
+    monkeypatch.setattr(kernels, "cp_attend", attend)
 
 
 def _cpu_predictor(monkeypatch, config=None, bs=2, calls=None):
@@ -1525,8 +1523,7 @@ def _depth_loop(model, monkeypatch):
     loop over ``n`` steps."""
     import mstar.model.components.code_predictor_kernels as kernels
 
-    monkeypatch.setattr(kernels, "_cp_qk_norm_rope_kv_kernel", _OpaqueKernel())
-    monkeypatch.setattr(kernels, "_cp_attn_kernel", _OpaqueKernel())
+    monkeypatch.setattr(kernels, "_cp_attend_kernel", _OpaqueKernel())
     if model == "qwen3_tts":
         config = _tiny_model_config()
         predictor = Qwen3TTSCodePredictor(config)
