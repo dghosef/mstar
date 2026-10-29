@@ -842,21 +842,28 @@ class ArenaShmCommunicationManager(SharedMemoryCommunicationManager):
         self, request_id: Rid, graph_edges: list[GraphEdge],
         graph_walk: str | None = None,
     ):
+        return self._start_reads([(request_id, graph_edges)], graph_walk)
+
+    def start_read_tensors_multi(self, reads):
+        """One stream context, peer sweep, event and wake for every request's
+        reads, not one each."""
+        return self._start_reads(reads, None)
+
+    def _start_reads(self, requests, graph_walk):
         # Increment races are benign here: a torn count can only make
         # eviction OVER-cautious (skip a sweep), never unsafe.
         self._reads_active += 1
         try:
-            if not any(e.tensor_info for e in graph_edges):
+            if not any(e.tensor_info for _rid, edges in requests for e in edges):
                 # signal-only edges: no stream context to pay for, but the
                 # (time-gated) sweep of dead peers' segments still runs here
                 self._evict_dead_peers()
                 return []
-            return self._start_read_tensors(request_id, graph_edges,
-                                            graph_walk)
+            return self._start_read_tensors(requests, graph_walk)
         finally:
             self._reads_active -= 1
 
-    def _start_read_tensors(self, request_id, graph_edges, graph_walk):
+    def _start_read_tensors(self, requests, graph_walk):
         self._evict_dead_peers()
         h2d_did_work = False
         stats = self.transfer_stats
@@ -867,48 +874,69 @@ class ArenaShmCommunicationManager(SharedMemoryCommunicationManager):
             if self._h2d_stream is not None
             else _nullcontext()
         )
+        # arena items are read and stored together after the loop; one met
+        # again before then takes the extra reference after the put
+        staged: list[tuple] = []
+        taken: dict[int, TensorPointerInfo] = {}
+        again: list[int] = []
+        t0 = time.perf_counter()
         with ctx:
-            for graph_edge in graph_edges:
-                if len(graph_edge.tensor_info) == 0:
-                    continue
-                rx_t0 = time.perf_counter()
-                fp = FutureAndPointers(
-                    future=None, graph_edges=[graph_edge], request_id=request_id,
+            for request_id, graph_edges in requests:
+                for graph_edge in graph_edges:
+                    if len(graph_edge.tensor_info) == 0:
+                        continue
+                    fp = FutureAndPointers(
+                        future=None, graph_edges=[graph_edge], request_id=request_id,
+                    )
+                    for info in graph_edge.tensor_info:
+                        if info.source_entity == self.my_entity_id:
+                            self._slice_existing_tensor(
+                                request_id=request_id, name=graph_edge.name,
+                                next_node=graph_edge.next_node,
+                                graph_walk=graph_walk, info=info,
+                            )
+                            self.tensor_store.increment_ref(info.uuid, 1)
+                            continue
+                        producer_uuid = info.uuid
+                        if self._take_cached_read(request_id, info, taken, again):
+                            continue
+                        if info.shm_segment is None:
+                            # Spilled at the producer (arena saturated): read the
+                            # per-uuid file, the old protocol's path.
+                            path = self._shm_path(info.source_entity, producer_uuid)
+                            with open(path, "rb") as f:
+                                f.seek(info.offset)
+                                data = f.read(info.nbytes)
+                            tensor = _deserialize_tensor(
+                                data, self.device, tensor_info=info)
+                            h2d_did_work = h2d_did_work or tensor.numel() > 0
+                            self.tensor_store.put_tensor(
+                                request_id, info.uuid, tensor, info)
+                            self.tensor_store.set_metadata(info.uuid, mem_registered=False)
+                            self.tensor_store.increment_ref(info.uuid, 2)
+                        else:
+                            staged.append((request_id, info))
+                            taken[info.uuid] = info
+                        if stats is not None:
+                            fp.count_read(info)
+                    reads.append(fp)
+            if staged:
+                infos = [info for _, info in staged]
+                uuids = [info.uuid for info in infos]
+                tensors = self._read_many_from_arena(infos)
+                h2d_did_work = h2d_did_work or any(t.numel() > 0 for t in tensors)
+                self.tensor_store.put_tensor_batch_multi(
+                    [rid for rid, _ in staged], uuids, tensors, infos,
                 )
-                for info in graph_edge.tensor_info:
-                    if info.source_entity == self.my_entity_id:
-                        self._slice_existing_tensor(
-                            request_id=request_id, name=graph_edge.name,
-                            next_node=graph_edge.next_node,
-                            graph_walk=graph_walk, info=info,
-                        )
-                        self.tensor_store.increment_ref(info.uuid, 1)
-                        continue
-                    producer_uuid = info.uuid
-                    if self._take_cached_read(request_id, info):
-                        continue
-                    if info.shm_segment is None:
-                        # Spilled at the producer (arena saturated): read the
-                        # per-uuid file, the old protocol's path.
-                        path = self._shm_path(info.source_entity, producer_uuid)
-                        with open(path, "rb") as f:
-                            f.seek(info.offset)
-                            data = f.read(info.nbytes)
-                        tensor = _deserialize_tensor(
-                            data, self.device, tensor_info=info)
-                    else:
-                        tensor = self._read_from_arena(info)
-                    h2d_did_work = h2d_did_work or tensor.numel() > 0
-                    self.tensor_store.put_tensor(
-                        request_id, info.uuid, tensor, info)
-                    self.tensor_store.set_metadata(info.uuid, mem_registered=False)
-                    # +1 transit (released by get_ready_tensors), +1 usage
-                    # (released by _cleanup_consumed_inputs).
-                    self.tensor_store.increment_ref(info.uuid, 2)
-                    if stats is not None:
-                        fp.count_read(info)
-                fp.rx_time = time.perf_counter() - rx_t0
-                reads.append(fp)
+                # +1 transit (released by get_ready_tensors), +1 usage
+                # (released by _cleanup_consumed_inputs).
+                self.tensor_store.increment_ref_batch_uniform(uuids, 2)
+            if again:
+                self.tensor_store.increment_ref_batch_uniform(again, 1)
+        # profiling attributes the call's time to its reads evenly
+        rx = (time.perf_counter() - t0) / max(len(reads), 1)
+        for fp in reads:
+            fp.rx_time = rx
         future = None
         if h2d_did_work and self._h2d_stream is not None:
             # Downstream kernels see the data (device-side ordering only).
@@ -969,6 +997,33 @@ class ArenaShmCommunicationManager(SharedMemoryCommunicationManager):
                         fut.set_result(None)
                     except Exception:  # noqa: BLE001
                         pass
+
+    # Small items of one shape, dtype and segment (a step's streamed tokens)
+    # are gathered on the host into one buffer, copied once and split on the
+    # device: one copy call and one split instead of a copy and a view per item.
+    _GATHER_ITEM_BYTES = 4096
+    _GATHER_BYTES = 1 << 20
+
+    def _read_many_from_arena(self, infos: list[TensorPointerInfo]) -> list[torch.Tensor]:
+        out: list[torch.Tensor | None] = [None] * len(infos)
+        if self.device != "cpu":
+            groups: dict[tuple, list[int]] = {}
+            for k, info in enumerate(infos):
+                if 0 < info.nbytes <= self._GATHER_ITEM_BYTES:
+                    key = (info.shm_segment, info.nbytes, info.dtype, tuple(info.dims))
+                    groups.setdefault(key, []).append(k)
+            for (segment, nbytes, dtype, dims), ks in groups.items():
+                if len(ks) < 2 or len(ks) * nbytes > self._GATHER_BYTES:
+                    continue
+                seg = np.frombuffer(self._peer_view(segment), dtype=np.uint8)
+                starts = np.fromiter(
+                    (infos[k].shm_offset + infos[k].offset for k in ks), dtype=np.int64, count=len(ks),
+                )
+                gathered = torch.from_numpy(seg[(starts[:, None] + np.arange(nbytes)).ravel()])
+                rows = gathered.to(self.device, non_blocking=True).view(dtype).reshape(len(ks), *dims)
+                for k, t in zip(ks, rows.unbind(0), strict=True):
+                    out[k] = t
+        return [t if t is not None else self._read_from_arena(i) for t, i in zip(out, infos, strict=True)]
 
     def _read_from_arena(self, info: TensorPointerInfo) -> torch.Tensor:
         if info.nbytes == 0:

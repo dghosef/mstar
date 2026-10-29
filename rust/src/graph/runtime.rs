@@ -2973,8 +2973,11 @@ impl GraphRuntime {
             }
 
             // Which rids will actually produce a frame carrying
-            // `per_request_info`: an INPUT_SIGNALS to a peer, or a
-            // WORKER_GRAPHS_DONE. EmitToClient does not carry it.
+            // `per_request_info`: an INPUT_SIGNALS to a peer with a
+            // non-streamed edge, or a WORKER_GRAPHS_DONE. EmitToClient does
+            // not carry it, and neither does a streamed edge: the receiver
+            // reads the info only alongside a non-streamed one
+            // (`Worker._process_new_inputs`).
             //
             // `is_local` is the whole point. A node in a SIBLING worker graph
             // on this worker compiles to External (Orpheus streams new_token
@@ -2985,6 +2988,9 @@ impl GraphRuntime {
             // take_send_plan's own skip.
             let me_now = self.shard.me;
             for (e, &is_local) in edges.iter().zip(&ingested_locally) {
+                if e.streaming {
+                    continue;
+                }
                 let dest = match e.dest {
                     Dest::External(d) => d,
                     Dest::Local(d) if e.declined_local => self.g(wg).node(d).name,
@@ -3944,6 +3950,12 @@ impl GraphRuntime {
             // (rid, edge, worker, items): what each consumer will register, so
             // counted from the descriptors that go out, not the refs.
             let mut stream_items: Vec<(u32, String, Sym, i64)> = Vec::new();
+            // A step's plain streamed edges (unsharded, one producer) go to
+            // each worker as one STREAM_ITEMS, not one INPUT_SIGNALS per
+            // request: the receiver then decodes, reads and routes the step's
+            // items once. Worker order kept as first seen.
+            let mut streamed: Vec<(Sym, frames::StreamItems)> = Vec::new();
+            let mut streamed_at: FxHashMap<Sym, usize> = FxHashMap::default();
             {
                 // One acquisition for every descriptor lookup in the batch, not
                 // one per edge. Released before the sends -- holding it across
@@ -3955,6 +3967,20 @@ impl GraphRuntime {
                         stream_items.push((
                             w.rid, w.signal.clone(), w.worker, infos.len() as i64,
                         ));
+                        if w.shard_dim.is_none() && w.total_fanin == 1 {
+                            let request_id = self.rids.name(w.rid).ok_or_else(|| {
+                                PyValueError::new_err(format!("unknown rid handle {}", w.rid))
+                            })?;
+                            let i = *streamed_at.entry(w.worker).or_insert_with(|| {
+                                streamed.push((w.worker, frames::StreamItems::new(&partition)));
+                                streamed.len() - 1
+                            });
+                            if streamed[i].1.try_add(
+                                bk.strings(), request_id, &w.signal, &w.next_node, &infos,
+                            ) {
+                                continue;
+                            }
+                        }
                     }
                     let key = (w.rid, w.worker);
                     let edge = frames::OutEdge {
@@ -3997,6 +4023,11 @@ impl GraphRuntime {
                         }
                         .encode(bk.strings()),
                     ));
+                }
+                for (worker, items) in &streamed {
+                    if !items.is_empty() {
+                        frames_out.push((*worker, items.encode(bk.strings())));
+                    }
                 }
             }
             for (worker, bytes) in frames_out {

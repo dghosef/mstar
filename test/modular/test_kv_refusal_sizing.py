@@ -229,7 +229,7 @@ def test_pages_two_labels_share_are_counted_once():
     assert _admit(mgr, {"r": 3 * PAGE_SIZE}, commit=True).ok
     a = mgr._streams["r"]["main"]
     b = mgr._ensure_label("r", "fork")
-    b.page_indices = list(a.page_indices)
+    b.page_indices.assign(a.page_indices.tolist())
     b.stored_len = a.stored_len
     mgr._arena.retain(b.page_indices)
     step = KVStep(segments=(Segment("r", "main", PAGE_SIZE), Segment("r", "fork", PAGE_SIZE)))
@@ -339,7 +339,7 @@ def _engine_manager(**pools: KVManager) -> SimpleNamespace:
     """The worker's engine manager over the real ``Engine.remove_request``,
     with these KV pools as the engine's resources."""
     engine = SimpleNamespace(
-        _loopback_steps={}, _resources=pools, _submodules={},
+        _loopback_steps={}, _resources=pools, _submodules={}, _rows={},
         _runner=SimpleNamespace(
             remove_request=lambda rid: [pool.remove_request(rid) for pool in pools.values()],
         ),

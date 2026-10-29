@@ -2,6 +2,7 @@ import gc
 import logging
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -23,6 +24,8 @@ from torch.distributed import ReduceOp
 from mstar.communication.codec import WireCodec
 from mstar.communication.communicator import CommProtocol, make_communicator
 from mstar.communication.event import EventWakeup
+from mstar.communication.stream_items import row_infos, row_input_signals
+from mstar.communication.stream_items import rows as stream_rows
 from mstar.communication.tensors import (
     LocalTransferEngine,
     NameToTensorList,
@@ -78,6 +81,7 @@ from mstar.utils.ipc_format import (
     ScheduleTPNode,
     SetupDone,
     StopLoops,
+    StreamItems,
     TensorReceived,
     TPNoSpeculation,
     UnpersistTensors,
@@ -93,6 +97,7 @@ from mstar.utils.profiler import (
     phase_start,
     range_pop,
     range_push,
+    set_step_key,
 )
 from mstar.worker.engine_manager import EngineManager, refuse_combined_walks_across_tp_groups
 from mstar.worker.executing_batch import input_metadata_and_fwd_info, make_executing_batch
@@ -409,6 +414,13 @@ class _LazyHostRow(Mapping):
 
     def __len__(self) -> int:
         return len(self._row)
+
+
+
+def _step_key(node_name: str, graph_walk: str) -> str:
+    """``step.<node>.<walk>``, as a phase name (``benchmark/worker_phases``
+    reads names of word characters and dots)."""
+    return "step." + re.sub(r"\W", "_", node_name) + "." + re.sub(r"\W", "_", graph_walk)
 
 
 class Worker:
@@ -983,9 +995,7 @@ class Worker:
             self.worker_id, message.message_type.value, message.body.request_id,
         )
         if message.message_type == WorkerMessageType.INPUT_SIGNALS:
-            self.tensor_manager.ack_unread_tensors(
-                message.body.request_id, message.body.inputs,
-            )
+            self.tensor_manager.ack_unread_tensors(message.body.inputs)
 
 
     def _remove_request(self, body: RemoveRequest) -> None:
@@ -1087,7 +1097,10 @@ class Worker:
         for node_name in self.engine_manager.evictable_nodes():
             self._last_active.pop((request_id, node_name), None)
         laps.lap("misc")
-        logger.info("Request cleanup complete: %s", body.request_id)
+        # DEBUG: once per request on the main thread, it cost as much as the
+        # engine's own removal (test/waypoint/serve_rollout.py, which waits on
+        # it, runs the server at DEBUG)
+        logger.debug("Request cleanup complete: %s", body.request_id)
         laps.lap("log")
 
         # Last: frees the handle for reuse, so nothing above may run after it.
@@ -1253,7 +1266,7 @@ class Worker:
                     "Worker %s: no stream buffer for %s of request %s; dropping it",
                     self.worker_id, [edge.name for edge in unbuffered], body.request_id,
                 )
-            self.tensor_manager.ack_unread_tensors(body.request_id, unbuffered)
+            self.tensor_manager.ack_unread_tensors(unbuffered)
 
         # Only update fwd_info when there are non-streaming edges (i.e., this is
         # a conductor-triggered forward pass, not just streaming data from another
@@ -1280,12 +1293,15 @@ class Worker:
         if self.enable_nvtx:
             range_pop(synchronize=False)
             range_push("process_new_inputs.start_read")
-        # Start RDMA reads for non-streaming edges with tensor_info
-        futures = self.tensor_manager.start_read_tensors(
-            request_id, non_streaming,
-            graph_walk=body.request_info.graph_walk
-        )
-        self.wakeup_event.register_futures(futures)
+        # Start RDMA reads for non-streaming edges with tensor_info; a
+        # streamed row of a STREAM_ITEMS replayed from the park has none, and
+        # no forward-pass info either
+        if non_streaming:
+            futures = self.tensor_manager.start_read_tensors(
+                request_id, non_streaming,
+                graph_walk=body.request_info.graph_walk
+            )
+            self.wakeup_event.register_futures(futures)
         # Start RDMA reads for streaming edges with tensor_info (will be routed to buffer in _check_ready_tensors)
         if streaming_with_tensors:
             futures = self.tensor_manager.start_read_tensors(
@@ -1311,6 +1327,33 @@ class Worker:
             )
         if self.enable_nvtx:
             range_pop()
+
+    def _process_stream_items(self, frame: StreamItems) -> None:
+        """A step's streamed tensors from one producer (STREAM_ITEMS): each
+        row is what one INPUT_SIGNALS of a single streamed edge did, and the
+        frame's reads start in one call."""
+        reads: list[tuple[int, list[GraphEdge]]] = []
+        for row in stream_rows(frame):
+            rid = self._rid(row.request_id)
+            if rid is None or rid not in self.request_state.per_request_info:
+                # not here yet, or removed: parked or dropped as the
+                # INPUT_SIGNALS it replaces
+                self._process_message_list([WorkerMessage(
+                    message_type=WorkerMessageType.INPUT_SIGNALS,
+                    body=row_input_signals(frame, row),
+                )])
+                continue
+            if row.request_id in self._draining_rids:
+                continue  # as _process_new_inputs: no new reads
+            stream_buf = self.request_state.per_request_info[rid].stream_buffers[row.signal]
+            for uuid in frame.uuids[row.start:row.start + row.count]:
+                stream_buf.pre_read_register(uuid)
+            reads.append((rid, [GraphEdge(
+                next_node=row.next_node, name=row.signal,
+                tensor_info=row_infos(frame, row), is_streaming=True,
+            )]))
+        if reads:
+            self.wakeup_event.register_futures(self.tensor_manager.start_read_tensors_multi(reads))
 
     def _unpersist_tensors(self, body: UnpersistTensors):
         for (uuid, ref_cnt) in body.uuid_to_ref_count.items():
@@ -1366,6 +1409,8 @@ class Worker:
                 self._remove_request(message.body)
             elif message.message_type == WorkerMessageType.INPUT_SIGNALS:
                 self._process_new_inputs(message.body)
+            elif message.message_type == WorkerMessageType.STREAM_ITEMS:
+                self._process_stream_items(message.body)
             elif message.message_type == WorkerMessageType.TENSOR_RECEIVED:
                 self._handle_tensor_received(message.body)
             elif message.message_type == WorkerMessageType.UNPERSIST_TENSORS:
@@ -1943,6 +1988,9 @@ class Worker:
 
         if not engine.can_pre_plan(spec_batch.node_name):
             return False
+        if self._phase_period:
+            sb = speculation.scheduled_batch
+            set_step_key(_step_key(sb.node_name, sb.graph_walk))
         try:
             if pending is not None:
                 # Safety timeout — the engine releases this event even on its
@@ -1969,6 +2017,9 @@ class Worker:
             logger.exception("Worker %s: plan_executor pre-plan failed", self.worker_id)
             self._reset_skip_plan_flags(spec_batch)
             return False
+        finally:
+            if self._phase_period:
+                set_step_key(None)
 
     def _reset_skip_plan_flags(self, spec_node_batch: ExecutingBatch) -> None:
         """Drop the pre-plan staged for ``spec_node_batch``.
@@ -2052,12 +2103,15 @@ class Worker:
         """Record the GPU times whose events have landed, leaving the rest:
         reading a pair still in flight would block the host on the GPU."""
         while self._gpu_spans:
-            start, end = self._gpu_spans[0]
+            start, end, key = self._gpu_spans[0]
             if not end.query():
                 return
             self._gpu_spans.popleft()
             # elapsed_time is ms; the phase buffer holds seconds
-            self._phase_record("gpu_exec", start.elapsed_time(end) / 1000)
+            elapsed = start.elapsed_time(end) / 1000
+            # drained while another step runs: not that step's sample
+            self._phase_buf.unkeyed("gpu_exec").append(elapsed)
+            self._phase_buf.unkeyed(f"{key}.gpu_exec").append(elapsed)
 
     def _execute_on_gpu_thread(
         self,
@@ -2080,6 +2134,8 @@ class Worker:
         timed = self._phase_period
         t_start = _time.perf_counter() if timed else 0.0
         c_start = _time.thread_time() if timed else 0.0
+        if timed:
+            set_step_key(_step_key(batch.node_name, batch.graph_walk))
         laps = PhaseLaps("worker.gpu_thread.")
         engine = self.engine_manager.get_engine(batch.node_name)
         # Every output of this step stays on the device: the engine keeps the
@@ -2166,7 +2222,7 @@ class Worker:
                 if gpu_start is not None:
                     gpu_end = torch.Event(device=self.device, enable_timing=True)
                     gpu_end.record(execution_stream)
-                    self._gpu_spans.append((gpu_start, gpu_end))
+                    self._gpu_spans.append((gpu_start, gpu_end, _step_key(batch.node_name, batch.graph_walk)))
                     self._drain_gpu_spans()
                     laps.lap("gpu_exec_events")
             return outputs
@@ -2197,6 +2253,7 @@ class Worker:
                 self._phase_record(
                     "worker.gpu_thread.total.cpu", _time.thread_time() - c_start,
                 )
+                set_step_key(None)
             if self.enable_nvtx:
                 range_pop(synchronize=False)
 
@@ -4804,11 +4861,17 @@ class Worker:
                             len(pending.batch.request_to_worker_graph),
                             walks=pending.batch.rids_by_walk(),
                         )
-                        with self._span(
-                            "worker.postprocess_batch",
-                            cpu="worker.postprocess_batch.cpu",
-                        ):
-                            self._postprocess_batch(pending, outputs)
+                        if phase_period:
+                            set_step_key(_step_key(pending.node_name, pending.graph_walk))
+                        try:
+                            with self._span(
+                                "worker.postprocess_batch",
+                                cpu="worker.postprocess_batch.cpu",
+                            ):
+                                self._postprocess_batch(pending, outputs)
+                        finally:
+                            if phase_period:
+                                set_step_key(None)
                         laps.skip()
                         if metrics is not None:
                             metrics.step_done(

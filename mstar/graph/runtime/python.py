@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from mstar.api_server.request_types import APIServerMessage, ResultTensors
 from mstar.communication.communicator import BaseCommunicator
+from mstar.communication.stream_items import StreamItemsBuilder, stream_items_eligible
 from mstar.communication.tensors import TensorCommunicationManager
 from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.distributed.base import ShardingConfig
@@ -1540,6 +1541,8 @@ class PythonGraphRuntime(GraphRuntime):
             else dict(iter(input.resource_publish_info))
         )
         sent_rids: list[int] = []
+        # worker -> its STREAM_ITEMS, sent after the per-request frames
+        streamed: dict[str, StreamItemsBuilder] = {}
 
         for rid, routing in completion.routing.items():
             if rid in input.failed_rids:
@@ -1584,7 +1587,17 @@ class PythonGraphRuntime(GraphRuntime):
             # which take over the reference counted for it.
             # RouteOutput's local_streaming_by_signal is how the caller finds them.
             for worker_id, edges in routing.streaming_to_workers.items():
-                self._send_input_signals(rid, worker_id, edges, fwd_info, partition)
+                self._tensor_manager.refresh_shm_placement(edges)
+                builder = streamed.get(worker_id)
+                if builder is None:
+                    builder = streamed[worker_id] = StreamItemsBuilder(partition)
+                rest = [
+                    e for e in edges
+                    if not (stream_items_eligible(e) and builder.try_add(self.get_rid_string(rid), e))
+                ]
+                if rest:
+                    # streamed edges only: the receiver doesn't read the info
+                    self._send_input_signals(rid, worker_id, rest, None, partition)
 
             if info is not None:
                 for worker_id, edges in [
@@ -1620,6 +1633,11 @@ class PythonGraphRuntime(GraphRuntime):
                     profiling=profiling.get(rid),
                 )
                 sent_rids.append(rid)
+        for worker_id, builder in streamed.items():
+            if builder:
+                self._communicator.send(worker_id, WorkerMessage(
+                    message_type=WorkerMessageType.STREAM_ITEMS, body=builder.build(),
+                ))
         return sent_rids
 
     def _send_input_signals(
