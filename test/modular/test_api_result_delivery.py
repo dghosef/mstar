@@ -65,6 +65,9 @@ class _RecordingTensorManager:
 
 
 class _RecordingCommunicator:
+    def poll_for_messages(self, timeout_ms=1):
+        return False
+
     def get_all_new_messages(self):
         return []
 
@@ -569,7 +572,9 @@ def _deliver_result_chunks(server, *chunks):
         server.running = False
         return []
 
-    server.communicator = SimpleNamespace(get_all_new_messages=stop_after_this_pass)
+    server.communicator = SimpleNamespace(
+        poll_for_messages=lambda timeout_ms=1: False, get_all_new_messages=stop_after_this_pass,
+    )
     server.preprocess_worker = SimpleNamespace(
         get_profile_updates=lambda: [], get_result_chunks=lambda: chunks,
         abort_request=lambda rid: None,

@@ -83,7 +83,8 @@ class _Server:
         facade.received_chunk_counts = {}
         facade.per_request_reading_tensors = {}
         self.api = make_test_api_server(preprocess_worker=facade, model=worker.model, model_name="orpheus")
-        self.api.communicator = SimpleNamespace(get_all_new_messages=lambda: [])
+        self.api.communicator = SimpleNamespace(poll_for_messages=lambda timeout_ms=1: False,
+            get_all_new_messages=lambda: [])
         self.api.conductor_proc = None
         self.api._liveness_interval_s = 0.5
         self.api.running = True

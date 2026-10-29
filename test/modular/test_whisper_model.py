@@ -927,6 +927,8 @@ def test_postprocess_renders_language_and_timestamps_only():
     assert text.startswith("<|en|><|0.00|>") and text.endswith("<|1.50|>")
     assert "<|startoftranscript|>" not in text and "<|notimestamps|>" not in text and "endoftext" not in text
     assert " " in text  # the byte-level 'Ġ' became a space
+    # a decode token sent inline arrives as a list (`Model.postprocess`)
+    assert b"".join(model.postprocess([i], "text") for i in ids).decode("utf-8") == text
     with pytest.raises(ValueError):
         model.postprocess(torch.tensor([1]), "audio")
 

@@ -457,6 +457,11 @@ class Model(ABC):
     # either. See ``entrypoint._set_switch_interval``.
     API_SWITCH_INTERVAL_S: float | None = None
 
+    # Requests whose media load and ``process_prompt`` the API server runs at
+    # once, on a thread pool. 1 runs them inline on the data worker thread, one
+    # at a time. Above 1, ``load_*`` and ``process_prompt`` must be thread-safe.
+    PREPROCESS_WORKERS: int = 1
+
     def _get_worker_graphs_for_graph_walk(
         self,
         graph_walk: str,
@@ -788,13 +793,16 @@ class Model(ABC):
     @abstractmethod
     def postprocess(
         self,
-        output: torch.Tensor,
+        output: torch.Tensor | list[int],
         modality: str,  # text | image | video | video_frame | audio
         request_kwargs: dict | None = None,
     ) -> bytes:
         """
         Given an output of a certain modality, encode and return as bytes.
         This will likely need to overridden with model-specific behavior.
+        A value sent inline (``NodeSubmodule.inline_client_signals``) arrives
+        as a list of ints rather than a tensor; ``mstar.model.utils.token_ids``
+        reads either.
         ``request_kwargs`` is the request's model_kwargs, so encoders can honor
         per-request parameters (e.g. writing a video container at the request's
         frame rate).

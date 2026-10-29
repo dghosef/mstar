@@ -434,8 +434,13 @@ class TextChunkDetokenizer:
         return self._bytes.to_bytes(token_ids)
 
 
+def token_ids(output: torch.Tensor | list[int]) -> list[int]:
+    """A text output's token ids. A value sent inline is a list already (see ``Model.postprocess``)."""
+    return output if isinstance(output, list) else output.reshape(-1).tolist()
+
+
 def drop_stop_tokens(
-    output: torch.Tensor, stop_token_ids: Container[int], request_kwargs: dict | None,
+    output: torch.Tensor | list[int], stop_token_ids: Container[int], request_kwargs: dict | None,
 ) -> list[int]:
     """Drop the stop tokens that ended a text reply, unless the request sets ``ignore_eos``.
 
@@ -443,7 +448,7 @@ def drop_stop_tokens(
     an assistant message, whose template closes it. Under ``ignore_eos`` it ends
     nothing and stays, one chunk per token.
     """
-    ids = output.reshape(-1).tolist()
+    ids = token_ids(output)
     if (request_kwargs or {}).get("ignore_eos"):
         return ids
     return [i for i in ids if i not in stop_token_ids]

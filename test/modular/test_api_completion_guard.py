@@ -55,7 +55,7 @@ def test_preprocess_failure_emits_error_chunk():
     wt.stop_event = threading.Event()
     wt.timing_requested = threading.Event()
     wt.communicator = SimpleNamespace(
-        get_all_new_messages=lambda: [], send=lambda *args: None,
+        poll_for_messages=lambda timeout_ms=1: False, get_all_new_messages=lambda: [], send=lambda *args: None,
     )
     cleaned = []
     wt.tensor_manager = SimpleNamespace(

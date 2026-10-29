@@ -98,7 +98,7 @@ def _conductor(*ticks, requests):
     batches = [list(t) for t in ticks]
     c.communicator = SimpleNamespace(
         send=lambda entity, msg: c.sent.append((entity, msg)),
-        get_all_new_messages=lambda: batches.pop(0) if batches else [],
+        poll_for_messages=lambda timeout_ms=1: False, get_all_new_messages=lambda: batches.pop(0) if batches else [],
     )
     c.model = _Model()
     c.enable_nvtx = False

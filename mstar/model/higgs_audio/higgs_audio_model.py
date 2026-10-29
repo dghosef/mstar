@@ -59,6 +59,7 @@ from mstar.model.higgs_audio.config import (
     HiggsAudioModelConfig,
 )
 from mstar.model.submodule_base import NodeSubmodule
+from mstar.model.utils import token_ids
 
 logger = logging.getLogger(__name__)
 
@@ -413,12 +414,12 @@ class HiggsAudioModel(Model):
 
     def postprocess(
         self,
-        output: torch.Tensor,
+        output: torch.Tensor | list[int],
         modality: str,
         **kwargs,
     ) -> bytes:
         if modality == "text":
-            return self._detokenizer.to_bytes(output.reshape(-1).tolist())
+            return self._detokenizer.to_bytes(token_ids(output))
         raise ValueError(f"Unsupported modality for Higgs-Audio: {modality!r}")
 
     # -------------------------------------------------------------------

@@ -440,6 +440,8 @@ class APIServer:
             push_ids=["conductor"],
             ipc_socket_path_prefix=socket_path_prefix,
         )
+        # the message thread's poll also wakes for the data worker's chunks
+        self.communicator.register_event_for_poll(self.preprocess_worker.output_ready)
 
         # Background thread that drains results from the conductor. Started by
         # finalize_setup() once the workers report ready — before that there's
@@ -1092,6 +1094,9 @@ class APIServer:
                         if req.profile.timing.first_chunk_time is None:
                             req.profile.timing.first_chunk_time = now
                         req.profile.timing.last_chunk_time = now
+                        if result_chunk.read_time is not None:
+                            req.profile.timing.last_output_read_time = result_chunk.read_time
+                            req.profile.timing.output_postprocess_s += result_chunk.postprocess_s
                         if metrics is not None and result_chunk.modality != "error":
                             req.first_chunk_times.setdefault(result_chunk.modality, now)
                         if req.request_id is not None:
@@ -1136,7 +1141,9 @@ class APIServer:
                 if self.running:
                     logger.exception("Error in message processing loop")
                     time.sleep(0.01)
-            time.sleep(0.001)
+            # wakes at once for a conductor or worker message, or a chunk
+            # from the data worker (PreprocessWorker.output_ready)
+            self.communicator.poll_for_messages(timeout_ms=1)
 
     # ----------------------------------------------------------
     # Streaming helper
