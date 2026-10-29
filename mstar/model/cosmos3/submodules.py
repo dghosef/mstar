@@ -327,6 +327,14 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             self.transformer.denoise_step_batched_cfg = torch.compile(
                 self.transformer.denoise_step_batched_cfg, fullgraph=False, dynamic=False,
             )
+            # One graph per (latent shape, batch size): dynamo unrolls the
+            # per-request loop, so the first batch of each compiles (seconds
+            # with a warm cache), and can_batch keeps a batch to one shape.
+            # Left eager, a cross-request batch runs slower per row than the
+            # compiled single-request step, and batching loses to serial.
+            self.transformer.denoise_step_batched = torch.compile(
+                self.transformer.denoise_step_batched, fullgraph=False, dynamic=False,
+            )
             # Dynamo unrolls the per-request loop and specializes on each
             # request's shapes and strides; can_batch keeps a batch to one shape
             # signature, and the position ids it reads are contiguous whatever
@@ -1928,10 +1936,11 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
 
     def can_batch(self, batch, model_inputs) -> bool:
         # The denoise step batches across concurrent requests at the same walk.
-        # The batched forward packs each request's own token shapes, so requests
-        # at different resolutions / frame counts (and, for action, different
-        # modes / embodiment domains) can share the batch. One request stays on
-        # the simpler single-request path.
+        # The batched forward packs each request's own token shapes, but its
+        # compiled step specializes on them, so a denoise batch holds one shape
+        # signature rather than compiling per ordered mix of them (action
+        # requests may differ in embodiment domain). One request stays on the
+        # simpler single-request path.
         if not self.batched_cfg or len(batch.request_ids) < 2:
             return False
         sts = [self.request_states.get(rid) for rid in batch.request_ids]
@@ -1951,6 +1960,9 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             # step (an append) and drops the batch to the sequential path.
             if not all(st["uncond"] is not None for st in sts):
                 return False
+            if batch.graph_walk in GEN_WALKS or batch.graph_walk in SOUND_WALKS:
+                if len({(tuple(st["latent_shape"]), st.get("num_sound")) for st in sts}) > 1:
+                    return False
             if batch.graph_walk not in GEN_WALKS:
                 # Windowed requests join only generation-loop batches; their
                 # prefill stays sequential (these passes carry no time_index,
