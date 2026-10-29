@@ -1096,7 +1096,8 @@ methods are:
    gives it ``check_stop_batched``, which checks a whole step off one host copy of its
    tokens. The token budget is the loop's cap from ``get_loop_caps``, not a stop check.
    When a prefill walk outside the loop samples the reply's first token, list it
-   in ``prefill_walks``: a stop id sampled
+   in ``prefill_walks``; that token counts toward the budget, so ``get_loop_caps``
+   gives the loop ``max_output_tokens - 1``. A stop id sampled
    there ends the loop at its first step, which withholds its ``buffer`` (see
    ``StopCheck`` below), so the loop has to emit the token under that name (GLM-5.2,
    Command A+).

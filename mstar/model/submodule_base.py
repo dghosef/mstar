@@ -62,7 +62,9 @@ class TokenStop(NamedTuple):
     sampler: str
     # the only walk whose rows can stop the loop; None for every walk
     walk: str | None = None
-    # walks that sample the reply's first token before the loop runs. A stop
+    # walks that sample the reply's first token before the loop runs. That
+    # token counts toward the budget, so the model's ``get_loop_caps`` gives
+    # the loop ``max_output_tokens - 1`` (GLM-5.2, Command A+). A stop
     # id sampled there has no loop to stop, so the reply ends at the loop's
     # first step (``ARNodeSubmodule.ended_at_prefill``), which withholds its
     # ``buffer`` (``StopCheck.withheld``), so the loop's client edge must
