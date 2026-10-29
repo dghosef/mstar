@@ -966,7 +966,7 @@ class CodecSubmodule(ARNodeSubmodule):
     real length rides with it.
     """
 
-    # fp32, and only the stateless decode compiled (``__init__``): the
+    # fp32, and only the stateless decode compiled (``compile_regions``): the
     # capture's gather and scatter stay outside it
     disable_torch_compile = True
     disable_autocast = True
@@ -1011,9 +1011,6 @@ class CodecSubmodule(ARNodeSubmodule):
         if {n: (b.shape, b.dtype) for n, b in blocks.items()} != {n: (b.shape, b.dtype) for n, b in declared.items()}:
             raise ValueError("the codec decoder's state does not match the CODEC_STATE blocks its model declares")
         self.state_names = tuple(blocks)
-        # One compile for every capture rather than each config's own.
-        on_cuda = next(decoder.parameters()).is_cuda
-        self._decode_step = torch.compile(self.incremental, dynamic=False) if on_cuda else self.incremental
         self._lengths_stager = PinnedStager(torch.long, numel=self.MAX_BATCH_SIZE)
 
     def _bucket(self, frames: int) -> int:
@@ -1075,6 +1072,10 @@ class CodecSubmodule(ARNodeSubmodule):
             kwargs={"frames": frames, "context": context, "is_final": chunk is not None and chunk.is_final},
         )
 
+    def compile_regions(self) -> dict[str, list[tuple]]:
+        """The stateless decode, compiled once for every chunk width and batch."""
+        return {"incremental": []}
+
     def declare_step(
         self,
         graph_walk: str,
@@ -1118,7 +1119,7 @@ class CodecSubmodule(ARNodeSubmodule):
         pool: RecurrentStatePool = engine_inputs.resources[CODEC_STATE]
         # a fresh stream, and a padding row on the sink, read zeros: the decoder's own left padding
         state = {name: pool.gather(name) for name in self.state_names}
-        wav, new = self._decode_step(codec_tokens, state, lengths)
+        wav, new = self.incremental(codec_tokens, state, lengths)
         for name, value in new.items():
             pool.scatter_(name, value)
         return (wav.float() * 32767).to(torch.int16)
@@ -1227,7 +1228,7 @@ class CodecSubmodule(ARNodeSubmodule):
         return self.watermarker.piecewise_configs(lengths, self.WATERMARK_BATCH_SIZES)
 
     def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
-        """Any mix of windows batches (``preprocess`` pads to the widest)."""
+        """Any mix of chunks batches (``preprocess`` pads to the widest)."""
         del batch
         return 0 < len(model_inputs) <= self.MAX_BATCH_SIZE
 
@@ -1236,12 +1237,12 @@ class CodecSubmodule(ARNodeSubmodule):
         return self.MAX_BATCH_SIZE
 
     def split_batches_by_capture_key(self, graph_walk: str) -> bool:
-        """Batch each window bucket apart.
+        """Batch each chunk width apart.
 
-        A mixed batch pads every row to its widest window, and the codec's
-        cost is per padded frame: a ramp window (1 to 28 frames) batched with
-        a full one decodes 35 frames instead of a few. Kept apart, the small
-        ramp windows, a stream's first audio among them, also do not wait
+        A mixed batch pads every row to its widest chunk, and the codec's
+        cost is per padded frame: a ramp chunk of a few frames batched with a
+        full one decodes 25 frames instead of a few. Kept apart, the small
+        ramp chunks, a stream's first audio among them, also do not wait
         behind a batch of full windows.
         """
         return graph_walk == "codec_chunk"
