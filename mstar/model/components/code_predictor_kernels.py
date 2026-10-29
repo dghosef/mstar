@@ -2,13 +2,12 @@
 Qwen3-TTS's): a few layers walked once per codec group, 16 x 5 times per Talker
 step, over a dense frame-local KV cache.
 
-``cp_qk_norm_rope_kv_write`` is the attention prologue in one launch: per layer
-and depth step, q and k normed and roped and k and v copied into the cache had
-been six launches of a few microseconds around a ~1 us job.
-``cp_attention`` attends over the depth positions so far, and
+``cp_attend`` is a layer's attention between its projections in one launch:
+q/k norm, RoPE, the cache write and attention over the depth positions so far,
+each a few microseconds around a ~1 us job when launched apart.
 ``cp_embed_accumulate`` records a depth step's codes and sums their embeddings.
-``DepthAttention`` is a code predictor layer's attention built from the first
-two, over the frame-local KV cache its ``DepthKV`` holds.
+``DepthAttention`` is a code predictor layer's attention built on ``cp_attend``,
+over the frame-local KV cache its ``DepthKV`` holds.
 
 A captured forward compiles with static ints, so any compiled frame that holds a
 depth step's ``cache_pos`` or a layer index recompiles at every depth position
@@ -26,67 +25,101 @@ from mstar.model.components.distributed.attention import ParallelAttention
 from mstar.utils.attention import rms_norm_rope
 
 
-@triton.jit
-def _cp_qk_norm_rope_kv_kernel(
-    QKV, Wq, Wk, Pos, KV,
-    eps_q, eps_k, rope_theta, seq_len, cache_pos,
-    s_qkv,
+@triton.jit(do_not_specialize=["cache_pos"])
+def _cp_attend_kernel(
+    QKV, Wq, Wk, Pos, KV, O,
+    eps_q, eps_k, rope_theta, sm_scale, cache_pos,
+    s_qkv, s_o,
     s_kv_b, s_kv_c, s_kv_n, s_kv_h,
     H_Q: tl.constexpr, H_KV: tl.constexpr, D: tl.constexpr, HALF_D: tl.constexpr,
+    SEQ: tl.constexpr, BLOCK_N: tl.constexpr,
 ):
+    """One (token, q head) of a depth step: its q normed and roped, the step's
+    keys up to it normed and roped from ``QKV`` (the step's own k/v are used
+    from registers, so no program waits on another's cache write), the
+    earlier positions from the cache, and attention over all of them. The
+    first q head of each kv head also writes its token's k and v into the
+    cache for later steps."""
     m = tl.program_id(0)
     h = tl.program_id(1)
+    hk = h // (H_Q // H_KV)
+    b = m // SEQ
+    s = m % SEQ
+    elem = KV.dtype.element_ty
     offs = tl.arange(0, HALF_D)
+    d = tl.arange(0, D)
     row = QKV + m * s_qkv
-    # programs [0, H_Q) take the q heads, [H_Q, H_Q + H_KV) the k heads and their v
-    base = row + h * D
-    if h < H_Q:
-        w = Wq
-        eps = eps_q
-    else:
-        w = Wk
-        eps = eps_k
-
-    x_first = tl.load(base + offs).to(tl.float32)
-    x_second = tl.load(base + offs + HALF_D).to(tl.float32)
     pos = tl.load(Pos + m).to(tl.float32)
-    out_first, out_second = rms_norm_rope(x_first, x_second, w, pos, eps, rope_theta, D, HALF_D)
+    q1, q2 = rms_norm_rope(
+        tl.load(row + h * D + offs).to(tl.float32), tl.load(row + h * D + HALF_D + offs).to(tl.float32),
+        Wq, pos, eps_q, rope_theta, D, HALF_D,
+    )
+    # rounded where the cache and the unfused q round
+    q1 = q1.to(elem).to(tl.float32) * sm_scale
+    q2 = q2.to(elem).to(tl.float32) * sm_scale
 
-    if h < H_Q:
-        tl.store(base + offs, out_first.to(QKV.dtype.element_ty))
-        tl.store(base + offs + HALF_D, out_second.to(QKV.dtype.element_ty))
-    else:
-        hk = h - H_Q
-        b = m // seq_len
-        n = cache_pos + m % seq_len
-        k_dst = KV + b * s_kv_b + n * s_kv_n + hk * s_kv_h
-        tl.store(k_dst + offs, out_first.to(KV.dtype.element_ty))
-        tl.store(k_dst + offs + HALF_D, out_second.to(KV.dtype.element_ty))
-        d = tl.arange(0, D)
-        v = tl.load(row + (H_Q + H_KV + hk) * D + d)
-        tl.store(k_dst + s_kv_c + d, v.to(KV.dtype.element_ty))
+    n = tl.arange(0, BLOCK_N)
+    kv_base = KV + b * s_kv_b + hk * s_kv_h
+    cached = n < cache_pos
+    k_off = n[:, None] * s_kv_n + offs[None, :]
+    k1 = tl.load(kv_base + k_off, mask=cached[:, None], other=0.0).to(tl.float32)
+    k2 = tl.load(kv_base + k_off + HALF_D, mask=cached[:, None], other=0.0).to(tl.float32)
+    v = tl.load(kv_base + s_kv_c + n[:, None] * s_kv_n + d[None, :], mask=cached[:, None], other=0.0).to(tl.float32)
+    for j in tl.static_range(SEQ):
+        if j <= s:
+            rj = QKV + (b * SEQ + j) * s_qkv
+            pj = tl.load(Pos + b * SEQ + j).to(tl.float32)
+            kj1, kj2 = rms_norm_rope(
+                tl.load(rj + (H_Q + hk) * D + offs).to(tl.float32),
+                tl.load(rj + (H_Q + hk) * D + HALF_D + offs).to(tl.float32),
+                Wk, pj, eps_k, rope_theta, D, HALF_D,
+            )
+            kj1 = kj1.to(elem)
+            kj2 = kj2.to(elem)
+            vj = tl.load(rj + (H_Q + H_KV + hk) * D + d).to(elem)
+            if j == s:
+                if h % (H_Q // H_KV) == 0:
+                    dst = kv_base + (cache_pos + s) * s_kv_n
+                    tl.store(dst + offs, kj1)
+                    tl.store(dst + HALF_D + offs, kj2)
+                    tl.store(dst + s_kv_c + d, vj)
+            here = (n == cache_pos + j)[:, None]
+            k1 = tl.where(here, kj1.to(tl.float32)[None, :], k1)
+            k2 = tl.where(here, kj2.to(tl.float32)[None, :], k2)
+            v = tl.where(here, vj.to(tl.float32)[None, :], v)
+    valid = n <= cache_pos + s  # causal within the depth sequence
+    qk = tl.where(valid, tl.sum(k1 * q1[None, :], 1) + tl.sum(k2 * q2[None, :], 1), float("-inf"))
+    p = tl.exp(qk - tl.max(qk, 0))
+    out = tl.sum(p[:, None] * v, 0) / tl.sum(p, 0)
+    tl.store(O + m * s_o + h * D + d, out.to(O.dtype.element_ty))
 
 
 @torch.compiler.disable
-def cp_qk_norm_rope_kv_write(
+def cp_attend(
     qkv: torch.Tensor, q_norm_w: torch.Tensor, k_norm_w: torch.Tensor, pos: torch.Tensor,
     kv_layer: torch.Tensor, cache_pos: int, seq_len: int, eps_q: float, eps_k: float,
     rope_theta: float, n_q_heads: int, n_kv_heads: int, head_dim: int,
-) -> None:
-    """QK-norm + RoPE the q heads of ``qkv (tokens, (Hq + 2 Hkv) * D)`` in place, and
-    write the normed, roped k and the raw v of token ``b * seq_len + s`` into
-    ``kv_layer (bs, 2, S, Hkv, D)`` at sequence position ``cache_pos + s``. ``pos`` holds
-    one position per token."""
+) -> torch.Tensor:
+    """A code predictor layer's attention between its projections, for
+    ``qkv (tokens, (Hq + 2 Hkv) * D)``, token ``b * seq_len + s`` at depth
+    position ``cache_pos + s`` (``pos`` holds its RoPE position): q/k RMSNorm,
+    RoPE, the new k and v written into ``kv_layer (bs, 2, S, Hkv, D)``, and
+    causal attention over the depth positions so far. Returns
+    ``(tokens, Hq * D)``. One launch, one warp per (token, head): the depth
+    sequence is at most 16 long, so a warp holds its whole key range."""
     tokens = qkv.shape[0]
-    assert qkv.stride(1) == 1 and kv_layer.stride(-1) == 1
-    _cp_qk_norm_rope_kv_kernel[(tokens, n_q_heads + n_kv_heads)](
-        qkv, q_norm_w, k_norm_w, pos, kv_layer,
-        eps_q, eps_k, rope_theta, seq_len, cache_pos,
-        qkv.stride(0),
+    assert qkv.stride(1) == 1 and kv_layer.stride(-1) == 1 and tokens % seq_len == 0
+    out = torch.empty(tokens, n_q_heads * head_dim, device=qkv.device, dtype=qkv.dtype)
+    _cp_attend_kernel[(tokens, n_q_heads)](
+        qkv, q_norm_w, k_norm_w, pos, kv_layer, out,
+        eps_q, eps_k, rope_theta, head_dim ** -0.5, cache_pos,
+        qkv.stride(0), out.stride(0),
         kv_layer.stride(0), kv_layer.stride(1), kv_layer.stride(2), kv_layer.stride(3),
         H_Q=n_q_heads, H_KV=n_kv_heads, D=head_dim, HALF_D=head_dim // 2,
-        num_warps=4, num_stages=1,
+        SEQ=seq_len, BLOCK_N=triton.next_power_of_2(kv_layer.shape[2]),
+        num_warps=1, num_stages=1,
     )
+    return out
 
 
 @triton.jit
@@ -124,47 +157,6 @@ def cp_embed_accumulate(
     )
     return emb
 
-
-
-@triton.jit
-def _cp_attn_kernel(Q, K, V, O, cache_pos, sm_scale,
-                    sq_b, sq_s, sq_h, sk_b, sk_n, sk_h, so_b, so_s, so_h,
-                    GROUP: tl.constexpr, D: tl.constexpr, BLOCK_N: tl.constexpr):
-    b = tl.program_id(0)
-    h = tl.program_id(1)
-    s = tl.program_id(2)
-    hk = h // GROUP
-    d = tl.arange(0, D)
-    n = tl.arange(0, BLOCK_N)
-    q = tl.load(Q + b * sq_b + s * sq_s + h * sq_h + d).to(tl.float32) * sm_scale
-    valid = n <= cache_pos + s  # causal within the depth sequence
-    kv = b * sk_b + n[:, None] * sk_n + hk * sk_h + d[None, :]
-    k = tl.load(K + kv, mask=valid[:, None], other=0.0).to(tl.float32)
-    qk = tl.where(valid, tl.sum(k * q[None, :], 1), float("-inf"))
-    p = tl.exp(qk - tl.max(qk, 0))
-    v = tl.load(V + kv, mask=valid[:, None], other=0.0).to(tl.float32)
-    out = tl.sum(p[:, None] * v, 0) / tl.sum(p, 0)
-    tl.store(O + b * so_b + s * so_s + h * so_h + d, out.to(O.dtype.element_ty))
-
-
-@torch.compiler.disable
-def cp_attention(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, cache_pos: int) -> torch.Tensor:
-    """Causal attention of the code predictor's ``q (bs, S, Hq, D)``, whose tokens sit
-    at depth positions ``cache_pos .. cache_pos + S - 1``, over its dense cache
-    ``(bs, max_depth, Hkv, D)``. The depth sequence is at most 16 long, so one
-    program holds a (batch row, head, token)'s whole key range."""
-    bs, seq, hq, d = q.shape
-    hkv, max_depth = k_cache.shape[2], k_cache.shape[1]
-    assert k_cache.stride() == v_cache.stride() and q.stride(-1) == 1 and k_cache.stride(-1) == 1
-    out = torch.empty(bs, seq, hq, d, device=q.device, dtype=q.dtype)
-    _cp_attn_kernel[(bs, hq, seq)](
-        q, k_cache, v_cache, out, cache_pos, d ** -0.5,
-        q.stride(0), q.stride(1), q.stride(2),
-        k_cache.stride(0), k_cache.stride(1), k_cache.stride(2),
-        out.stride(0), out.stride(1), out.stride(2),
-        GROUP=hq // hkv, D=d, BLOCK_N=triton.next_power_of_2(max_depth), num_warps=4,
-    )
-    return out
 
 
 class DepthKV:
@@ -210,16 +202,12 @@ class DepthKV:
         k and v written at the step's depth positions, each token attending
         over the positions so far. Returns ``(bs, S, Hq * D)``."""
         bs, seq_len, _ = qkv.shape
-        kv = self.kv_cache[self.layer_idx]
-        # q normed and roped in place; k (normed, roped) and v into the cache
-        cp_qk_norm_rope_kv_write(
+        return cp_attend(
             qkv.view(bs * seq_len, -1), attn.q_norm.weight, attn.k_norm.weight,
-            self.pos, kv, self.cache_pos, seq_len,
+            self.pos, self.kv_cache[self.layer_idx], self.cache_pos, seq_len,
             attn.q_norm.variance_epsilon, attn.k_norm.variance_epsilon,
             float(attn.rope_theta), attn.num_heads, attn.num_kv_heads, attn.head_dim,
-        )
-        q = qkv[..., :attn.num_heads * attn.head_dim].view(bs, seq_len, attn.num_heads, attn.head_dim)
-        return cp_attention(q, kv[:, 0], kv[:, 1], self.cache_pos).reshape(bs, seq_len, -1)
+        ).view(bs, seq_len, -1)
 
 
 class DepthAttention(ParallelAttention):
