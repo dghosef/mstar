@@ -1176,9 +1176,9 @@ class CodecSubmodule(ARNodeSubmodule):
         """The batch's chunks as ``[B, quantizers, width]``, padded to its widest
         bucket, and their real lengths.
 
-        A batch keeps to one bucket (``split_batches_by_capture_key``) and
-        most chunks fill it, so one stack of transposed views is the whole
-        copy; only a short chunk (a terminal flush) is padded first.
+        One stack of transposed views is the whole copy; a chunk narrower
+        than the batch's widest (a ramp chunk next to full windows, a
+        terminal flush) is padded first.
         """
         del graph_walk, engine_inputs
         width = max(self._row_bucket(item) for item in inputs)
@@ -1322,17 +1322,6 @@ class CodecSubmodule(ARNodeSubmodule):
     def max_batch_size(self, graph_walk: str) -> int:
         del graph_walk
         return self.MAX_BATCH_SIZE
-
-    def split_batches_by_capture_key(self, graph_walk: str) -> bool:
-        """Batch each window bucket apart.
-
-        A mixed batch pads every row to its widest window, and the codec's
-        cost is per padded frame: a ramp window (1 to 28 frames) batched with
-        a full one decodes 35 frames instead of a few. Kept apart, the small
-        ramp windows, a stream's first audio among them, also do not wait
-        behind a batch of full windows.
-        """
-        return graph_walk == "codec_chunk"
 
     def cg_key_info(
         self,
