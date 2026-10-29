@@ -806,8 +806,10 @@ class Engine:
             """A plan over what ``size`` says each runner's buckets cost."""
             pools: dict[str, dict] = {}
             for node_name, submodule_mgmt in self._submodules.items():
-                # sizing runs the forwards and captures, so under the node's precision too
-                with fp32_precision_scope(submodule_mgmt.fp32_precision):
+                # sizing runs the forwards and captures (a sized capture runs none of its own),
+                # so under the node's precision and cuDNN search too
+                with fp32_precision_scope(submodule_mgmt.fp32_precision), \
+                        _cudnn_benchmark(submodule_mgmt.submodule.capture_cudnn_benchmark):
                     pools[node_name] = size(ag_runners[node_name])
                     # one pool for all of a node's regions (see `_build_piecewise_runners`)
                     pools[f"{node_name} piecewise"] = {
@@ -1430,11 +1432,14 @@ class Engine:
     def _exec_per_request(
         self, batch: ExecutingBatch
     ) -> dict[str, NameToTensorList]:
-        """Full step cycle per request, eager (no lease), outputs merged.
+        """Full step cycle per request, without a whole-forward lease, outputs merged.
 
-        The unbatchable fallback: no capture applies (a lease would have set
-        ``running_batched``), so each request declares/admits/plans/commits on
-        its own, keeping the plan matched to its single-request forward.
+        The unbatchable fallback: no whole-forward capture applies (a lease
+        would have set ``running_batched``), so each request declares/admits/
+        plans/commits on its own, keeping the plan matched to its
+        single-request forward. Each request still takes its own
+        piecewise-region leases in ``_declare_and_admit``, so a captured inner
+        loop can replay per request.
         """
         nvtx = self._enable_nvtx
         submodule_mgmt = self._submodules[batch.node_name]
