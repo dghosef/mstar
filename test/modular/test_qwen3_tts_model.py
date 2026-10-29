@@ -1998,7 +1998,7 @@ def test_qwen3_tts_streamed_codec_audio_matches_one_whole_decode(captured):
                               policy=ScheduledLeftContextChunkPolicy(codec.chunk_schedule, codec.chunk_frames, 0))
         if leads[rid]:
             stream.prime_context(leads[rid])
-        items = frames[rid] if rid != "b" else torch.cat([frames[rid], torch.full((1, 4), eos)])
+        items = frames[rid]   # the Talker withholds its EOS frame (TokenStop.withhold)
         for i in range(items.shape[0]):
             stream.pre_read_register(f"t{i}")
             stream.put(f"t{i}", items[i])
@@ -2187,7 +2187,7 @@ def test_qwen3_tts_codec_stream_carries_no_eos_and_ends_on_the_last_frames(num_f
     stream = StreamBuffer(
         request_id="r", edge_name="codec_tokens", from_partition="Talker",
         policy=ScheduledLeftContextChunkPolicy(
-            codec_config.chunk_schedule, codec_config.chunk_frames, codec_config.left_context_frames,
+            codec_config.chunk_schedule, codec_config.chunk_frames, 0,
         ),
     )
     for i, token in enumerate([*range(1, num_frames + 1), eos]):
@@ -2200,9 +2200,9 @@ def test_qwen3_tts_codec_stream_carries_no_eos_and_ends_on_the_last_frames(num_f
     assert result == StopCheck({"talker_decode_loop"}, ("codec_tokens",))
     stream.signal_done(num_frames)
 
-    codec = CodecSubmodule(_FakeCodecDecoder(4), config)
+    codec = _tiny_codec(config)
+    driver = _CodecDriver(codec)
     fwd = SimpleNamespace(request_id="r", rid_handle="r")
-    engine_inputs = ModelInputsFromEngine(request_ids=["r"], per_request_info={})
     windows = []
     while stream.has_chunk_ready():
         chunk = stream.pop_chunk()
@@ -2214,9 +2214,7 @@ def test_qwen3_tts_codec_stream_carries_no_eos_and_ends_on_the_last_frames(num_f
         )
         assert item.kwargs["frames"] == chunk.num_items
         assert (item.tensor_inputs["codec_tokens"][0, :chunk.num_items] != eos).all()
-        packed = codec.preprocess("codec_chunk", engine_inputs, [item])
-        row = {"audio_chunk": [codec.forward_batched("codec_chunk", engine_inputs, **packed).row_outputs["audio_chunk"][0]]}
-        codec.postprocess("r", None, row, inputs=item)
+        row = driver.step({"r": item})["r"]
         windows.append((chunk.info, row["audio_chunk"][0].numel()))
 
     final, final_samples = windows[-1]
