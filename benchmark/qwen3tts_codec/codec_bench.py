@@ -394,7 +394,7 @@ def cmd_timing(args):
         for window, context in pairs:
             new = window - context
             bucket = codec._bucket(window)
-            for compiled in (False, True):
+            for compiled in (True,) if args.compiled_only else (False, True):
                 if base:
                     fn = base_step_fn(codec, B, bucket, context, compiled)
                     ms = _time(_graph(fn), args.iters)
@@ -609,6 +609,7 @@ def main():
         s.add_argument("--iters", type=int, default=30)
     sub.choices["timing"].add_argument("--batches", type=int, nargs="+", default=[1, 4, 8, 16, 32])
     sub.choices["timing"].add_argument("--extra-widths", type=int, nargs="+", default=[10, 12])
+    sub.choices["timing"].add_argument("--compiled-only", action="store_true")
     sub.choices["kernels"].add_argument("--batch", type=int, default=16)
     sub.choices["parity"].add_argument("--codes", required=True)
     sub.choices["parity"].add_argument("--limit", type=int, default=20)
