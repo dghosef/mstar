@@ -3281,8 +3281,9 @@ class Worker:
         _pp_stage("completion_event_sync")
         # Waited on above, so the spans have landed; cut before anything reads
         # the outputs: the stop check, the store, a streaming edge.
+        empty_spans: dict[int, list[str]] = {}
         if outputs.output_spans and batch_N.batch.request_to_worker_graph:
-            self._crop_to_spans(outputs)
+            empty_spans = self._crop_to_spans(outputs)
             _pp_stage("crop_spans")
         if self.enable_nvtx:
             range_pop(synchronize=False)
@@ -3304,6 +3305,7 @@ class Worker:
             # routes without stopping for it
             checked, _ = self._check_stops(batch_N, outputs, cpu_outputs, host_rows, engine)
             _pp_stage("check_stop")
+        self._drop_unrouted(outputs, batch_N.node_batch.withheld_outputs, empty_spans)
         request = self._get_postprocess_request(
             batch_N, host_rows, engine, runtime_stops, tokens, checked,
         )
@@ -3326,6 +3328,7 @@ class Worker:
             _t = _time.perf_counter() if self._phase_period else 0.0
             if step.need is PostprocessNeed.STOPS:
                 stops, dropped = self._check_stops(batch_N, outputs, cpu_outputs, host_rows, engine)
+                self._drop_unrouted(outputs, batch_N.node_batch.withheld_outputs)
                 stage = "check_stop"
                 _t_rt = _time.perf_counter() if self._phase_period else 0.0
                 step = rt.resume_postprocess(stops=stops, dropped=dropped)
@@ -3447,6 +3450,20 @@ class Worker:
             stream_partition_done=list(batch_N.node_batch.stream_partition_done_rids),
             python_send=self.enable_prof,
         )
+
+    @staticmethod
+    def _drop_unrouted(outputs: BatchedModelOutput, *unrouted: dict[int, tuple[str, ...] | list[str]]) -> None:
+        """Leave out of the store what the stop check withheld
+        (``StopCheck.withheld``) and an output cut to an empty span: a
+        streaming edge then carries no item for the row, and the producer's
+        item count leaves it out as well. Before STORE, which reads the
+        per-rid outputs."""
+        for names_of in unrouted:
+            for rid, names in names_of.items():
+                rid_outputs = outputs.get(rid)
+                if rid_outputs:
+                    for name in names:
+                        rid_outputs.pop(name, None)
 
     def _check_stops(
         self, batch_N: PendingBatch, outputs: BatchedModelOutput, cpu_outputs,
@@ -3867,7 +3884,7 @@ class Worker:
         return host
 
     @staticmethod
-    def _crop_to_spans(outputs: "BatchedModelOutput") -> None:
+    def _crop_to_spans(outputs: "BatchedModelOutput") -> dict[int, list[str]]:
         """Cut each row of a spanned output to its span along the last dim
         (``NodeSubmodule.spanned_outputs``). Called once the step's completion
         event has fired, so the spans staged behind the step are on the host.
@@ -3875,10 +3892,14 @@ class Worker:
         a second name that ``postprocess`` or ``unpack_packed_outputs`` gave
         the same list is cut with it. Two names the forward returned on its own
         get their own lists from the engine and keep their own widths.
+
+        Returns rid -> the outputs whose span is empty, which the caller leaves
+        out of the store as it does a withheld output.
         """
         spans = outputs.host_spans or outputs.output_spans
         per_rid = outputs.per_rid_outputs
         cut = False
+        empty: dict[int, list[str]] = {}
         for name, span in spans.items():
             # columns, not a [start, end] list per row
             starts, ends = span.t().tolist()
@@ -3887,6 +3908,8 @@ class Worker:
                 tensors = row.get(name) if row is not None else None
                 if not tensors:
                     continue
+                if end <= start:
+                    empty.setdefault(rid, []).append(name)
                 for i, tensor in enumerate(tensors):
                     if start > 0 or end < tensor.shape[-1]:
                         tensors[i] = tensor[..., max(start, 0):max(end, 0)]
@@ -3894,6 +3917,7 @@ class Worker:
         if cut:
             # the views no longer describe the stored rows
             outputs.row_views = None
+        return empty
 
     def _get_pinned_d2h_buffer(
         self,
