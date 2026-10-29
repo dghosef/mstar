@@ -1042,8 +1042,9 @@ class CodecSubmodule(ARNodeSubmodule):
     real length rides with it.
     """
 
-    # fp32, and only the stateless decode compiled (``__init__``): the
-    # capture's gather and scatter stay outside it
+    # the decoder runs in its own dtype (``codec_dtype``), and only the
+    # stateless decode is compiled (``__init__``): the capture's gather and
+    # scatter stay outside it
     disable_torch_compile = True
     disable_autocast = True
     # cuDNN times its conv algorithms per captured shape: its heuristic pick

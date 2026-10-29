@@ -8,7 +8,7 @@ measured in seconds instead of a server restart:
     python -m benchmark.qwen3tts_codec.codec_bench kernels --out DIR
     python -m benchmark.qwen3tts_codec.codec_bench parity  --codes codes.pt --out DIR
 
-``timing`` and ``kernels`` compare the window decode the server runs (``base``:
+``timing`` and ``kernels`` compare the window decode older checkouts serve (``base``, run from such a checkout:
 transformer over context + new frames, conv stack over the new frames plus its
 receptive field) with a stateful incremental decode (``incr``: new frames only,
 the transformer's sliding-window KV and every causal conv's left samples carried

@@ -659,9 +659,11 @@ Qwen3-TTS notes
   On its own it lowers first-audio latency at high concurrency; with
   ``mps: true`` in the YAML (see :doc:`serving`) the two workers' kernels also
   overlap, which raised c=32 throughput by about a fifth on an H100.
-- The codec decoder runs in float32 by default. Its decode is compiled
-  (Inductor) once for every capture. ``model_kwargs: {codec_dtype: bfloat16}``
-  runs it in bfloat16 (measured within noise of float32 on an H200).
+- The codec decoder runs in float32 by default; ``configs/qwen3tts_1p7b.yaml``
+  serves it in bfloat16 (``model_kwargs: {codec_dtype: bfloat16}``, RMSNorm
+  and RoPE kept in float32), about 1.9x a codec step's speed on an H200 once
+  the captures keep cuDNN's searched conv plans (``capture_cudnn_benchmark``).
+  Its decode is compiled (Inductor) once for every capture.
 - Opt-in AudioSeal watermark on the codec's output (off by default; install
   ``pip install -e '.[audioseal]'``). Turn it on in the deployment YAML::
 
