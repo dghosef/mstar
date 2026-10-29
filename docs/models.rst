@@ -615,23 +615,20 @@ Qwen3-TTS notes
   two kept in flight while the current one streams); set
   ``sentence_chunking: false`` (or ``true`` for shorter texts) per request.
 - Audio streams in a ramp of codec chunks: the first frame is decoded on its
-  own (first audio one Talker step after prefill), the next windows add 3, 8
-  and 16 frames, then 25 new frames behind up to 72 frames of already decoded
-  left context, the decoder transformer's sliding window. The
-  transformer stacks 8 such layers, so a window still differs slightly from a
-  whole-utterance decode once an utterance outgrows the context; 25 frames of
-  context differed far more. Each window size is a CUDA-graph bucket captured
-  for batch sizes 1 to 32 (densely: the codec's cost is per row, so a padding
-  row costs as much as a real one); the stream buffer reports how many leading
-  frames of a window are repeated context, and the codec trims their audio. The
-  scheduler batches each window size apart, so a stream's small first windows
-  are not padded to a full window's width or queued behind a batch of them. A
-  voice clone's reference tail (its last 72 frames) is the first window's context.
-- The codec runs its transformer over the whole window but its conv stack (all
-  but a few percent of the codec's time) only over the new frames plus the
-  stack's causal receptive field, derived from the decoder's modules at load
-  (10 frames for the 12 Hz decoder; the new frames' audio equals the
-  whole-window decode). It also fuses the SnakeBeta activations into one kernel.
+  own (first audio one Talker step after prefill), the next chunks add 3, 8
+  and 16 frames, then 25 frames a chunk. The decoder is causal, so the codec
+  decodes every frame once: per stream it keeps each causal conv's last input
+  samples, the transformer's sliding-window keys and values (71 per layer) and
+  the frame count, about 5 MiB in float32, in the ``codec_state`` recurrent
+  pool (``resources: {codec_state: {max_slots: N}}`` sizes it; 256 streams by
+  default). A stream's audio equals a whole-utterance decode. Each chunk width
+  is a CUDA-graph bucket captured for batch sizes 1 to 32 (densely: the
+  codec's cost is per row, so a padding row costs as much as a real one); the
+  scheduler batches each width apart, so a stream's small first chunks are not
+  padded to a full chunk's width or queued behind a batch of them. A voice
+  clone's stream leads with the reference's last 72 frames, decoded with the
+  first chunk to warm the state on the voice and trimmed from its audio.
+  The SnakeBeta activations run as one fused kernel.
 - Talker prefill, the clone prefill included, replays a packed CUDA Graph for
   the smallest token bucket (32 to 1024 tokens) that holds the batch; a clone's
   reference frames join the codec stream in ``postprocess``. Decode
@@ -651,13 +648,11 @@ Qwen3-TTS notes
   On its own it lowers first-audio latency at high concurrency; with
   ``mps: true`` in the YAML (see :doc:`serving`) the two workers' kernels also
   overlap, which raised c=32 throughput by about a fifth on an H100.
-- The codec decoder runs in float32 by default. Its capture is compiled
-  (Inductor, ~55-60 dB SNR against the eager reference decoder), its full
-  windows share one capture bucket, and its conv stack skips the context
-  samples no new frame's audio reads. ``model_kwargs: {codec_dtype: bfloat16}``
+- The codec decoder runs in float32 by default. Its decode is compiled
+  (Inductor) once for every capture. ``model_kwargs: {codec_dtype: bfloat16}``
   runs it in bfloat16 (measured within noise of float32 on an H200).
-- Under load a codec window other than a stream's first waits up to 40 ms for
-  windows of other requests to batch with (``model_kwargs:
+- Under load a codec chunk other than a stream's first waits up to 40 ms for
+  chunks of other requests to batch with (``model_kwargs:
   {codec_batch_hold_ms: 40}``, 0 turns it off): a codec step costs several
   times its cost per row.
 - Opt-in AudioSeal watermark on the codec's output (off by default; install
