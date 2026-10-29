@@ -303,3 +303,23 @@ def test_a_prepared_request_waits_while_a_peer_cannot_take_more():
     PreprocessWorkerThread._take_new_input(worker, sends_pending=False)
     assert taken == ["r", "s"]
 
+
+def test_the_pool_skips_the_prepare_of_a_request_the_api_server_let_go_of():
+    """A request aborted while queued costs no media load or process_prompt;
+    it is dropped as it is handed on, as on the inline path."""
+    from mstar.api_server.request_types import PreprocessInput
+
+    worker = PreprocessWorkerThread.__new__(PreprocessWorkerThread)
+    worker._prep_workers, worker.in_queue, worker._preparing = 2, queue.Queue(), deque()
+    submitted = []
+    worker._prep_pool = SimpleNamespace(submit=lambda fn, pre_input: submitted.append(pre_input.request_id))
+    worker._is_pending = lambda rid: False
+    worker.timing_requested, worker.wakeup = threading.Event(), None
+    worker.communicator = SimpleNamespace(flush=lambda: False)
+    taken = []
+    worker._take_input = lambda pre_input, profile=None, prepared=None: taken.append((pre_input.request_id, prepared))
+    worker.in_queue.put(PreprocessInput("gone", "gone", None, [], ["text"], {}))
+
+    PreprocessWorkerThread._take_new_input(worker, sends_pending=False)
+    assert submitted == [], "prepared a request nothing will read"
+    assert taken == [("gone", None)]

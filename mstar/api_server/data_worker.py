@@ -1708,7 +1708,8 @@ class PreprocessWorkerThread:
                     preparing.append(PreparingInput(pre_input))
                     continue
                 requests += 1
-                if self._prep_pool is None:
+                # one the API server let go of is dropped as it is handed on
+                if self._prep_pool is None or not self._is_pending(pre_input.request_id):
                     preparing.append(PreparingInput(pre_input))
                     continue
                 profile = self._start_profile(pre_input) if self.timing_requested.is_set() else None
