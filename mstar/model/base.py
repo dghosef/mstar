@@ -459,8 +459,9 @@ class Model(ABC):
 
     # Requests whose media load and ``process_prompt`` the API server runs at
     # once, on a thread pool. 1 runs them inline on the data worker thread, one
-    # at a time. Above 1, ``load_*`` and ``process_prompt`` must be thread-safe;
-    # ``preprocess_workers`` in the serving config may lower it, not raise it.
+    # at a time. Above 1, ``load_*`` and ``process_prompt`` must be thread-safe,
+    # and ``preprocess_workers`` in the serving config may resize the pool; at 1
+    # the config cannot add one.
     PREPROCESS_WORKERS: int = 1
 
     def _get_worker_graphs_for_graph_walk(

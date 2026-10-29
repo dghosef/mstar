@@ -263,18 +263,26 @@ def test_pooled_preprocessing_overlaps_requests_and_keeps_arrival_order():
     assert not t.is_alive()
 
 
-@pytest.mark.parametrize("workers", [0, "2", 3])
-def test_a_bad_preprocess_workers_fails_startup(workers):
-    """Not a dead data-worker thread under a server that comes up; nor more
-    prepares at once than the model class declares safe (2 here)."""
+@pytest.mark.parametrize(("declared", "workers"), [(2, 0), (2, "2"), (1, 2)])
+def test_a_bad_preprocess_workers_fails_startup(declared, workers):
+    """Not a dead data-worker thread under a server that comes up; nor a pool
+    for a model class that does not declare its prepares thread-safe."""
     from mstar.api_server.data_worker import PreprocessWorker
     from mstar.communication.communicator import CommProtocol
 
+    model = _SlowModel()
+    model.PREPROCESS_WORKERS = declared
     with pytest.raises(ValueError, match="preprocess_workers"):
         PreprocessWorker(
-            model=_SlowModel(), model_config={"preprocess_workers": workers},
+            model=model, model_config={"preprocess_workers": workers},
             tensor_comm_protocol=CommProtocol.SHM, socket_path_prefix=f"/tmp/mstar-pw{os.getpid()}",
         )
+
+
+def test_a_deployment_may_size_a_thread_safe_pool_past_the_class_value():
+    from mstar.api_server.data_worker import preprocess_workers
+
+    assert preprocess_workers(_SlowModel(), {"preprocess_workers": 16}) == 16
 
 
 def test_a_prepared_request_waits_while_a_peer_cannot_take_more():

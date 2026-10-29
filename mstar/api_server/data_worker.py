@@ -180,16 +180,18 @@ class PreparingInput(NamedTuple):
 
 def preprocess_workers(model: Model | None, model_config: dict | None) -> int:
     """``preprocess_workers`` from the serving config, else the model's
-    ``PREPROCESS_WORKERS``. The class value is also the ceiling: it says how
-    many prepares its ``load_*`` and ``process_prompt`` are safe to run at once."""
+    ``PREPROCESS_WORKERS``. A class value of 1 says its ``load_*`` and
+    ``process_prompt`` are not thread-safe, so the config cannot add a pool."""
     if model is None:
         return 1
-    ceiling = model.PREPROCESS_WORKERS
-    workers = (model_config or {}).get("preprocess_workers", ceiling)
-    if isinstance(workers, bool) or not isinstance(workers, int) or not 1 <= workers <= ceiling:
+    declared = model.PREPROCESS_WORKERS
+    workers = (model_config or {}).get("preprocess_workers", declared)
+    if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
+        raise ValueError(f"preprocess_workers must be a positive integer, got {workers!r}")
+    if workers > 1 and declared == 1:
         raise ValueError(
-            f"preprocess_workers must be an integer from 1 to {type(model).__name__}.PREPROCESS_WORKERS "
-            f"({ceiling}), got {workers!r}"
+            f"preprocess_workers is {workers}, but {type(model).__name__}.PREPROCESS_WORKERS is 1: "
+            "its load_* and process_prompt are not declared thread-safe"
         )
     return workers
 
