@@ -28,13 +28,21 @@ class ChunkBatchHold:
     For a consumer whose step costs far more than each extra row (a
     streaming vocoder): a ready chunk waits until ``min_chunks`` chunks of
     the connection are ready across requests, or the oldest has waited
-    ``max_wait_s``. A stream's first chunk (time to first output), a chunk
+    ``max_wait_s``, or a held stream is about to run dry (``item_seconds``).
+    A stream's first chunk (time to first output), a chunk
     after the producer is done (end of the request) and any chunk while the
     worker has nothing in flight are never held. Under lockstep parallelism
     the leader rank holds; followers take each chunk as it arrives.
     """
     max_wait_s: float
     min_chunks: int
+    # Optional playback deadline. ``item_seconds`` is how long one item plays
+    # for (a codec frame's audio); a stream has then played its delivered new
+    # items' worth since its first chunk left, and its slack is how far that
+    # runs ahead of the clock. A hold releases once any held stream's slack is
+    # down to ``min_slack_s``, whatever ``max_wait_s`` allows.
+    item_seconds: float | None = None
+    min_slack_s: float = 0.0
 
 
 # The producer of a stream the client feeds into a running request:

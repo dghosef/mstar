@@ -173,7 +173,13 @@ class StreamBufferManager:
                     polled.append((request_id, streaming_edge))
         for edge_name, chunks in held.items():
             hold = holds[edge_name]
-            if len(chunks) < hold.min_chunks and min(c[2] for c in chunks) > now - hold.max_wait_s:
+            if (
+                len(chunks) < hold.min_chunks
+                and min(c[2] for c in chunks) > now - hold.max_wait_s
+                and (hold.item_seconds is None or min(
+                    c[1].playback_slack(now, hold.item_seconds) for c in chunks
+                ) > hold.min_slack_s)
+            ):
                 continue
             for request_id, sbuf, _ in chunks:
                 sbuf.release_hold()
