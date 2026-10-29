@@ -152,8 +152,8 @@ class TalkerSubmodule(ARNodeSubmodule):
     # which keeps it in the captured token buckets. Its captures run to the
     # decode cap: one below it would split the batch.
     MIXED_MAX_PREFILL_ROWS = 4
-    MIXED_CAPTURE_BATCH_SIZES = [4, 8, 16, 32, 48, 64]
-    MIXED_TOKEN_BUCKETS = [64, 128, 256, 512, 1024]
+    MIXED_CAPTURE_BATCH_SIZES = [8, 16, 32, 48, 64]
+    MIXED_TOKEN_BUCKETS = [128, 256, 512, 1024]
     CHATML_ASSISTANT_PREFIX_TOKEN_IDS = CHATML_ASSISTANT_PREFIX_TOKEN_IDS
     CHATML_ASSISTANT_SUFFIX_TOKEN_IDS = CHATML_ASSISTANT_SUFFIX_TOKEN_IDS
 
@@ -890,7 +890,8 @@ class TalkerSubmodule(ARNodeSubmodule):
             make_node_input=prefill_input,
             capture_batch_sizes=self.MIXED_CAPTURE_BATCH_SIZES,
             token_layout=decode_rows_then_prompt,
-            compile=False,
+            # compiled like the decode graph, whose rows it mostly carries
+            compile=True,
         )
         return [prefill, mixed, BatchedAcceleratorGraphConfig(
             capture_graph_walk="talker_decode",
