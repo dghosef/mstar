@@ -367,6 +367,24 @@ def test_message_loop_runs_while_the_conductor_lives():
     assert server.fatal_error is None
 
 
+def test_a_failed_message_wait_does_not_end_the_message_loop():
+    """A transport error from the idle wait is a failed pass, not the end of
+    the thread that delivers every request's results."""
+    server = _api_server(_Proc(5))
+    waits = []
+
+    def poll(timeout_ms=1):
+        waits.append(timeout_ms)
+        if len(waits) == 1:
+            raise RuntimeError("socket closed")
+        server.running = False
+        return False
+    server.communicator.poll_for_messages = poll
+    server._process_messages()
+    assert len(waits) == 2
+    assert server.fatal_error is None
+
+
 def test_dead_conductor_releases_pending_requests_and_stops_the_server():
     stopped = []
     server = _api_server(_Proc(5, alive=False, exitcode=-9))
