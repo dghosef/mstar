@@ -794,16 +794,13 @@ class Model(ABC):
     @abstractmethod
     def postprocess(
         self,
-        output: torch.Tensor | list[int],
+        output: torch.Tensor,
         modality: str,  # text | image | video | video_frame | audio
         request_kwargs: dict | None = None,
     ) -> bytes:
         """
         Given an output of a certain modality, encode and return as bytes.
         This will likely need to overridden with model-specific behavior.
-        A value sent inline (``NodeSubmodule.inline_client_signals``) arrives
-        as a list of ints rather than a tensor; ``mstar.model.utils.token_ids``
-        reads either.
         ``request_kwargs`` is the request's model_kwargs, so encoders can honor
         per-request parameters (e.g. writing a video container at the request's
         frame rate).
@@ -817,6 +814,15 @@ class Model(ABC):
         - image: png
         """
         return output.cpu().numpy().tobytes()
+
+    def postprocess_token_ids(
+        self, ids: list[int], modality: str, request_kwargs: dict | None = None,
+    ) -> bytes:
+        """``postprocess`` for a value sent inline (``NodeSubmodule.inline_client_signals``),
+        which arrives as a list of ints. A model whose inline outputs are token ids
+        overrides it to skip the tensor: each torch call on the data-worker thread
+        hands the GIL off."""
+        return self.postprocess(torch.tensor(ids), modality, request_kwargs=request_kwargs)
 
     @abstractmethod
     def get_submodule(

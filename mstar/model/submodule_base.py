@@ -924,8 +924,8 @@ class NodeSubmodule(torch.nn.Module, ABC):
         the stop check already copies to the host, as signal name -> the name
         of the row-addressed stop buffer holding it. The worker then sends
         those values inline, one frame per step, instead of one tensor per
-        request, and the API server hands each to ``Model.postprocess`` as
-        a list of ints. Only for a walk whose emit edge is not persisted."""
+        request, and the API server hands each to ``Model.postprocess_token_ids``
+        as a list of ints. Only for a walk whose emit edge is not persisted."""
         del graph_walk
         return {}
 

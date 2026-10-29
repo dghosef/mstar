@@ -168,7 +168,10 @@ You must implement these abstract methods:
 
 ``postprocess(self, output, modality) -> bytes``
    Encode a finished output tensor to bytes for the client: ``utf-8`` for text, PNG for
-   images, raw PCM for audio, and so on.
+   images, raw PCM for audio, and so on. A value sent inline
+   (``NodeSubmodule.inline_client_signals``) arrives as a list of ints at
+   ``postprocess_token_ids``, whose default wraps it in a tensor for ``postprocess``; a
+   model whose inline outputs are token ids overrides it to detokenize the list directly.
 
 ``get_submodule(self, node_name, device="cpu", tp_group=None, autocast_dtype=None, sp_group=None, moe_parallel=None) -> NodeSubmodule | None``
    Build and return the ``NodeSubmodule`` for ``node_name``, and cache the result. Load

@@ -17,6 +17,7 @@ import pytest
 from mstar.api_server.data_worker import InlineToken, PreprocessWorkerThread
 from mstar.communication.event import EventWakeup
 from mstar.graph.loop_indices import NestedLoopIndices
+from mstar.model.base import Model
 
 
 class _Model:
@@ -26,6 +27,8 @@ class _Model:
 
     def postprocess(self, output, modality, request_kwargs=None):
         return f"<{int(output[0])}>".encode()
+
+    postprocess_token_ids = Model.postprocess_token_ids
 
 
 class _PollingComm:

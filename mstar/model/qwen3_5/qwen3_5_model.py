@@ -644,8 +644,13 @@ class Qwen3_5DenseModel(Model):
             modality: str,
             request_kwargs: dict | None = None,
         ) -> bytes:
+            return self.postprocess_token_ids(output.reshape(-1).tolist(), modality, request_kwargs)
+
+    def postprocess_token_ids(
+            self, ids: list[int], modality: str, request_kwargs: dict | None = None,
+        ) -> bytes:
             if modality == "text":
-                ids = drop_stop_tokens(output, self.config.stop_token_ids, request_kwargs)
+                ids = drop_stop_tokens(ids, self.config.stop_token_ids, request_kwargs)
                 if self._text_detokenizer is None or self._text_detokenizer.tokenizer is not self.tokenizer:
                     self._text_detokenizer = TextChunkDetokenizer(self.tokenizer)
                 return self._text_detokenizer.to_bytes(ids)

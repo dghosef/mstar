@@ -843,7 +843,7 @@ class BagelModel(Model):
         request_kwargs: dict | None = None,
     ) -> bytes:
         if modality == "text":
-            ids = drop_stop_tokens(output, (self.eos_token_id,), request_kwargs)
+            ids = drop_stop_tokens(output.reshape(-1).tolist(), (self.eos_token_id,), request_kwargs)
             if self._text_detokenizer is None or self._text_detokenizer.tokenizer is not self.tokenizer:
                 self._text_detokenizer = TextChunkDetokenizer(self.tokenizer)
             return self._text_detokenizer.to_bytes(ids)

@@ -1056,7 +1056,7 @@ def test_a_second_socket_cannot_take_over_a_live_call(monkeypatch, tmp_path):
 
 
 class _FailingOutputModel(_ListeningModel):
-    def postprocess(self, output, modality, request_kwargs=None):
+    def postprocess_token_ids(self, ids, modality, request_kwargs=None):
         raise RuntimeError("boom")
 
 

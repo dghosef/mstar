@@ -1270,7 +1270,7 @@ class PreprocessWorkerThread:
             # A list, not a tensor: every torch call releases and retakes the
             # GIL, which costs up to a switch interval per token while the
             # event loop is busy (see `NodeSubmodule.inline_client_signals`).
-            postprocessed = self.model.postprocess(
+            postprocessed = self.model.postprocess_token_ids(
                 [item.value], item.modality,
                 request_kwargs=self.request_model_kwargs.get(request_id),
             )
