@@ -22,6 +22,7 @@ from mstar.engine.resources.linear_attn.wrappers import (
     GDNMixedWrapper,
     GDNPrefillWrapper,
     GDNWrapper,
+    compiled,
 )
 from mstar.engine.resources.recurrent.config import DeltaNetGeometry
 from mstar.engine.resources.recurrent.pool import NO_SLOT, SINK_SLOT, RecurrentAddressing
@@ -37,19 +38,8 @@ def _l2norm(t: torch.Tensor) -> torch.Tensor:
 
 
 # Eager, the normalize is four full-size passes per tensor (fp32 copy, norm,
-# divide, cast); compiled, one. Built on first use, once the device is known.
-# Not dynamic=True: a symbolic head dim made the reduction ~3x slower; the
-# token count goes dynamic on its own at the second size.
-_L2NORM = None
-
-
-def _l2norm_compiled(t: torch.Tensor) -> torch.Tensor:
-    global _L2NORM
-    if _L2NORM is None:
-        from mstar.platforms.compile import with_inductor_overrides
-
-        _L2NORM = with_inductor_overrides(torch.compile(_l2norm))
-    return _L2NORM(t)
+# divide, cast); compiled, one. Not dynamic=True: a symbolic head dim made the
+# reduction ~3x slower; the token count goes dynamic on its own at the second size.
 
 
 # What each arch's chunked prefill kernel will read as its packed state.
@@ -325,7 +315,7 @@ class GDNManager(LinearAttnManager):
         """
         plan = self.current_plan(label)
         if self.config.qk_l2norm and not plan.qk_l2norm_in_kernel:
-            q, k = _l2norm_compiled(q), _l2norm_compiled(k)
+            q, k = compiled(_l2norm)(q), compiled(_l2norm)(k)
         # a split projection gives column views; copy only for a kernel that
         # needs them contiguous
         if not plan.takes_strided_inputs:

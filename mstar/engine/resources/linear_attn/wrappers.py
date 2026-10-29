@@ -5,7 +5,9 @@ their addresses, so they are sized to the bucket on first plan and never
 reallocated: a `torch.zeros` firing on a later, larger layout means a replay
 reads freed memory.
 """
+import functools
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -109,20 +111,28 @@ def _with_room(t: torch.Tensor, rows: int) -> torch.Tensor:
     return torch.cat((t, t.new_zeros((rows, *t.shape[1:]))), dim=0)
 
 
+@functools.cache
+def compiled(fn: Callable, dynamic: bool | None = None) -> Callable:
+    """``fn`` under ``torch.compile`` and the platform's inductor overrides,
+    built on first use, once the process knows its device. The GDN
+    resource's elementwise helpers sit outside the engine's compiled
+    forward, so they compile here."""
+    from mstar.platforms.compile import with_inductor_overrides
+
+    return with_inductor_overrides(torch.compile(fn, dynamic=dynamic))
+
+
 # The chunked path's elementwise work around its kernels, compiled into one
-# kernel each: run eagerly (the wrappers sit outside the engine's compiled
-# forward), it was a dozen launches per layer and about a third of a long
-# prefill's GPU time on Qwen3.5-0.8B. Pointwise only, so dynamic=True costs
-# nothing here (unlike a reduction over a symbolic head dim).
+# kernel each: run eagerly, it was a dozen launches per layer and about a
+# third of a long prefill's GPU time on Qwen3.5-0.8B. Pointwise only, so
+# dynamic=True costs nothing here (unlike a reduction over a symbolic head dim).
 
 
-@torch.compile(dynamic=True)
 def _masked_rows(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """``x`` with its rows where ``mask`` is 0 zeroed, by select (they can hold inf)."""
     return torch.where(mask[: x.shape[0], None].bool(), x, torch.zeros((), dtype=x.dtype, device=x.device))
 
 
-@torch.compile(dynamic=True)
 def _chunked_gates(
     a: torch.Tensor, b: torch.Tensor,
     a_log: torch.Tensor, dt_bias: torch.Tensor, mask: torch.Tensor,
@@ -348,9 +358,12 @@ class GDNPrefillWrapper(GDNWrapper):
         # The kernel allocates its output with `empty_like` and writes only the
         # `cu_seqlens` range, so a capture bucket's padded tail keeps whatever
         # the previous replay left in that memory.
-        return _masked_rows(out, self._plan_state.token_mask)
+        return compiled(_masked_rows, dynamic=True)(out, self._plan_state.token_mask)
 
     def run(self, q, k, v, a, b, state, a_log, dt_bias):
+        """The chunked delta rule over the plan's sequences. ``q``, ``k`` and
+        ``v`` must be ``run_conv``'s output: under capture it zeroes the padded
+        tail, which can hold inf, and ``run`` zeroes only the gates'."""
         from flashinfer.gdn_prefill import chunk_gated_delta_rule
 
         slots = self._plan_state.slots.to(torch.int64)
@@ -394,7 +407,7 @@ class GDNPrefillWrapper(GDNWrapper):
 
         # The padded tail is zeroed so inf there can't poison the result: q, k
         # and v by `run_conv`, whose output they are, the gates here.
-        g, beta = _chunked_gates(a, b, a_log, dt_bias, self._plan_state.token_mask)
+        g, beta = compiled(_chunked_gates, dynamic=True)(a, b, a_log, dt_bias, self._plan_state.token_mask)
 
         out, final = chunk_gated_delta_rule(
             q=q, k=k, v=v,
