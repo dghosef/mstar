@@ -9,11 +9,6 @@ max_seq_len: 32768
 resources:
   talker_attn:
     flashinfer_backend: fa2
-# No codec batch hold: the incremental codec's per-row cost dominates its
-# step, and holding a chunk 40 ms to batch it stalled a stream's playback
-# right after its first chunk (workload-A SLO misses).
-model_kwargs:
-  codec_batch_hold_ms: 0
 node_groups:
   - node_names: [Talker]
     ranks: [0]

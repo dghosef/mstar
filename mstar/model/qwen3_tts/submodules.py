@@ -584,7 +584,8 @@ class TalkerSubmodule(ARNodeSubmodule):
         over a prompt row (its text is already in its embeddings)."""
         longest = max(item.input_seq_len for item in inputs)
         if self._zero_rows is None or self._zero_rows.shape[0] < longest:
-            self._zero_rows = packed_embeds.new_zeros(max(longest, self.MIXED_TOKEN_BUCKETS[-1]), packed_embeds.shape[1])
+            rows = max(longest, self.MIXED_TOKEN_BUCKETS[-1])
+            self._zero_rows = packed_embeds.new_zeros(rows, packed_embeds.shape[1])
         zeros = self._zero_rows
         return torch.cat([
             item.kwargs["text_condition"].view(1, -1) if item.graph_walk == "talker_decode"

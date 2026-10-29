@@ -748,13 +748,9 @@ class Worker:
             conn.edge_name for conn in self._my_consumer_connections
         }
 
-        # A lockstep consumer's leader holds chunks (``ChunkBatchHold``) and its
-        # followers ingest at once: the leader picks every step's rows, and a
-        # follower waits for a row's chunk.
         self.streams = StreamBufferManager(
             self.request_state, self.tensor_manager, self._my_consumer_connections,
             model.get_graph_walk_graphs() if model else None,
-            unheld_nodes=frozenset(self.parallel_nodes - self.parallel_leader_nodes),
         )
 
         # (graph_walk, node) -> innermost enclosing loop, for ending a
@@ -1389,16 +1385,12 @@ class Worker:
     # Tensor readiness
     # ------------------------------------------------------------------
 
-    def _poll_stream_buffers(self, idle: bool = True) -> None:
-        """Check all active StreamBuffers; when a chunk is ready, feed it as a normal input.
-
-        ``idle`` (nothing in flight) releases every chunk a ``ChunkBatchHold``
-        would keep back (``StreamBufferManager.poll``).
-        """
+    def _poll_stream_buffers(self) -> None:
+        """Check all active StreamBuffers; when a chunk is ready, feed it as a normal input."""
         # Every ready chunk is popped first and ingested in one call (and one
         # Python <> Rust roundtrip)
         laps = PhaseLaps("worker.main.poll_stream_buffers.")
-        polled = self.streams.poll(idle)
+        polled = self.streams.poll()
         laps.lap("scan_and_pop")
         if not polled:
             return
@@ -4619,7 +4611,7 @@ class Worker:
 
                 if self.enable_nvtx:
                     range_push("worker.poll_stream_buffers", synchronize=False)
-                self._poll_stream_buffers(idle=pending is None)
+                self._poll_stream_buffers()
                 if self.enable_nvtx:
                     range_pop(synchronize=False)
                 laps.lap("poll_stream_buffers")

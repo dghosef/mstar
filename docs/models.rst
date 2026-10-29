@@ -662,10 +662,6 @@ Qwen3-TTS notes
 - The codec decoder runs in float32 by default. Its decode is compiled
   (Inductor) once for every capture. ``model_kwargs: {codec_dtype: bfloat16}``
   runs it in bfloat16 (measured within noise of float32 on an H200).
-- Under load a codec chunk other than a stream's first waits up to 40 ms for
-  chunks of other requests to batch with (``model_kwargs:
-  {codec_batch_hold_ms: 40}``, 0 turns it off): a codec step costs several
-  times its cost per row.
 - Opt-in AudioSeal watermark on the codec's output (off by default; install
   ``pip install -e '.[audioseal]'``). Turn it on in the deployment YAML::
 

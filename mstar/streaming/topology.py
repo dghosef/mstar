@@ -21,22 +21,6 @@ class StreamingGraphEdge(GraphEdge):
         self.is_streaming = True
 
 
-@dataclass(frozen=True)
-class ChunkBatchHold:
-    """How long a consumer may hold ready chunks back to batch them.
-
-    For a consumer whose step costs far more than each extra row (a
-    streaming vocoder): a ready chunk waits until ``min_chunks`` chunks of
-    the connection are ready across requests, or the oldest has waited
-    ``max_wait_s``. A stream's first chunk (time to first output), a chunk
-    after the producer is done (end of the request) and any chunk while the
-    worker has nothing in flight are never held. Under lockstep parallelism
-    the leader rank holds; followers take each chunk as it arrives.
-    """
-    max_wait_s: float
-    min_chunks: int
-
-
 # The producer of a stream the client feeds into a running request:
 # ``Connection(from_partition=CLIENT, ...)``. It names no partition, so it has
 # no walks, worker or partition state; the API server appends its chunks and
@@ -68,8 +52,6 @@ class Connection:
     to_partition: str
     edge_name: str
     chunk_policy_factory: Callable[[], ChunkPolicy]
-    # None: hand each chunk to the consumer as soon as it is ready
-    batch_hold: ChunkBatchHold | None = None
     limits: ClientStreamLimits | None = None
 
 

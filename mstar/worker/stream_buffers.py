@@ -6,14 +6,13 @@ chunks a step did not keep, and settles which streams a step ends.
 """
 from __future__ import annotations
 
-import time
 from collections.abc import Iterable
 
 from mstar.communication.tensors import NameToTensorList, TensorCommunicationManager
 from mstar.graph.base import GraphEdge, GraphSection
 from mstar.graph.runtime.base import ColumnarEdgeSpecs, EdgeSpec, InputTensors
 from mstar.streaming.stream_buffer import StreamBuffer, StreamChunkInfo, StreamingEdge, collate
-from mstar.streaming.topology import ChunkBatchHold, Connection
+from mstar.streaming.topology import Connection
 from mstar.worker.node_manager_utils import RequestStateManager
 
 
@@ -47,7 +46,6 @@ class StreamBufferManager:
         tensor_manager: TensorCommunicationManager,
         connections: list[Connection],
         walks: dict[str, GraphSection] | None = None,
-        unheld_nodes: frozenset[str] = frozenset(),
     ):
         self._request_state = request_state
         self._tensor_manager = tensor_manager
@@ -58,12 +56,6 @@ class StreamBufferManager:
         )
         # edge name -> the partition the stream feeds
         self._partition: dict[str, str] = {c.edge_name: c.to_partition for c in connections}
-        # edge name -> how long its ready chunks may wait to batch; never for
-        # a stream into one of ``unheld_nodes``
-        self.holds: dict[str, ChunkBatchHold] = {
-            c.edge_name: c.batch_hold for c in connections
-            if c.batch_hold is not None and self.consumer_node.get(c.edge_name) not in unheld_nodes
-        }
         # the rids that own a buffer; empty for a text model, so a speculation
         # skips its per-row stream polls
         self._rids: set[int] = set()
@@ -122,9 +114,6 @@ class StreamBufferManager:
         waiting = sbuf.pop_waiting_edge()
         if waiting is not None:
             return waiting
-        if sbuf.held:
-            # `poll` decided to hold it; a speculative build waits too
-            return None
         if not sbuf.has_chunk_ready():
             sbuf.maybe_ready = False
             return None
@@ -143,40 +132,14 @@ class StreamBufferManager:
             tm.dereference_batch_uniform(list(chunk.released))
         return StreamingEdge(edge_name, consumer_node, uuids, chunk.info)
 
-    def poll(self, idle: bool = True) -> list[tuple[int, StreamingEdge]]:
+    def poll(self) -> list[tuple[int, StreamingEdge]]:
         """Every request's ready chunks, popped. A buffer nothing has touched
-        since a poll found it empty is skipped (``StreamBuffer.maybe_ready``).
-
-        A connection with a ``ChunkBatchHold`` keeps its holdable chunks back
-        until enough are ready or the oldest has waited long enough, so they
-        reach the consumer as one batch; ``idle`` (nothing in flight) releases
-        them at once, since holding then only delays the work. The decision
-        lands on each buffer (``StreamBuffer.held``), so the speculative
-        build's poll, later in the pass, holds the same chunks.
-        """
+        since a poll found it empty is skipped (``StreamBuffer.maybe_ready``)."""
         polled: list[tuple[int, StreamingEdge]] = []
-        holds = self.holds
-        held: dict[str, list[tuple[int, StreamBuffer, float]]] = {}
-        now = time.monotonic()
         for request_id, req_info in list(self._request_state.per_request_info.items()):
             for edge_name, sbuf in req_info.stream_buffers.items():
                 if not sbuf.maybe_ready:
                     continue
-                if holds and edge_name in holds:
-                    since = None if idle else sbuf.holdable_since(now)
-                    if since is not None:
-                        held.setdefault(edge_name, []).append((request_id, sbuf, since))
-                        continue
-                    sbuf.release_hold()
-                streaming_edge = self.pop_edge(sbuf, edge_name, request_id)
-                if streaming_edge is not None:
-                    polled.append((request_id, streaming_edge))
-        for edge_name, chunks in held.items():
-            hold = holds[edge_name]
-            if len(chunks) < hold.min_chunks and min(c[2] for c in chunks) > now - hold.max_wait_s:
-                continue
-            for request_id, sbuf, _ in chunks:
-                sbuf.release_hold()
                 streaming_edge = self.pop_edge(sbuf, edge_name, request_id)
                 if streaming_edge is not None:
                     polled.append((request_id, streaming_edge))

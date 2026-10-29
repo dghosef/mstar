@@ -98,7 +98,6 @@ def _make_model() -> Qwen3TTSModel:
     model.config = Qwen3TTSModelConfig()
     model.tokenizer = _TokenizerStub()
     model._submodule_cache = {}
-    model.codec_batch_hold_ms = 40.0
     model.codec_dtype = torch.float32
     return model
 
@@ -1385,7 +1384,8 @@ def test_qwen3_tts_talker_preprocess_packs_the_tensors_the_per_row_device_copies
     # text condition, a prompt row as built.
     configs = {c.capture_graph_walk: c for c in submodule.get_accelerator_graph_configs(torch.device("cpu"))}
     mixed_rows = [rows[0], prefill[0], rows[1], prefill[2], *configs[TALKER_MIXED].get_node_inputs(2, 0)]
-    for row, walk in zip(mixed_rows, ["talker_decode", "talker_prefill", "talker_decode", "talker_prefill_clone"]):
+    walks = ["talker_decode", "talker_prefill", "talker_decode", "talker_prefill_clone"]
+    for row, walk in zip(mixed_rows, walks, strict=False):
         row.graph_walk = walk  # the engine stamps a mixed step's rows with their own walk
     packed = submodule.preprocess(TALKER_MIXED, engine_inputs, mixed_rows)
     _assert_same_tensor(packed["input_embeds"], torch.cat([
