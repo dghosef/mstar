@@ -379,7 +379,7 @@ def incr_step_fn(incr, pool, B, width, compiled):
 
 
 def cmd_timing(args):
-    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.benchmark = not args.no_cudnn_benchmark
     model, codec = load_codec(args.dtype)
     cfg = codec.config.codec
     incrs = {lay: make_incremental(codec.decoder, lay) for lay in args.layouts}
@@ -443,7 +443,7 @@ def _category(name: str) -> str:
 def cmd_kernels(args):
     from torch.profiler import ProfilerActivity, profile
 
-    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.benchmark = not args.no_cudnn_benchmark
     model, codec = load_codec(args.dtype)
     incrs = {lay: make_incremental(codec.decoder, lay) for lay in args.layouts}
     pools = {lay: SlotPool(m, args.batch + 1, "cuda") for lay, m in incrs.items()}
@@ -619,6 +619,7 @@ def main():
     e.add_argument("--limit", type=int, default=40)
     for sp in sub.choices.values():
         sp.add_argument("--tf32", action="store_true", help="TF32 matmuls (cuDNN convs use TF32 by default)")
+        sp.add_argument("--no-cudnn-benchmark", action="store_true", help="cuDNN's heuristic conv picks")
         if sp is not e:
             sp.add_argument("--layouts", nargs="+", default=["ncw", "nwc"])
     args = p.parse_args()
