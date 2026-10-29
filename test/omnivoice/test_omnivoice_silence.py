@@ -50,6 +50,30 @@ def test_edge_cases_match_pydub(audio, reference):
     assert np.array_equal(got, want)
 
 
+def test_postprocess_shapes_the_waveform_and_refuses_a_masked_canvas(reference):
+    """code2wav emits the raw float waveform and the API side shapes it the
+    reference's way (here: peak-normalised to 0.5, faded and padded); a canvas
+    that still held MASK cells arrives NaN-poisoned and is refused."""
+    del reference  # the fade and pad are the reference package's
+    import torch
+
+    from mstar.model.omnivoice.components.codec import post_process
+    from mstar.model.omnivoice.config import OmniVoiceConfig
+    from mstar.model.omnivoice.omnivoice_model import OmniVoiceModel
+
+    model = object.__new__(OmniVoiceModel)
+    model.config = OmniVoiceConfig()
+    rng = np.random.default_rng(0)
+    wave = _speech(rng, 2.0)[0]
+    pcm = np.frombuffer(model.postprocess(torch.from_numpy(wave), "audio", request_kwargs={}), dtype=np.int16)
+    want = post_process(wave, config=model.config, ref_rms=None, pad_duration=0.1, fade_duration=0.1, enabled=True)
+    assert np.array_equal(pcm, (np.clip(want, -1, 1) * 32767).astype(np.int16))
+    poisoned = torch.from_numpy(wave.copy())
+    poisoned[:] = float("nan")
+    with pytest.raises(RuntimeError, match="masked cells"):
+        model.postprocess(poisoned, "audio", request_kwargs={})
+
+
 def _trim_over_a_reversed_copy(audio, rate, mid_sil, lead_sil, trail_sil):
     """The edge trim as pydub runs it: the trailing trim reverses the lead-trimmed
     samples and measures them afresh."""
