@@ -1,4 +1,5 @@
-"""Attention as one dense varlen pass: FlashAttention-3, or AITER on ROCm."""
+"""Dense attention over [frozen prefix | fresh tokens]: FlashAttention-3 per
+segment, or one AITER varlen pass on ROCm."""
 
 import functools
 import logging
@@ -97,15 +98,15 @@ class _GatheredPrefix:
 
 
 class DenseAttentionManager(AttentionManager):
-    """Attention as one dense varlen pass (FA3, AITER on ROCm) over a contiguous
-    [frozen prefix | fresh tokens] sequence.
+    """Dense attention (FA3's dense kernel per segment, one AITER varlen pass
+    on ROCm) over a contiguous [frozen prefix | fresh tokens] sequence.
 
     For a workload that recomputes every one of its K/V every step and only
     reuses a small frozen prefix — diffusion denoise, where the prefix is the
     text conditioning — the paged path's per-step full-buffer K/V write and
     ``wrapper.plan`` are pure overhead. This gathers the prefix once per
     (stream, layer), concatenates it with the freshly projected K/V, and runs
-    one kernel. The gathered prefix is reused across steps: it is keyed on the
+    the kernel. The gathered prefix is reused across steps: it is keyed on the
     stream's ``generation``, so a fork, a reset, or a page-table move
     invalidates it (``CacheStream.generation``).
 

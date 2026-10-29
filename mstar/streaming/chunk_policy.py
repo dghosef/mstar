@@ -233,7 +233,9 @@ class ScheduledLeftContextChunkPolicy(ChunkPolicy):
     up to ``left_context`` already-delivered items in front of them, so a
     causal decoder can warm up on frames it has processed before. Unlike
     ``LeftContextChunkPolicy`` the first chunk may be smaller than the
-    context: the context is whatever has been delivered so far, capped.
+    context: the context is whatever has been delivered so far, capped at
+    ``left_context``, except a first chunk's primed context (``prime``),
+    which may exceed it.
 
     Example (Qwen3-TTS, 12 Hz frames): ``schedule=(4, 8, 16)``, ``chunk=25``,
     ``left_context=25`` pops windows of 4, 4+8, 12+16, 25+25, 25+25, ...
