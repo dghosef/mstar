@@ -8,8 +8,13 @@ then::
 
 Every checkpoint is placed by its mean offset from ``recv`` across requests,
 and each stage is the gap between consecutive checkpoints in that order. The
-worker's share is ``worker start -> worker end`` (first step's launch to last
-step's postprocess, over every node); everything else is outside it.
+worker's share is its span (first step's launch to last step's postprocess,
+over every node, so meaningful when the workers share one host); everything
+else is outside it.
+
+It parses ``pretty_print_profile``'s text, the only form the stats file has,
+and raises on a timeline line it doesn't know, so a change to that format
+fails here rather than dropping a stage from the table.
 """
 from __future__ import annotations
 
@@ -20,6 +25,8 @@ from dataclasses import dataclass, field
 
 _SEG = re.compile(r"^\s{3}(.+?) → (.+?)\s+(-?[\d.]+) ms$")
 _TOTAL = re.compile(r"^\s{3}total\s+(-?[\d.]+) ms$")
+_SPAN = re.compile(r"^\s{3}worker span \(same-host clocks\)\s+(-?[\d.]+) ms$")
+_LAST_READ = re.compile(r"^\s{3}last chunk after last output read\s+(-?[\d.]+) ms$")
 _POST = re.compile(r"^\s{3}output postprocess \(sum\)\s+([\d.]+) ms$")
 _NODE = re.compile(r"^\s{3}(\S+)\s*$")
 _WALK = re.compile(r"^\s{5}(\S+)\s+n=(\d+)\s+([\d.]+)\s+\(")
@@ -30,6 +37,7 @@ class Profile:
     rid: str
     offsets: dict[str, float] = field(default_factory=dict)  # checkpoint -> ms after the first one
     total_ms: float | None = None
+    worker_span_ms: float | None = None
     postprocess_ms: float = 0.0
     node_busy_ms: dict[str, float] = field(default_factory=dict)
     node_steps: dict[str, int] = field(default_factory=dict)
@@ -64,8 +72,12 @@ def parse(text: str) -> list[Profile]:
                 cur.offsets[b] = cur.offsets[a] + ms
             elif m := _TOTAL.match(line):
                 cur.total_ms = float(m.group(1))
+            elif m := _SPAN.match(line):
+                cur.worker_span_ms = float(m.group(1))
             elif m := _POST.match(line):
                 cur.postprocess_ms = float(m.group(1))
+            elif line.strip() and not _LAST_READ.match(line):
+                raise ValueError(f"unrecognised timeline line in request {cur.rid}: {line!r}")
         elif section == "graph":
             if m := _WALK.match(line):
                 key = f"{node}/{m.group(1)}"
@@ -98,10 +110,9 @@ def render(profiles: list[Profile], client_e2e_ms: float | None = None) -> str:
         out.append(f"{a + ' → ' + b:<44} {_stats(gaps)}")
     totals = [p.total_ms for p in profiles if p.total_ms is not None]
     out.append(f"{'total (recv → last checkpoint)':<44} {_stats(totals)}")
-    span = [p.offsets["worker end"] - p.offsets["worker start"] for p in profiles
-            if "worker start" in p.offsets and "worker end" in p.offsets]
-    outside = [p.total_ms - (p.offsets["worker end"] - p.offsets["worker start"]) for p in profiles
-               if p.total_ms is not None and "worker start" in p.offsets and "worker end" in p.offsets]
+    span = [p.worker_span_ms for p in profiles if p.worker_span_ms is not None]
+    outside = [p.total_ms - p.worker_span_ms for p in profiles
+               if p.total_ms is not None and p.worker_span_ms is not None]
     out += ["", f"{'worker span (start → end, all nodes)':<44} {_stats(span)}",
             f"{'outside the worker span (server side)':<44} {_stats(outside)}",
             f"{'  of which output postprocess (encode)':<44} {_stats([p.postprocess_ms for p in profiles])}"]
