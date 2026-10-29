@@ -614,9 +614,10 @@ Qwen3-TTS notes
   ordered sentence chunks of about 400 characters (one Talker request each,
   two kept in flight while the current one streams); set
   ``sentence_chunking: false`` (or ``true`` for shorter texts) per request.
-- Audio streams in a ramp of codec chunks: the first frame is decoded on its
-  own (first audio one Talker step after prefill), the next windows add 3, 8
-  and 16 frames, then 25 new frames behind up to 72 frames of already decoded
+- Audio streams in a ramp of codec chunks: the first four frames are decoded
+  together (320 ms of audio for the client to play while the next chunk is
+  made; one frame's 80 ms ran dry under load), the next windows add 8 and 16
+  frames, then 25 new frames behind up to 72 frames of already decoded
   left context, the decoder transformer's sliding window. The
   transformer stacks 8 such layers, so a window still differs slightly from a
   whole-utterance decode once an utterance outgrows the context; 25 frames of
@@ -674,9 +675,9 @@ Qwen3-TTS notes
   without the package. Each request's PCM is marked chunk by chunk with its own
   streaming state, so a streamed utterance carries the same mark as a whole one.
   At startup the engine captures the generator per chunk length of the codec
-  schedule (by default 1, 3, 8, 16 and 25 frames) and batch bucket, so marking a step's
+  schedule (by default 4, 8, 16 and 25 frames) and batch bucket, so marking a step's
   chunks costs one graph replay per distinct length. The captures hold GPU memory: about
-  2.5 GiB for the default 30 graphs (5 lengths, 6 batch buckets) on an H200, 5.7 GiB with
+  2.5 GiB for the default 24 graphs (4 lengths, 6 batch buckets) on an H200, 5.7 GiB with
   25 lengths. A chunk outside them (another length, more rows than the largest bucket,
   a partial frame) runs eagerly, and the first one of each kind is logged.
   Check files with ``python -m mstar.model.audio_watermark detect --message 0xBEEF out.wav``
