@@ -9,9 +9,15 @@ last input sample, the transformer's last ``sliding_window - 1`` keys and
 values per layer, and the frame count (RoPE positions continue from it).
 Zeros are a fresh stream's state: the decoder's own left zero padding.
 
-``CodecState`` names that state as recurrent-state pool blocks; the codec node
-gathers its rows' blocks from the pool before the decode and scatters the new
-ones back after it.
+``codec_state_blocks`` names that state as recurrent-state pool blocks; the
+codec node gathers its rows' blocks from the pool before the decode and
+scatters the new ones back after it.
+
+After the transformer the decode runs time-major (``[B, T, C]``, what the
+transformer emits and the ConvNeXt blocks' norm and linears read), every conv
+a 2-D conv on channels-last tensors and weights: cuDNN's NHWC kernels then
+need no layout transposes around each conv, a fifth of the decode's GPU time
+channels-first.
 """
 
 from __future__ import annotations
@@ -42,7 +48,9 @@ def codec_state_blocks(config, dtype: torch.dtype) -> dict[str, RecurrentBlockCo
             )
 
     def conv(name, channels, width):
-        blocks[name] = RecurrentBlockConfig(shape=(channels, width), dtype=dtype)
+        # time-major, as the decode runs; the pre-transformer conv is channels-first
+        shape = (channels, width) if name == "pre_conv" else (width, channels)
+        blocks[name] = RecurrentBlockConfig(shape=shape, dtype=dtype)
 
     conv("pre_conv", config.codebook_dim, _PRE_CONV_KERNEL - 1)
     for i in range(len(config.upsampling_ratios)):
@@ -93,6 +101,13 @@ class IncrementalDecoder(nn.Module):
         for tconv, _ in decoder.upsample:
             if tconv.conv.kernel_size != tconv.conv.stride:
                 raise TypeError("incremental decode assumes the upsampling transposed convs do not overlap")
+        # Channels-last weights, in place: ``weight.unsqueeze(2)`` is then the
+        # NHWC 2-D weight, and the reference modules still run on the same storage.
+        with torch.no_grad():
+            for _, _, module in self.convs[1:]:
+                _to_channels_last(module.conv)
+            for tconv, _ in decoder.upsample:
+                _to_channels_last(tconv.conv)
 
     def state_blocks(self) -> dict[str, RecurrentBlockConfig]:
         """The blocks this decoder's modules read and write (``codec_state_blocks`` must match)."""
@@ -105,7 +120,8 @@ class IncrementalDecoder(nn.Module):
                 )
         for name, transposed, module in self.convs:
             width = 1 if transposed else module.padding
-            blocks[name] = RecurrentBlockConfig(shape=(module.conv.in_channels, width), dtype=dtype)
+            shape = (module.conv.in_channels, width) if name == "pre_conv" else (width, module.conv.in_channels)
+            blocks[name] = RecurrentBlockConfig(shape=shape, dtype=dtype)
         return blocks
 
     def _transformer(self, x, state, new, lengths):
@@ -155,34 +171,54 @@ class IncrementalDecoder(nn.Module):
         rate = [1]   # input samples per frame of the next stateful module
 
         def conv(x):
+            """The next stateful conv over ``x [B, T, C]`` from its state, time-major."""
             name, transposed, module = next(convs)
-            keep = state[name].shape[-1]
-            xs = torch.cat([state[name], x], -1)
-            new[name] = _tail(xs, lengths * rate[0], keep, 2)
+            keep = state[name].shape[1]
+            xs = torch.cat([state[name], x], 1)
+            new[name] = _tail(xs, lengths * rate[0], keep, 1)
             c = module.conv
+            x4 = xs.transpose(1, 2).unsqueeze(2)   # [B, C, 1, T], a channels-last view
             if transposed:
                 stride = c.stride[0]
                 rate[0] *= stride
-                y = F.conv_transpose1d(xs, c.weight, c.bias, stride=stride)
-                return y[..., stride: stride + x.shape[-1] * stride]
-            return F.conv1d(xs, c.weight, c.bias, dilation=c.dilation, groups=c.groups)
+                y = F.conv_transpose2d(x4, c.weight.unsqueeze(2), c.bias, stride=(1, stride))
+                return y.squeeze(2).transpose(1, 2)[:, stride: stride + x.shape[1] * stride]
+            y = F.conv2d(x4, c.weight.unsqueeze(2), c.bias, dilation=(1, c.dilation[0]), groups=c.groups)
+            return y.squeeze(2).transpose(1, 2)
 
-        h = conv(decoder.quantizer.decode(codes))
-        h = self._transformer(h.transpose(1, 2), state, new, lengths).transpose(1, 2)
+        next(convs)   # the pre-transformer conv, channels-first:
+        pre = decoder.pre_conv.conv
+        xs = torch.cat([state["pre_conv"], decoder.quantizer.decode(codes)], -1)
+        new["pre_conv"] = _tail(xs, lengths, state["pre_conv"].shape[-1], 2)
+        h = F.conv1d(xs, pre.weight, pre.bias)
+        h = self._transformer(h.transpose(1, 2), state, new, lengths)   # [B, T, latent]
         for tconv, convnext in decoder.upsample:
-            h = tconv.conv(h)
-            rate[0] *= tconv.conv.stride[0]
-            y = conv(h).transpose(1, 2)
-            y = convnext.pwconv2(convnext.act(convnext.pwconv1(convnext.norm(y))))
-            h = h + (convnext.gamma * y).transpose(1, 2)
+            c = tconv.conv
+            h = F.conv_transpose2d(h.transpose(1, 2).unsqueeze(2), c.weight.unsqueeze(2), c.bias,
+                                   stride=(1, c.stride[0])).squeeze(2).transpose(1, 2)
+            rate[0] *= c.stride[0]
+            y = convnext.pwconv2(convnext.act(convnext.pwconv1(convnext.norm(conv(h)))))
+            h = h + convnext.gamma * y
         h = conv(h)
         for block in decoder.decoder[1:-2]:
-            h = conv(block.block[0](h))
+            h = conv(_snake(block.block[0], h))
             for unit in block.block[2:]:
-                h = h + unit.conv2.conv(unit.act2(conv(unit.act1(h))))
-        wav = conv(decoder.decoder[-2](h))
+                c2 = unit.conv2.conv
+                h = h + F.linear(_snake(unit.act2, conv(_snake(unit.act1, h))), c2.weight.squeeze(-1), c2.bias)
+        wav = conv(_snake(decoder.decoder[-2], h))
         new[FRAMES] = state[FRAMES] + lengths.view(-1, 1)
-        return wav.clamp(-1, 1).squeeze(1), new
+        return wav.clamp(-1, 1).squeeze(-1), new
+
+
+def _snake(module: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    """``FusedSnakeBeta`` over a time-major ``x [B, T, C]``, in fp32 as its kernel computes."""
+    x32 = x.float()
+    return (x32 + module.inv_beta * torch.sin(x32 * module.alpha).pow(2)).to(x.dtype)
+
+
+def _to_channels_last(conv: nn.Module) -> None:
+    w = conv.weight
+    w.data = w.data.unsqueeze(2).contiguous(memory_format=torch.channels_last).squeeze(2)
 
 
 def _tail(xs: torch.Tensor, valid: torch.Tensor, keep: int, dim: int) -> torch.Tensor:
