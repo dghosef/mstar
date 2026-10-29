@@ -37,7 +37,11 @@ def compile_vae_decode(vae: nn.Module):
     candidate conv kernels, two server processes can pick different ones (64 dB apart on the same
     seeds). An "exact" compile that keeps GroupNorm and SiLU on the eager kernels is bit-exact but
     slower than eager (111 vs 89 ms), so the exactness knob for the VAE is ``vae_compile: false``.
+    The compiled decode also folds each nearest-x2 upsample into its conv (``UpStage.fold_upsample``).
     """
+    for module in vae.modules():
+        if callable(getattr(module, "fold_upsample", None)):
+            module.fold_upsample()
     return with_inductor_rounding(
         torch.compile(vae.decode, fullgraph=False, dynamic=False, mode=VAE_COMPILE_MODE),
         eager_rounding=True,

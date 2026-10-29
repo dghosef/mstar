@@ -1488,8 +1488,11 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
    is a latency-for-exactness trade:
 
    * The norms alone make the transformer bit-exact with eager (measured on klein-4B and
-     9B). The shipped ``[norms]`` costs klein-4B 4% of its B=1 latency (0.371 vs
-     0.356 s); excluding the activations too adds cost and nothing else.
+     9B). A torch ``RMSNorm`` (klein's per-head q/k norms) runs a Triton replica of torch's
+     kernel with the same arithmetic order: bit-identical, ~4x faster than torch's
+     one-block-per-row launch, +5% klein-4B throughput at concurrency >= 4 (H200). Before
+     it the shipped ``[norms]`` cost klein-4B 4% of its B=1 latency (0.371 vs 0.356 s).
+     Excluding the activations too adds cost and nothing else.
    * Z-Image's 180 norms per step cost 45% (1.25 vs 0.86 s at B=1), so it ships ``false``
      and lands at a median 34 dB. ``[norms]`` turns it reference-faithful (at least
      55.9 dB on every prompt).

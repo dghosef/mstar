@@ -8,11 +8,14 @@ model never imports a sibling model.
 
 from __future__ import annotations
 
+import functools
 import logging
 from collections.abc import Sequence
 
 import torch
 from torch import nn
+
+from mstar.model.components.diffusion.exact_norm import exact_rms_norm
 
 logger = logging.getLogger(__name__)
 
@@ -44,15 +47,31 @@ def exclude_from_compile(transformer: nn.Module, types: Sequence[type] = EXACT_O
     forward: each excluded module's forward becomes a dynamo graph break, so inductor only
     fuses the pointwise chains around the GEMMs and attention. A module is excluded by type
     (``types``) or, when ``types`` include the norms, with a ``compile_exact_op = True`` class
-    attribute. Returns the number of modules excluded."""
+    attribute. A torch ``RMSNorm`` runs :func:`exact_rms_norm` (torch's eager result, several times
+    faster on the per-head q/k norms). Returns the number of modules excluded."""
     types = tuple(types)
     with_marked = any(t in EXACT_OP_CLASSES["norms"] for t in types)
     count = 0
     for module in transformer.modules():
         if isinstance(module, types) or (with_marked and getattr(module, "compile_exact_op", False)):
-            module.forward = torch._dynamo.disable(module.forward)
+            forward = module.forward
+            if type(module) is nn.RMSNorm:
+                forward = functools.partial(_exact_rms_norm_forward, module)
+            module.forward = torch._dynamo.disable(forward)
             count += 1
     return count
+
+
+def excluded_from_compile(module: nn.Module) -> bool:
+    """Whether :func:`exclude_from_compile` took ``module`` out of the compiled graph: it
+    replaces the module's forward with an instance attribute."""
+    return "forward" in vars(module)
+
+
+def _exact_rms_norm_forward(module: nn.RMSNorm, x: torch.Tensor) -> torch.Tensor:
+    if len(module.normalized_shape) != 1:
+        return torch.nn.functional.rms_norm(x, module.normalized_shape, module.weight, module.eps)
+    return exact_rms_norm(x, module.weight, module.eps)
 
 
 def compile_transformer_forward(
