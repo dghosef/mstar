@@ -507,9 +507,6 @@ class ThinkerSubmodule(ARNodeSubmodule):
         **kwargs
     ) -> ARNodeInputs:
         device = self.get_device()
-        start_pos = self.node_resources[THINKER_POS].position(
-            rid=fwd_info.rid_handle, label="main"
-        )
         if graph_walk == "thinker_decode":
             # The previous token, embedded with the step's other decode rows in
             # `preprocess`; its MRoPE position (the same for all 3 components)
@@ -539,6 +536,10 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 }
             )
 
+        # an audio or vision row's own positions start from the stream's counter
+        start_pos = self.node_resources[THINKER_POS].position(
+            rid=fwd_info.rid_handle, label="main"
+        )
         if graph_walk == "prefill_audio":
             audio_embeds = inputs["audio_embeds"][0].to(device)  # (audio_tokens, hidden)
             audio_len = audio_embeds.shape[0]
@@ -947,14 +948,10 @@ class ThinkerSubmodule(ARNodeSubmodule):
         return [
             BatchedAcceleratorGraphConfig(
                 capture_graph_walk="thinker_decode",
+                # a text row, as a decode row is, so padded steps keep the broadcast positions
                 single_request_inputs=ARNodeInputs(
                     input_seq_len=1,
                     input_ids=torch.zeros((1,), dtype=torch.long, device=device),
-                    custom_pos_ids=torch.tensor(
-                        [[0], [0], [0]],
-                        dtype=torch.float,
-                        device=device,
-                    ),
                 ),
                 capture_batch_sizes=[1, 2, 4, 8, 16, 32],
             ),
