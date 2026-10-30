@@ -32,6 +32,7 @@ from mstar.engine.resources.recurrent import RecurrentBlockConfig
 from mstar.model.components.streaming_codec import (
     causal_conv,
     overlap_tconv,
+    snake,
     tail,
     tconv_gemm,
     to_channels_last,
@@ -221,9 +222,8 @@ def _rms_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
 
 
 def _snake(module: nn.Module, x: torch.Tensor) -> torch.Tensor:
-    """``FusedSnakeBeta`` over a time-major ``x [B, T, C]``, in fp32 as its kernel computes."""
-    x32 = x.float()
-    return (x32 + module.inv_beta * torch.sin(x32 * module.alpha).pow(2)).to(x.dtype)
+    """``FusedSnakeBeta`` over a time-major ``x [B, T, C]``."""
+    return snake(x, module.alpha, module.inv_beta)
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:

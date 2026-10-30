@@ -54,6 +54,14 @@ def causal_conv(xs: torch.Tensor, conv: nn.Module) -> torch.Tensor:
     return y.squeeze(2).transpose(1, 2)
 
 
+def snake(x: torch.Tensor, alpha: torch.Tensor, inv_beta: torch.Tensor) -> torch.Tensor:
+    """Snake ``x + inv_beta * sin(alpha * x)^2`` over a time-major ``x [B, T, C]``, in fp32
+    (or wider) as the codecs' fused kernels compute it."""
+    dtype = torch.promote_types(x.dtype, torch.float32)
+    x32 = x.to(dtype)
+    return (x32 + inv_beta.to(dtype) * torch.sin(x32 * alpha.to(dtype)).pow(2)).to(x.dtype)
+
+
 def to_channels_last(conv: nn.Module) -> None:
     """Lay ``conv``'s weight out channels-last in place: ``weight.unsqueeze(2)``
     is then the NHWC 2-D weight, and the module still runs on the same storage."""
