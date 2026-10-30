@@ -257,6 +257,10 @@ class FlashInferManager(AttentionManager):
 
         plan_outputs: KVPlanOutputs = ctx.plan_results.get(self._kv_cache_name)
         assert plan_outputs is not None, f"Attention Manager expected plan result from {self._kv_cache_name}"
+        # unbound, the wrappers would plan the logical page size over a cache of page_size / P
+        assert (self._placement is not None) == getattr(self._kv_config, "context_parallel", False), (
+            f"{self._kv_cache_name!r} sets context_parallel but bind_dependencies gave no placement"
+        )
 
         # a preplan leases a different cg slot, so its wrappers and workspaces
         # are disjoint from the ones the in-flight forward reads

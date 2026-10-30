@@ -385,6 +385,10 @@ class FlashInferMLAManager(AttentionManager):
             return
         plan_outputs: KVPlanOutputs = ctx.plan_results.get(self._kv_cache_name)
         assert plan_outputs is not None, f"expected plan result from {self._kv_cache_name}"
+        # as FlashInferManager's: unbound, the wrappers would plan the logical page size
+        assert (self._placement is not None) == getattr(self._kv_config, "context_parallel", False), (
+            f"{self._kv_cache_name!r} sets context_parallel but bind_dependencies gave no placement"
+        )
         plan_states = self._preplan_states if ctx.is_preplan else self._current_plan_states
         plan_states.clear()
         for label, kv_out in plan_outputs.items():
