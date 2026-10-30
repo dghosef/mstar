@@ -82,9 +82,9 @@ class AttentionManager(AttentionResource):
                 f"attention backend {backend.value!r} ignores sm_scale; only "
                 f"{AttnBackend.FLASHINFER_MLA.value!r} reads it"
             )
-        # `shard` lives on the KVConfig base, so this is unchanged for both.
+        # by the pool's own rule, so it matches the KV resource's
         if info.joint_comm_group is not None:
-            kv_config.shard(info.head_shards)
+            kv_config.shard(kv_config.head_shards(info.joint_comm_group))
         if isinstance(kv_config, PagedKVConfig) and kv_config.context_parallel:
             unsupported = [name for name, refused in (
                 ("sliding_window", spec.config.sliding_window is not None),

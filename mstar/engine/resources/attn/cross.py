@@ -66,7 +66,7 @@ class CrossAttentionManager(AttentionResource):
         kv_config = info.dependency(spec.config.kv_cache).config
         backend = resolve_attn_backend(spec.config.backend, info.device)
         if info.joint_comm_group is not None:
-            kv_config.shard(info.head_shards)
+            kv_config.shard(kv_config.head_shards(info.joint_comm_group))
         if backend == AttnBackend.FLASHINFER:
             return FlashInferCrossManager(
                 kv_cache=spec.config.kv_cache,

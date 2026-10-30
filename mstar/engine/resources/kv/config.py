@@ -51,22 +51,27 @@ class KVConfig(ABC):
         self._unsharded_kv_heads = self.num_kv_heads
         self._unsharded_qo_heads = self.num_qo_heads
 
+    def head_shards(self, joint: "JointGroups | None") -> int:
+        """How many ways ``joint``'s ranks split this cache's heads: its TP and SP ranks (Ulysses
+        all-to-alls heads), or TP alone for a pool placing its positions over the SP ranks
+        (``PagedKVConfig.place``). The KV resource and every resource over it shard by this, so
+        they agree with the pool however each was built."""
+        if joint is None:
+            return 1
+        sp = joint.sp_group.world_size
+        # only a paged pool places positions
+        over_sp = getattr(self, "context_parallel", False) and sp > 1
+        return joint.tp_group.world_size * (1 if over_sp else sp)
+
     def shard(self, num_shards: int) -> None:
-        """Narrow the head counts to one rank's slice.
+        """Narrow the head counts to one rank's slice of ``num_shards`` (``head_shards``).
 
         Idempotent because one KVConfig is shared by the KV resource and the
         attention resources planned against it, and each shards on construction.
-        ``num_shards`` is `EngineResourceInfo.head_shards`: tp * sp, since Ulysses
-        SP all-to-alls heads, or tp alone on a node whose pool places positions
-        over its SP ranks (see `place`).
         """
-        from mstar.distributed.utils import divide
+        from mstar.distributed.utils import divide, kv_head_replicas
 
-        if num_shards >= self._unsharded_kv_heads:
-            # fewer KV heads than ranks — every rank holds a replicated head
-            self.num_kv_heads = 1
-        else:
-            self.num_kv_heads = divide(self._unsharded_kv_heads, num_shards)
+        self.num_kv_heads = kv_head_replicas(self._unsharded_kv_heads, num_shards)[0]
         self.num_qo_heads = divide(self._unsharded_qo_heads, num_shards)
 
     @abstractmethod

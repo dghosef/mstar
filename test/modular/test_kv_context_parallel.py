@@ -281,11 +281,18 @@ def test_an_sp_placed_node_shards_heads_over_tp_and_refuses_a_dependent_without_
     placement = engine._resources["kv"].placement
     assert (placement.size, placement.index, placement.over_sp) == (P, 0, True)
     assert engine._resources["kv"].kv_cache.page_slots == PAGE_SIZE // P
-    # built directly, as a harness does, the pool shards its heads the same way
+    # built directly, as a harness does, the pool shards its heads the same way, and so does the
+    # attention over it, told nothing about the placement
     direct = pool()
-    KVManager(
-        cfg=direct, name="kv", joint_comm_group=groups.get_joint_group_for_node(NODE),
-        transfer_engine_info=None, device=CPU, dtype=torch.float32,
+    joint = groups.get_joint_group_for_node(NODE)
+    KVManager(cfg=direct, name="kv", joint_comm_group=joint, transfer_engine_info=None, device=CPU, dtype=torch.float32)
+    assert (direct.num_kv_heads, direct.num_qo_heads) == (2, 4)
+    AttentionManager.build(
+        AttentionSpec(resource_key="attn", nodes={NODE}, config=AttentionConfig(kv_cache="kv")),
+        EngineResourceInfo(
+            device=CPU, joint_comm_group=joint,
+            dependencies={"kv": KVSpec(resource_key="kv", nodes={NODE}, config=direct)},
+        ),
     )
     assert (direct.num_kv_heads, direct.num_qo_heads) == (2, 4)
 

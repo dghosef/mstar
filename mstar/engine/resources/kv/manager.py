@@ -539,9 +539,7 @@ class KVManager(AttentionResource):
         # before the cache is allocated: it is sized off the head counts and the placement
         placement = cfg.place(joint_comm_group, name)
         if joint_comm_group is not None:
-            # positions placed over SP ranks leave the heads to TP alone (`EngineResourceInfo.head_shards`)
-            over_sp = placement is not None and placement.over_sp
-            cfg.shard(joint_comm_group.tp_group.world_size if over_sp else joint_comm_group.world_size)
+            cfg.shard(cfg.head_shards(joint_comm_group))
             tp_cache = joint_comm_group.world_size > 1 and cfg.prefix_cache and cfg.prefix_cache_tp
             if tp_cache and cfg.cpu_offload_pages > 0:
                 raise ValueError(

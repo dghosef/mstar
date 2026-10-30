@@ -9,6 +9,7 @@ from mstar.distributed.communication import WorkerParallelGroups
 from mstar.engine.engine import Engine
 from mstar.engine.node_dtype import resolve_model_dtype, resolve_node_dtype
 from mstar.engine.resources import ResourceReqConfig, apply_yaml_overrides
+from mstar.engine.resources.context_parallel import positions_over_sp
 from mstar.engine.resources.kv.transfer import TransferEngineInfo
 from mstar.graph.runtime.base import GraphRuntime
 from mstar.model.base import Model, node_moe_parallel_configs
@@ -136,12 +137,15 @@ class EngineManager:
             # Sequence parallelism is opt-in per node; only forward the SP
             # group to a node that runs its own and is on SP ranks, so models
             # that don't support SP keep their existing get_submodule call.
-            # Any other node on SP ranks places its KV positions over them
-            # (validate_deployment), and runs replicated across them.
+            # A node on SP ranks whose KV pool places positions over them runs
+            # replicated across them instead (validate_deployment checks that
+            # this agrees with the model's sp_enabled_nodes); the engine shards
+            # its heads by the same predicate.
             # Likewise ``moe_parallel``, only for a node group's ``ep_config``.
             extra = {}
             node_sp_group = parallel_groups.get_sp_config_for_node(name)
-            if node_sp_group.world_size > 1 and name in model.get_default_sharding_config().sp_enabled_nodes:
+            sp = node_sp_group.world_size
+            if sp > 1 and not positions_over_sp(specs, name, sp):
                 extra["sp_group"] = node_sp_group
             if name in moe_parallel:
                 extra["moe_parallel"] = moe_parallel[name]
