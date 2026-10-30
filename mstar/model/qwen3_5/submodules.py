@@ -790,9 +790,9 @@ class VisionEncoderSubmodule(NodeSubmodule):
     ) -> torch.Tensor | None:
         """The block loop replayed once for the whole step, or None if the step
         did not lease it."""
-        if VISION_BLOCK_LOOP not in engine_inputs.piecewise_leases:
+        runner = engine_inputs.piecewise_runners.get(VISION_BLOCK_LOOP)
+        if runner is None:
             return None
-        runner = engine_inputs.piecewise_runners[VISION_BLOCK_LOOP]
         # one replay for every image, not one each: a second plan overwrites the schedule a queued replay still reads
         return runner.run(
             static_inputs={"hidden": hidden, "cos": cos, "sin": sin},

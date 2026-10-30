@@ -591,32 +591,6 @@ def test_vision_encoder_refuses_patches_it_would_not_normalize():
         _encoder(max_segments=4)._normalize(torch.zeros(2, 3))
 
 
-def test_vision_block_loop_replays_exactly_when_leased():
-    """The forward replays the block loop when the step leased it and runs
-    eagerly otherwise, whatever the runner's buckets allow."""
-    from mstar.model.qwen3_5.submodules import VISION_BLOCK_LOOP
-
-    class Runner:
-        def run(self, **kwargs):
-            self.ran = kwargs
-            return SimpleNamespace(get_view=lambda name: "replayed")
-
-    encoder, runner = _encoder(max_segments=4), Runner()
-    hidden = cos = sin = torch.zeros(8, 32)
-
-    def replay(leases):
-        engine_inputs = SimpleNamespace(
-            piecewise_runners={VISION_BLOCK_LOOP: runner}, piecewise_leases=leases, request_ids=["r"],
-        )
-        return encoder._replay_block_loop(engine_inputs, hidden, cos, sin, (4, 4))
-
-    # not leased: `can_lease` refused the batch, or a forward driven outside the engine
-    assert replay({}) is None
-    assert not hasattr(runner, "ran")
-    assert replay({VISION_BLOCK_LOOP: object()}) == "replayed"
-    assert runner.ran["seq_lens"] == [4, 4]
-
-
 def test_a_bad_layout_is_refused_before_the_video_is_preprocessed(model, monkeypatch):
     """A literal `<|video_pad|>` in the user's text leaves the prompt with
     more video placeholders than videos; that 400s before the processor

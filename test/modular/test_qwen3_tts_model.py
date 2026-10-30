@@ -1079,29 +1079,6 @@ def test_qwen3_tts_batched_stop_check_agrees_with_the_per_request_one():
     assert submodule.check_stop_batched(list(cases), infos, host_rows) == BatchedStopCheck(stops, withheld)
 
 
-def test_qwen3_tts_depth_loop_replays_only_on_a_step_that_leased_it():
-    """``declare_step`` leaves the depth loop's sampler to the region only when
-    the step leased it, so the forward replays the region exactly then: a
-    runner that could take the batch is not enough."""
-    from mstar.model.qwen3_tts.submodules import DEPTH_LOOP_REGION
-
-    runs = []
-    runner = SimpleNamespace(
-        can_run=lambda **kwargs: True,
-        run=lambda **kwargs: runs.append(kwargs) or {"all_codes": "codes", "codec_embed_sum": "sum"},
-    )
-    hidden, codes = torch.zeros(2, 4), torch.zeros(2, dtype=torch.long)
-
-    def step(leases):
-        engine_inputs = SimpleNamespace(
-            piecewise_runners={DEPTH_LOOP_REGION: runner}, piecewise_leases=leases, request_ids=["a", "b"],
-        )
-        return TalkerSubmodule._run_depth_loop_piecewise(None, engine_inputs, hidden, codes)
-
-    assert step({}) is None and runs == []
-    assert step({DEPTH_LOOP_REGION: object()}) == ("codes", "sum") and len(runs) == 1
-
-
 def test_qwen3_tts_talker_returns_row_outputs_except_for_the_clone_prefill():
     """A decode or plain prefill step is one frame per row, handed back as
     batch tensors; the codec reads a ``[1, groups]`` row view as one frame."""

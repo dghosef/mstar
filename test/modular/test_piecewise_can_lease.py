@@ -52,6 +52,18 @@ def test_nothing_leased_leaves_the_context_alone():
     assert _lease({"refused": _Runner(accepts=False)}, [SimpleNamespace(input_seq_len=8)]) is None
 
 
+def test_the_forward_gets_an_early_lease_region_only_on_a_step_that_leased_it():
+    """Unleased, the step's own declaration covers the region's resources, so
+    its forward is not handed the region to replay and declare them again. A
+    region that takes no early lease is handed over every step."""
+    from mstar.engine.engine import SubmoduleManagement
+
+    runners = {"ok": _Runner(), "refused": _Runner(accepts=False), "own": _Runner(lease_before_step=False)}
+    leases = _lease(runners, [SimpleNamespace(input_seq_len=100)])
+    handed = SubmoduleManagement.runners_for(SimpleNamespace(piecewise_runners=runners), leases)
+    assert set(handed) == {"ok", "own"}
+
+
 def test_runner_defers_to_the_configs_predicate():
     def runner(predicate):
         return SimpleNamespace(_config=SimpleNamespace(can_lease=predicate))

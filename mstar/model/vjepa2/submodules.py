@@ -1138,14 +1138,6 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
 
         return out
 
-    @staticmethod
-    def _leased_block_loop(engine_inputs: ModelInputsFromEngine) -> "PiecewiseAcceleratorGraphRunner | None":
-        """The block loop's runner when this step leased it; without a lease
-        the loop runs inline, under ``declare_step``'s own KV and attention."""
-        if BLOCK_LOOP_REGION in engine_inputs.piecewise_leases:
-            return engine_inputs.piecewise_runners[BLOCK_LOOP_REGION]
-        return None
-
     @torch.compiler.disable
     def _rollout_step(
         self,
@@ -1228,7 +1220,7 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
             t_0=request_info.dynamic_loop_iter_counts.get("rollout_loop", 0),
             extrinsics=extrinsics,
             request_ids=engine_inputs.request_ids,
-            runner=self._leased_block_loop(engine_inputs),
+            runner=engine_inputs.piecewise_runners.get(BLOCK_LOOP_REGION),
         )
 
         logger.info(
@@ -1270,7 +1262,7 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
             t_0=iter_idx,
             extrinsics=extrinsics,
             request_ids=engine_inputs.request_ids,
-            runner=self._leased_block_loop(engine_inputs),
+            runner=engine_inputs.piecewise_runners.get(BLOCK_LOOP_REGION),
         )
 
         return {

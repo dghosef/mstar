@@ -697,12 +697,13 @@ class TalkerSubmodule(ARNodeSubmodule):
         ``talker_prefill``, which is eager because it is variable-length. Left
         eager, this loop costs ~4x its captured time.
         """
-        # a step replays the region exactly when it leased it, which is when
-        # the region (not ``declare_step``) declared CODE_PRED_SAMPLER
-        if DEPTH_LOOP_REGION not in engine_inputs.piecewise_leases:
+        # here exactly when the step leased it, which is when the region (not
+        # ``declare_step``) declared CODE_PRED_SAMPLER
+        runner = engine_inputs.piecewise_runners.get(DEPTH_LOOP_REGION)
+        if runner is None:
             return None
         batch_size = layer0_codes.shape[0]
-        output = engine_inputs.piecewise_runners[DEPTH_LOOP_REGION].run(
+        output = runner.run(
             static_inputs={
                 "last_hidden": last_hidden,
                 "layer0_codes": layer0_codes,

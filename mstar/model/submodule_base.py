@@ -553,12 +553,9 @@ class ModelInputsFromEngine:
     # by the engine, spread in at execute time (like ``cache_manager`` /
     # ``sampler``). Empty when the submodule opts into no piecewise graphs or
     # capture failed. See ``NodeSubmodule.get_piecewise_cuda_graph_configs``.
+    # A ``lease_before_step`` region is here only on a step that leased it, so
+    # its forward replays it exactly then and runs it eagerly otherwise.
     piecewise_runners: dict[str, "PiecewiseAcceleratorGraphRunner"] = field(default_factory=dict)
-    # label -> the slot this step leased on that region (``lease_before_step``
-    # regions). A forward replays such a region exactly when its label is
-    # here: a bucket that fits is not enough, since ``can_lease`` may have
-    # refused the batch, and the step declared its own attention instead.
-    piecewise_leases: "Mapping[str, SlotLease]" = field(default_factory=dict)
 
     # The batch's per-request states, injected by the engine (None on paths
     # that don't carry them, e.g. CUDA-graph capture with synthetic requests).

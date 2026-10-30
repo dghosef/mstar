@@ -227,6 +227,16 @@ class SubmoduleManagement:
             self._next_slot = (self._next_slot + 1) % self._num_slots
             return slot
 
+    def runners_for(self, leases: Mapping[str, SlotLease]) -> dict[str, PiecewiseAcceleratorGraphRunner]:
+        """The regions a forward may replay on a step holding ``leases``: a
+        ``lease_before_step`` region only when the step leased it. Without the
+        lease the step's own declaration covers the region's resources, and a
+        replay would declare and plan them a second time."""
+        runners = self.piecewise_runners
+        if not runners:
+            return runners
+        return {label: r for label, r in runners.items() if label in leases or not r.lease_before_step}
+
     def set_piecewise_slot(self, slot: int) -> None:
         """Point the region runners at this batch's slot, on the GPU thread just
         before its forward. Set here rather than at lease time: leasing runs
@@ -1732,8 +1742,7 @@ class Engine:
             request_ids=rids,
             per_request_info=req_info,
             resources=submodule_mgmt.resources,
-            piecewise_runners=submodule_mgmt.piecewise_runners,
-            piecewise_leases=ctx.piecewise_leases,
+            piecewise_runners=submodule_mgmt.runners_for(ctx.piecewise_leases),
             # padding rows get their own states, like their cache streams:
             # the submodule indexes this by step id, not by real rid
             per_request_states=LazyRequestStates(submodule, rids),

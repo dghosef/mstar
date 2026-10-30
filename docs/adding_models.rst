@@ -1647,11 +1647,10 @@ Both types share the base ``PiecewiseCudaGraphConfig`` fields:
 - ``can_lease`` has signature ``(inputs: list[NodeInputs]) -> bool``. It applies only with
   ``lease_before_step``, and lets the region refuse a batch for a limit that the
   capture bucket key doesn't express, such as Qwen3.5's per-request segment count. The
-  engine then gives the region no lease for that step. Your forward must replay only
-  when the region was leased, that is when its label is in
-  ``engine_inputs.piecewise_leases``, and not whenever ``runner.can_run`` is true: a
-  refused batch can still fit a bucket, and replaying it would declare the region's
-  resources twice.
+  engine then gives the region no lease for that step. A ``lease_before_step`` region is
+  in ``engine_inputs.piecewise_runners`` only on a step that leased it, so the forward
+  replays it whenever its runner is there and runs it eagerly otherwise: an unleased
+  step declared the region's resources itself, and a replay would declare them twice.
 - ``one_row_per_step`` makes the runner lease, check (``can_run``) and replay the region as
   one row, whatever the step's batch size, under the step's first request. It is for a
   packed region that runs every request's segments as one ragged batch, such as a vision
@@ -1771,8 +1770,8 @@ sequence, and an eager section after the region.
        }
 
    # --- invoke it inside the forward ---
-   if BLOCK_LOOP_REGION in engine_inputs.piecewise_leases:   # leased before the step
-       runner = engine_inputs.piecewise_runners[BLOCK_LOOP_REGION]
+   runner = engine_inputs.piecewise_runners.get(BLOCK_LOOP_REGION)   # here when leased
+   if runner is not None:
        out = runner.run(                       # admits + plans + replays + commits
            static_inputs={"x": x, "d_pos": d_pos, ...},
            request_ids=engine_inputs.request_ids,
