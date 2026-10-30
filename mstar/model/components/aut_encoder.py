@@ -257,11 +257,11 @@ class AuTEncoder(nn.Module):
 
     # -- forward -----------------------------------------------------------
 
-    def frontend(self, features: torch.Tensor, feature_lens: list[int]) -> torch.Tensor:
-        """``(B, num_mel_bins, T_max)`` zero-padded mel + valid lengths ->
-        packed ``(total_tokens, d_model)`` chunk embeddings with positions.
+    def frontend(self, clips: list[torch.Tensor]) -> torch.Tensor:
+        """Each request's ``(num_mel_bins, frames)`` mel -> packed
+        ``(total_tokens, d_model)`` chunk embeddings with positions.
 
-        Every request is cut into ``chunk_frames`` pieces; the last piece is
+        Every clip is cut into ``chunk_frames`` pieces; the last piece is
         zero-padded to a full chunk (as HF's ``pad_sequence`` does whenever a
         batch holds one full chunk), convolved, and trimmed back to its valid
         tokens. The trim gathers rows by indices built on the host, so nothing
@@ -271,11 +271,11 @@ class AuTEncoder(nn.Module):
         chunk = cfg.chunk_frames
         chunks: list[torch.Tensor] = []
         valid: list[int] = []
-        for b, n_frames in enumerate(feature_lens):
-            n_frames = int(n_frames)
+        for clip in clips:
+            n_frames = clip.shape[-1]
             full, rem = divmod(n_frames, chunk)
             n_chunks = full + (rem > 0)
-            padded = F.pad(features[b, :, :n_frames], (0, n_chunks * chunk - n_frames))
+            padded = F.pad(clip, (0, n_chunks * chunk - n_frames))
             chunks.append(padded.view(cfg.num_mel_bins, n_chunks, chunk).permute(1, 0, 2))
             valid += [cfg.tokens_per_chunk] * full + ([_conv_length(rem)] if rem else [])
         x = torch.cat(chunks, dim=0).unsqueeze(1).to(self.conv2d1.weight.dtype)  # (N, 1, mel, chunk)
@@ -314,7 +314,7 @@ class AuTEncoder(nn.Module):
         hidden_states = self.ln_post(hidden_states)
         return self.proj2(self.act(self.proj1(hidden_states)))
 
-    def forward(self, features: torch.Tensor, feature_lens: list[int]) -> tuple[torch.Tensor, AuTLayout]:
-        layout = self.layout(feature_lens)
-        hidden = self.frontend(features, feature_lens)
+    def forward(self, clips: list[torch.Tensor]) -> tuple[torch.Tensor, AuTLayout]:
+        layout = self.layout([clip.shape[-1] for clip in clips])
+        hidden = self.frontend(clips)
         return self.encode(hidden, layout.cu_seqlens), layout

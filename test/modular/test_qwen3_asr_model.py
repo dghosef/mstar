@@ -297,11 +297,10 @@ def test_encoder_submodule_declares_windows_and_packs_requests():
     assert all(s.label == "main" for s in step.segments)
 
     batch = sub.preprocess(PREFILL_WALK, _engine_inputs("abc"), rows)
-    assert batch["audio_features"].shape == (3, cfg.num_mel_bins, 305) and batch["feature_lens"] == [230, 150, 305]
     with torch.no_grad():
         out = sub.forward_batched(PREFILL_WALK, _engine_inputs("abc"), **batch)
-        single = sub.forward(PREFILL_WALK, _engine_inputs("b"),
-                             audio_features=rows[1].tensor_inputs["audio_features"], feature_lens=[150])
+        alone = sub.preprocess(PREFILL_WALK, _engine_inputs("b"), rows[1:2])
+        single = sub.forward(PREFILL_WALK, _engine_inputs("b"), **alone)
     assert [out[r]["audio_embeds"][0].shape[0] for r in "abc"] == [r.input_seq_len for r in rows]
     assert out["a"]["audio_embeds"][0].shape[1] == cfg.audio.output_dim
     assert torch.allclose(out["b"]["audio_embeds"][0], single["audio_embeds"][0], atol=1e-5)

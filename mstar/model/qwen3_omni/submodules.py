@@ -228,40 +228,30 @@ class AudioEncoderSubmodule(NodeSubmodule):
         engine_inputs: ModelInputsFromEngine,
         inputs: list[NodeInputs],
     ) -> dict[str, torch.Tensor | Any]:
-        # the clips zero-padded to the longest; the frontend packs their frames
-        lens = [inp.tensor_inputs["audio_features"].shape[-1] for inp in inputs]
-        longest = max(lens)
-        return {
-            "audio_features": torch.stack([
-                nn.functional.pad(inp.tensor_inputs["audio_features"], (0, longest - n))
-                for inp, n in zip(inputs, lens, strict=True)
-            ]),
-            "feature_lens": lens,
-        }
+        # the clips as they are; the frontend packs their frames
+        return {"audio_features": [inp.tensor_inputs["audio_features"] for inp in inputs]}
 
     def forward(
         self,
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
-        audio_features: torch.Tensor,
-        feature_lens: list[int],
+        audio_features: list[torch.Tensor],
         **kwargs,
     ) -> NameToTensorList:
         rid = engine_inputs.request_ids[0]
-        return self.forward_batched(graph_walk, engine_inputs, audio_features, feature_lens)[rid]
+        return self.forward_batched(graph_walk, engine_inputs, audio_features)[rid]
 
     def forward_batched(
         self,
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
-        audio_features: torch.Tensor,
-        feature_lens: list[int],
+        audio_features: list[torch.Tensor],
         **kwargs,
     ) -> dict[str, NameToTensorList]:
         """Encode the step's clips in one pass and split the rows back by clip."""
         enc = self.encoder
-        layout = enc.layout(feature_lens)
-        hidden = enc.frontend(audio_features, feature_lens)
+        layout = enc.layout([clip.shape[-1] for clip in audio_features])
+        hidden = enc.frontend(audio_features)
         # replay only under the step's lease; a step the region refused runs
         # eagerly under declare_step's own plan
         if self.AUDIO_LAYERS in engine_inputs.piecewise_leases:

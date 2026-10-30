@@ -109,7 +109,7 @@ def test_single_request_matches_hf(num_frames):
     feats = torch.randn(TINY["num_mel_bins"], num_frames)
     expected = _hf_encode(hf, feats)
     with torch.no_grad():
-        actual, layout = ours(feats.unsqueeze(0), [num_frames])
+        actual, layout = ours([feats])
     assert layout.tokens_per_request == [expected.shape[0]]
     assert actual.shape == expected.shape
     assert torch.allclose(actual, expected, atol=1e-4), (actual - expected).abs().max()
@@ -120,11 +120,8 @@ def test_packed_requests_match_hf_one_by_one():
     torch.manual_seed(2)
     lens = [230, 150, 305]
     feats = [torch.randn(TINY["num_mel_bins"], n) for n in lens]
-    padded = torch.zeros(len(lens), TINY["num_mel_bins"], max(lens))
-    for i, f in enumerate(feats):
-        padded[i, :, : f.shape[-1]] = f
     with torch.no_grad():
-        actual, layout = ours(padded, lens)
+        actual, layout = ours(feats)
     cfg = ours.config
     assert layout.tokens_per_request == [cfg.tokens_for_frames(n) for n in lens]
     # every request's windows, back to back: 26-token windows plus remainders
@@ -166,9 +163,9 @@ def test_encode_runs_through_a_bound_ragged_resource():
         if hasattr(module, "bind_resources"):
             module.bind_resources({"aut_attn": rec})
     assert all(layer.self_attn.ragged is rec for layer in keyed.layers)
-    feats = torch.randn(1, TINY["num_mel_bins"], 120)
+    feats = torch.randn(TINY["num_mel_bins"], 120)
     with torch.no_grad():
-        out, layout = keyed(feats, [120])
+        out, layout = keyed([feats])
     assert len(calls) == TINY["encoder_layers"] and calls[0] == (layout.total_tokens, 4, 16)
     assert out.shape == (layout.total_tokens, TINY["output_dim"])
 
