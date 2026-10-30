@@ -407,11 +407,14 @@ class _Case:
         new = torch.cat([kv[context:] for kv, (context, _) in zip(self.keys, self.rows, strict=True)])
         return (new,) if self.mla else (new[:, 0], new[:, 1])
 
-    def runner(self, attn, placement, heads=slice(None), keys=True):
+    def runner(self, attn, placement, heads=slice(None), keys=True, pad=0):
         """``attn.run`` for ``heads`` over this rank's cache, passed the new keys when ``keys``, as a
-        call whose inputs are built once (so it can be captured)."""
+        call whose inputs are built once (so it can be captured); ``pad`` zero tokens past the
+        step's, as a captured bucket larger than the step passes them."""
         q, cache = self.queries(heads), self.cache(placement)
         new = self.new_keys() if keys else (None, None)
+        if pad:
+            q, new = (tuple(torch.cat([t, t.new_zeros(pad, *t.shape[1:])]) for t in parts) for parts in (q, new))
         if self.mla:
             return lambda: attn.run(q[0], "main", kv_cache_layer=cache, k=new[0], q_pe=q[1])
         return lambda: attn.run(q[0], "main", kv_cache_layer=cache, k=new[0], v=new[1])
@@ -490,7 +493,10 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False)
         case = _Case.build(rows, device, dtype, mla)
         # the slot plans the other kind of step first
         _plan(attn, _Case.build(DECODE_ROWS if rows == PREFILL_ROWS else PREFILL_ROWS, device, dtype, mla))
-        _plan(attn, case, bucket=BucketKey("w", bs=len(rows), num_tokens=case.q.shape[0]) if captured else None)
+        # a captured prefill's bucket holds 8 tokens past the step
+        n = case.q.shape[0]
+        pad = 8 if captured and rows == PREFILL_ROWS else 0
+        _plan(attn, case, bucket=BucketKey("w", bs=len(rows), num_tokens=n + pad) if captured else None)
         # a one-token-a-row step attends the pages alone, so a fused KV-write kernel can serve it
         assert attn.reads_step_kv() == (rows == PREFILL_ROWS)
         heads = slice(None) if over_sp else slice(rank * Q_HEADS // world, (rank + 1) * Q_HEADS // world)
@@ -498,7 +504,7 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False)
             with pytest.raises(ValueError, match="got none"):
                 case.runner(attn, placement, heads, keys=False)()
         tol = {"atol": 2e-2, "rtol": 2e-2} if cuda else {}
-        run = case.runner(attn, placement, heads)
+        run = case.runner(attn, placement, heads, pad=pad)
         out = run()
         if captured:
             torch.cuda.synchronize()
@@ -509,7 +515,8 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False)
             out.fill_(math.nan)
             graph.replay()
             torch.cuda.synchronize()
-        torch.testing.assert_close(out.float(), case.want()[:, heads], **tol)
+        assert torch.isfinite(out).all()
+        torch.testing.assert_close(out[:n].float(), case.want()[:, heads], **tol)
         if rows == PREFILL_ROWS and not captured:
             # an eager first prefill (no row holds stored context) attends its own tokens alone, on
             # every rank, with no collective
