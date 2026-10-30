@@ -423,8 +423,8 @@ needs FlashInfer's fused bf16 decode kernel (K = V = 128).
 Text prefill and mixed steps replay captured graphs by total tokens, on the
 ladder ``32 ... 8192`` (powers of two); a step pads to its bucket and a longer
 one runs eagerly. ``model_kwargs: prefill_token_buckets: [...]`` sets a
-deployment's own ladder: ``configs/qwen3_5_9b*.yaml`` add 3072, 5120, 6144 and
-7168, which cut the padding of compute-bound long prefills (+2% output tok/s
+deployment's own ladder: ``configs/qwen3_5_9b*.yaml`` and
+``configs/qwen3_5_27b_tp4.yaml`` add 3072, 5120, 6144 and 7168, which cut the padding of compute-bound long prefills (+2% output tok/s
 on 9B, random 1024/256 at c=64/128, H200); the same ladder was not a win on
 0.8B, whose prefill is launch-bound. Each bucket adds captures and startup time.
 
@@ -555,9 +555,11 @@ Qwen3-Omni notes
   Thinker's prefix cache on, a decode step that finds the pool full has no host
   pool to offload to and holds its requests until they time out. Set
   ``max_concurrent_requests`` in that config: 2,048 / 256 = 8 requests of the full
-  32k context. The other configs need the cap too, set the same way from their own
-  GPU pages; their host pages help a pool that runs short now and then but don't
-  replace it (see the prefix cache under "Config files" in :doc:`serving`). On
+  32k context. The two configs with host pages need the cap too, set the same way
+  from their GPU pages: 4 for the default (1,024 pages) and 2 for
+  ``configs/qwen3omni_2gpu_h100.yaml`` (512 pages). Their host pages help a pool
+  that runs short now and then but don't replace the cap (see the prefix cache
+  under "Config files" in :doc:`serving`). On
   80 GB GPUs such as the H100, serve ``configs/qwen3omni_2gpu_h100.yaml``: the
   Thinker's GPU holds every prefill capture, and the larger ones don't fit beside
   a 1,024-page KV pool. The H100 config's 512 pages (64k tokens) leave room for

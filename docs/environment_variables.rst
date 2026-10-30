@@ -559,10 +559,10 @@ Worker scheduling
        but that step's commit touched the streams: every length is one
        more, pages change only where a row crossed a page boundary, and the
        five FlashInfer index arrays come from numpy instead of a per-row
-       Python pass. Off by default; ``configs/qwen3_5_0.8b.yaml`` and
-       ``configs/qwen3_5_9b_tp2.yaml`` turn it on, measured only bundled
-       with ``gc_gen0_threshold`` (and, on 9B TP2, ``tp_async_sched``); its
-       own effect is unmeasured. ``0`` plans every step from the streams.
+       Python pass. Off by default; ``configs/qwen3_5_{0.8b,2b,4b}.yaml``,
+       ``configs/qwen3_5_9b_tp2.yaml`` and ``configs/qwen3_5_27b_tp4.yaml``
+       turn it on, measured only bundled with ``gc_gen0_threshold`` (and, on
+       the TP configs, ``tp_async_sched``); its own effect is unmeasured. ``0`` plans every step from the streams.
        ``2`` runs both and logs a difference, for checking a run. Read by
        ``knobs.kv_plan_cache``.
    * - ``MSTAR_DEVICE_LOOPBACK``
