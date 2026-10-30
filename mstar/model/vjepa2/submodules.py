@@ -698,7 +698,7 @@ class VJepa2RolloutPredictorSubmodule(ARNodeSubmodule):
     def check_stop(
         self, request_id: str,
         request_info: CurrentForwardPassInfo,
-        outputs: dict[str, list[torch.Tensor]],
+        outputs: Mapping[str, list[torch.Tensor]],
     ) -> set[str]:
         iter_idx = request_info.dynamic_loop_iter_counts.get("rollout_loop", 0)
         horizon = int(request_info.step_metadata.get("rollout_horizon", 0) or 0)
@@ -1277,7 +1277,7 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
     def check_stop(
         self, request_id: str,
         request_info: CurrentForwardPassInfo,
-        outputs: dict[str, list[torch.Tensor]],
+        outputs: Mapping[str, list[torch.Tensor]],
     ) -> set[str]:
         horizon = int(request_info.step_metadata.get("rollout_horizon", 0) or 0)
         iter_idx = request_info.dynamic_loop_iter_counts.get("rollout_loop", 0)

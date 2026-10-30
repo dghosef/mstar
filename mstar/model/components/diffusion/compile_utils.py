@@ -1,9 +1,10 @@
 """Compiling a flow transformer: which modules stay eager, and the inductor
 rounding the compiled region is traced under.
 
-Shared by every model on the DiT scaffold (FLUX.2 klein, Z-Image); nothing here
-is model-specific. Lives beside the scaffold rather than in a model package so a
-model never imports a sibling model.
+Shared by the flow models (FLUX.2 klein, Z-Image and LTX-2.5 compile their
+transformer forward, LingBot-World its blocks) and by the VAE decode wrappers in
+``decode_utils``; nothing here is model-specific. Lives beside the scaffold rather
+than in a model package so a model never imports a sibling model.
 """
 
 from __future__ import annotations
