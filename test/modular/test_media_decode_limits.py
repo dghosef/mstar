@@ -223,7 +223,7 @@ class _Metadata:
     average_fps: float = 30.0
 
 
-def _fake_torchcodec(monkeypatch, pulled, metadata=None, opened=None):
+def _fake_torchcodec(monkeypatch, pulled, metadata=None, opened=None, key_frames=None):
     class FakeDecoder:
         def __init__(self, *_args, **kwargs):
             self.metadata = metadata or _Metadata()
@@ -244,8 +244,12 @@ def _fake_torchcodec(monkeypatch, pulled, metadata=None, opened=None):
 
         def get_frames_at(self, indices):
             pulled.extend(indices)
-            return torch.zeros(len(indices), 3, self.metadata.height, self.metadata.width, dtype=torch.uint8)
+            # every pixel of a frame holds its index (mod 256), to tell the frames apart
+            frames = (torch.tensor(indices, dtype=torch.int64) % 256).to(torch.uint8)
+            return frames.view(-1, 1, 1, 1).expand(-1, 3, self.metadata.height, self.metadata.width)
 
+    if key_frames is not None:
+        FakeDecoder._get_key_frame_indices = lambda self: torch.tensor(key_frames)
     decoders = types.ModuleType("torchcodec.decoders")
     decoders.VideoDecoder = FakeDecoder
     monkeypatch.setitem(sys.modules, "torchcodec", types.ModuleType("torchcodec"))
@@ -291,6 +295,21 @@ def test_vjepa2_ac_decodes_only_the_frames_its_walk_encodes(monkeypatch, rollout
     assert pulled == loaded.metadata["sampled_indices"][:decoded]
     assert out["video_frames"][0].shape[0] == decoded
     assert out["video_inputs"] == []
+
+
+def test_gop_split_decode_returns_the_frames_in_the_order_asked(monkeypatch):
+    """Sampled frames grouped by keyframe interval decode on separate decoders, each frame
+    once, and come back in the order asked for, duplicates included."""
+    from mstar.model.components import video_decode
+
+    pulled, opened = [], []
+    _fake_torchcodec(monkeypatch, pulled, opened=opened, key_frames=[0, 10, 20, 30, 40])
+    monkeypatch.setattr(video_decode, "_max_decoders", lambda: 3)
+    indices = [41, 3, 22, 3, 15, 0, 35, 22, 8]
+    frames = video_decode.decode_frames_at("clip.mp4", indices)
+    assert frames[:, 0, 0, 0].tolist() == indices
+    assert sorted(pulled) == sorted(set(indices))
+    assert len(opened) == 4  # one for the keyframe index, then one per group of GOPs
 
 
 def _mp4(path, frames, side=64):
