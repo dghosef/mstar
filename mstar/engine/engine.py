@@ -2426,6 +2426,7 @@ class Engine:
                 else sum(inp.input_seq_len for inp in batch.inputs)
             ),
             cg_key_info=batch.cg_key_info,
+            request_ids=batch.request_ids,
         )
         if lease is not None:
             batch.lease_slot(lease)

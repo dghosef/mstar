@@ -104,3 +104,34 @@ def test_greedy_tie_is_argmax_for_every_seed_under_capture():
             torch.cuda.synchronize()
             seen.add(int(out.item()))
     assert seen == {argmax}, f"greedy broke a top-1 tie by seed: got {sorted(seen)}"
+
+
+@pytest.mark.parametrize("vocab", [6000, 40000])  # one chunk, several
+def test_the_argmax_capture_draws_what_the_one_hot_path_draws(vocab):
+    """``greedy_argmax`` (the sampler's all-greedy capture) returns the token the
+    full path's one-hot puts the draw on: ties, the repetition penalty and padded
+    rows at a sampling temperature included."""
+    _flashinfer_or_skip()
+    from mstar.engine.resources.sampler.utils import greedy_argmax, sample_accelerator_graphable_gpu
+
+    dev = torch.device("cuda")
+    g = torch.Generator(device=dev).manual_seed(0)
+    bs = 8
+    logits = torch.randn(bs, vocab, device=dev, generator=g).to(torch.bfloat16)
+    logits[0, 7] = logits[0, vocab - 3] = 20.0  # an exact tie across chunks
+    temperature = torch.zeros(bs, device=dev)
+    temperature[-1] = 0.6  # a padding row reading a default sampling row
+    penalty = torch.full((bs,), 1.3, device=dev)
+    seen = torch.zeros(bs, vocab, dtype=torch.bool, device=dev)
+    seen[1, logits[1].float().argmax()] = True  # the penalty moves row 1's argmax
+    for apply_penalty in (False, True):
+        kw = dict(penalty=penalty, seen_mask=seen) if apply_penalty else {}
+        fast = greedy_argmax(logits, temperature, **kw)
+        full = sample_accelerator_graphable_gpu(
+            logits, temperature,
+            torch.full((bs,), 20, dtype=torch.int32, device=dev), torch.full((bs,), 0.95, device=dev),
+            torch.arange(bs, device=dev), torch.zeros(bs, dtype=torch.int64, device=dev),
+            apply_penalty=apply_penalty, rep_penalty=penalty, seen_tokens=seen,
+        )
+        assert torch.equal(fast[:-1], full[:-1])
+        assert int(fast[0]) == 7

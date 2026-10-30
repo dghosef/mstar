@@ -5,7 +5,8 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field, is_dataclass, replace
 from functools import cache, partial
-from typing import Any, Callable, Collection, Iterator, Mapping, NamedTuple
+from itertools import product
+from typing import Any, Callable, Collection, Iterator, Mapping, NamedTuple, Sequence
 
 import torch
 from torch.distributed import ReduceOp
@@ -651,6 +652,8 @@ class AcceleratorGraphRunner:
             )
         )
         self._resources = resources
+        # graph walk -> the resources' extra capture variants (``_variants``)
+        self._walk_variants: dict[str, tuple] = {}
         self._step_runner = step_runner
         self._device = device
         self._device_capability = device_capability or DeviceCapability.of(device or "cpu")
@@ -729,13 +732,15 @@ class AcceleratorGraphRunner:
     def _get_slot_specs(self) -> list[CGSlotSpec]:
         specs = []
         for config_idx, config in enumerate(self._capture_configs):
+            variants = (None, *self._variants(config.capture_graph_walk))
             for bs in self._batch_sizes(config):
-                for num_tokens in config.get_total_tokens(bs):
+                for num_tokens, variant in product(config.get_total_tokens(bs), variants):
                     bucket = BucketKey(
                         graph_walk=config.capture_graph_walk,
                         cg_key_info=config.additional_key_info,
                         bs=bs,
                         num_tokens=num_tokens,
+                        variant=variant,
                     )
                     for slot in range(self._num_slots):
                         specs.append(CGSlotSpec(
@@ -745,6 +750,16 @@ class AcceleratorGraphRunner:
                             config_idx=config_idx,
                         ))
         return specs
+
+    def _variants(self, graph_walk: str) -> tuple:
+        """The node's resources' extra capture variants of ``graph_walk``
+        (fixed per resource, so asked once per walk: a lease asks every step)."""
+        variants = self._walk_variants.get(graph_walk)
+        if variants is None:
+            variants = self._walk_variants[graph_walk] = tuple(
+                v for r in self._resources.values() for v in r.capture_variants(graph_walk)
+            )
+        return variants
 
     def _get_addtl_slot_specs(self, spec: CGSlotSpec) -> list[CGSlotSpec]:
         """The same capture, keyed under the config's other replay walks."""
@@ -1273,7 +1288,7 @@ class AcceleratorGraphRunner:
 
     def select_bucket(
         self, graph_walk: str, bs: int, num_tokens: int,
-        cg_key_info: Any | None = None,
+        cg_key_info: Any | None = None, variant: Any | None = None,
     ) -> BucketKey | None:
         """Tightest captured bucket that fits this batch, or None for eager.
 
@@ -1285,7 +1300,7 @@ class AcceleratorGraphRunner:
         """
         best: BucketKey | None = None
         for key, bucket in self._buckets.items():
-            if key.graph_walk != graph_walk or key.cg_key_info != cg_key_info:
+            if key.graph_walk != graph_walk or key.cg_key_info != cg_key_info or key.variant != variant:
                 continue
             needed = num_tokens * bucket.config.total_tokens_multiplier
             if key.bs < bs or key.num_tokens < needed or not bucket.slots:
@@ -1296,6 +1311,7 @@ class AcceleratorGraphRunner:
 
     def select_batched_bucket(
         self, graph_walk: str, bs: int, cg_key_info: Any | None = None,
+        variant: Any | None = None,
     ) -> BucketKey | None:
         """A bucket for a batch whose inputs aren't built yet.
 
@@ -1311,7 +1327,7 @@ class AcceleratorGraphRunner:
         """
         best: BucketKey | None = None
         for key, bucket in self._buckets.items():
-            if key.graph_walk != graph_walk or key.cg_key_info != cg_key_info:
+            if key.graph_walk != graph_walk or key.cg_key_info != cg_key_info or key.variant != variant:
                 continue
             if key.bs < bs or not bucket.slots:
                 continue
@@ -1364,6 +1380,7 @@ class AcceleratorGraphRunner:
         slot: int,
         num_tokens: int | None = None,
         cg_key_info: Any | None = None,
+        request_ids: Sequence | None = None,
     ) -> SlotLease | None:
         """Pick the bucket and double-buffer slot an upcoming step replays on.
 
@@ -1373,12 +1390,25 @@ class AcceleratorGraphRunner:
         ``slot=None`` advances the bucket's counter so the next lease lands on
         the other slot; a caller that already reserved one (pre-plan) passes it
         back so both submissions target the same slot.
+
+        A resource that asks for a capture variant of this batch
+        (``Resource.capture_variant``, from ``request_ids``) gets that variant's
+        bucket when one fits, and the default capture otherwise.
         """
-        key = (
-            self.select_batched_bucket(graph_walk, bs, cg_key_info)
-            if num_tokens is None
-            else self.select_bucket(graph_walk, bs, num_tokens, cg_key_info)
-        )
+        def select(variant):
+            if num_tokens is None:
+                return self.select_batched_bucket(graph_walk, bs, cg_key_info, variant)
+            return self.select_bucket(graph_walk, bs, num_tokens, cg_key_info, variant)
+
+        key = None
+        if request_ids is not None and self._variants(graph_walk):
+            for resource in self._resources.values():
+                variant = resource.capture_variant(graph_walk, request_ids)
+                if variant is not None:
+                    key = select(variant)
+                    break
+        if key is None:
+            key = select(None)
         if key is None:
             return None
         bucket = self._buckets[key]

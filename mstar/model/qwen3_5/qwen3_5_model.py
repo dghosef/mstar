@@ -273,6 +273,7 @@ class Qwen3_5DenseModel(Model):
                 resource_key=SAMPLER, nodes={"LLM"},
                 vocab_size=self.config.vocab_size,
                 enable_repetion_penalty=True,
+                argmax_capture_walks=("decode",),
             ),
             *self._vision_resources(),
         ]

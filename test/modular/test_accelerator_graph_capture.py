@@ -25,7 +25,11 @@ from torch.distributed import ReduceOp
 
 from mstar.distributed.communication import JointGroups
 from mstar.engine.accelerator_graph_backend import AcceleratorGraphPool
-from mstar.engine.accelerator_graph_config import AcceleratorGraphConfigType, geometric_batch_sizes
+from mstar.engine.accelerator_graph_config import (
+    AcceleratorGraphConfigType,
+    BatchedAcceleratorGraphConfig,
+    geometric_batch_sizes,
+)
 from mstar.engine.accelerator_graph_runner import (
     AcceleratorGraphRunner,
     CaptureCost,
@@ -480,3 +484,46 @@ def test_geometric_batch_sizes(max_batch_size, expected):
 def test_geometric_batch_sizes_refuses_a_max_under_one():
     with pytest.raises(ValueError, match="at least 1"):
         geometric_batch_sizes(0)
+
+
+class _ArgmaxResource:
+    """Asks for an "argmax" capture of decode, and for it on a batch with no sampled row."""
+
+    def __init__(self, sampled=()):
+        self.sampled = set(sampled)
+
+    def capture_variants(self, graph_walk):
+        return ("argmax",) if graph_walk == "decode" else ()
+
+    def capture_variant(self, graph_walk, request_ids):
+        return "argmax" if graph_walk == "decode" and not self.sampled & set(request_ids) else None
+
+
+def test_a_resource_capture_variant_is_captured_and_leased_when_the_batch_asks():
+    from mstar.model.submodule_base import ARNodeInputs
+
+    config = BatchedAcceleratorGraphConfig(
+        capture_graph_walk="decode",
+        single_request_inputs=ARNodeInputs(input_ids=torch.zeros(1, dtype=torch.long), input_seq_len=1),
+        capture_batch_sizes=[1, 4],
+    )
+    runner = object.__new__(AcceleratorGraphRunner)
+    runner._capture_configs = [config]
+    runner._resources = {"sampler": _ArgmaxResource(sampled={"s"})}
+    runner._walk_variants = {}
+    runner._num_slots = 1
+    specs = runner._get_slot_specs()
+    assert sorted((s.bucket.bs, s.bucket.variant or "") for s in specs) == [
+        (1, ""), (1, "argmax"), (4, ""), (4, "argmax"),
+    ]
+    runner._buckets = {s.bucket: SimpleNamespace(config=config, slots=[object()]) for s in specs}
+
+    def leased(rids, **kw):
+        return runner.lease_slot("decode", bs=len(rids), slot=0, request_ids=rids, **kw).bucket
+
+    assert leased(["g1", "g2"]).variant == "argmax"
+    assert leased(["g1", "s"]).variant is None, "a sampled row takes the default capture"
+    assert runner.lease_slot("decode", bs=2, slot=0).bucket.variant is None
+    # a variant bucket the plan dropped falls back to the default capture of the same size
+    del runner._buckets[BucketKey("decode", bs=4, num_tokens=4, variant="argmax")]
+    assert leased(["g1", "g2"]) == BucketKey("decode", bs=4, num_tokens=4)

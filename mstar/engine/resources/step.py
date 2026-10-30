@@ -32,10 +32,14 @@ class BucketKey:
     num_tokens: int
     # Matches additional_key_info in CudaGraphConfig
     cg_key_info: Any | None = None
+    # A resource's capture variant of this bucket (``Resource.capture_variants``);
+    # None is the capture every bucket has
+    variant: Any | None = None
 
     def __str__(self) -> str:
         key = "" if self.cg_key_info is None else f",key={self.cg_key_info}"
-        return f"{self.graph_walk}[bs={self.bs},tokens={self.num_tokens}{key}]"
+        variant = "" if self.variant is None else f",variant={self.variant}"
+        return f"{self.graph_walk}[bs={self.bs},tokens={self.num_tokens}{key}{variant}]"
 
 
 @dataclass(frozen=True)

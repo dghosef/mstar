@@ -544,6 +544,50 @@ def fused_temperature_softmax(
     return probs
 
 
+def greedy_argmax(
+    logits: torch.Tensor,       # [B, V]
+    temperature: torch.Tensor,  # [B]
+    penalty: torch.Tensor | None = None,    # [B]
+    seen_mask: torch.Tensor | None = None,  # [B, V] bool
+    history: "HistoryRows | None" = None,
+) -> torch.Tensor:
+    """The token ``fused_temperature_softmax(include_greedy=True)`` puts a
+    greedy row's one-hot on (penalties and the min-tokens floor applied),
+    without writing the ``[B, V]`` probs: its first two kernels only. Rows are
+    meant to be greedy; a sampled row gets the argmax of its scaled logits."""
+    B, V = logits.shape
+    apply_penalty = penalty is not None and seen_mask is not None
+    nsplit = _split_count(B, V, logits.device)
+    chunk = -(-V // nsplit)
+    hist_args, hist_flags = _history_kernel_args(history, logits)
+    f32 = dict(device=logits.device, dtype=torch.float32)
+    cmax = torch.empty((B, nsplit), **f32)
+    csum = torch.empty((B, nsplit), **f32)
+    carg = torch.empty((B, nsplit), device=logits.device, dtype=torch.int32)
+    rmax = torch.empty(B, **f32)
+    rinv = torch.empty(B, **f32)
+    rarg = torch.empty(B, device=logits.device, dtype=torch.int32)
+    with torch.cuda.device(logits.device):
+        _split_partials_kernel[(B, nsplit)](
+            logits, temperature, penalty if apply_penalty else logits,
+            seen_mask if apply_penalty else logits, *hist_args, cmax, csum, carg,
+            V, chunk,
+            logits.stride(0), logits.stride(1),
+            seen_mask.stride(0) if apply_penalty else 0,
+            seen_mask.stride(1) if apply_penalty else 0,
+            cmax.stride(0),
+            BLOCK_SIZE=min(_SPLIT_MAX_BLOCK, triton.next_power_of_2(chunk)),
+            APPLY_PENALTY=apply_penalty, INCLUDE_GREEDY=True, **hist_flags,
+            num_warps=8, num_stages=2,
+        )
+        _split_combine_kernel[(B,)](
+            cmax, csum, carg, rmax, rinv, rarg,
+            nsplit, cmax.stride(0),
+            BLOCK_N=triton.next_power_of_2(nsplit), INCLUDE_GREEDY=True, num_warps=4,
+        )
+    return rarg.to(torch.int64)
+
+
 def apply_min_p(probs: torch.Tensor, min_p: torch.Tensor) -> torch.Tensor:
     """Min-p filter on a ``[B, V]`` distribution: zero every probability below
     ``min_p`` times the row's largest, then renormalise.
@@ -1762,24 +1806,37 @@ class AcceleratorGraphableSampler(BaseSampler):
         self, request_ids: list[str], logits: torch.Tensor,
         apply_penalty: bool = False,
         apply_filters: bool = True,
+        argmax: bool = False,
     ):
+        """``argmax``: every real row is greedy (the batch replays the sampler's
+        argmax capture), so take the argmax directly; same tokens, no draw. The
+        RNG offsets still advance, so a request's later sampled steps draw
+        where they would have."""
         top_k, top_p = self.top_k_buf, self.top_p_buf
         if not apply_filters:
             # top-k 0 is "off"; captured, these are constant fills
             top_k, top_p = torch.zeros_like(top_k), torch.ones_like(top_p)
         if self.ingraph_scatter:
             self.gather_in_graph()
-        codes = sample_accelerator_graphable_gpu(
-            logits, self.temperature_buf,
-            top_k, top_p,
-            self.seed_buf, self.offset_buf,
-            apply_penalty=apply_penalty,
-            rep_penalty=self.rep_penalty_buf,
-            seen_tokens=self.seen_tokens_buf,
-            min_p=self.min_p_buf,
-            history=self.history,
-            order=self.order,
-        )
+        if argmax and logits.device.type == "cuda" and logits.shape[1] > FUSED_SAMPLE_MAX_VOCAB:
+            codes = greedy_argmax(
+                logits, self.temperature_buf,
+                penalty=self.rep_penalty_buf if apply_penalty else None,
+                seen_mask=self.seen_tokens_buf if apply_penalty else None,
+                history=self.history,
+            )
+        else:
+            codes = sample_accelerator_graphable_gpu(
+                logits, self.temperature_buf,
+                top_k, top_p,
+                self.seed_buf, self.offset_buf,
+                apply_penalty=apply_penalty,
+                rep_penalty=self.rep_penalty_buf,
+                seen_tokens=self.seen_tokens_buf,
+                min_p=self.min_p_buf,
+                history=self.history,
+                order=self.order,
+            )
         self.offset_buf.add_(_rng_offset_stride(logits.device.type, logits.shape[-1]))
         codes = self._broadcast_tokens(codes)
         if self.history is not None:

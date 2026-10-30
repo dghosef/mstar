@@ -26,6 +26,9 @@ from mstar.utils.h2d import PinnedStager
 from mstar.utils.knobs import device_loopback_enabled, sampler_ingraph_scatter
 from mstar.utils.profiler import PhaseLaps
 
+# The capture variant of an all-greedy batch (``SamplerSpec.argmax_capture_walks``)
+ARGMAX = "argmax"
+
 
 class SamplerResource(Resource):
     prefix_skip_safe = True
@@ -46,6 +49,7 @@ class SamplerResource(Resource):
         max_repetition_window: int = 0,
         min_tokens_stop_ids: tuple[int, ...] = (),
         enable_top_p_first: bool = False,
+        argmax_capture_walks: tuple[str, ...] = (),
     ):
         self._track_seen_tokens = enable_repetion_penalty
         self._loopback_state = dict(loopback_state or {})
@@ -53,6 +57,12 @@ class SamplerResource(Resource):
         self._vocab_size = vocab_size if self._track_seen_tokens else None
         self._max_repetition_window = max_repetition_window
         self._enable_top_p_first = enable_top_p_first
+        self._argmax_walks = frozenset(argmax_capture_walks)
+        # Resident requests that sample (temperature > 0): with none, every
+        # batch is all-greedy without looking at its rows.
+        self._sampled_rids: set[str] = set()
+        # whether the step planned last replays (or captures) the argmax variant
+        self._argmax_this_step = False
         if max_repetition_window < 0:
             raise ValueError(f"max_repetition_window={max_repetition_window} must be >= 0")
         # What each request has generated, for the windowed penalty and the
@@ -149,7 +159,22 @@ class SamplerResource(Resource):
             max_repetition_window=spec.max_repetition_window,
             min_tokens_stop_ids=tuple(spec.min_tokens_stop_ids),
             enable_top_p_first=spec.enable_top_p_first,
+            argmax_capture_walks=tuple(spec.argmax_capture_walks),
         )
+
+    def capture_variants(self, graph_walk: str) -> tuple:
+        # CUDA only: the argmax path reuses the CUDA softmax-prep kernels
+        if graph_walk in self._argmax_walks and self._device.type == "cuda":
+            return (ARGMAX,)
+        return ()
+
+    def capture_variant(self, graph_walk: str, request_ids) -> str | None:
+        if graph_walk not in self._argmax_walks:
+            return None
+        sampled = self._sampled_rids
+        if sampled and any(rid in sampled for rid in request_ids):
+            return None
+        return ARGMAX
 
     def build_accelerator_graph_buffers(
         self, slots, max_bs: int, max_seq_len: int
@@ -219,6 +244,8 @@ class SamplerResource(Resource):
         # after the refusals, so a refused request leaves no stale entry
         if resolved.presence_penalty != 1.0:
             self._penalty_rids.add(rid)
+        if resolved.temperature != 0:
+            self._sampled_rids.add(rid)
         if self._history is not None:
             self._history.register(rid)
         if self._cg_buffers is not None:
@@ -294,6 +321,7 @@ class SamplerResource(Resource):
     def remove_request(self, rid: str):
         self._sampler.remove_request(rid)
         self._penalty_rids.discard(rid)
+        self._sampled_rids.discard(rid)
         self._cached_prefix.pop(rid, None)
         if self._history is not None:
             self._history.unregister(rid)
@@ -305,6 +333,8 @@ class SamplerResource(Resource):
         """
         if not ctx.is_preplan:
             self._apply_filters_this_step = step.apply_filters
+            lease = ctx.slot_lease
+            self._argmax_this_step = lease is not None and lease.bucket.variant == ARGMAX
             self._apply_penalty_this_step = (
                 self._track_seen_tokens and step.apply_penalty
             )
@@ -514,6 +544,7 @@ class SamplerResource(Resource):
                 request_ids, logits,
                 apply_penalty=self._apply_penalty_this_step,
                 apply_filters=self._apply_filters_this_step,
+                argmax=self._argmax_this_step,
             )
         tokens = self._sampler.sample(
             request_ids, logits, apply_penalty=self._apply_penalty_this_step,

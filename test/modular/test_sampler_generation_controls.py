@@ -675,3 +675,21 @@ def test_a_windowed_penalty_needs_no_seen_token_mask():
     SamplingReqConfig(repetition_penalty=1.05, repetition_window=16).validate(spec)
     with pytest.raises(ValueError, match="repetition_penalty"):
         SamplingReqConfig(repetition_penalty=1.05).validate(spec)
+
+
+def test_an_all_greedy_batch_asks_for_the_argmax_capture():
+    """The variant is decided on the host from the resident requests' settings:
+    a batch takes the argmax capture only when none of its rows samples."""
+    res = _resource(argmax_capture_walks=("decode",))
+    res.ingest_request("g", SamplingReqConfig(temperature=0.0))
+    assert res.capture_variant("decode", ["g"]) == "argmax"
+    res.ingest_request("s", SamplingReqConfig(temperature=0.7))
+    assert res.capture_variant("decode", ["g"]) == "argmax"
+    assert res.capture_variant("decode", ["g", "s"]) is None
+    assert res.capture_variant("prefill", ["g"]) is None, "only the declared walks"
+    res.remove_request("s")
+    assert res.capture_variant("decode", ["g", "s"]) == "argmax"
+    # the extra capture is CUDA-only, and nothing is captured for an undeclared walk
+    assert res.capture_variants("decode") == ()
+    res._device = torch.device("cuda")
+    assert res.capture_variants("decode") == ("argmax",) and res.capture_variants("prefill") == ()

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -123,6 +123,22 @@ class Resource(ABC):
 
     def can_capture(self) -> bool:
         return True
+
+    def capture_variants(self, graph_walk: str) -> tuple:
+        """Variants of ``graph_walk``'s buckets to capture besides the default
+        (None): a choice this resource bakes into the graph at capture, such as
+        a kernel path, that a later batch can need the other way. The runner
+        captures each bucket once per variant; ``capture_variant`` picks one."""
+        del graph_walk
+        return ()
+
+    def capture_variant(self, graph_walk: str, request_ids: Sequence) -> Any:
+        """Which of ``capture_variants`` a batch of ``request_ids`` replays, from
+        host-side state only (asked at lease, before the step is declared); None
+        for the default capture. ``plan`` sees the answer as
+        ``ctx.slot_lease.bucket.variant``."""
+        del graph_walk, request_ids
+        return None
 
     # stays correct when a hit skips the front of a request; required of every resource on a keyed node
     prefix_skip_safe: bool = False

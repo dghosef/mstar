@@ -62,6 +62,12 @@ class SamplerSpec(NodeResourceSpec):
     min_tokens_stop_ids: tuple[int, ...] = ()
     # Allows ``top_p_first`` / ``top_p_min_keep``.
     enable_top_p_first: bool = False
+    # Walks whose captured steps get a second capture for all-greedy batches:
+    # it takes the argmax the softmax prep computes and skips the probs write
+    # and the top-k/top-p draw (~0.3 ms a step at a 248k vocab and 128 rows).
+    # Each walk named doubles its graphs, so name the walks that run many
+    # steps (decode), not the prefill ladders.
+    argmax_capture_walks: tuple[str, ...] = ()
 
     @property
     def resource_class(self) -> "type[Resource]":
