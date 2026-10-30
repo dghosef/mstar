@@ -547,11 +547,13 @@ Qwen3-Omni notes
 ----------------
 
 - The default ``configs/qwen3omni_2gpu.yaml`` is for 141 GB H200-class GPUs. Its
-  Thinker KV pool of 1,024 pages dates from when it targeted 80 GB GPUs;
-  ``configs/qwen3omni_2gpu_large_kv.yaml`` runs the full 2,048-page pool for long
-  contexts or high concurrency on an H200. On 80 GB GPUs such as the H100, serve with ``configs/qwen3omni_2gpu_h100.yaml``. The Thinker's
-  GPU holds every prefill capture, and on an 80 GB GPU the larger ones don't fit beside
-  the default config's 1,024-page KV pool.
+  Thinker KV pool holds 1,024 GPU pages (128k tokens) plus 1,024 host pages it
+  offloads to. When concurrent requests hold more than 128k tokens of Thinker KV,
+  serve ``configs/qwen3omni_2gpu_large_kv.yaml``, which keeps 2,048 pages (256k
+  tokens) on the GPU and offloads nothing; it should fit beside its captures on an
+  H200 (not run since the prefill buckets grew to 8192 tokens). On 80 GB GPUs such
+  as the H100, serve ``configs/qwen3omni_2gpu_h100.yaml``: the Thinker's GPU holds
+  every prefill capture, and the larger ones don't fit beside a 1,024-page KV pool.
   The H100 config's 512 pages (64k tokens) leave room for all of them. It also runs
   the audio and vision encoders on the Talker's GPU, so an encoder step doesn't wait
   behind a Thinker step.
@@ -1515,9 +1517,10 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
      measured.
    * Without ``[norms]``, the plain compile — even with eager rounding — lands at a
      median 37.6 dB (klein-4B) and 35.6 dB (9B) PSNR from eager over the 100 protocol
-     prompts (measured at #287, before the compiled VAE decode changed), because a 4-
-     or 8-step distilled sampler amplifies the last bit of inductor's own reductions and
-     activation decompositions.
+     prompts (measured with the original compiled VAE decode, before it gained its
+     folded upsample conv and split GroupNorm), because a 4- or 8-step distilled
+     sampler amplifies the last bit of inductor's own reductions and activation
+     decompositions.
 
 ``cuda_graph``, ``capture_sizes``, ``capture_batch_sizes``
    The denoise step, Euler update included, is captured per listed ``[height, width]``
@@ -1562,10 +1565,10 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
 
 The shipped plain compile is not reference-exact (see ``compile_exact_ops``). For the
 exact path, set ``compile_exact_ops: [norms]``: every served klein image is then within
-53 dB of the eager path on all 100 protocol prompts (also measured at #287), and with
-``vae_compile: false`` too it is bit-exact. For scale, SGLang 0.5.22's images sit at a
-median 23.8 dB (minimum 13.1) on klein-4B and 24.0 dB (14.5) on 9B from klein's
-``[norms]`` output at the same seeds (H100).
+53 dB of the eager path on all 100 protocol prompts (also measured with the original
+compiled VAE decode), and with ``vae_compile: false`` too it is bit-exact. For scale,
+SGLang 0.5.22's images sit at a median 23.8 dB (minimum 13.1) on klein-4B and 24.0 dB
+(14.5) on 9B from klein's ``[norms]`` output at the same seeds (H100).
 Requests at the same output size batch across users in every node, including the
 text encoder, whose input is always 512 tokens. ``lora`` lists adapters to fold into the
 transformer weights at load time (``[{path: ..., scale: ...}]``; diffusers/PEFT-format or

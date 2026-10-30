@@ -17,11 +17,11 @@ model_kwargs:
   attention_backend: sdpa
   compile: true
   # inductor rounds intermediates where eager PyTorch does (and fuses no FMAs); on its own the compiled
-  # transformer still lands at a median 37.6 dB from the eager path over the 100 protocol prompts (67 of 100 below 40 dB)
+  # transformer is still not bit-exact with the eager path (measured PSNR: compile_exact_ops in docs/models.rst)
   compile_eager_rounding: true
   # op classes kept on the eager kernels inside the compiled forward. [norms] makes the compiled transformer
-  # bit-exact with the eager one (every served image >= 53 dB from the eager path on all 100 protocol prompts,
-  # the compiled VAE) at a latency cost; false is the plain compile
+  # bit-exact with the eager one at a latency cost (see compile_exact_ops in docs/models.rst); false is the
+  # plain compile
   compile_exact_ops: false
   accelerator_graph: true
   capture_sizes: [[1024, 1024]]
