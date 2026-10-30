@@ -73,8 +73,9 @@ def kept_exact(module: nn.Module | None) -> bool:
 @functools.cache
 def _kept_class(cls: type[nn.Module], exact_rms: bool) -> type[nn.Module]:
     """The subclass a kept module of class ``cls`` becomes, made once, so every kept module of a
-    class shares one ``forward``. Dynamo guards on the identity of a forward set on an instance,
-    which recompiles a frame the blocks share once per block."""
+    class shares one ``forward``. Dynamo guards a non-function ``forward`` set on an instance (a
+    ``functools.partial``) by identity, so a frame the blocks share would recompile once per block;
+    a class attribute is checked once for all of them."""
     forward = _exact_rms_norm_forward if exact_rms else torch.compiler.disable(cls.forward)
     return type(cls.__name__, (cls,), {"forward": forward, "compile_kept_exact": True})
 
