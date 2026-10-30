@@ -706,7 +706,7 @@ class Model(ABC):
         multimodal tensors from file_paths (images, audio, video).
         The model may inspect the raw tensors dict and compute additional
         derived tensors (e.g., Qwen3-Omni computes ``pixel_values``,
-        ``image_grid_thw``, ``audio_features``, ``audio_seqlens`` from the
+        ``image_grid_thw``, ``audio_features`` from the
         raw ``image_inputs`` / ``audio_inputs`` / ``video_inputs``).
 
         Args:
@@ -840,9 +840,12 @@ class Model(ABC):
         meta module to this dtype *before* ``to_empty(device)`` so storage
         is allocated directly in the target dtype — casting after
         ``to_empty`` first materialises every param in the meta default
-        (float32), doubling the load-time VRAM peak. ``None`` means leave
-        the default (float32); the engine manager passes ``None`` for
-        nodes whose engine does not autocast.
+        (float32), doubling the load-time VRAM peak. It is always the
+        model-wide dtype (``get_autocast_dtype``, or YAML ``autocast_dtype``):
+        the submodule does not exist yet, so a node with ``disable_autocast``
+        gets it too. The engine manager's cast afterwards keeps such a node in
+        whatever dtype it was built in, and moves a node with its own
+        ``get_autocast_dtype`` to that dtype.
         """
         pass
 
@@ -867,6 +870,9 @@ class Model(ABC):
         return None
 
     def get_autocast_dtype(self):
+        """The model-wide dtype nodes are cast to and autocast in. ``None``
+        runs every node without autocast, in the dtype it was built in; YAML
+        ``autocast_dtype`` may then only be ``null``."""
         return torch.bfloat16
 
     def get_output_sample_rate(self, modality: str = "audio") -> int:

@@ -217,6 +217,14 @@ You must implement these abstract methods:
    data worker drops a client's value for it before ``process_prompt``. Qwen3-TTS
    lists its prompt layout, speaker, language, clip digest and codec stream lead.
 
+.. note::
+
+   The conductor merges each walk's ``ForwardPassArgs.step_metadata`` into the
+   request's ``metadata.kwargs``, so a request fact stored under a key that a
+   later walk's step metadata also uses is overwritten by that walk's value. Keep
+   such facts under their own key: LTX-2.5 nests the request's geometry under
+   ``kwargs["request"]``, since its stage-1 walk sends a half-size ``height``.
+
 The following methods have defaults and are optional to override:
 ``get_request_resource_configs`` (described below), ``get_sampling_config``,
 ``get_max_output_tokens``, ``get_autocast_dtype``, ``load_image``, ``load_audio``,
@@ -602,12 +610,21 @@ The spec types are:
        defaults to ``head_dim ** -0.5``, ``backend`` (``RaggedAttnBackend.AUTO``, the
        default, ``RaggedAttnBackend.FLASHINFER``, or ``RaggedAttnBackend.DENSE``),
        ``flashinfer_backend``, the
-       two CUDA-graph ceilings ``max_segments_per_request`` and
-       ``max_tokens_per_request``, and ``compile_op``, described under `Cacheless
-       attention (encoder towers)`_. ``compile_op`` is the model's declaration; the
-       serving config's ``resources:`` overrides take only the backends and the two
-       ceilings. ``DENSE`` runs FA3 ``flash_attn_varlen`` (AITER on ROCm)
-       and falls back to FlashInfer if that kernel is missing. See `Cacheless attention (encoder towers)`_.
+       two CUDA-graph ceilings ``max_segments_per_request`` (``max_segments_per_step``
+       for a ``one_row_per_step`` region) and
+       ``max_tokens_per_request``, ``compile_op``, ``shard_over_sp`` and
+       ``workspace_mb``. ``DENSE`` runs FA3
+       ``flash_attn_varlen`` (AITER on ROCm) and falls back to FlashInfer if that kernel is
+       missing. By default the heads are split across all TP × SP ranks of the node;
+       ``shard_over_sp=False`` splits them across the TP ranks only, for an attention
+       each sequence-parallel rank runs whole over its own tokens (one over a
+       replicated stream, or a cross-attention from the rank's query shard).
+       ``workspace_mb`` sizes each label's FlashInfer workspace per slot (default
+       ``MSTAR_WORKSPACE_BUFFER_MB``, 512); a node with many labels can declare less,
+       since a ragged prefill only uses it for split-KV partials. ``compile_op``,
+       ``shard_over_sp`` and ``workspace_mb`` are the model's declaration; the serving
+       config's ``resources:`` overrides take only the backends and the ceilings. See
+       `Cacheless attention (encoder towers)`_ for ``compile_op``.
    * - ``RaggedCrossAttentionSpec(config=RaggedAttentionConfig(...))``
      - The cross-attention counterpart: one span of each request attends another
        (``RaggedCrossAttentionStep(pairs=...)``). Same config. See `Cross-attention
@@ -891,6 +908,14 @@ span's tokens as ``k`` and ``v``. One resource has one head geometry, so a model
 attentions differ in head count or head dim declares one spec per (kind, geometry).
 LTX-2.5 is the reference (``mstar/model/ltx2_5/submodules.py``).
 
+Called with ``return_lse=True``, a ragged or ragged cross-attention resource's ``run`` on the
+FlashInfer backend also returns each query row's log-sum-exp (``[total_tokens, H]``, fp32,
+natural log) from the same plan, which is what merging attentions over disjoint key sets
+needs; a compiled caller breaks there even with ``compile_op``. Under sequence parallelism
+LTX-2.5's audio queries attend each rank's share of the video tokens, and
+``attention_over_sharded_keys`` (``mstar/model/components/distributed/sequence_parallel.py``)
+merges them.
+
 Block-causal attention within spans
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -1058,8 +1083,11 @@ methods are:
    whole-forward compile but wants parts of it compiled returns them from
    ``compile_regions()``: attribute paths (a module, or a method) mapped to example
    arguments to warm each with at start-up. The engine compiles them, with dynamic
-   shapes and before capture, on an accelerator only; don't call ``torch.compile`` in
-   model code. Qwen3.5's vision encoder and Omnilingual ASR are examples.
+   shapes and before capture, on an accelerator only; prefer it to calling
+   ``torch.compile`` in model code. Its options are fixed (dynamic shapes,
+   torch.compile's default mode), so a part that needs static shapes, a mode or
+   ``fullgraph`` still compiles in model code. Qwen3.5's vision encoder and
+   Omnilingual ASR are examples.
 
    Some submodules must run in their own parameter dtype. One example is an fp32 vocoder
    that is numerically sensitive. Such a submodule sets ``disable_autocast = True``. The
@@ -1086,10 +1114,9 @@ methods are:
    (Kokoro is an example).
 
    Under TP or SP the engine sizes every resource it builds for a node (KV, attention,
-   recurrent state) for one rank's slice of the heads. A node whose SP ranks split other
-   work instead, such as one guidance branch per rank, sets ``splits_heads = False``,
-   and its SP ranks keep all the heads (TP ranks still split them). Nodes sharing a
-   resource must agree.
+   recurrent state) for one rank's slice of the heads, split over all TP × SP ranks. A
+   ragged attention that each SP rank runs whole declares that on the resource, with
+   ``RaggedAttentionConfig(shard_over_sp=False)``.
 
 ``postprocess(...)`` (optional)
    Metadata-only fixups that run on the GPU thread. This method must not read tensor
@@ -1107,11 +1134,8 @@ methods are:
    gives it ``check_stop_batched``, which checks a whole step off one host copy of its
    tokens. Qwen3.5's ``LLMSubmodule`` is an example. The token budget is the loop's cap
    from ``get_loop_caps``, not a stop check. A decode walk that feeds each row
-   its last sampled token can keep that token on the device instead of routing it: give
-   its ``TokenStop`` a ``walk`` and the ``loopback_signal`` the token feeds back to (see
-   `Device loop-back`_); the loop-back hooks and the client's inline copy of the token
-   follow from it (``MSTAR_DEVICE_LOOPBACK``). Qwen3.5, Higgs Audio, Qwen3-ASR and
-   Whisper declare it.
+   its last sampled token can keep that token on the device instead of routing it, with a
+   ``DeviceLoopback`` (see `Device loop-back`_).
    When a prefill walk outside the loop samples the reply's first token, list it
    in ``prefill_walks``; that token counts toward the budget, so ``get_loop_caps``
    gives the loop ``max_output_tokens - 1``. A stop id sampled
@@ -1355,18 +1379,19 @@ inductor specialize on that integer. The frame is then retraced once per layer.
 .. _Device loop-back:
 
 **Device loop-back.** A decode loop normally routes its sampled token back to itself as a
-tensor per request. A node whose ``TokenStop`` names a ``walk`` and a ``loopback_signal``
-instead reads each row's last sampled token off the sampler on the device: the base
-class's ``device_loopback_signals`` names the signal, so the worker routes it without a
-tensor, ``prepare_inputs`` returns ``self.uniform_row_inputs(...)`` for such a row, and
-``preprocess`` reads the tokens with ``sampler.loopback_tokens(request_ids)``. A row whose
-last step did not keep its value on the device (its first decode step, after the prefill)
-still brings it routed; put it over the one read from the device with
-``sampler.overwrite_rows(rows, (ids, routed_ids))``.
+tensor per request. An AR node that sets ``self.device_loopback = DeviceLoopback(walk,
+signal, sampler, buffer)`` instead reads each row's last sampled token off the sampler on
+the device (``MSTAR_DEVICE_LOOPBACK``): the base class's ``device_loopback_signals`` names
+the signal, so the worker routes it without a tensor and sends the client's copy inline,
+``prepare_inputs`` returns ``self.uniform_row_inputs(...)`` for such a row, and
+``preprocess`` reads the tokens with ``self.loopback_inputs(engine_inputs, inputs)``. A
+row whose last step did not keep its value on the device (its first decode step, after
+the prefill) still brings it routed, and that read puts it over the slot's. Qwen3.5,
+Higgs Audio, Qwen3-ASR and Whisper declare it.
 
 State that a decode loop carries from step to step beside the token, such as Whisper's
 timestamp rule state, is declared on the sampler, not kept in the model (Whisper adds its
-signal to ``device_loopback_signals``):
+signal to ``device_loopback_signals`` and passes its name to ``loopback_inputs``):
 
 .. code-block:: python
 
@@ -1646,20 +1671,19 @@ Both types share the base ``PiecewiseCudaGraphConfig`` fields:
   them.
 - ``can_lease`` has signature ``(inputs: list[NodeInputs]) -> bool``. It applies only with
   ``lease_before_step``, and lets the region refuse a batch for a limit that the
-  capture bucket key doesn't express, such as Qwen3.5's per-request segment count. The
-  engine then gives the region no lease for that step. Your forward must replay only
-  when the region was leased, that is when its label is in
-  ``engine_inputs.piecewise_leases``, and not whenever ``runner.can_run`` is true: a
-  refused batch can still fit a bucket, and replaying it would declare the region's
-  resources twice.
+  capture bucket key doesn't express, such as Qwen3.5's segment count per step. The
+  engine then gives the region no lease for that step. A ``lease_before_step`` region is
+  in ``engine_inputs.piecewise_runners`` only on a step that leased it, so the forward
+  replays it whenever its runner is there and runs it eagerly otherwise: an unleased
+  step declared the region's resources itself, and a replay would declare them twice.
 - ``one_row_per_step`` makes the runner lease, check (``can_run``) and replay the region as
   one row, whatever the step's batch size, under the step's first request. It is for a
   packed region that runs every request's segments as one ragged batch, such as a vision
   tower, and needs ``lease_before_step`` and ``capture_batch_sizes=[1]``. The region's
   ``declare_step`` then receives ``[first_rid]`` with every request's ``seq_lens``, so the
-  whole step's segments count against that one request's ``max_segments_per_request``,
-  which for this region is a per-step ceiling. Pair it with a ``can_lease`` that refuses a
-  step with more.
+  whole step's segments count against one replay's plan: size its attention resource with
+  ``max_segments_per_step``, and pair it with a ``can_lease`` that refuses a step with
+  more.
 - ``capture_batch_sizes`` lists the batch sizes to record. ``None`` uses the runner
   default.
 - ``compile`` runs ``torch.compile`` on ``capture_fn`` before capture. The default is
@@ -1771,8 +1795,8 @@ sequence, and an eager section after the region.
        }
 
    # --- invoke it inside the forward ---
-   if BLOCK_LOOP_REGION in engine_inputs.piecewise_leases:   # leased before the step
-       runner = engine_inputs.piecewise_runners[BLOCK_LOOP_REGION]
+   runner = engine_inputs.piecewise_runners.get(BLOCK_LOOP_REGION)   # here when leased
+   if runner is not None:
        out = runner.run(                       # admits + plans + replays + commits
            static_inputs={"x": x, "d_pos": d_pos, ...},
            request_ids=engine_inputs.request_ids,
@@ -1865,8 +1889,9 @@ that a misspelled setting is never silently ignored:
    * - ``RaggedAttentionSpec``
      - ``backend`` (``auto`` / ``flashinfer``), ``flashinfer_backend``
        (``auto`` / ``fa2`` / ``fa3``), ``max_segments_per_request``,
-       ``max_tokens_per_request``. The two ceilings size CUDA-graph buckets, which is a
-       memory-against-coverage trade the deployment makes, not the model.
+       ``max_segments_per_step``, ``max_tokens_per_request``. The ceilings size CUDA-graph
+       buckets, which is a memory-against-coverage trade the deployment makes, not the model.
+       A resource sized per step refuses ``max_segments_per_request``, which it would ignore.
 
 Tune the cache shape on the KV resource, not on the attention resource that reads it. For
 example, ``configs/qwen3tts.yaml`` selects FA2 under ``talker_attn``,

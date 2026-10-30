@@ -13,7 +13,6 @@ conv3d kernels run in, so no conv pays a layout conversion on the way in or out.
 
 from __future__ import annotations
 
-import contextlib
 import os
 
 import torch
@@ -361,20 +360,3 @@ class FastDecoder:
             return decode_causal(
                 self.vae, z, feat_cache, self.step, clip_start=clip_start, latents_per_call=latents_per_call,
             )
-
-
-@contextlib.contextmanager
-def cudnn_benchmark(enabled: bool):
-    """Within the block, let cuDNN time its conv algorithms per new shape
-    (once, then cached) instead of taking its heuristic pick; restores the
-    process-wide flag on exit. Not safe against convs on other threads: the
-    decoder nodes run every forward on the worker's one GPU thread."""
-    if not enabled:
-        yield
-        return
-    previous = torch.backends.cudnn.benchmark
-    torch.backends.cudnn.benchmark = True
-    try:
-        yield
-    finally:
-        torch.backends.cudnn.benchmark = previous

@@ -424,13 +424,13 @@ def test_qwen3_omni_caps_the_talkers_decode_where_its_stop_check_ends_it(talker_
 
 
 def _tiny_qwen3_tts_talker():
-    from test_qwen3_tts_model import _tiny_model_config
+    from test_qwen3_tts_model import _code_predictor, _tiny_model_config
 
-    from mstar.model.qwen3_tts.components.talker import Qwen3TTSCodePredictor, Qwen3TTSTalkerModel
+    from mstar.model.qwen3_tts.components.talker import Qwen3TTSTalkerModel
     from mstar.model.qwen3_tts.submodules import TalkerSubmodule
 
     config = _tiny_model_config()
-    return TalkerSubmodule(Qwen3TTSTalkerModel(config), Qwen3TTSCodePredictor(config), config)
+    return TalkerSubmodule(Qwen3TTSTalkerModel(config), _code_predictor(config), config)
 
 
 LONG_TEXT = "one two three four five six seven eight nine ten eleven twelve"
