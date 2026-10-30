@@ -36,7 +36,8 @@ def main() -> int:
     sess = f"p4q_{a.port}"
     env["OVN_WRAP"] = (f"nsys launch --session-new={sess} --trace=cuda,nvtx --cuda-graph-trace={a.graph_trace} "
                        "--trace-fork-before-exec=true")
-    if tree not in ("vllm", "sglang"):
+    # worker NVTX ranges where the tree's CLI has the flag; kernels are captured either way
+    if tree not in ("vllm", "sglang") and "--enable-nvtx" in (Path(tree) / "mstar/cli/main.py").read_text():
         env["OVN_SERVE_EXTRA"] = (env.get("OVN_SERVE_EXTRA", "") + " --enable-nvtx").strip()
     wl, c = a.cell.split(":")
     s = ab.Server(name, tree, env, a.model, a.gpus, a.port, out / f"{name}_server.log")
@@ -51,9 +52,9 @@ def main() -> int:
         s.stop()
     pin = ["numactl", f"--physcpubind={ab.CORES}"]
     subprocess.run(pin + ["nsys", "export", "--type", "sqlite", "--force-overwrite", "true", "-o",
-                          str(rep) + ".sqlite", str(rep) + ".nsys-rep"], capture_output=True)
+                          str(rep) + ".sqlite", str(rep) + ".nsys-rep"], check=False, capture_output=True)
     r = subprocess.run(pin + ["nsys", "stats", "--report", "cuda_gpu_kern_sum", "--format", "csv", "-o", "-",
-                              str(rep) + ".sqlite"], capture_output=True, text=True)
+                              str(rep) + ".sqlite"], check=False, capture_output=True, text=True)
     (out / f"{name}_kern.csv").write_text(r.stdout)
     rows = list(csv.DictReader(io.StringIO(r.stdout[r.stdout.find("Time (%)"):]))) if "Time (%)" in r.stdout else []
     lines = [f"{float(x['Time (%)']):6.2f}%  {float(x['Total Time (ns)']) / 1e6:9.1f} ms  "
@@ -61,7 +62,7 @@ def main() -> int:
     (out / f"{name}_top.txt").write_text("\n".join(lines) + "\n" + r.stderr[-2000:])
     if ANALYZE.exists():
         r2 = subprocess.run(pin + [ab.PY, str(ANALYZE), str(rep) + ".sqlite", "--top", "25"],
-                            capture_output=True, text=True)
+                            check=False, capture_output=True, text=True)
         (out / f"{name}_analyze.txt").write_text(r2.stdout + r2.stderr[-3000:])
     print("\n".join(lines))
     return 0

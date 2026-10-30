@@ -3,7 +3,7 @@
 Jobs run in order, each under a hard timeout with its own log; a failed or timed-out job is logged and the next one
 starts. Jobs marked `all_gpus` first wait until GPUs 1-3 have no compute processes (they are lent out until ~12:40Z).
 
-  nohup setsid python offline_chain.py [PID ...] >> ~/push4/results/newb/offline_chain.log 2>&1 &
+  nohup setsid python offline_chain.py [--jobs=a,b] [PID ...] >> ~/push4/results/newb/offline_chain.log 2>&1 &
   (PIDs: jobs already on GPU 0 to wait for first)
 """
 from __future__ import annotations
@@ -37,6 +37,11 @@ JOBS = [
     # pi0.5 is mstar's losing cell (JCT p50 ~120 ms vs openpi 35 ms in-process; mstar's worker is ~16 ms of it):
     # where the rest of mstar's request goes, then openpi's own websocket server so both arms pay for serving,
     # then the mstar server unpacked (is the host path CPU-starved on 2 CPUs?)
+    # after 0da53b4ac (uint8 cameras, -24%): where the remaining API-side time goes
+    ("pi05_timeline_u8", [PY, "run_pi05.py", "--gpu", "0", "--n", "50", "--timeline",
+                          "--out", str(R / "pi05_timeline_u8")], 2400, GEN, False),
+    ("pi05_hostprof_u8", [PY, "pi05_hostprof.py", "--gpu", "0", "--out", str(R / "pi05_hostprof_u8")],
+     2400, GEN, False),
     ("pi05_timeline", [PY, "run_pi05.py", "--gpu", "0", "--n", "50", "--timeline", "--out", str(R / "pi05_timeline")],
      2400, GEN, False),
     ("pi05_ws", [PY, "run_pi05.py", "--gpu", "0", "--arms", "mstar,openpi_ws", "--rounds", "2", "--n", "50",
@@ -49,6 +54,7 @@ JOBS = [
     # 27B TP4: where the TTFT gap to vLLM comes from (prefill kernel cost), then a workload not yet measured
     ("nsys_27b_ladder", NSYS[:2] + ["--arm", f"ladder={TREE}:OVN_CONFIG={LADDER}"] + NSYS[2:], 3600, TP4, True),
     ("nsys_27b_vllm", NSYS[:2] + ["--arm", "vllm=vllm"] + NSYS[2:], 3600, TP4, True),
+    ("nsys_27b_ladder_retry", NSYS[:2] + ["--arm", f"ladder={TREE}:OVN_CONFIG={LADDER}"] + NSYS[2:], 3600, TP4, True),
     ("q27b_sharegpt", BENCH27 + ["--cells", "sharegpt:32,sharegpt:64,sharegpt:128", "--rounds", "2",
                                  "--out", str(R / "q27b_sharegpt")], 4 * 3600, TP4, True),
     ("q27b_random_r3", BENCH27 + ["--rounds", "1", "--out", str(R / "q27b_random_r3")], 2 * 3600, TP4, True),
@@ -104,7 +110,11 @@ def cleanup() -> None:
 
 
 def main() -> int:
-    for pid in (int(x) for x in sys.argv[1:]):  # jobs already running on GPU 0
+    args = sys.argv[1:]
+    only = None
+    if args and args[0].startswith("--jobs="):  # run only these jobs, in JOBS order
+        only = set(args.pop(0).split("=", 1)[1].split(","))
+    for pid in (int(x) for x in args):  # jobs already running
         log(f"waiting for pid {pid}")
         while True:
             try:
@@ -114,6 +124,8 @@ def main() -> int:
             time.sleep(15)
         cleanup()
     for name, cmd, timeout, env, all_gpus in JOBS:
+        if only is not None and name not in only:
+            continue
         if all_gpus and not wait_gpus_1_3():
             log(f"{name}: SKIPPED, GPUs 1-3 still busy after 4 h")
             continue
