@@ -31,6 +31,9 @@ TP4 = {"PUSH4_CORES": evens(0, 206), "HF_HOME": "/root/hf",
 NSYS = [PY, "nsysrun.py", "--model", "qwen3_5_27b_tp4", "--gpus", "0,1,2,3", "--port", "59100",
         "--cell", "random_1024_256:128", "--n", "256", "--out", str(R / "q27b_nsys")]
 BENCH27 = [PY, "run_27b.py", "--phases", "bench", "--arms", "ladder,vllm,sglang"]
+# prefill only (1 output token): mstar's prefill is 6-11% slower per token than vLLM's (q27b_prefill)
+NSYS_PF = [PY, "nsysrun.py", "--model", "qwen3_5_27b_tp4", "--gpus", "0,1,2,3", "--port", "59100",
+           "--cell", "random_1024_1:128", "--n", "512", "--out", str(R / "q27b_nsys_prefill")]
 
 # (name, command, timeout s, env, needs GPUs 1-3)
 JOBS = [
@@ -55,6 +58,8 @@ JOBS = [
     ("nsys_27b_ladder", NSYS[:2] + ["--arm", f"ladder={TREE}:OVN_CONFIG={LADDER}"] + NSYS[2:], 3600, TP4, True),
     ("nsys_27b_vllm", NSYS[:2] + ["--arm", "vllm=vllm"] + NSYS[2:], 3600, TP4, True),
     ("nsys_27b_ladder_retry", NSYS[:2] + ["--arm", f"ladder={TREE}:OVN_CONFIG={LADDER}"] + NSYS[2:], 3600, TP4, True),
+    ("nsys_pf_ladder", NSYS_PF[:2] + ["--arm", f"ladder={TREE}:OVN_CONFIG={LADDER}"] + NSYS_PF[2:], 3600, TP4, True),
+    ("nsys_pf_vllm", NSYS_PF[:2] + ["--arm", "vllm=vllm"] + NSYS_PF[2:], 3600, TP4, True),
     ("q27b_sharegpt", BENCH27 + ["--cells", "sharegpt:32,sharegpt:64,sharegpt:128", "--rounds", "2",
                                  "--out", str(R / "q27b_sharegpt")], 4 * 3600, TP4, True),
     ("q27b_random_r3", BENCH27 + ["--rounds", "1", "--out", str(R / "q27b_random_r3")], 2 * 3600, TP4, True),
