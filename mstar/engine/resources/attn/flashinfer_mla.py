@@ -341,7 +341,9 @@ class FlashInferMLAManager(AttentionManager):
                     f"is installed. Install flashinfer-python=={_FA_PLANNER_VERSION}"
                 )
             # FA's causal tile-bound check can refuse a causal plan at a head count that doesn't divide
-            # its query tile (64 or 128); the backend is pinned, so the refusal can't fall through
+            # its query tile, which is 64 on a plan averaging few queries a row (a captured bucket's
+            # padding rows make one). The backend is pinned, so such a step would fail mid-serving
+            # rather than fall through: refused here instead, under TP placement too
             heads = self._kv_config.num_qo_heads
             if 64 % heads:
                 raise ValueError(
