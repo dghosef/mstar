@@ -132,7 +132,6 @@ class EngineManager:
         submodules: dict[str, torch.nn.Module] = {}
         # Checked by the conductor's get_sharding_config before spawn.
         moe_parallel = node_moe_parallel_configs(model_config["node_groups"])
-        sp_enabled = model.get_default_sharding_config().sp_enabled_nodes
         for name in sorted(node_names):
             # Sequence parallelism is opt-in per node; only forward the SP
             # group to a node that runs its own and is on SP ranks, so models
@@ -142,7 +141,7 @@ class EngineManager:
             # Likewise ``moe_parallel``, only for a node group's ``ep_config``.
             extra = {}
             node_sp_group = parallel_groups.get_sp_config_for_node(name)
-            if node_sp_group.world_size > 1 and name in sp_enabled:
+            if node_sp_group.world_size > 1 and name in model.get_default_sharding_config().sp_enabled_nodes:
                 extra["sp_group"] = node_sp_group
             if name in moe_parallel:
                 extra["moe_parallel"] = moe_parallel[name]
