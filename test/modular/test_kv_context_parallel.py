@@ -546,7 +546,9 @@ def _flashinfer(mla: bool) -> None:
     """Skips without FlashInfer, and for MLA on a FlashInfer a placed pool refuses at bind."""
     flashinfer = pytest.importorskip("flashinfer")
     if mla and Version(flashinfer.__version__).public != fm._FA_PLANNER_VERSION:
-        pytest.skip(f"attention over a placed MLA pool refuses FlashInfer {flashinfer.__version__} at bind")
+        pytest.skip(
+            f"needs FlashInfer {fm._FA_PLANNER_VERSION}: a placed MLA pool refuses {flashinfer.__version__} at bind"
+        )
 
 
 @LAYOUTS
