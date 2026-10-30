@@ -159,19 +159,33 @@ class Server:
         self.logf.write(f"# arm={arm} env={env_extra} cmd={' '.join(cmd)}\n")
         self.logf.flush()
         self.cores = CORES if self.kind == "comp" else MSTAR_CORES
-        self.p = subprocess.Popen(pin(cmd, self.cores), cwd=cwd, env=env, stdout=self.logf, stderr=subprocess.STDOUT,
-                                  start_new_session=True)
+        # A packed mstar server compiles slowly on its 2 CPUs (Inductor workers inherit the mask), so it starts on
+        # the whole slice and is moved onto its CPUs once healthy (push4c BRIEF: within 1.5% of packed-from-start).
+        wide = ",".join(sorted({*CORES.split(","), *MSTAR_CORES.split(",")}, key=int))
+        repin = self.kind == "mstar" and self.cores != CORES
+        self.p = subprocess.Popen(pin(cmd, wide if repin else self.cores), cwd=cwd, env=env, stdout=self.logf,
+                                  stderr=subprocess.STDOUT, start_new_session=True)
         t0 = time.monotonic()
         while time.monotonic() - t0 < 3600:
             if self.p.poll() is not None:
                 raise RuntimeError(f"server {arm} died at startup; see {logpath}")
             if healthy(port):
                 self.startup_s = time.monotonic() - t0
-                log(f"server {arm} up in {self.startup_s:.0f}s")
+                if repin:
+                    self.repin()
+                log(f"server {arm} up in {self.startup_s:.0f}s" + (f", repinned to {self.cores}" if repin else ""))
                 return
             time.sleep(3)
         self.stop()
         raise RuntimeError(f"server {arm} not healthy in 60 min")
+
+    def repin(self) -> None:
+        """Every process of the server's session, all threads, onto self.cores."""
+        ps = subprocess.run(["ps", "-eo", "pid=,sid="], capture_output=True, text=True, check=True).stdout.split("\n")
+        for line in ps:
+            f = line.split()
+            if len(f) == 2 and int(f[1]) == self.p.pid:
+                subprocess.run(["taskset", "-apc", self.cores, f[0]], capture_output=True, check=False)
 
     def stop(self) -> None:
         if self.p.poll() is None:
