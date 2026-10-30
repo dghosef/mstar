@@ -90,7 +90,7 @@ def decode_frames_at(
     if _max_decoders() > 1:
         try:
             # private in torchcodec (0.5 to 0.16 at least): any failure means one decoder
-            keys = sorted(int(i) for i in decoder._get_key_frame_indices())
+            keys = sorted(torch.as_tensor(decoder._get_key_frame_indices()).tolist())
         except Exception:  # noqa: BLE001
             logger.debug("keyframe index unavailable: the sampled frames decode on one decoder", exc_info=True)
             _warn_no_key_frames()

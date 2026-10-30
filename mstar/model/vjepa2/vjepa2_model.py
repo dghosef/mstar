@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 
 import torch
@@ -656,8 +657,10 @@ class VJepa2Model(Model):
             metadata = {}
         metadata["sampled_indices"] = indices
         metadata["original_num_frames"] = total
-        encoded = torch.frombuffer(bytearray(Path(filepath).read_bytes()), dtype=torch.uint8)
-        return TensorAndMetadata(data=encoded, metadata=metadata)
+        with open(filepath, "rb") as f:  # one copy of the upload, into a writable buffer the tensor shares
+            encoded = bytearray(os.fstat(f.fileno()).st_size)
+            f.readinto(encoded)
+        return TensorAndMetadata(data=torch.frombuffer(encoded, dtype=torch.uint8), metadata=metadata)
 
 
     def _preprocess_frames(self, frames: torch.Tensor) -> torch.Tensor:
