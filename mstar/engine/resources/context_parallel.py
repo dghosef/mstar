@@ -66,9 +66,12 @@ class ContextParallel(NamedTuple):
         last = np.clip((logical_last - self.index + self.size - 1) // self.size, 0, slots)
         return last, np.where(npages > 0, (npages - 1) * slots + last, 0)
 
-    def local_indptrs(self, indptrs: PagedIndptrs, page_size: int) -> tuple[PagedIndptrs, np.ndarray]:
+    def local_indptrs(
+        self, indptrs: PagedIndptrs, page_size: int, context_only: bool = False,
+    ) -> tuple[PagedIndptrs, np.ndarray]:
         """A plan's logical paged indptrs as this rank's (``page_size`` the logical one), and per row
-        whether it holds any of this rank's slots.
+        whether it holds any of this rank's slots. With ``context_only``, a row's KV is its stored
+        context alone: the step's own tokens and the pages past them are dropped.
 
         Every row keeps a length of at least 1 and a last page holding at least one slot, as on one
         rank: FlashInfer's split-KV planner counts a row's pages where its kernel counts its tokens,
@@ -77,19 +80,25 @@ class ContextParallel(NamedTuple):
         partial is masked before the exchange (``exchange_partials``)."""
         kvp = indptrs.paged_kv_indptr.numpy().astype(np.int64)
         npages = np.diff(kvp)
-        last, lens = self.local_last_page_len(indptrs.paged_kv_last_page_len.numpy(), npages, page_size)
+        logical_last = indptrs.paged_kv_last_page_len.numpy()
+        rows_pages = npages
+        if context_only:
+            stored = np.maximum(indptrs.stored_lens(page_size), 0)
+            rows_pages = -(-stored // page_size)
+            logical_last = stored - np.maximum(rows_pages - 1, 0) * page_size
+        last, lens = self.local_last_page_len(logical_last, rows_pages, page_size)
         valid = lens > 0
         drop = valid & (last == 0)
         kv_indptr, indices = indptrs.paged_kv_indptr, indptrs.paged_kv_indices
-        if drop.any() or not valid.all():
-            keep_pages = np.where(valid, npages - drop, 0)
+        if context_only or drop.any() or not valid.all():
+            keep_pages = np.where(valid, rows_pages - drop, 0)
             new_kvp = np.zeros(len(npages) + 1, dtype=np.int64)
             np.cumsum(np.where(valid, keep_pages, 1), out=new_kvp[1:])
             row = np.repeat(np.arange(len(npages)), npages)
             within = np.arange(len(row)) - kvp[row]
             keep = within < keep_pages[row]
             out = np.full(int(new_kvp[-1]), SINK_PAGE, dtype=np.int32)
-            out[new_kvp[row[keep]] + within[keep]] = indices.numpy()[keep]
+            out[new_kvp[row[keep]] + within[keep]] = indices.numpy()[:len(row)][keep]
             last = np.where(valid, np.where(drop, page_size // self.size, last), 1)
             lens = np.where(valid, lens, 1)
             kv_indptr, indices = torch.from_numpy(new_kvp.astype(np.int32)), torch.from_numpy(out)

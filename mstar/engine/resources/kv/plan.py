@@ -88,6 +88,12 @@ class PagedIndptrs(NamedTuple):
             kv_lens=self.kv_lens,
         )
 
+    def stored_lens(self, page_size: int) -> np.ndarray:
+        """Each row's KV length before the tokens the step appends (its queries, at the row's end)."""
+        npages = np.diff(self.paged_kv_indptr.numpy()).astype(np.int64)
+        lens = np.where(npages > 0, (npages - 1) * page_size + self.paged_kv_last_page_len.numpy(), 0)
+        return lens - np.diff(self.qo_indptr.numpy())
+
     def to_kwargs_dict(self):
         return dict(
             qo_indptr=self.qo_indptr,

@@ -20,7 +20,6 @@ import math
 import numpy as np
 import torch
 
-from mstar.engine.resources.kv.plan import build_paged_indptrs, context_only_views
 from mstar.utils.h2d import PinnedStager
 
 logger = logging.getLogger(__name__)
@@ -671,15 +670,10 @@ class FlashInferContextParallelWrapper:
     @torch.compiler.disable
     def plan(self, placement, page_size: int, kv_out, causal: bool = True, dtype: torch.dtype = torch.bfloat16):
         """``kv_out``: the step's logical ``KVPlanOutput`` for this label; ``page_size`` the logical one.
-        The context attention reads its indptrs for a one-token-a-row step, its context-only views'
-        otherwise."""
+        The context attention reads its indptrs for a one-token-a-row step, its stored context
+        alone otherwise."""
         context = kv_out.cpu_indptrs
-        if self.new is not None:
-            views = kv_out.views
-            context = build_paged_indptrs(
-                context_only_views(views, [view.to_compute for view in views], page_size), page_size,
-            )
-        local, valid_rows = placement.local_indptrs(context, page_size)
+        local, valid_rows = placement.local_indptrs(context, page_size, context_only=self.new is not None)
         if self.new is None:
             self.context.plan(dtype=dtype, **local.to_kwargs_dict())
         else:
