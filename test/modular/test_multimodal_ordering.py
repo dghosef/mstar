@@ -618,6 +618,33 @@ def test_qwen_schedule_walks_the_plan():
     assert [e["image_grid_thw"] for e in vision] == ["g0", "g1"]
 
 
+def test_qwen_audio_walks_prefill_the_text_either_side_of_their_clip():
+    """An audio-only prompt runs one Thinker walk per clip: the clip takes the text after it, and the text before
+    it unless an earlier clip took it or it fills a KV page, which keeps a walk of its own for requests that share
+    it (a long system prompt) to share its cached pages."""
+    pytest.importorskip("flashinfer")  # imported by Qwen3OmniModel's submodules
+    from mstar.model.qwen3_omni.qwen3_omni_model import THINKER_KV_PAGE_SIZE, Qwen3OmniModel
+
+    def text(name, tokens):
+        return SimpleNamespace(name=name, dims=[tokens])
+
+    model = Qwen3OmniModel.__new__(Qwen3OmniModel)
+    t0, t1, t2 = text("t0", 40), text("t1", 9), text("t2", 9)
+    signals = {"text_inputs": [t0, t1, t2], "audio_features": ["af0", "af1"], "audio_seqlens": ["as0", "as1"]}
+    one = Qwen3OmniModel._build_thinker_prefill_schedule(model, ["text", "audio", "text"], signals)
+    assert one == [("prefill_audio", {
+        "audio_features": "af0", "audio_seqlens": "as0", "text_before": t0, "text_after": t1,
+    })]
+    two = Qwen3OmniModel._build_thinker_prefill_schedule(model, ["text", "audio", "text", "audio", "text"], signals)
+    assert [(walk, entry.get("text_before"), entry.get("text_after")) for walk, entry in two] == [
+        ("prefill_audio", t0, t1), ("prefill_audio", None, t2),
+    ]
+    signals["text_inputs"][0] = system = text("system prompt", THINKER_KV_PAGE_SIZE)
+    shared = Qwen3OmniModel._build_thinker_prefill_schedule(model, ["text", "audio", "text"], signals)
+    assert [(walk, entry.get("text_inputs"), entry.get("text_before"), entry.get("text_after"))
+            for walk, entry in shared] == [("prefill_text", system, None, None), ("prefill_audio", None, None, t1)]
+
+
 def test_qwen_placeholder_ids_come_from_the_tokenizer():
     """Not from thinker_config, which disagrees with it on the checkpoint."""
     pytest.importorskip("flashinfer")  # imported by Qwen3OmniModel's submodules
