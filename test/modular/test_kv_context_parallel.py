@@ -796,40 +796,6 @@ def test_mla_ranks_refuse_the_same_steps_past_the_fa_planners_work_item_cap(monk
                         mla=True, flashinfer_backend="fa2")[0], case)
 
 
-def test_sp_mla_ranks_refuse_the_same_steps_at_the_fa_planners_causal_tile_bound(monkeypatch):
-    """FlashInfer's FA MLA planner refuses a causal plan where a query tile its head count doesn't
-    divide ends inside a query whose last key starts a KV tile, which SP partners' zigzag shares
-    meet on different steps. Every rank refuses the steps any partner's planner would."""
-    _emulate_fa_planner(monkeypatch, lambda q, kv, heads, causal: causal and fm.fa_causal_tile_refusable(q, kv, heads))
-    # 60 heads, a query tile of 128
-    ranks = [
-        _cp_attention(JointGroups(tp_group=CommGroup.trivial(), sp_group=_group(rank, P)), CPU, torch.float32,
-                      mla=True, num_qo_heads=60, flashinfer_backend="fa2")[0]
-        for rank in range(P)
-    ]
-    decisions = [
-        _refusals(ranks, _Case.build(((0, n),), CPU, torch.float32, mla=True), "causal tile-bound check")
-        for n in range(1, 48)
-    ]
-    assert all(a == b for a, b in decisions) and {a for a, _ in decisions} == {False, True}
-
-
-def test_sp_mla_refuses_to_capture_at_a_head_count_its_padding_queries_can_trip(monkeypatch):
-    """A captured SP share pads with a row of queries over one key, whose last query FA's causal
-    tile-bound check refuses for some pad counts when the heads neither divide 64 nor are a multiple
-    of 128 (40 heads, a pad of 4). The bucket is refused when built rather than on such steps."""
-    monkeypatch.setattr(fm, "_sm_count", lambda device: 132)
-    # the wrappers a capture builds; on CPU they plan the torch fallback
-    monkeypatch.setattr(fm.FlashInferMLAManager, "uses_kernel", property(lambda self: True))
-    monkeypatch.setitem(sys.modules, "flashinfer", types.SimpleNamespace(__version__=fm._FA_PLANNER_VERSION))
-    attn, _ = _cp_attention(JointGroups(tp_group=CommGroup.trivial(), sp_group=_group(0, P)), CPU, torch.float32,
-                            mla=True, num_qo_heads=40, flashinfer_backend="fa2")
-    case = _Case.build(((0, 4),), CPU, torch.float32, mla=True)
-    with pytest.raises(ValueError, match="pads each SP partner's share of its own tokens"):
-        # 6 queries a share at most, 2 of them real: a pad of 4
-        _plan(attn, case, bucket=BucketKey("w", bs=1, num_tokens=9))
-
-
 @pytest.mark.parametrize("version, heads, refused", [
     ("0.7.3", Q_HEADS, r"FlashInfer 0\.7\.3 is installed"),
     # a local build of the release
@@ -850,10 +816,9 @@ def test_mla_attention_over_a_placed_pool_refuses_at_bind_a_flashinfer_or_head_c
         _cp_attention(joint, CPU, torch.float32, mla=True, num_qo_heads=heads, flashinfer_backend="fa2")
 
 
-def test_the_fa_planner_checks_hold_flashinfers_own(monkeypatch):
-    """The refusals above are rank-symmetric only while ``fa_work_items_bound`` is at least what the
-    installed FlashInfer's planner counts on any rank's KV lengths, and ``fa_causal_tile_refusable``
-    holds wherever its causal tile-bound check refuses."""
+def test_the_fa_work_item_bound_holds_flashinfers_own_count():
+    """The refusal above is rank-symmetric only while ``fa_work_items_bound`` is at least what the
+    installed FlashInfer's planner counts on any rank's KV lengths."""
     _flashinfer(mla=True)
     from flashinfer.mla._batch_mla._backends import _fa_common as fa
 
@@ -874,16 +839,3 @@ def test_the_fa_planner_checks_hold_flashinfers_own(monkeypatch):
                 assert bound > fa._FA_MAX_WORK_ITEMS
                 continue
             assert count <= bound, (q.tolist(), kv.tolist(), heads, sm, causal)
-    # fa2's smallest KV tile, 16, which the mirror takes for every tile
-    monkeypatch.setattr(fa, "_get_fa_shared_memory_limits", lambda device: (92672, 0))
-    for _ in range(3000):
-        rows = int(torch.randint(1, 4, (), generator=gen))
-        q = torch.randint(1, 40, (rows,), generator=gen)
-        kv = q + torch.randint(0, 100, (rows,), generator=gen)
-        heads = (20, 24, 40, 48, 60, 96)[int(torch.randint(6, (), generator=gen))]
-        for backend in ("fa2", "fa3"):
-            try:
-                fa._validate_fa_causal_tile_bound(q.tolist(), kv.tolist(), heads, backend, torch.bfloat16, None)
-            except fa._BackendPlanUnsupportedError:
-                assert fm.fa_causal_tile_refusable(q.numpy(), kv.numpy(), heads), (q.tolist(), kv.tolist(), heads)
-

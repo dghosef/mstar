@@ -47,9 +47,8 @@ def flashinfer_mla_supports(kv_lora_rank: int, qk_rope_head_dim: int) -> bool:
     return qk_rope_head_dim == 0 and _flashinfer_at_least("0.6.18")
 
 
-# the FlashInfer whose FA MLA planner (fa2, fa3) rules `fa_work_items_bound` and
-# `fa_causal_tile_refusable` copy: its cap on a plan's work items, its SM cluster and query tile,
-# its KV split limit, and its causal tile-bound check
+# the FlashInfer whose FA MLA planner (fa2, fa3) rules `fa_work_items_bound` copies: its cap on a
+# plan's work items, its SM cluster and query tile, and its KV split limit
 _FA_PLANNER_VERSION = "0.7.2"
 _FA_MAX_WORK_ITEMS = 16384
 
@@ -67,25 +66,6 @@ def fa_work_items_bound(qo_indptr: np.ndarray | torch.Tensor, num_heads: int, nu
     cluster = 2 if q.sum() * num_heads // len(q) > 64 else 1
     tile = 64 * cluster
     return int(((q * num_heads + tile - 1) // tile).sum()) + num_sm // cluster
-
-
-def fa_causal_tile_refusable(q_lens: np.ndarray, kv_lens: np.ndarray, num_heads: int) -> bool:
-    """Whether FlashInfer's FA MLA planner may refuse a causal plan of these rows (its causal
-    tile-bound check): where a query tile the head count doesn't divide ends inside a
-    query whose last visible key starts a KV tile. The KV tile is taken as 16, the smallest, whose
-    multiples hold every larger tile's."""
-    q_lens, kv_lens = np.asarray(q_lens, dtype=np.int64), np.asarray(kv_lens, dtype=np.int64)
-    if not len(q_lens):
-        return False
-    tile = 64 * (2 if q_lens.sum() * num_heads // len(q_lens) > 64 else 1)
-    if tile % num_heads == 0:
-        return False
-    for q, kv in zip(q_lens.tolist(), kv_lens.tolist(), strict=True):
-        query, part = np.divmod(np.arange(tile, q * num_heads, tile), num_heads)
-        key = kv - q + query
-        if ((part > 0) & (key >= 0) & (key < kv) & (key % 16 == 0)).any():
-            return True
-    return False
 
 
 def _sm_count(device: torch.device) -> int | None:
@@ -378,8 +358,9 @@ class FlashInferMLAManager(AttentionManager):
                 )
             # FA's causal tile-bound check can refuse a causal plan at a head count that doesn't divide
             # its query tile, which is 64 on a plan averaging few queries a row (a captured bucket's
-            # padding rows make one). The backend is pinned, so such a step would fail mid-serving
-            # rather than fall through: refused here instead, under TP placement too
+            # padding rows, or a zigzag share's empty ones, make one). The backend is pinned, so such
+            # a step would fail rather than fall through, under SP placement on one partner's share
+            # alone: refused here instead, under TP placement too
             heads = self._kv_config.num_qo_heads
             if 64 % heads:
                 raise ValueError(
@@ -447,17 +428,6 @@ class FlashInferMLAManager(AttentionManager):
             workspace = self._workspaces.get(f"{label}.own_tokens", slot)
             if self._placement.over_sp:
                 # SP partners hold the same heads, so each attends its zigzag share of the own tokens
-                heads = self._kv_config.num_qo_heads
-                if max_total_tokens is not None and self._fa_sm_count is not None and 64 % heads and heads % 128:
-                    # the padding row's last query ends mid-tile for some pad counts
-                    # (`ZigzagWrapper._padded`), so a valid step could be refused
-                    raise ValueError(
-                        f"a captured step over context-parallel KV pool {self._kv_cache_name!r} pads each SP "
-                        f"partner's share of its own tokens with queries FlashInfer's FA MLA planner refuses "
-                        f"on some steps (its causal tile-bound check) at {heads} query heads a rank, which "
-                        "neither divides 64 nor is a multiple of 128: choose a TP size that gives each rank "
-                        "such a head count, or place positions over TP ranks (sp_size 1)"
-                    )
                 rows = own.pop("batch_size", None) or 0
                 del own["max_num_pages"]
                 own.pop("use_cuda_graph", None)
@@ -536,12 +506,12 @@ class FlashInferMLAManager(AttentionManager):
             plan_states[label] = wrapper
         self._preplanned = ctx.is_preplan
 
-    def _refuse_unplannable(self, what: str, qo_indptr: np.ndarray, kv_lens: np.ndarray | None, causal: bool) -> None:
-        """Refuses, before FlashInfer can, a plan its FA planner may refuse (``ContextParallelWrapper.plan``'s
-        ``check``). The planner reads the KV lengths a rank plans, which differ by rank over a placed
-        pool, so its refusal could come on one rank alone; these checks read only what every rank
-        knows. A plan's heads are the planned ones: under SP placement the context's and the own
-        tokens' are the same."""
+    def _refuse_unplannable(self, what: str, qo_indptr: np.ndarray) -> None:
+        """Refuses, before FlashInfer can, a plan past its FA planner's work-item cap
+        (``ContextParallelWrapper.plan``'s ``check``). The planner counts the KV lengths a rank plans,
+        which differ by rank over a placed pool, so its refusal could come on one rank alone; the
+        bound reads the query lengths alone. Under SP placement the context's and the own tokens'
+        heads are the same."""
         heads = self._wrapper_kwargs["num_qo_heads"]
         bound = fa_work_items_bound(qo_indptr, heads, self._fa_sm_count)
         if bound > _FA_MAX_WORK_ITEMS:
@@ -554,12 +524,6 @@ class FlashInferMLAManager(AttentionManager):
                 f"{what} of a step of {int(qo_indptr[-1])} query tokens at {heads} heads can take FlashInfer's "
                 f"FA MLA planner up to {bound} work items over context-parallel KV pool "
                 f"{self._kv_cache_name!r}, past its cap of {_FA_MAX_WORK_ITEMS}.{hint}"
-            )
-        if causal and kv_lens is not None and fa_causal_tile_refusable(np.diff(qo_indptr), kv_lens, heads):
-            raise ValueError(
-                f"{what} of a step over context-parallel KV pool {self._kv_cache_name!r} can meet "
-                f"FlashInfer's FA MLA causal tile-bound check: {heads} heads don't divide its query tile. "
-                "Choose a TP size that gives each rank a head count dividing 64"
             )
 
     def clear_preplan(self):

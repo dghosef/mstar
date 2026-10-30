@@ -233,28 +233,26 @@ class ContextParallelWrapper:
         self.context_empty = False
 
     @torch.compiler.disable
-    def plan(
-        self, kv_out, causal: bool = True, check: Callable[[str, np.ndarray, np.ndarray | None, bool], None] | None = None,
-    ):
+    def plan(self, kv_out, causal: bool = True, check: Callable[[str, np.ndarray], None] | None = None):
         """``kv_out``: the step's logical ``KVPlanOutput`` for this label. The context attention reads
         its indptrs for a one-token-a-row step, its stored context alone otherwise.
 
-        ``check(what, qo_indptr, kv_lens, causal)``, before anything is planned, is the backend's
-        refusal of a plan its kernel's planner may refuse on one rank of the lockstep instance
-        alone. It sees every plan any rank makes of the step, from what every rank knows: the
-        context's (``kv_lens`` None, since each rank plans its own slots), and under SP placement
-        every partner's zigzag share of the own tokens."""
+        ``check(what, qo_indptr)``, before anything is planned, is the backend's refusal of a plan
+        its kernel's planner may refuse on one rank of the lockstep instance alone. It sees every
+        plan whose lengths differ by rank: the context's, and under SP placement every partner's
+        zigzag share of the own tokens. TP mode's own-token plan has the same lengths on every rank,
+        so a refusal of it is symmetric already."""
         context = kv_out.cpu_indptrs
         if self.new is not None:
             context = context.context_only(self._page_size)
         if check is not None:
             qo = context.qo_indptr.numpy()
-            check("the context", qo, None, False)
+            check("the context", qo)
             if isinstance(self.new, ZigzagWrapper):
                 for index in range(self._placement.size):
                     share = self.new.share(qo, index, causal)
-                    if len(share[1]):
-                        check(f"partner {index}'s own tokens", *share, causal)
+                    if len(share) > 1:
+                        check(f"partner {index}'s own tokens", share)
         local, valid_rows = self._placement.local_indptrs(context, self._page_size)
         # no row has a stored page: logical, so the same on every rank
         self.context_empty = not self._captured and self.new is not None and not int(context.paged_kv_indptr[-1])
@@ -405,11 +403,11 @@ class ZigzagWrapper:
         self._gather, self._scatter = self._tokens
         self._bucket_tokens = captured_tokens
 
-    def share(self, qo_indptr: np.ndarray, index: int, causal: bool = True) -> tuple[np.ndarray, np.ndarray]:
-        """Partner ``index``'s plan of a step as this wrapper makes it, as its kernel's planner reads
-        it: the chunks' ``qo_indptr`` and KV lengths. Every rank can lay out every partner's."""
+    def share(self, qo_indptr: np.ndarray, index: int, causal: bool = True) -> np.ndarray:
+        """Partner ``index``'s plan of a step as this wrapper makes it: its chunks' ``qo_indptr``,
+        padded as its kernel's planner reads it. Every rank can lay out every partner's."""
         _, first, end, kv_end = _zigzag_chunks(qo_indptr, self._placement.size, index, causal)
-        return self._padded(np.concatenate([[0], np.cumsum(end - first)]), kv_end)
+        return self._padded(np.concatenate([[0], np.cumsum(end - first)]), kv_end)[0]
 
     def _padded(self, qo_indptr: np.ndarray, kv_lens: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """A share's chunks on a captured wrapper, padded to the bucket's queries and rows. Its

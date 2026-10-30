@@ -1938,16 +1938,13 @@ MLA over a placed pool plans on FA3 (Hopper) or FA2 rather than ``auto``'s other
 planner caps a plan's work items, which TP mode's widened heads reach ``P`` times sooner, and
 counts each rank's own KV lengths, so its own refusal could come on one rank alone. Instead a step
 is refused before it plans, on every rank alike, when a bound on its work items from its query
-lengths alone passes the cap. In SP mode each rank plans its own zigzag share, so every rank
-checks every partner's share, against the cap and the planner's causal tile-bound check (which a
-head count that doesn't divide its query tile can meet), and refuses the step if any would be
-refused. A captured share's padding queries, one row over one key, meet that check at some pad
-counts when a rank's heads neither divide 64 nor are a multiple of 128, so SP placement refuses to
-capture at such a head count. These checks copy FlashInfer 0.7.2's planner rules, so a placed MLA
+lengths alone passes the cap; in SP mode, where each rank plans its own zigzag share, every rank
+checks every partner's share. The bound copies FlashInfer 0.7.2's planner rules, so a placed MLA
 pool refuses any other FlashInfer at load. That planner's causal tile-bound check can also refuse
 a causal plan at a head count that doesn't divide its query tile, which is 64 on a plan averaging
-few queries a row, so a placed MLA pool is refused at load unless each rank's head count divides
-64, in TP mode too, where the refusal would otherwise fail steps mid-serving.
+few queries a row (a captured share's empty rows make one), so a placed MLA pool is refused at
+load unless each rank's head count divides 64: in SP mode the refusal could come on one rank
+alone, and in TP mode it would fail steps mid-serving.
 
 Besides attention, the position resource (RoPE) and the recurrent state pool (GDN, KDA) support
 a placed pool; a recurrent pool on an SP-placed node holds the same state on every SP partner.
