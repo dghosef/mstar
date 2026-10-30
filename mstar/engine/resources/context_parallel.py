@@ -179,25 +179,33 @@ class ContextParallelWrapper:
     decode-kind wrapper, ``new`` None). Any other step is two attentions: the stored context, not
     causal, planned on its context-only indptrs; and the step's own tokens, over the keys the layer
     passes to ``run``, on ``new``, which needs no exchange. ``context`` is planned with
-    ``page_size`` the pool's slots per page on this rank. Each wrapper takes whatever its backend's
-    ``run`` does; ``new`` plans as ``plan(qo_indptr, causal)``.
+    ``page_size`` the pool's slots per page on this rank (``page_size`` here is the logical one).
+    Each wrapper takes whatever its backend's ``run`` does; ``new`` plans as
+    ``plan(qo_indptr, causal)``. A captured wrapper is built with its ``batch_size`` and
+    ``max_total_tokens``.
     """
 
     def __init__(
         self,
+        placement: ContextParallel,
+        page_size: int,
+        dtype: torch.dtype,
         context,
         new,
         device: torch.device,
-        captured_tokens: int = 0,
+        batch_size: int | None = None,
+        max_total_tokens: int | None = None,
     ):
+        self._placement, self._page_size, self._dtype = placement, page_size, dtype
         self.context = context
         # None for a one-token-a-row step
         self.new = new
         self._device = device
         self._qo_indptr_buf = None
         # per query token, whether its row holds any of this rank's slots. A captured wrapper's
-        # holds its bucket's every token (``captured_tokens``) and is never reallocated, so a
-        # replay reads the address it was captured with
+        # holds its bucket's every token (a row's at least, and the bucket's) and is never
+        # reallocated, so a replay reads the address it was captured with
+        captured_tokens = max(batch_size or 0, max_total_tokens or 0)
         self._captured = captured_tokens > 0
         self._valid = torch.zeros(captured_tokens, dtype=torch.bool, device=device) if self._captured else None
         self._stager = PinnedStager(torch.bool)
@@ -206,19 +214,18 @@ class ContextParallelWrapper:
         self.context_empty = False
 
     @torch.compiler.disable
-    def plan(self, placement, page_size: int, kv_out, causal: bool = True, dtype: torch.dtype = torch.bfloat16):
-        """``kv_out``: the step's logical ``KVPlanOutput`` for this label; ``page_size`` the logical one.
-        The context attention reads its indptrs for a one-token-a-row step, its stored context
-        alone otherwise."""
+    def plan(self, kv_out, causal: bool = True):
+        """``kv_out``: the step's logical ``KVPlanOutput`` for this label. The context attention reads
+        its indptrs for a one-token-a-row step, its stored context alone otherwise."""
         context = kv_out.cpu_indptrs
         if self.new is not None:
-            context = context.context_only(page_size)
-        local, valid_rows = placement.local_indptrs(context, page_size)
+            context = context.context_only(self._page_size)
+        local, valid_rows = self._placement.local_indptrs(context, self._page_size)
         # no row has a stored page: logical, so the same on every rank
         self.context_empty = not self._captured and self.new is not None and not int(context.paged_kv_indptr[-1])
         # not causal whatever the step: every query sees all of it (a one-token row's own key
         # included), and FA MLA's causal tile check reads each rank's KV lengths
-        self.context.plan(causal=False, dtype=dtype, **local.to_kwargs_dict())
+        self.context.plan(causal=False, dtype=self._dtype, **local.to_kwargs_dict())
         if self.new is not None:
             self.new.plan(context.qo_indptr, causal=causal)
         self._qo_indptr_buf = getattr(self.context, "_qo_indptr_buf", None)
@@ -233,7 +240,7 @@ class ContextParallelWrapper:
         self._stager.copy_(self._valid, valid, pad_value=False if self._captured else None)
 
     def attend(
-        self, placement, queries: tuple[torch.Tensor, ...], kv_cache_layer: torch.Tensor,
+        self, queries: tuple[torch.Tensor, ...], kv_cache_layer: torch.Tensor,
         new_keys: tuple[torch.Tensor | None, ...],
     ) -> torch.Tensor:
         """Attention over the whole placed pool (``ContextParallel.attend``), in the query's dtype:
@@ -247,7 +254,7 @@ class ContextParallelWrapper:
             )
         context = None if self.context_empty else lambda *parts: self.attend_context(*parts, kv_cache_layer)
         new = None if self.new is None else self.new.run(*queries, *new_keys, return_lse=True)
-        return placement.attend(queries, context, new).to(queries[0].dtype)
+        return self._placement.attend(queries, context, new).to(queries[0].dtype)
 
     @property
     def reads_step_kv(self) -> bool:

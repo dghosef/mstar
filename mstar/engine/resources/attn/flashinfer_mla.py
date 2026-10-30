@@ -409,9 +409,10 @@ class FlashInferMLAManager(AttentionManager):
             if max_total_tokens is not None:
                 own["max_num_pages"] = max_total_tokens
             new = FlashInferMLAOwnTokensWrapper(self._workspaces.get(f"{label}.own_tokens", slot), self._dtype, **own)
-        # a captured wrapper's every query token: a row's at least, and the bucket's
-        captured_tokens = max(kwargs.get("batch_size") or 0, max_total_tokens or 0)
-        return ContextParallelWrapper(context, new, self._device, captured_tokens)
+        return ContextParallelWrapper(
+            self._placement, self._kv_config.page_size, self._dtype, context, new, self._device,
+            kwargs.get("batch_size"), max_total_tokens,
+        )
 
     @property
     def supports_preplan(self):
@@ -461,9 +462,7 @@ class FlashInferMLAManager(AttentionManager):
                 wrapper = self._eager_wrapper(label, ctx.slot, is_decode)
             if self._placement is not None:
                 self._refuse_past_work_item_cap(indptrs.qo_indptr)
-                wrapper.plan(
-                    self._placement, self._kv_config.page_size, kv_out, causal=step.causal, dtype=self._dtype,
-                )
+                wrapper.plan(kv_out, causal=step.causal)
             else:
                 wrapper.plan(causal=step.causal, dtype=self._dtype, **indptrs.to_kwargs_dict())
             plan_states[label] = wrapper
@@ -526,7 +525,7 @@ class FlashInferMLAManager(AttentionManager):
         """As ``FlashInferManager._attend_placed``, with the query in two parts and the step's own
         keys its latents."""
         wrapper: ContextParallelWrapper = self._current_plan_states[label]
-        return wrapper.attend(self._placement, (q_nope, q_pe), kv_cache_layer, (latent,))
+        return wrapper.attend((q_nope, q_pe), kv_cache_layer, (latent,))
 
     @torch.compiler.disable
     def _attend(self, q_nope, q_pe, label, kv_cache_layer, return_lse=False):

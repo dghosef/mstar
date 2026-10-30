@@ -213,9 +213,10 @@ class FlashInferManager(AttentionManager):
                 max_num_segments=kv_kwargs.get("batch_size"), max_total_tokens=max_total_tokens,
                 accelerator_graph=kv_kwargs.get("accelerator_graph", False), **self._new_kwargs,
             )
-        # a captured wrapper's every query token: a row's at least, and the bucket's
-        captured_tokens = max(kv_kwargs.get("batch_size") or 0, max_total_tokens or 0)
-        return ContextParallelWrapper(context, new, self._device, captured_tokens)
+        return ContextParallelWrapper(
+            self._placement, self._kv_config.page_size, self._dtype, context, new, self._device,
+            kv_kwargs.get("batch_size"), max_total_tokens,
+        )
 
     @property
     def supports_preplan(self):
@@ -271,7 +272,7 @@ class FlashInferManager(AttentionManager):
 
             if self._placement is not None:
                 laps.lap("wrapper")
-                wrapper.plan(self._placement, self._kv_config.page_size, kv_out, causal=step.causal, dtype=self._dtype)
+                wrapper.plan(kv_out, causal=step.causal)
                 laps.lap("wrapper_plan")
                 plan_states[label] = wrapper
                 continue
@@ -336,7 +337,7 @@ class FlashInferManager(AttentionManager):
         k: torch.Tensor | None, v: torch.Tensor | None,
     ) -> torch.Tensor:
         wrapper: ContextParallelWrapper = self._current_plan_states[label]
-        return wrapper.attend(self._placement, (q,), kv_cache_layer, (k, v))
+        return wrapper.attend((q,), kv_cache_layer, (k, v))
 
     @torch.compiler.disable
     def _attend(
