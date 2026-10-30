@@ -58,12 +58,6 @@ class EngineResourceInfo:
     """
     device: torch.device
     joint_comm_group: JointGroups | None = None
-    # how many ways the node's ranks split its attention heads; each builder
-    # sizes head counts by it, except a ragged resource declaring
-    # ``shard_over_sp=False``, which splits over the TP ranks only. None means
-    # every rank of ``joint_comm_group`` (1 without one); the engine passes the
-    # node's own count (``NodeSubmodule.splits_heads``).
-    head_shards: int | None = None
     transfer_engine_info: "TransferEngineInfo | None" = None
     kv_dtype: torch.dtype = torch.bfloat16
     # Whether this logical resource has consumers in another worker instance.
@@ -80,10 +74,13 @@ class EngineResourceInfo:
         default_factory=dict
     )
 
-    def __post_init__(self):
-        if self.head_shards is None:
-            group = self.joint_comm_group
-            object.__setattr__(self, "head_shards", 1 if group is None else group.world_size)
+    @property
+    def head_shards(self) -> int:
+        """How many ways the node's ranks split its attention heads, which each
+        builder sizes head counts by: all its TP × SP ranks. A ragged resource
+        declaring ``RaggedAttentionConfig.shard_over_sp=False`` splits over TP only."""
+        group = self.joint_comm_group
+        return 1 if group is None else group.world_size
 
     def dependency(self, key: str) -> NodeResourceSpec:
         spec = self.dependencies.get(key)

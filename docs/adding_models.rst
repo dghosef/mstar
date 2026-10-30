@@ -614,9 +614,8 @@ The spec types are:
        ``max_tokens_per_request``, ``compile_op``, ``shard_over_sp`` and
        ``workspace_mb``. ``DENSE`` runs FA3
        ``flash_attn_varlen`` (AITER on ROCm) and falls back to FlashInfer if that kernel is
-       missing. By default the heads are split across all TP × SP ranks of the node (the TP
-       ranks only, on a node that sets ``splits_heads = False``); ``shard_over_sp=False``
-       splits them across the TP ranks only, for an attention each sequence-parallel rank
+       missing. By default the heads are split across all TP × SP ranks of the node;
+       ``shard_over_sp=False`` splits them across the TP ranks only, for an attention each sequence-parallel rank
        runs whole over its own tokens (one over a replicated stream, or a cross-attention
        from the rank's query shard). ``workspace_mb`` sizes each label's FlashInfer
        workspace per slot (default ``MSTAR_WORKSPACE_BUFFER_MB``, 512); a node with many
@@ -1099,11 +1098,9 @@ methods are:
    per instance in ``__init__``, for example only when the model loads in fp32.
 
    Under TP or SP the engine sizes every resource it builds for a node (KV, attention,
-   recurrent state) for one rank's slice of the heads. A node whose SP ranks split other
-   work instead, such as one guidance branch per rank, sets ``splits_heads = False``,
-   and its SP ranks keep all the heads (TP ranks still split them). Nodes sharing a
-   resource must agree. A ragged attention that each SP rank of a head-splitting node runs
-   whole declares that on the resource, with ``RaggedAttentionConfig(shard_over_sp=False)``.
+   recurrent state) for one rank's slice of the heads, split over all TP × SP ranks. A
+   ragged attention that each SP rank runs whole declares that on the resource, with
+   ``RaggedAttentionConfig(shard_over_sp=False)``.
 
 ``postprocess(...)`` (optional)
    Metadata-only fixups that run on the GPU thread. This method must not read tensor
