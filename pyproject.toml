@@ -274,7 +274,7 @@ chatterbox_multilingual = [
 # torchcodec as the fallback); the speech tokenizer and speaker encoder load from
 # the checkpoint's ONNX files without onnxruntime.
 cosyvoice3 = [
-    "flashinfer-python==0.7.2",
+    "flashinfer-python>=0.7.2",
     "huggingface-hub",
     "mooncake-transfer-engine>=0.3.13.post1",
     "safetensors",
@@ -348,7 +348,7 @@ lingbot_world = [
     "accelerate",
     "diffusers>=0.39",
     "einops",
-    "flashinfer-python==0.7.2",
+    "flashinfer-python>=0.7.2",
     "ftfy",
     "huggingface-hub",
     "regex",
@@ -398,7 +398,7 @@ asr = [
 
 # GLM-5.x
 glm = [
-    "flashinfer-python==0.7.2",
+    "flashinfer-python>=0.7.2",
     "huggingface-hub",
     "mooncake-transfer-engine>=0.3.13.post1",
     "ninja",  # speeds up the first-use JIT build of the vendored MoE align kernel
