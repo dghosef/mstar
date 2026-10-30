@@ -241,7 +241,8 @@ OmniVoice notes
   and each residual add folds into the next RMSNorm (flashinfer
   ``fused_add_rmsnorm``), so logits match the reference to half-precision
   rounding rather than bit for bit. ``model_kwargs: {backbone_graphs: false}``
-  runs the same layer loop eagerly.
+  runs the same layer loop eagerly, and ``backbone_token_buckets`` sets the
+  packed-token buckets (256 to 4096 by default).
 - ``configs/omnivoice_split.yaml`` runs code2wav (codec decode and the
   host-side silence trim) on a second worker sharing GPU 0, so the unmask loop
   no longer stops for each finished request, and sets ``mps: true`` (see
@@ -555,6 +556,10 @@ Qwen3-Omni notes
 - The MoE layers route through the fused softmax-top-k kernel
   (``TopKRouter(fused_softmax_topk=True)``), which gives equal probabilities to
   the lower expert id where ``torch.topk`` may pick another.
+- ``configs/qwen3omni_pd_2gpu.yaml`` runs ``qwen3omni_pd_disaggregated.yaml``'s
+  prefill/decode split on two GPUs: the prefill Thinker shares rank 0 with the
+  encoders, the Talker and Code2Wav, and rank 1 runs the Thinker's decode. At
+  concurrency 1 its text matches ``configs/qwen3omni_2gpu.yaml``'s.
 
 CosyVoice3 notes
 ----------------
