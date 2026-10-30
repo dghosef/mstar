@@ -507,6 +507,8 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla):
         # the slot plans the other kind of step first
         _plan(attn, _Case.build(DECODE_ROWS if rows == PREFILL_ROWS else PREFILL_ROWS, device, dtype, mla))
         _plan(attn, case)
+        # a one-token-a-row step attends the pages alone, so a fused KV-write kernel can serve it
+        assert attn.reads_step_kv() == (rows == PREFILL_ROWS)
         heads = slice(None) if over_sp else slice(rank * Q_HEADS // world, (rank + 1) * Q_HEADS // world)
         if rows == PREFILL_ROWS:
             with pytest.raises(ValueError, match="got none"):

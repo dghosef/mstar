@@ -415,6 +415,12 @@ class FlashInferMLAManager(AttentionManager):
         self._preplanned = False
         self._preplan_states = {}
 
+    def reads_step_kv(self, label: str | None = None) -> bool:
+        # as FlashInferManager's: the latents passed as k, on a step that isn't one token a row
+        if self._placement is None:
+            return False
+        return self._current_plan_states[label or self._default_label].new is not None
+
     @torch.compiler.disable
     def qo_indptr_buf(self, label: str = "main") -> torch.Tensor | None:
         wrapper = self._current_plan_states.get(label)

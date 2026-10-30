@@ -200,6 +200,17 @@ class AttentionManager(AttentionResource):
         """
         return True
 
+    def reads_step_kv(self, label: str | None = None) -> bool:
+        """Whether this step's ``run`` under ``label`` attends the ``k``/``v`` it is passed rather
+        than only the pages. A layer whose fused kernel writes the K/V but leaves ``k`` unrotated
+        rotates it in place first when this is True.
+
+        Every step of a backend that takes the fresh K/V straight into the kernel; on a paged
+        backend over a context-parallel pool, a step that attends its own tokens apart from the
+        pool. Fixed once the step is planned, so a captured bucket replays the same answer.
+        """
+        return not self.requires_kv_write
+
 
 class PlanCacheKey(NamedTuple):
     """Fingerprint of a wrapper ``plan`` call's inputs. When it is unchanged

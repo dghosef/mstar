@@ -301,6 +301,12 @@ class FlashInferManager(AttentionManager):
         self._preplan_states = {}
 
     ### Submodule-level functionality
+    def reads_step_kv(self, label: str | None = None) -> bool:
+        # over a placed pool a step that isn't one token a row attends its own tokens from k and v
+        if self._placement is None:
+            return False
+        return self._current_plan_states[label or self._default_label].new is not None
+
     @torch.compiler.disable
     def qo_indptr_buf(self, label: str="main") -> torch.Tensor | None:
         if label not in self._current_plan_states:

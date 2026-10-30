@@ -1902,7 +1902,8 @@ stored context on the paged kernel and its own tokens on FlashInfer's ragged pre
 the ``k`` and ``v`` the layer passes to ``run``. A layer that calls ``attn.run`` itself must
 pass them (``AttentionCallable`` does); one that writes K/V in a fused kernel that leaves
 ``k`` unrotated (``Qwen3Attention`` in ``mstar/model/components/qwen3_lm.py``) rotates it in
-place first when ``kv.placement`` is set. The mixed decode/prefill wrapper (``splits``) is
+place first when the attention resource's ``reads_step_kv()`` says the step attends them, so a
+decode step keeps the fused kernel. The mixed decode/prefill wrapper (``splits``) is
 not used. The MLA backend (``flashinfer_mla``) attends a placed pool the same way, its own
 tokens on a second MLA call over the latents the layer passes as ``k`` (``MLAAttention`` does),
 and refuses a ``context_only`` step; it is proven at the kernel level only, until an MLA model

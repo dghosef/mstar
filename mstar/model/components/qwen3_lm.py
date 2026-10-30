@@ -66,9 +66,9 @@ class Qwen3Attention(ParallelAttention):
 
         eps = (float(self.q_norm.variance_epsilon), float(self.k_norm.variance_epsilon), self._rope_theta)
         attend = self.attend
-        # the fused kernel leaves k as it was, so a backend that attends the step's k and v
-        # (dense; paged over a context-parallel pool) needs them normed and rotated in place
-        if not attend.attn.requires_kv_write or attend.kv.placement is not None:
+        # the fused kernel leaves k as it was, so a step that attends its k and v needs them
+        # normed and rotated in place
+        if attend.attn.reads_step_kv():
             qk_norm_rope_inplace(q, k, self.q_norm.weight, self.k_norm.weight, pos_ids, *eps)
             return attend(q, k, v)
         layer, page_idx, slot_idx, n = attend.kv.write_target()
