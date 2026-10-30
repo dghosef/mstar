@@ -51,8 +51,6 @@ from mstar.engine.resources import (
     PagedKVConfig,
     PositionConfig,
     PositionSpec,
-    RaggedAttentionConfig,
-    RaggedAttentionSpec,
     ResourceReqConfig,
     SamplerSpec,
     SamplingReqConfig,
@@ -71,6 +69,7 @@ from mstar.model.base import (
     TensorAndMetadata,
 )
 from mstar.model.components import MoeParallelConfig
+from mstar.model.components.aut_encoder_submodule import aut_attention_spec
 from mstar.model.components.code_predictor_kernels import ResidualCodePredictor
 from mstar.model.media_limits import VideoBudget, probe_video
 from mstar.model.multimodal import (
@@ -84,7 +83,6 @@ from mstar.model.multimodal import (
     prefill_plan,
     split_around_spans,
 )
-from mstar.model.qwen3_asr.config import AUT_ATTN
 from mstar.model.qwen3_omni.components.rope import get_rope_index_vision
 from mstar.model.qwen3_omni.config import (
     CODE_PRED_SAMPLER,
@@ -268,19 +266,9 @@ class Qwen3OmniModel(Model):
             num_qo_heads=self.config.talker_text.num_attention_heads,
         )
 
-        audio = self.config.audio_encoder
         return [
-            RaggedAttentionSpec(
-                resource_key=AUT_ATTN, nodes={"audio_encoder"},
-                config=RaggedAttentionConfig(
-                    num_qo_heads=audio.encoder_attention_heads,
-                    num_kv_heads=audio.encoder_attention_heads,
-                    head_dim=audio.head_dim,
-                    # every attention window of a clip is its own segment;
-                    # windows of mel frames (100 a second) in the longest clip
-                    max_segments_per_request=-(-MAX_AUDIO_SECONDS * 100 // audio.n_window_infer),
-                ),
-            ),
+            # the longest clip's mel frames, 100 a second
+            aut_attention_spec(self.config.audio_encoder, {"audio_encoder"}, MAX_AUDIO_SECONDS * 100),
             KVSpec(
                 resource_key=THINKER_KV,
                 nodes={"Thinker"},
@@ -1709,21 +1697,11 @@ class Qwen3OmniModel(Model):
         )
 
     def _create_audio_encoder_submodule(self, device: str, autocast_dtype: torch.dtype | None) -> NodeSubmodule:
-        """The audio encoder: the AuT node Qwen3-ASR runs (Qwen3-ASR's encoder is
-        this checkpoint's, unchanged), fed the API server's log-mel features."""
-        from mstar.model.components.aut_encoder import AuTEncoder
-        from mstar.model.loader.iterators import iter_safetensors_shards
-        from mstar.model.qwen3_asr.submodules import Qwen3ASREncoderSubmodule
+        """The audio encoder: the shared AuT node (Qwen3-ASR's encoder is this
+        checkpoint's, unchanged), fed the API server's log-mel features."""
+        from mstar.model.components.aut_encoder_submodule import load_aut_encoder_submodule
 
-        with torch.device("meta"):
-            encoder = AuTEncoder(self.config.audio_encoder, attn_key=AUT_ATTN)
-        if autocast_dtype is not None:
-            encoder = encoder.to(autocast_dtype)
-        encoder.to_empty(device=device)
-        prefix = "thinker.audio_tower."
-        weights = iter_safetensors_shards(self.local_dir, device=device, prefix=prefix)
-        encoder.load_weights((k.removeprefix(prefix), v) for k, v in weights)
-        return Qwen3ASREncoderSubmodule(encoder.eval())
+        return load_aut_encoder_submodule(self.local_dir, self.config.audio_encoder, device, autocast_dtype)
 
     def _create_vision_encoder_submodule(self, device: str) -> NodeSubmodule:
         """Load the vision encoder (SigLIP2 ViT) from HF weights."""
