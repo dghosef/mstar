@@ -430,13 +430,14 @@ class _Case:
         new = torch.cat([kv[context:] for kv, (context, _) in zip(self.keys, self.rows, strict=True)])
         return (new,) if self.mla else (new[:, 0], new[:, 1])
 
-    def run(self, attn, placement, heads=slice(None), keys=True) -> torch.Tensor:
-        """``attn.run`` for ``heads`` over this rank's cache, passed the new keys when ``keys``."""
+    def runner(self, attn, placement, heads=slice(None), keys=True):
+        """``attn.run`` for ``heads`` over this rank's cache, passed the new keys when ``keys``, as a
+        call whose inputs are built once (so it can be captured)."""
         q, cache = self.queries(heads), self.cache(placement)
         new = self.new_keys() if keys else (None, None)
         if self.mla:
-            return attn.run(q[0], "main", kv_cache_layer=cache, k=new[0], q_pe=q[1])
-        return attn.run(q[0], "main", kv_cache_layer=cache, k=new[0], v=new[1])
+            return lambda: attn.run(q[0], "main", kv_cache_layer=cache, k=new[0], q_pe=q[1])
+        return lambda: attn.run(q[0], "main", kv_cache_layer=cache, k=new[0], v=new[1])
 
     def want(self) -> torch.Tensor:
         outs = []
@@ -481,9 +482,11 @@ def _plan(attn, case: _Case, slot: int = 0, bucket: BucketKey | None = None, **s
     attn.plan(AttentionStep(**step), ctx)
 
 
-def _over_ranks(rank, world, backend, store, over_sp, rows, mla):
+def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False):
     """One rank of a ``world``-rank placement running ``rows`` through ``FlashInferManager.run``
-    against one rank attending every key; every rank issues the same collectives, same shapes."""
+    against one rank attending every key; every rank issues the same collectives, same shapes.
+    ``captured`` (NCCL only) plans the step for a graph bucket, and captures ``run`` with its
+    collectives in a CUDA graph on every rank and replays it."""
     os.environ["MSTAR_WORKSPACE_BUFFER_MB"] = "1"
     dist.init_process_group(backend, init_method=f"file://{store}", rank=rank, world_size=world)
     torch.set_num_threads(1)
@@ -509,23 +512,33 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla):
         case = _Case.build(rows, device, dtype, mla)
         # the slot plans the other kind of step first
         _plan(attn, _Case.build(DECODE_ROWS if rows == PREFILL_ROWS else PREFILL_ROWS, device, dtype, mla))
-        _plan(attn, case)
+        _plan(attn, case, bucket=BucketKey("w", bs=len(rows), num_tokens=case.q.shape[0]) if captured else None)
         # a one-token-a-row step attends the pages alone, so a fused KV-write kernel can serve it
         assert attn.reads_step_kv() == (rows == PREFILL_ROWS)
         heads = slice(None) if over_sp else slice(rank * Q_HEADS // world, (rank + 1) * Q_HEADS // world)
         if rows == PREFILL_ROWS:
             with pytest.raises(ValueError, match="got none"):
-                case.run(attn, placement, heads, keys=False)
+                case.runner(attn, placement, heads, keys=False)()
         tol = {"atol": 2e-2, "rtol": 2e-2} if cuda else {}
-        out = case.run(attn, placement, heads)
+        run = case.runner(attn, placement, heads)
+        out = run()
+        if captured:
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                out = run()
+            # what the check reads is the replay's
+            out.fill_(math.nan)
+            graph.replay()
+            torch.cuda.synchronize()
         torch.testing.assert_close(out.float(), case.want()[:, heads], **tol)
-        if rows == PREFILL_ROWS:
+        if rows == PREFILL_ROWS and not captured:
             # an eager first prefill (no row holds stored context) attends its own tokens alone, on
             # every rank, with no collective
             first = _Case.build(((0, 5), (0, 3)), device, dtype, mla)
             _plan(attn, first)
             issued = len(calls)
-            torch.testing.assert_close(first.run(attn, placement, heads).float(), first.want()[:, heads], **tol)
+            torch.testing.assert_close(first.runner(attn, placement, heads)().float(), first.want()[:, heads], **tol)
             assert len(calls) == issued
         everyone = [None] * world
         dist.all_gather_object(everyone, calls)
@@ -614,11 +627,12 @@ def test_two_ranks_attend_a_placed_pool_like_one_rank_with_the_same_collectives(
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs 2 GPUs")
 @LAYOUTS
+@pytest.mark.parametrize("captured", [False, True], ids=["eager", "captured"])
 @pytest.mark.parametrize("rows", [PREFILL_ROWS, DECODE_ROWS], ids=["prefill", "decode"])
 @pytest.mark.parametrize("over_sp", [False, True], ids=["tp", "sp"])
-def test_two_gpus_attend_a_placed_pool_like_one(tmp_path, over_sp, rows, mla):
+def test_two_gpus_attend_a_placed_pool_like_one(tmp_path, over_sp, rows, captured, mla):
     pytest.importorskip("flashinfer")
-    mp.spawn(_over_ranks, args=(P, "nccl", str(tmp_path / "store"), over_sp, rows, mla), nprocs=P)
+    mp.spawn(_over_ranks, args=(P, "nccl", str(tmp_path / "store"), over_sp, rows, mla, captured), nprocs=P)
 
 
 def test_tp_placed_decode_runs_on_tensor_cores_whatever_decode_tensor_cores_says(monkeypatch):
