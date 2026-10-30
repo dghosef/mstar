@@ -622,8 +622,8 @@ Qwen3-TTS notes
   decodes every frame once: per stream it keeps each causal conv's last input
   samples, the transformer's sliding-window keys and values (71 per layer) and
   the frame count, about 5 MiB in float32, in the ``codec_state`` recurrent
-  pool (``resources: {codec_state: {max_slots: N}}`` sizes it; 256 streams by
-  default). A stream's audio matches a whole-utterance decode to within one
+  pool (``resources: {codec_state: {max_slots: N}}`` sizes it: N slots hold
+  N - 1 streams, as the pool's sink takes one; 256 streams by default). A stream's audio matches a whole-utterance decode to within one
   PCM16 step. Each chunk width
   is a CUDA-graph bucket captured for batch sizes 1 to 32 (densely: the
   codec's cost is per row, so a padding row costs as much as a real one). A
