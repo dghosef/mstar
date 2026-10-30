@@ -104,12 +104,15 @@ class Server:
             self.kind = "mstar"
             env.update({"PYTHONPATH": str(TREE), "PATH": f"{NEWB / 'venv' / 'bin'}:{env['PATH']}",
                         "MSTAR_SHM_ARENA": "1", "MSTAR_REQUIRE_ACCELERATOR_GRAPHS": "1",
-                        "TORCHINDUCTOR_CACHE_DIR": str(NEWB / "inductor"), "TRITON_CACHE_DIR": str(NEWB / "triton"),
+                        "TORCHINDUCTOR_CACHE_DIR": str(HOME / "push4" / "cache" / m["name"] / "inductor"),
+                        "TRITON_CACHE_DIR": str(HOME / "push4" / "cache" / m["name"] / "triton"),
+                        "TORCHINDUCTOR_FX_GRAPH_CACHE": "1", "TORCHINDUCTOR_AUTOGRAD_CACHE": "1",
                         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
             env.update({k: v for k, v in env_extra.items() if not k.startswith("OVN_")})
             cfg = env_extra.get("OVN_CONFIG", m["config"])
             cmd = [PY, "-m", "mstar.cli.main", "serve", m["mstar"], "--config",
-                   cfg if cfg.startswith("/") else str(TREE / cfg), "--gpus", m["gpus"], "--port", str(port),
+                   cfg if cfg.startswith("/") else str(TREE / cfg), "--gpus", m.get("visible", m["gpus"]),
+                   "--port", str(port),
                    "--socket-path-prefix", f"/tmp/p4g_{port}_{int(time.time())}/"]
             cwd = str(TREE)
         self.logf = open(logpath, "w")
@@ -226,7 +229,7 @@ def main() -> int:
     ap.add_argument("--arms", default="base,sglang_b1,sglang_b8,base2")
     ap.add_argument("--rounds", type=int, default=2)
     ap.add_argument("--out", default="")
-    ap.add_argument("--gpu", default="", help="physical GPU for a 1-GPU model (CUDA_VISIBLE_DEVICES)")
+    ap.add_argument("--gpu", default="", help="physical GPU for a 1-GPU model (mstar --gpus / CUDA_VISIBLE_DEVICES)")
     ap.add_argument("--after-pid", type=int, action="append", default=[],
                     help="wait for these processes (jobs ahead on the same GPUs) to exit first")
     a = ap.parse_args()

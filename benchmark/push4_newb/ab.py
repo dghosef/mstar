@@ -98,6 +98,7 @@ def base_env(gpus: str) -> dict:
     env = dict(os.environ)
     env.update({"HF_HOME": HF, "HF_HUB_OFFLINE": "1", "CUDA_VISIBLE_DEVICES": gpus,
                 "TORCHINDUCTOR_CACHE_DIR": str(CACHE / "inductor"), "TRITON_CACHE_DIR": str(CACHE / "triton"),
+                "TORCHINDUCTOR_FX_GRAPH_CACHE": "1", "TORCHINDUCTOR_AUTOGRAD_CACHE": "1",
                 # push4a's fabric manager can't bind NVLS multicast memory: NCCL init fails with CUDA error 401
                 "NCCL_NVLS_ENABLE": "0"})
     return env

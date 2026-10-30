@@ -35,10 +35,17 @@ def mstar_round(gpu: str, n: int, warm: int, out: Path, tag: str, profile: bool)
     from benchmark.dataset import DROIDDataset
     from benchmark.run_robotics import _send_pi05
 
-    m = {"mstar": "pi05", "config": "configs/pi05_droid.yaml", "gpus": "0", "visible": gpu, "comps": {}}
+    m = {"name": "pi05", "mstar": "pi05", "config": "configs/pi05_droid.yaml", "gpus": "0", "visible": gpu, "comps": {}}
     env = {"MSTAR_PHASE_TIMING": "100"} if profile else {}
     reqs = DROIDDataset(local_file_dir=str(MEDIA), num_requests=n, task="pi05").get_requests()
-    s = run_gen.Server(m, "mstar", env, PORT, out / f"server_{tag}.log")
+    # numactl only binds CPUs inside the caller's affinity, so widen it to spawn the server, then narrow back to
+    # the client's set so this process's HTTP client stays off the server's CPUs
+    client = {int(c) for c in run_gen.CORES.split(",")}
+    os.sched_setaffinity(0, client | {int(c) for c in run_gen.MSTAR_CORES.split(",")})
+    try:
+        s = run_gen.Server(m, "mstar", env, PORT, out / f"server_{tag}.log")
+    finally:
+        os.sched_setaffinity(0, client)
     try:
         url = f"http://127.0.0.1:{PORT}/generate"
         for i in range(warm):
