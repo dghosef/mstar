@@ -667,9 +667,7 @@ class VisionEncoderSubmodule(NodeSubmodule):
         # the graph and makes h, w symints inductor cannot codegen from. And
         # built on the host: on the device, the grid upload and the
         # `repeat_interleave`s each block on the stream.
-        indices, weights = vision_interpolation(
-            grid, self.config.num_grid_per_side, merge, torch.device("cpu"),
-        )
+        indices, weights = vision_interpolation(grid, self.config.num_grid_per_side, merge)
         num_patches = sum(t * h * w for t, h, w in grid)
         return NodeInputs(
             # what the engine leases the captured block loop's bucket by
@@ -678,9 +676,7 @@ class VisionEncoderSubmodule(NodeSubmodule):
                 "pixel_values": torch.cat(inputs["pixel_values"], dim=0),
                 "indices": to_device_nonblocking(indices, device),
                 "weights": to_device_nonblocking(weights, device),
-                "position_ids": to_device_nonblocking(
-                    vision_grid_position_ids(grid, merge, torch.device("cpu")), device,
-                ),
+                "position_ids": to_device_nonblocking(vision_grid_position_ids(grid, merge), device),
                 # not forward args: `declare_step` makes segments of the
                 # lengths, `forward_batched` cuts the output at the count
                 "seq_lengths": vision_seq_lengths(grid),
