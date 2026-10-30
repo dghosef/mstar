@@ -460,13 +460,12 @@ class CodecSubmodule(ARNodeSubmodule):
     ) -> dict[str, torch.Tensor]:
         """Stack the batch's windows, zero-padded on the right to the widest one's bucket.
 
-        A batch whose windows carry no new frames (a stream's context-only
-        terminal flush) gets width 0 and decodes nothing.
+        A context-only window (a stream's terminal flush) decodes too, and
+        ``postprocess`` keeps none of it: the batch's shape is its bucket's.
         """
         del graph_walk, engine_inputs
         windows = [item.tensor_inputs["codec_tokens"] for item in inputs]
-        has_new = any(item.kwargs["frames"] > item.kwargs["context"] for item in inputs)
-        width = self._bucket(max(window.shape[-1] for window in windows)) if has_new else 0
+        width = self._bucket(max(window.shape[-1] for window in windows))
         device = windows[0].device
         codec_tokens = torch.stack(
             [
@@ -485,8 +484,6 @@ class CodecSubmodule(ARNodeSubmodule):
     def _decode(self, codec_tokens: torch.Tensor, start_offset: torch.Tensor, conv_start: torch.Tensor) -> torch.Tensor:
         """``[B, 10, W]`` windows -> int16 PCM ``[B, conv_frames * hop]``."""
         width = codec_tokens.shape[-1]
-        if width == 0:
-            return codec_tokens.new_zeros((codec_tokens.shape[0], 0), dtype=torch.int16)
         wav = self.decoder.decode_window(codec_tokens, start_offset, conv_start, self.conv_frames(width))
         return (wav.clamp(-1, 1) * 32767).to(torch.int16)
 
@@ -594,12 +591,7 @@ class CodecSubmodule(ARNodeSubmodule):
         ]
 
     def can_use_accelerator_graphs(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
-        # a batch of context-only terminal flushes decodes nothing
-        return (
-            self.can_batch(batch, model_inputs)
-            and any(item.kwargs["frames"] > item.kwargs["context"] for item in model_inputs)
-            and super().can_use_accelerator_graphs(batch, model_inputs)
-        )
+        return self.can_batch(batch, model_inputs) and super().can_use_accelerator_graphs(batch, model_inputs)
 
 
 # ===========================================================================

@@ -279,9 +279,9 @@ def test_streams_batched_at_different_offsets_each_stitch_into_their_own_decode(
         assert_same_audio(streamed(steps[rid]), whole_decode(decoder, request_codes))
 
 
-def test_context_only_terminal_flush_decodes_nothing(config, decoder):
+def test_context_only_terminal_flush_emits_nothing(config, decoder):
     """A stream that ends after its consumer drained it gets a final window of
-    context only: it emits nothing and, alone in its batch, runs no decode."""
+    context only: it decodes at its bucket's shape, as a capture does, and emits nothing."""
     submodule = CodecSubmodule(decoder, config)
     item = submodule.prepare_inputs(
         "codec_chunk",
@@ -291,8 +291,7 @@ def test_context_only_terminal_flush_decodes_nothing(config, decoder):
     )
     engine_inputs = ModelInputsFromEngine(request_ids=["r"], per_request_info={})
     packed = submodule.preprocess("codec_chunk", engine_inputs, [item])
-    assert packed["codec_tokens"].shape[-1] == 0
-    assert not submodule.can_use_accelerator_graphs(None, [item])
+    assert packed["codec_tokens"].shape[-1] == submodule._bucket(5)
     with torch.no_grad():
         rows = submodule.forward_batched("codec_chunk", engine_inputs, **packed).row_outputs["audio_chunk"]
     outputs = {"audio_chunk": [rows[0]]}
