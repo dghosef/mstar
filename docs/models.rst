@@ -733,7 +733,8 @@ Qwen3-TTS notes
   picks, main's windowed codec ran bf16 slower, not faster (several of its
   convs on a kernel without tensor cores), and this decoder has not been
   measured there: serve ``codec_dtype: float32`` on other GPUs until it is.
-  Its decode is compiled (Inductor) once for every capture.
+  Its decode is compiled (Inductor) with dynamic shapes, so a few graphs
+  serve every chunk width and batch bucket the captures use.
 - Opt-in AudioSeal watermark on the codec's output (off by default; install
   ``pip install -e '.[audioseal]'``). Turn it on in the deployment YAML::
 

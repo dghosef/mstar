@@ -28,11 +28,15 @@ MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 
 
 def load_codec(dtype: str = "float32"):
+    from mstar.engine.engine import compile_node_regions
     from mstar.model.qwen3_tts.qwen3_tts_model import Qwen3TTSModel
 
     model = Qwen3TTSModel(MODEL, codec_dtype=dtype)
     model._ensure_full_snapshot()
-    return model, model._create_codec_submodule("cuda")
+    codec = model._create_codec_submodule("cuda")
+    # as the engine does (the codec declares no fp32 precision and opts out of autocast)
+    compile_node_regions("Codec", codec, None, None, "cuda")
+    return model, codec
 
 
 class ServedStep:
