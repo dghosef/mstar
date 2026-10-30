@@ -14,7 +14,7 @@ from typing import NamedTuple
 import torch
 import triton.language as tl
 
-from mstar.utils.fused_moe.align import block_per_pair, moe_align_block_size
+from mstar.utils.fused_moe.align import moe_align_block_size
 from mstar.utils.fused_moe.kernels import (
     act_and_mul_triton,
     get_config,
@@ -119,16 +119,22 @@ def fused_experts(
     # moe_align_block_size expects int32; torch.topk returns int64.
     topk_ids = topk_ids.to(torch.int32).contiguous()
     topk_weights = topk_weights.contiguous()
+    if alignment is None and not skip_invalid and activation == "silu" and hidden_states.is_cuda:
+        # imported here: it needs triton's CUDA extras, which CPU hosts may lack
+        from mstar.utils.fused_moe import decode
+
+        if num_tokens <= decode.ROUTED_MAX_TOKENS:
+            # At a few tokens each expert's GEMM tile is mostly padding rows: per-pair GEMVs
+            # read the same weights without the sort, the padding or a separate SwiGLU and sum.
+            return decode.routed_experts(hidden_states, w1, w2, topk_weights, topk_ids,
+                                         reduce=reduce_results)
 
     config, down_config = get_config(M=num_tokens, E=E, N=two_inter, K=hidden, top_k=top_k)
     compute_type = _tl_compute_type(hidden_states.dtype)
 
     # 1. Token permute + per-expert block alignment.
     block_m = config["BLOCK_SIZE_M"]
-    if alignment is None and num_tokens == 1 and not skip_invalid and topk_ids.is_cuda:
-        # one token's experts are distinct: the sort would give each pair its own block anyway
-        alignment = MoeAlignment(*block_per_pair(topk_ids, block_m), block_m)
-    elif alignment is None:
+    if alignment is None:
         alignment = MoeAlignment(*moe_align_block_size(topk_ids, block_m, E), block_m)
     assert alignment.block_m == block_m, f"alignment uses BLOCK_SIZE_M={alignment.block_m}, config {block_m}"
     sorted_token_ids, expert_ids, num_tokens_post_padded, _ = alignment
