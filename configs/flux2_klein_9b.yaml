@@ -5,18 +5,21 @@ model: "flux2_klein_9b"
 # not Apache-2.0; check the license before deploying.
 max_seq_len: 512
 
+# Shipped for speed, at the numerics level of the other engines rather than bit-exactness: served
+# images land at a median 32-33 dB (min 20) from the reference-exact path at the same seeds, where
+# SGLang's are at 24.0 dB (min 14.5). For reference-exact output set attention_backend: sdpa and
+# compile_exact_ops: [norms] (-2.5..-4% images/s on an H100).
 model_kwargs:
-  # sdpa (cuDNN on H100) served as fast as FlashInfer FA3 (0.349 vs 0.355 s at B=1) and is the
-  # reference kernel; flashinfer stays available
-  attention_backend: sdpa
+  # fa3: FlashAttention-3's dense kernel (Hopper only); sdpa (cuDNN) is the reference kernel
+  attention_backend: fa3
   compile: true
   # inductor rounds intermediates where eager PyTorch does (and fuses no FMAs); on its own the compiled
   # transformer still lands at a median 35.6 dB from the eager path over the 100 protocol prompts (81 of 100 below 40 dB)
   compile_eager_rounding: true
-  # op classes kept on the eager kernels inside the compiled forward: with the norms eager the compiled transformer
-  # is bit-exact with the eager one (the activations add nothing but graph breaks); every served image is then
-  # >= 53 dB from the eager path on all 100 protocol prompts (the compiled VAE) — true: 0.654 s at B=1 vs 0.608 plain; 0.785 without compile; [norms] pending measurement
-  compile_exact_ops: [norms]
+  # op classes kept on the eager kernels inside the compiled forward. [norms] makes the compiled transformer
+  # bit-exact with the eager one (every served image >= 53 dB from the eager path on all 100 protocol prompts,
+  # the compiled VAE) at a latency cost; false is the plain compile
+  compile_exact_ops: false
   accelerator_graph: true
   capture_sizes: [[1024, 1024]]
   # the dit's capture batch sizes (the text encoder captures geometric_batch_sizes: powers of two below
