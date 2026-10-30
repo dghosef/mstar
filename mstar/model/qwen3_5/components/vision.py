@@ -11,7 +11,6 @@ Images arrive packed: ``pixel_values`` is ``[total_patches, patch_numel]`` and
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from mstar.model.qwen3_5.config import VISION_ATTN, Qwen3_5VisionConfig
@@ -54,20 +53,41 @@ def vision_position_ids(
 
 
 def _axis_taps_weights(
-    index: torch.Tensor, size: torch.Tensor, side: int,
+    index: torch.Tensor, size: int, side: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Bilinear taps into a ``side``-long table, for positions on an axis of
     length ``size``. ``align_corners=True`` and border padding, matching the
     ``F.interpolate`` call upstream reproduces."""
     index = index.to(torch.float32)
-    # closed form of `linspace(0, side - 1, size)[index]`; clamp avoids a
+    # closed form of `linspace(0, side - 1, size)[index]`; the max avoids a
     # divide-by-zero at size == 1, where index is 0 anyway
-    src = index * (side - 1) / torch.clamp(size - 1, min=1)
+    src = index * (side - 1) / max(size - 1, 1)
     floor = torch.floor(src)
     offsets = torch.arange(0, 2, device=index.device)
     taps = (floor.long()[:, None] + offsets).clamp(0, side - 1)
     distance = (src[:, None] - floor[:, None] - offsets).abs()
     return taps, (1 - distance).clamp(min=0)
+
+
+def _frame_interpolation(
+    h: int, w: int, side: int, merge: int, device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``[h * w, 4]`` gather indices and weights for one ``(h, w)`` frame, in
+    spatial-merge-block order."""
+    within = torch.arange(h * w, device=device)
+    # undo the spatial-merge-block ordering to recover (row, col)
+    in_col = within % merge
+    in_row = (within // merge) % merge
+    block_col = (within // (merge * merge)) % (w // merge)
+    block_row = within // (merge * merge * (w // merge))
+    row = block_row * merge + in_row
+    col = block_col * merge + in_col
+
+    h_taps, h_w = _axis_taps_weights(row, h, side)
+    w_taps, w_w = _axis_taps_weights(col, w, side)
+    indices = (h_taps[:, :, None] * side + w_taps[:, None, :]).reshape(-1, 4)
+    weights = (h_w[:, :, None] * w_w[:, None, :]).reshape(-1, 4)
+    return indices, weights
 
 
 def vision_interpolation(
@@ -80,38 +100,21 @@ def vision_interpolation(
     table onto each image's ``(h, w)`` grid.
 
     Returns ``[total_patches, 4]`` each — the 2x2 bilinear neighbourhood per
-    patch, as the outer product of the two axes' taps.
+    patch, as the outer product of the two axes' taps. Built once per frame
+    shape and repeated over a video's frames: per patch, a 60 s video's maths
+    took ~130 ms of the GPU thread's host time under a loaded server.
     """
-    side, merge = num_grid_per_side, spatial_merge_size
-
-    grid_thw = torch.tensor(grid, dtype=torch.long, device=device)
-    counts = grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]
-    heights = torch.repeat_interleave(grid_thw[:, 1], counts)
-    widths = torch.repeat_interleave(grid_thw[:, 2], counts)
-    starts = torch.repeat_interleave(
-        F.pad(counts.cumsum(0)[:-1], (1, 0)), counts,
-    )
-    # position within one frame's flat patch run, repeating across frames;
-    # the total comes off the host grid to avoid a device read
-    total_patches = sum(t * h * w for t, h, w in grid)
-    within = (
-        torch.arange(total_patches, device=device) - starts
-    ) % (heights * widths)
-
-    # undo the spatial-merge-block ordering to recover (row, col)
-    blocks_w = widths // merge
-    in_col = within % merge
-    in_row = (within // merge) % merge
-    block_col = (within // (merge * merge)) % blocks_w
-    block_row = within // (merge * merge * blocks_w)
-    row = block_row * merge + in_row
-    col = block_col * merge + in_col
-
-    h_taps, h_w = _axis_taps_weights(row, heights, side)
-    w_taps, w_w = _axis_taps_weights(col, widths, side)
-    indices = (h_taps[:, :, None] * side + w_taps[:, None, :]).reshape(-1, 4)
-    weights = (h_w[:, :, None] * w_w[:, None, :]).reshape(-1, 4)
-    return indices, weights
+    frames: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor]] = {}
+    indices, weights = [], []
+    for t, h, w in grid:
+        if (h, w) not in frames:
+            frames[h, w] = _frame_interpolation(h, w, num_grid_per_side, spatial_merge_size, device)
+        idx, wts = frames[h, w]
+        indices.append(idx.repeat(t, 1) if t > 1 else idx)
+        weights.append(wts.repeat(t, 1) if t > 1 else wts)
+    if len(indices) == 1:
+        return indices[0], weights[0]
+    return torch.cat(indices), torch.cat(weights)
 
 
 # ----------------------------------------------------------------------------
