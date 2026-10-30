@@ -14,6 +14,12 @@ ROPE = "rope"
 # and graph memory.
 SNAC_MAX_WINDOW_FRAMES = 16
 
+# A decoded frame's audio depends on fewer than this many frames to its left:
+# the snac_24khz decoder's receptive field reaches about 2.5 frames, and
+# frames 3 or more into a window decode the same audio (to float rounding) with
+# any frames prepended. Also the left context a window needs.
+SNAC_LEFT_REACH_FRAMES = 3
+
 @dataclass
 class OrpheusModelConfig:
     # Llama 3.2 3B architecture

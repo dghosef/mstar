@@ -215,6 +215,41 @@ def test_mixed_batches_match_each_requests_whole_decode(fake, config):
     assert None in keys and any(isinstance(key, int) for key in keys)
 
 
+def test_windows_past_the_left_reach_share_the_widest_window(fake, config):
+    # A stream's first two windows start inside the decoder's left reach and
+    # keep their own sizes; every later one (ramp, steady, final flush) is
+    # padded on the left to the widest window, so they batch in one step.
+    _, keys = _stream_batched(fake, {"r": _tokens(config, 40, eos=True)})
+    assert keys[:2] == [4, 6]
+    assert set(keys[2:]) == {max(config.snac_window_frames())}
+
+
+def test_snac_24khz_left_reach_is_under_the_padding_bound(monkeypatch):
+    """Frames ``SNAC_LEFT_REACH_FRAMES`` or more into a window decode the same
+    audio with frames prepended: the receptive field is the architecture's, so
+    random weights show it."""
+    from mstar.model.orpheus.components import snac as snac_module
+    from mstar.model.orpheus.config import SNAC_LEFT_REACH_FRAMES
+
+    monkeypatch.setattr(snac_module.NoiseBlock, "forward", lambda self, x: x)  # the injected noise off
+    torch.manual_seed(0)
+    model = SNAC(
+        sampling_rate=24000, encoder_dim=48, encoder_rates=[2, 4, 8, 8], decoder_dim=1024,
+        decoder_rates=[8, 8, 4, 2], attn_window_size=None, codebook_size=4096, codebook_dim=8,
+        vq_strides=[4, 2, 1], noise=True, depthwise=True,
+    ).eval()
+    frames, pad = 9, 5
+    generator = torch.Generator().manual_seed(1)
+    window = [torch.randint(0, 4096, (1, k * (frames + pad)), generator=generator) for k in (1, 2, 4)]
+    with torch.no_grad():
+        audio = model.decode([c[:, k * pad:] for c, k in zip(window, (1, 2, 4), strict=True)])
+        padded = model.decode(window)
+    own = audio[..., SNAC_LEFT_REACH_FRAMES * HOP:]
+    torch.testing.assert_close(padded[..., (pad + SNAC_LEFT_REACH_FRAMES) * HOP:], own,
+                               rtol=0, atol=1e-5 * float(own.abs().max()))
+    assert not torch.allclose(padded[..., (pad + 2) * HOP:(pad + 3) * HOP], audio[..., 2 * HOP:3 * HOP])
+
+
 GEOMETRIES = {
     "default": {},
     "no ramp": dict(snac_chunk_schedule=(4,)),
