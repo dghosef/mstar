@@ -253,9 +253,10 @@ class _RaggedManagerBase:
 
         Built on the first plan for that key, like the paged backend's. Its
         static buffers are fixed for its lifetime, so they are sized off the
-        config's per-request ceilings and the bucket — NOT off this first
-        plan's ``num_rows``, which is only one of the layouts the bucket will
-        replay.
+        config's segment ceiling at the bucket's batch size
+        (``max_segments_for``) and the bucket's token count — NOT off this
+        first plan's ``num_rows``, which is only one of the layouts the bucket
+        will replay.
         """
         key = CGSlotKey(bucket=lease.bucket, slot=lease.slot, label=label)
         wrapper = self._cg_plan_states.get(key)

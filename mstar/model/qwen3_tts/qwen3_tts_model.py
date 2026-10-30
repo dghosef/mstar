@@ -449,8 +449,8 @@ class Qwen3TTSModel(Model):
     def get_node_resources(self) -> list[NodeResourceSpec]:
         """Talker paged KV + attention/position/sampler resources.
 
-        The CodePredictor's frame-local KV scratch is not a resource; the
-        Talker submodule owns it (overwritten every step)."""
+        The CodePredictor's frame-local KV scratch is not a resource; its
+        ``DepthKV`` owns it (overwritten every step)."""
         talker = self.config.talker
         cp = talker.code_predictor
         talker_kv = PagedKVConfig(

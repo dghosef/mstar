@@ -197,7 +197,7 @@ class OmniASRCTCSubmodule(NodeSubmodule):
     def _fits_capture(self, inputs: list[NodeInputs]) -> bool:
         """Whether a step replays the captured encoder: it packs, and its rows,
         one segment each under the replay's one row, fit the attention
-        resource's per-request ceiling (read from it, so a YAML override
+        resource's ``max_segments_per_step`` (read from it, so a YAML override
         holds). A step over the ceiling encodes packed eagerly."""
         return len(inputs) <= self.node_resources[ENCODER_ATTN].max_segments_per_step and self._packs(
             [inp.input_seq_len for inp in inputs]

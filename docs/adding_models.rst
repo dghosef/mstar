@@ -1648,7 +1648,7 @@ Both types share the base ``PiecewiseCudaGraphConfig`` fields:
   them.
 - ``can_lease`` has signature ``(inputs: list[NodeInputs]) -> bool``. It applies only with
   ``lease_before_step``, and lets the region refuse a batch for a limit that the
-  capture bucket key doesn't express, such as Qwen3.5's per-request segment count. The
+  capture bucket key doesn't express, such as Qwen3.5's segment count per step. The
   engine then gives the region no lease for that step. A ``lease_before_step`` region is
   in ``engine_inputs.piecewise_runners`` only on a step that leased it, so the forward
   replays it whenever its runner is there and runs it eagerly otherwise: an unleased
