@@ -1186,10 +1186,10 @@ class ARNodeSubmodule(NodeSubmodule):
     # below follow from it.
     token_stop: TokenStop | None = None
 
-    # The packed token counts the prefill captures are built at: a class
-    # constant of each submodule that captures prefill, which ``__init__``'s
-    # ``prefill_token_buckets`` replaces per instance, so the capture configs
-    # read it off ``self``.
+    # The packed token counts a prefill capture is built at, which
+    # ``__init__``'s ``prefill_token_buckets`` replaces per instance. A
+    # submodule that takes that kwarg must read its capture ladder off
+    # ``self.PREFILL_TOKEN_BUCKETS``, or the override is silently ignored.
     PREFILL_TOKEN_BUCKETS: list[int]
 
     def __init__(self, prefill_token_buckets: Sequence[int] | None = None):
