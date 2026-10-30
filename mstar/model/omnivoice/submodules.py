@@ -451,9 +451,7 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
         tokens = unmask_step(
             logits,
             canvases=[item.tokens[0] for item in items],
-            uncond_rows=[
-                canvas.flat_target_total + item.flat_u_start if item.flat_u_start >= 0 else -1 for item in items
-            ],
+            uncond_rows=canvas.uncond_rows(),
             counts=counts,
             generators=[self._step_generator(info, k, logits.device) for info, k in zip(infos, steps, strict=True)],
             guidance_scale=[item.guidance_scale for item in items],

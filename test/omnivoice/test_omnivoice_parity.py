@@ -196,7 +196,7 @@ def _reveal_all(item, canvas, logits, generator=None, class_temperature=0.0, cou
     """One ``unmask_step`` over ``item`` alone, revealing ``count`` cells (all by default)."""
     count = NUM_CODEBOOK * item.target_len if count is None else count
     return unmask_step(
-        logits, [item.tokens[0]], [canvas.flat_target_total + item.flat_u_start], [count], [generator],
+        logits, [item.tokens[0]], canvas.uncond_rows(), [count], [generator],
         [item.guidance_scale], [class_temperature], [0.1], [1.0], MASK_ID,
     )
 
@@ -301,8 +301,7 @@ def test_batched_unmask_step_matches_the_per_request_reveal(guidance, class_temp
         )[0])
     before = [item.tokens.clone() for item in items]
     got = unmask_step(
-        logits, [item.tokens[0] for item in items],
-        [canvas.flat_target_total + item.flat_u_start if item.flat_u_start >= 0 else -1 for item in items],
+        logits, [item.tokens[0] for item in items], canvas.uncond_rows(),
         counts, gens(), [item.guidance_scale for item in items], list(temperatures), [5.0] * 3, [5.0] * 3,
         MASK_ID,
     )
@@ -520,7 +519,7 @@ def _run_ours(backbone, config, specs, num_step=None):
         # the served step: one batched scoring and reveal over the packed logits
         tokens = unmask_step(
             _packed_logits(backbone, canvas), [item.tokens[0] for item in items],
-            [canvas.flat_target_total + item.flat_u_start for item in items],
+            canvas.uncond_rows(),
             [schedule[k] for schedule in schedules], [None] * len(items), *knobs, config.audio_mask_id,
         )
         for item in items:
