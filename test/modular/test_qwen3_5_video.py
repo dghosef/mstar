@@ -771,3 +771,25 @@ def test_patch_embed_matmul_matches_its_conv():
     patches = torch.randn(10, 3 * 2 * 4 * 4, dtype=torch.float64)
     conv = embed.proj(patches.view(-1, 3, 2, 4, 4)).view(-1, 32)
     torch.testing.assert_close(embed(patches), conv)
+
+
+def test_position_table_resample_matches_bilinear_interpolate():
+    # The tower resamples its learned square position table onto each frame's
+    # grid by gathering 2x2 taps on the host; that must be the reference's
+    # align_corners bilinear interpolate, in merge-block order, per frame.
+    import torch.nn.functional as F
+
+    from mstar.model.qwen3_5.components.vision import vision_interpolation
+
+    side, merge, dim = 6, 2, 3
+    table = torch.randn(side, side, dim, dtype=torch.float64)
+    grid = [(1, 4, 8), (3, 10, 6), (2, 4, 8)]
+    indices, weights = vision_interpolation(grid, side, merge, torch.device("cpu"))
+    got = (table.reshape(side * side, dim)[indices] * weights[..., None].double()).sum(1)
+
+    expected = []
+    for t, h, w in grid:
+        frame = F.interpolate(table.permute(2, 0, 1)[None], size=(h, w), mode="bilinear", align_corners=True)
+        frame = frame[0].permute(1, 2, 0).reshape(h // merge, merge, w // merge, merge, dim)
+        expected.append(frame.permute(0, 2, 1, 3, 4).reshape(h * w, dim).repeat(t, 1))
+    torch.testing.assert_close(got, torch.cat(expected), rtol=1e-6, atol=1e-6)
