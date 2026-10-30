@@ -13,8 +13,8 @@ with its RMSNorm and residual add or SwiGLU folded in, and
 
 A captured forward compiles with static ints, so any compiled frame that holds a
 depth step's ``cache_pos``, LM head or layer index recompiles at every depth
-position or layer. Those ints are read only in eager code: ``depth_step`` and
-``DepthKV``'s methods.
+position or layer. Those ints are read only in eager code: ``depth_step``,
+``cp_embed_accumulate`` and ``DepthKV``'s methods.
 """
 from __future__ import annotations
 
