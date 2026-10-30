@@ -348,7 +348,7 @@ lingbot_world = [
     "accelerate",
     "diffusers>=0.39",
     "einops",
-    "flashinfer-python>=0.7.2",
+    "flashinfer-python>=0.6.14",
     "ftfy",
     "huggingface-hub",
     "regex",
