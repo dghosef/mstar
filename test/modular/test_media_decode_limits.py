@@ -251,8 +251,13 @@ def _fake_torchcodec(monkeypatch, pulled, metadata=None, opened=None, key_frames
             frames = (torch.tensor(indices, dtype=torch.int64) % 256).to(torch.uint8)
             return frames.view(-1, 1, 1, 1).expand(-1, 3, self.metadata.height, self.metadata.width)
 
-    if key_frames is not None:
-        FakeDecoder._get_key_frame_indices = lambda self: torch.tensor(key_frames)
+    if key_frames is not None:  # what _get_key_frame_indices returns, or the exception it raises
+        def _get_key_frame_indices(self):
+            if isinstance(key_frames, Exception):
+                raise key_frames
+            return key_frames
+
+        FakeDecoder._get_key_frame_indices = _get_key_frame_indices
     decoders = types.ModuleType("torchcodec.decoders")
     decoders.VideoDecoder = FakeDecoder
     monkeypatch.setitem(sys.modules, "torchcodec", types.ModuleType("torchcodec"))
@@ -317,19 +322,24 @@ def test_vjepa2_ac_decodes_only_the_frames_its_walk_encodes(monkeypatch, tmp_pat
     assert out["video_inputs"] == []
 
 
-def test_gop_split_decode_returns_the_frames_in_the_order_asked(monkeypatch):
+@pytest.mark.parametrize("key_frames, decoders", [
+    (torch.tensor([0, 10, 20, 30, 40]), 3),  # one per group of GOPs; the index's decoder decodes the first
+    ([0, 10, 20, 30, 40], 3),  # the list torchcodec's annotation promises
+    (RuntimeError("private API changed"), 1),  # an unusable index: one decoder, not an error
+])
+def test_gop_split_decode_returns_the_frames_in_the_order_asked(monkeypatch, key_frames, decoders):
     """Sampled frames grouped by keyframe interval decode on separate decoders, each frame
     once, and come back in the order asked for, duplicates included."""
     from mstar.model.components import video_decode
 
     pulled, opened = [], []
-    _fake_torchcodec(monkeypatch, pulled, opened=opened, key_frames=[0, 10, 20, 30, 40])
+    _fake_torchcodec(monkeypatch, pulled, opened=opened, key_frames=key_frames)
     monkeypatch.setattr(video_decode, "_max_decoders", lambda: 3)
     indices = [41, 3, 22, 3, 15, 0, 35, 22, 8]
     frames = video_decode.decode_frames_at(torch.zeros(16, dtype=torch.uint8), indices)
     assert frames[:, 0, 0, 0].tolist() == indices
-    assert sorted(pulled) == sorted(set(indices))
-    assert len(opened) == 3  # one per group of GOPs: the keyframe index's decoder decodes the first
+    assert sorted(pulled) == sorted(set(indices) if decoders > 1 else indices)
+    assert len(opened) == decoders
 
 
 def _mp4(path, frames, side=64):

@@ -26,8 +26,10 @@ logger = logging.getLogger(__name__)
 
 @functools.cache
 def _max_decoders() -> int:
-    """Concurrent decoders per request, each with ``video_decode_threads()``
-    FFmpeg threads, within the CPUs this process may use."""
+    """The shared decode pool's size, so also the most groups one request's
+    frames split into. Each decoder runs ``video_decode_threads()`` FFmpeg
+    threads, so the pool fits the CPUs this process may use; and at most 6,
+    as a larger pool measured within noise on V-JEPA2's benchmark."""
     return max(1, min(6, usable_cpus() // video_decode_threads()))
 
 
@@ -47,8 +49,8 @@ def _decode_pool() -> ThreadPoolExecutor:
 @functools.cache
 def _warn_no_key_frames() -> None:
     logger.warning(
-        "torchcodec's VideoDecoder has no _get_key_frame_indices: sampled video "
-        "frames decode on one decoder, not split by keyframe interval"
+        "torchcodec's VideoDecoder has no usable _get_key_frame_indices: sampled "
+        "video frames decode on one decoder, not split by keyframe interval"
     )
 
 
@@ -82,11 +84,13 @@ def decode_frames_at(
     from torchcodec.decoders import VideoDecoder
 
     decoder = VideoDecoder(source, num_ffmpeg_threads=video_decode_threads())
-    # private in torchcodec 0.17; without it the clip decodes on one decoder
-    key_frames = getattr(decoder, "_get_key_frame_indices", None)
-    if key_frames is None:
-        _warn_no_key_frames()
-    keys = key_frames().tolist() if key_frames is not None and _max_decoders() > 1 else [0]
+    keys: list[int] = []
+    if _max_decoders() > 1:
+        try:
+            # private in torchcodec (0.5 to 0.16 at least): any failure means one decoder
+            keys = sorted(int(i) for i in decoder._get_key_frame_indices())
+        except Exception:  # noqa: BLE001
+            _warn_no_key_frames()
     order = sorted(set(indices))
     by_gop: dict[int, list[int]] = {}
     for i in order:
