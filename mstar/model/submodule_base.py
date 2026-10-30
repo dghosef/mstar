@@ -1194,8 +1194,9 @@ class ARNodeSubmodule(NodeSubmodule):
         if prefill_token_buckets is not None:
             buckets = prefill_token_buckets
             if (
-                not isinstance(buckets, (list, tuple)) or not buckets or len(set(buckets)) < len(buckets)
+                not isinstance(buckets, (list, tuple)) or not buckets
                 or not all(isinstance(n, int) and not isinstance(n, bool) and n > 0 for n in buckets)
+                or len(set(buckets)) < len(buckets)
             ):
                 raise ValueError(
                     f"prefill_token_buckets must be a non-empty list of distinct positive token counts, got {buckets!r}"
