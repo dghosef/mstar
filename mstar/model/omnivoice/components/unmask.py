@@ -267,7 +267,9 @@ def unmask_step(
         u_log_probs = F.log_softmax(u_logits.float(), dim=-1)
         scale = _per_position(guidance_scale, lens, device)
         scale = scale.view(1, 1, -1, 1) if torch.is_tensor(scale) else scale
-        guided = torch.log_softmax(log_probs + scale * (log_probs - u_log_probs), dim=-1)
+        # log_probs + scale * (log_probs - u_log_probs), to the bit, in u_log_probs' buffer: every
+        # float32 [C, P, V] copy at once is what max_packed_tokens has to leave room for
+        guided = torch.log_softmax(u_log_probs.neg_().add_(log_probs).mul_(scale).add_(log_probs), dim=-1)
         if all(cfg):
             log_probs = guided
         else:
@@ -287,7 +289,9 @@ def unmask_step(
         temp = _per_position([t if hot else 1.0 for t, hot in zip(class_temperature, sampled, strict=True)],
                              lens, device)
         temp = temp.view(1, 1, -1, 1) if torch.is_tensor(temp) else temp
-        drawn = (filter_top_k(log_probs, ratio=0.1) / temp - torch.log(-torch.log(noise + 1e-10) + 1e-10)).argmax(-1)
+        # plus Gumbel noise, -log(-log(u)), built in the noise's buffer like the combine above
+        log_log = noise.add_(1e-10).log_().neg_().add_(1e-10).log_()
+        drawn = filter_top_k(log_probs, ratio=0.1).div_(temp).sub_(log_log).argmax(-1)
         if all(sampled):
             pred_tokens = drawn
         else:
