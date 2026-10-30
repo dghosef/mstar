@@ -65,9 +65,8 @@ class AttentionManager(AttentionResource):
             self._bind_placement(placement)
 
     def _bind_placement(self, placement: "ContextParallel") -> None:
-        """This rank's share of a context-parallel pool, for a backend that supports one
-        (``supports_context_parallel``; the engine refuses the others at load)."""
-        raise ValueError(f"{type(self).__name__} does not support a context-parallel KV pool")
+        """This rank's share of a context-parallel pool. Reached only for a backend that supports
+        one (``supports_context_parallel``): the engine refuses the others at load."""
 
     def fingerprint(self) -> bytes:
         # the class, not the declared backend: `build` moves dense to another
