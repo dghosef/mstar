@@ -1281,7 +1281,6 @@ def test_qwen3_tts_talker_batches_and_captures_decode():
 
     assert submodule.disable_torch_compile is True
     assert submodule.can_batch(batch, model_inputs)
-    assert submodule.can_use_accelerator_graphs(batch, model_inputs)
     packed = submodule.preprocess(
         "talker_decode",
         ModelInputsFromEngine(
@@ -1497,6 +1496,17 @@ def _cpu_predictor(monkeypatch, config=None, bs=2, calls=None):
         cp.num_hidden_layers, bs, 2, config.talker.num_code_groups, cp.num_key_value_heads, cp.head_dim,
     )
     return predictor, kv_cache, torch.randn(bs, config.talker.hidden_size)
+
+
+def test_qwen3_tts_folded_depth_weights_record_no_autograd():
+    """Folding each norm into its projection must not record autograd: a
+    folded weight with a grad_fn keeps its fp32 intermediates alive for the
+    server's life (about 0.34 GB a Talker on the 1.7B)."""
+    config = _tiny_model_config()
+    predictor = Qwen3TTSCodePredictor(config)
+    predictor.consolidate_stacked_weights(torch.randn(config.talker.vocab_size, config.talker.hidden_size))
+    fused = predictor.fused
+    assert not any(w.requires_grad for w in (*fused.qkv, *fused.gate, *fused.up, fused.heads))
 
 
 def _first_step(predictor, kv_cache, x, head=0):

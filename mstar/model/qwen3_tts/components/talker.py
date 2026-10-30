@@ -248,30 +248,16 @@ class Qwen3TTSCodePredictor(nn.Module):
         # weight loading
         self.input_tables: list[torch.Tensor] | None = None
         self.fused: DepthWeights | None = None
-        self.register_buffer(
-            # Populated after weight loading. A single contiguous tensor lets
-            # the piecewise loop select a residual head without traversing a
-            # Python ModuleList during CUDA Graph replay.
-            "lm_head_weight",
-            torch.empty(
-                config.num_code_groups - 1,
-                cp.vocab_size,
-                cp.hidden_size,
-            ),
-            persistent=False,
-        )
 
     def consolidate_stacked_weights(self, talker_codec_embedding: torch.Tensor) -> None:
-        """Pack the 15 loaded LM heads into graph-friendly contiguous storage,
-        and, on checkpoints that project the depth inputs, every embedding
-        table the depth loop reads already projected (``input_tables``): a
-        step's input is then a row lookup, not a GEMM over the looked-up
-        row. ``talker_codec_embedding`` embeds group 0, whose embedding is the
-        depth sequence's second input."""
-        self.lm_head_weight = torch.stack([
-            head.weight.data for head in self.lm_head
-        ]).contiguous()
-        self.fused = fold_depth_weights(self.model.layers, self.model.norm, self.lm_head_weight)
+        """Fold the layers and the 15 loaded LM heads into the fused depth
+        loop's weights (``fused``) and, on checkpoints that project the depth
+        inputs, keep every embedding table the depth loop reads already
+        projected (``input_tables``): a step's input is then a row lookup,
+        not a GEMM over the looked-up row. ``talker_codec_embedding`` embeds
+        group 0, whose embedding is the depth sequence's second input."""
+        heads = torch.stack([head.weight.data for head in self.lm_head])
+        self.fused = fold_depth_weights(self.model.layers, self.model.norm, heads)
         self.input_tables = None
         if isinstance(self.small_to_mtp_projection, nn.Linear):
             with torch.no_grad():

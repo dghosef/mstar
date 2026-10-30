@@ -216,7 +216,7 @@ def test_qwen3_tts_depth_loop_matches_its_layers_unfused():
             h = h + attn.o_proj(out.transpose(1, 2).reshape(bs, depth, -1).bfloat16()).float()
             h = h + layer.mlp(_rms(h, layer.post_attention_layernorm.weight, cp.rms_norm_eps).bfloat16()).float()
         want = _rms(h, predictor.model.norm.weight, cp.rms_norm_eps)
-        heads = predictor.lm_head_weight.float()
+        heads = torch.stack([head.weight for head in predictor.lm_head]).float()
         want = torch.stack([want[:, s] @ heads[max(s - 1, 0)].t() for s in range(depth)], 1)
 
     got = torch.stack(got, 1).float()

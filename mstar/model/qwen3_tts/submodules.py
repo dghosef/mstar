@@ -186,7 +186,6 @@ class TalkerSubmodule(ARNodeSubmodule):
         self._decode_last_token_indices: torch.Tensor | None = None
         self._flag_stager = PinnedStager(torch.bool, numel=self.MAX_BATCH_SIZE)
         self._index_stager = PinnedStager(torch.long, numel=self.MAX_BATCH_SIZE)
-        self._prefill_ids: dict[tuple[int, ...], torch.Tensor] = {}
         # prefill embeddings that are the same for every request (special text
         # tokens, the assistant role, codec tags), built once from the weights
         self._fixed_embeds: dict[tuple, torch.Tensor] = {}
@@ -287,21 +286,14 @@ class TalkerSubmodule(ARNodeSubmodule):
         return self.model.text_projection(text_hidden.to(projection_dtype))
 
     def _device_ids(self, ids: tuple[int, ...]) -> torch.Tensor:
-        """``[1, len(ids)]`` token ids on the worker GPU, built once per distinct tuple.
-
-        The prefill's fixed ids (TTS BOS/EOS/PAD, the codec tags of one
-        language and speaker) take few distinct values, so no request pays a
-        host-to-device copy for them in ``prepare_inputs``.
-        """
-        tensor = self._prefill_ids.get(ids)
-        if tensor is None:
-            tensor = torch.tensor([ids], dtype=torch.long, device=self.get_device())
-            self._prefill_ids[ids] = tensor
-        return tensor
+        """``[1, len(ids)]`` token ids on the worker GPU."""
+        return torch.tensor([ids], dtype=torch.long, device=self.get_device())
 
     def _fixed_embed(self, key: tuple, build: Callable[[], torch.Tensor]) -> torch.Tensor:
-        """``build()``, once per key: a prefill embedding no request changes, so
-        a prompt's prefill does not re-run its lookups and projections."""
+        """``build()``, once per key: a prefill embedding no request changes (the
+        special text tokens, the role, one language and speaker's codec tags), so
+        a prompt's prefill pays neither the lookups and projections nor the
+        host-to-device copy of their ids."""
         embed = self._fixed_embeds.get(key)
         if embed is None:
             embed = self._fixed_embeds[key] = build()
@@ -311,12 +303,10 @@ class TalkerSubmodule(ARNodeSubmodule):
         self, dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """TTS BOS/EOS/PAD, projected, for official sequence construction."""
-        token_ids = self._device_ids((
-            self.config.tts_bos_token_id,
-            self.config.tts_eos_token_id,
-            self.config.tts_pad_token_id,
-        ))
-        special = self._fixed_embed(("special", dtype), lambda: self._project_text(token_ids).to(dtype))
+        token_ids = (self.config.tts_bos_token_id, self.config.tts_eos_token_id, self.config.tts_pad_token_id)
+        special = self._fixed_embed(
+            ("special", dtype), lambda: self._project_text(self._device_ids(token_ids)).to(dtype),
+        )
         bos, eos, pad = special.chunk(3, dim=1)
         return bos, eos, pad
 
@@ -402,8 +392,9 @@ class TalkerSubmodule(ARNodeSubmodule):
         # a built-in speaker's codec embedding, or the reference x-vector.
         speaker_tag = [speaker_id] if speaker_id >= 0 else []
         codec_key = (*codec_prefix, *speaker_tag, codec.codec_pad_id, codec.codec_bos_id)
-        codec_ids = self._device_ids(codec_key)
-        codec_embeds = self._fixed_embed(("codec", codec_key), lambda: self.model.model.codec_embedding(codec_ids))
+        codec_embeds = self._fixed_embed(
+            ("codec", codec_key), lambda: self.model.model.codec_embedding(self._device_ids(codec_key)),
+        )
         dtype = codec_embeds.dtype
         if not speaker_tag and speaker_embed is not None:
             speaker_vector = speaker_embed.to(device=self.get_device(), dtype=dtype).reshape(1, 1, -1)
@@ -1010,17 +1001,6 @@ class TalkerSubmodule(ARNodeSubmodule):
             )
         }
 
-    def can_use_accelerator_graphs(
-        self, batch: ExecutingBatch, model_inputs: list[NodeInputs]
-    ) -> bool:
-        """Replay the whole decode graph or a packed prefill; sampling params
-        are read from buffers, so no request's settings can disqualify it."""
-        if batch.graph_walk not in ("talker_decode", "talker_prefill", "talker_prefill_clone") or not self.can_batch(
-            batch, model_inputs
-        ):
-            return False
-        return super().can_use_accelerator_graphs(batch, model_inputs)
-
 
 # ===========================================================================
 # 2. CodecSubmodule - fixed-shape streaming waveform decode
@@ -1383,16 +1363,6 @@ class CodecSubmodule(ARNodeSubmodule):
             )
             for window in self.windows
         ]
-
-    def can_use_accelerator_graphs(
-        self, batch: ExecutingBatch, model_inputs: list[NodeInputs]
-    ) -> bool:
-        return (
-            batch.graph_walk == "codec_chunk"
-            and self.can_batch(batch, model_inputs)
-            and all(self._row_bucket(item) in self.windows for item in model_inputs)
-            and super().can_use_accelerator_graphs(batch, model_inputs)
-        )
 
 
 # ===========================================================================

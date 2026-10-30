@@ -287,6 +287,7 @@ class DepthWeights(NamedTuple):
     eps: float
 
 
+@torch.no_grad()
 def fold_depth_weights(layers, norm, heads: torch.Tensor | None) -> DepthWeights:
     """``DepthWeights`` from ``DecoderLayer``s over ``DepthAttention`` and a
     gated MLP, the final ``norm`` and the stacked LM ``heads``."""

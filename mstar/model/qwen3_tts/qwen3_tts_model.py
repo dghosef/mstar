@@ -1070,10 +1070,6 @@ class Qwen3TTSModel(Model):
                 full_metadata=partition_metadata,
                 inputs=[],
                 unpersist_tensors=[],
-                step_metadata={
-                    "codec_chunk_frames": self.config.codec.chunk_frames,
-                    "codec_chunk_schedule": list(self.config.codec.chunk_schedule),
-                },
             )
         raise ValueError(f"Unknown Qwen3-TTS partition: {partition_name!r}")
 
