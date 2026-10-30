@@ -1,5 +1,5 @@
-"""``exclude_from_compile`` / ``compile_exact_ops``: norms and activations stay on the eager kernels
-inside a compiled transformer, the excluded modules compute exactly what they did before, and the
+"""``exclude_from_compile`` / ``compile_exact_ops``: norms and activations stay on the eager result
+inside a compiled transformer, the kept modules compute exactly what they did before, and the
 knob reaches both denoise nodes."""
 
 from __future__ import annotations
@@ -8,7 +8,12 @@ import pytest
 import torch
 from torch import nn
 
-from mstar.model.components.diffusion.compile_utils import EXACT_OP_TYPES, exact_op_types, exclude_from_compile
+from mstar.model.components.diffusion.compile_utils import (
+    EXACT_OP_TYPES,
+    exact_op_types,
+    exclude_from_compile,
+    kept_exact,
+)
 from mstar.model.components.diffusion.exact_norm import exact_rms_norm
 from mstar.model.flux2_klein.components.transformer import Flux2DiT
 from mstar.model.flux2_klein.config import Flux2TransformerConfig
@@ -33,9 +38,18 @@ def test_exclude_marks_every_norm_and_activation_once():
     assert len(expected) == 4 + 4 + 2 + 2 * 4 + 3
     assert exclude_from_compile(dit) == len(expected)
     for m in expected:
-        assert getattr(m.forward, "_torchdynamo_disable", False), type(m).__name__
+        assert kept_exact(m), type(m).__name__
     untouched = [m for m in dit.modules() if m not in expected and not isinstance(m, (Flux2DiT, nn.ModuleList))]
-    assert untouched and all(not getattr(m.forward, "_torchdynamo_disable", False) for m in untouched)
+    assert untouched and not any(kept_exact(m) for m in untouched)
+
+
+def test_a_kept_torch_rms_norm_compiles_without_a_graph_break():
+    """klein's q/k norms under [norms]: torch's RMSNorm runs an op the compiled graph keeps whole."""
+    model = nn.Sequential(nn.Linear(128, 128), nn.RMSNorm(128, eps=1e-6), nn.Linear(128, 128))
+    assert exclude_from_compile(model, exact_op_types(["norms"])) == 1
+    x = torch.randn(2, 5, 128)
+    with torch.no_grad():
+        assert torch.equal(torch.compile(model, backend="eager", fullgraph=True)(x), model(x))
 
 
 def test_excluded_modules_compute_the_same_values():
@@ -96,15 +110,18 @@ def test_split_group_norm_silu_matches_fp32_group_norm(shape, layout):
 
 
 def test_norm_act_fuses_only_silu(monkeypatch):
-    """The fused kernel applies SiLU or nothing; any other activation runs as its module."""
+    """The fused kernel applies SiLU or nothing; any other activation, or a module kept exact,
+    runs as its module."""
     from mstar.model.components.diffusion import group_norm
 
     monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
     monkeypatch.setattr(group_norm, "_fits", lambda *a: True)
     monkeypatch.setattr(group_norm, "group_norm_silu", lambda x, w, b, g, eps, silu: torch.full_like(x, float(silu)))
-    norm, x = nn.GroupNorm(2, 4), torch.randn(1, 4, 3, 3)
-    assert torch.equal(group_norm.norm_act(norm, x, nn.SiLU()), torch.ones_like(x))
+    norm, act, x = nn.GroupNorm(2, 4), nn.SiLU(), torch.randn(1, 4, 3, 3)
+    assert torch.equal(group_norm.norm_act(norm, x, act), torch.ones_like(x))
     torch.testing.assert_close(group_norm.norm_act(norm, x, nn.GELU()), nn.functional.gelu(norm(x)))
+    exclude_from_compile(nn.Sequential(norm, act))
+    torch.testing.assert_close(group_norm.norm_act(norm, x, act), nn.functional.silu(norm(x)))
 
 
 def test_scaled_rmsnorm_opts_in_by_attribute():

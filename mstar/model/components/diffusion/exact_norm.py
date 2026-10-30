@@ -76,11 +76,13 @@ def _fits(x: torch.Tensor, weight: torch.Tensor | None) -> bool:
     )
 
 
+@torch.library.custom_op("mstar::exact_rms_norm", mutates_args=())
 def exact_rms_norm(x: torch.Tensor, weight: torch.Tensor | None, eps: float | None) -> torch.Tensor:
     """``F.rms_norm(x, (128,), weight, eps)`` with torch's eager CUDA result, bit for bit; other
-    shapes and devices go to ``F.rms_norm`` itself."""
+    shapes and devices go to ``F.rms_norm`` itself. An op a compiled graph keeps whole: no graph
+    break, and inductor never decomposes the norm. The output is contiguous."""
     if not _fits(x, weight):
-        return F.rms_norm(x, (x.shape[-1],), weight, eps)
+        return F.rms_norm(x, (x.shape[-1],), weight, eps).contiguous()
     if eps is None:  # torch's default: the epsilon of the fp32 math type
         eps = torch.finfo(torch.float32).eps
     lead = [1] * (4 - x.dim()) + list(x.shape[:-1])
@@ -92,3 +94,9 @@ def exact_rms_norm(x: torch.Tensor, weight: torch.Tensor | None, eps: float | No
             x, weight, y, m, lead[1], lead[2], strides[0], strides[1], strides[2], float(eps), ROWS=_ROWS,
         )
     return y
+
+
+@exact_rms_norm.register_fake
+def _(x, weight, eps):
+    # torch's result type, contiguous like the replica's output
+    return F.rms_norm(x, (x.shape[-1],), weight, eps).contiguous()

@@ -43,34 +43,34 @@ def exact_op_types(spec: ExactOps) -> tuple[type, ...] | None:
 
 
 def exclude_from_compile(transformer: nn.Module, types: Sequence[type] = EXACT_OP_TYPES) -> int:
-    """Keep the transformer's norms and/or activations on the eager kernels inside a compiled
-    forward: each excluded module's forward becomes a dynamo graph break, so inductor only
-    fuses the pointwise chains around the GEMMs and attention. A module is excluded by type
-    (``types``) or, when ``types`` include the norms, with a ``compile_exact_op = True`` class
-    attribute. A torch ``RMSNorm`` runs :func:`exact_rms_norm` (torch's eager result, several times
-    faster on the per-head q/k norms). Returns the number of modules excluded."""
+    """Keep the transformer's norms and/or activations on the eager result inside a compiled
+    forward. A module is kept by type (``types``) or, when ``types`` include the norms, with a
+    ``compile_exact_op = True`` class attribute. A torch ``RMSNorm`` runs :func:`exact_rms_norm`,
+    an op the compiled graph keeps whole (several times faster than torch's kernel on the
+    per-head q/k norms); every other kept module's forward becomes a dynamo graph break, so
+    inductor only fuses the pointwise chains around it. A compiled path that would replace a
+    module, such as a fused kernel, asks :func:`kept_exact` first. Returns the number of modules
+    kept."""
     types = tuple(types)
     with_marked = any(t in EXACT_OP_CLASSES["norms"] for t in types)
     count = 0
     for module in transformer.modules():
         if isinstance(module, types) or (with_marked and getattr(module, "compile_exact_op", False)):
-            forward = module.forward
-            if type(module) is nn.RMSNorm:
-                forward = functools.partial(_exact_rms_norm_forward, module)
-            module.forward = torch._dynamo.disable(forward)
+            if type(module) is nn.RMSNorm and len(module.normalized_shape) == 1:
+                module.forward = functools.partial(_exact_rms_norm_forward, module)
+            else:
+                module.forward = torch._dynamo.disable(module.forward)
+            module.compile_kept_exact = True
             count += 1
     return count
 
 
-def excluded_from_compile(module: nn.Module) -> bool:
-    """Whether :func:`exclude_from_compile` took ``module`` out of the compiled graph: it
-    replaces the module's forward with an instance attribute."""
-    return "forward" in vars(module)
+def kept_exact(module: nn.Module | None) -> bool:
+    """Whether :func:`exclude_from_compile` keeps ``module`` on the eager result."""
+    return getattr(module, "compile_kept_exact", False)
 
 
 def _exact_rms_norm_forward(module: nn.RMSNorm, x: torch.Tensor) -> torch.Tensor:
-    if len(module.normalized_shape) != 1:
-        return torch.nn.functional.rms_norm(x, module.normalized_shape, module.weight, module.eps)
     return exact_rms_norm(x, module.weight, module.eps)
 
 
@@ -83,10 +83,11 @@ def compile_transformer_forward(
     bf16 chains keep fp32 intermediates and the served images drift to 35-39 dB from the bit-exact
     eager path on a 4-step distilled sampler (measured). Even with it the compiled transformer
     lands at a median 37.6 dB over 100 prompts (klein-4B), because inductor's own reductions and
-    activation decompositions round differently: ``exact_ops`` keeps those modules eager
-    (``exclude_from_compile``) and compiles the rest — ``True`` for all of them, or a list of the
-    op classes to keep eager (``["norms"]``, ``["activations"]``), since each excluded module is a
-    graph break that costs fusion (klein-4B pays 8% at B=1 for all of them, Z-Image 48%)."""
+    activation decompositions round differently: ``exact_ops`` keeps those modules on the eager
+    result (``exclude_from_compile``) and compiles the rest — ``True`` for all of them, or a list
+    of the op classes to keep (``["norms"]``, ``["activations"]``), since every kept module but a
+    torch ``RMSNorm`` is a graph break that costs fusion (klein-4B paid 8% at B=1 for all of them
+    while its RMSNorms were breaks too, Z-Image 48%)."""
     types = exact_op_types(exact_ops)
     if types:
         excluded = exclude_from_compile(transformer, types)

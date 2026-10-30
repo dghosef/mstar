@@ -13,6 +13,8 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from mstar.model.components.diffusion.compile_utils import kept_exact
+
 try:
     import triton
     import triton.language as tl
@@ -114,8 +116,10 @@ def _(x, weight, bias, num_groups, eps, silu):
 
 def norm_act(norm: torch.nn.GroupNorm, x: torch.Tensor, act: torch.nn.Module | None) -> torch.Tensor:
     """``act(norm(x))``: the split-reduction kernel inside a compiled CUDA forward, else the
-    modules themselves (eager stays the reference's kernels)."""
-    fusable = act is None or type(act) is torch.nn.SiLU  # the kernel fuses SiLU only
+    modules themselves (eager stays the reference's kernels, and so does a compiled module
+    ``exclude_from_compile`` keeps exact)."""
+    # the kernel fuses SiLU or nothing, in place of both modules
+    fusable = (act is None or type(act) is torch.nn.SiLU) and not (kept_exact(norm) or kept_exact(act))
     if fusable and torch.compiler.is_compiling() and _fits(x, norm.weight, norm.bias, norm.num_groups):
         return group_norm_silu(x, norm.weight, norm.bias, norm.num_groups, norm.eps, act is not None)
     x = norm(x)
