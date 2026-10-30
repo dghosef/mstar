@@ -283,6 +283,10 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
 
     # Cap on how many concurrent requests share one batched denoise step.
     max_gen_batch_size = 8
+    # Vision tokens past which generation steps run request by request: a step
+    # this large already fills the GPU, and the batched forward ran two
+    # 832x480x189 videos (75k tokens each) at 2.4x one's step time.
+    max_batched_vision_tokens = 16384
 
     # t2i (num_frames=1) resolutions to capture a bs=1 denoise-step CUDA graph
     # for; others run eager. The graph removes launch overhead (biggest at low
@@ -1950,6 +1954,11 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             # window boundaries — but a kv commit iteration is a different
             # step (an append) and drops the batch to the sequential path.
             if not all(st["uncond"] is not None for st in sts):
+                return False
+            if (
+                batch.graph_walk not in PREFILL_WALKS
+                and sum(st["cond"]["num_vision_tokens"] for st in sts) > self.max_batched_vision_tokens
+            ):
                 return False
             if batch.graph_walk not in GEN_WALKS:
                 # Windowed requests join only generation-loop batches; their
