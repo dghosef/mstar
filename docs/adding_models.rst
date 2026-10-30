@@ -1905,16 +1905,22 @@ the ``k`` and ``v`` the layer passes to ``run``. A layer that calls ``attn.run``
 pass them (``AttentionCallable`` does); one that writes K/V in a fused kernel that leaves
 ``k`` unrotated (``Qwen3Attention`` in ``mstar/model/components/qwen3_lm.py``) rotates it in
 place first when the attention resource's ``reads_step_kv()`` says the step attends them, so a
-decode step keeps the fused kernel. The MLA backend (``flashinfer_mla``) attends a placed pool the same way, its own
-tokens on a second MLA call over the latents the layer passes as ``k`` (``MLAAttention`` does),
-and refuses a ``context_only`` step; it is proven at the kernel level only, until an MLA model
-without DSA is servable. Besides attention, the position resource (RoPE) and the recurrent
+decode step keeps the fused kernel. The MLA backend (``flashinfer_mla``) attends a placed pool
+the same way, its own tokens on a second MLA call over the latents the layer passes as ``k``
+(``MLAAttention`` does), and refuses a ``context_only`` step. It plans on FA3 (Hopper) or FA2
+rather than ``auto``'s other fallbacks, and a step that planner refuses (FA MLA caps a plan's
+work items, which TP mode's widened heads reach ``P`` times sooner) fails with a message naming
+it. An MLA pool's one latent is every TP rank's, so in TP mode ``P = tp``, and a multi-token
+step exchanges every head's queries and partials over the whole TP group each layer; that
+prefill cost is unmeasured. The MLA path is tested on CPU through its torch fallback; its GPU
+tests are written but have not run. GLM-5.2 with ``dsa_long_context`` off (context capped at
+``index_topk``) is an MLA model without DSA and loads under ``context_parallel``. Besides attention, the position resource (RoPE) and the recurrent
 state pool (GDN, KDA) support a placed pool; a recurrent pool on an SP-placed node holds the
 same state on every SP partner. The dense, flex and XPU backends, cross-attention, DSA (the
 GLM-5.x indexer), ``sliding_window`` attention, the mixed decode/prefill wrapper (``splits``)
-and a ``flashinfer_backend`` other than ``auto``, ``fa2``, ``fa3`` or ``trtllm-gen`` (the ones
-whose log-sum-exp base the merge is known to read right) are not supported and are refused at
-load.
+and a ``flashinfer_backend`` other than ``auto``, ``fa2``, ``fa3`` or (not for MLA) ``trtllm-gen``
+(the ones whose log-sum-exp base the merge is known to read right) are not supported and are
+refused at load.
 
 .. note::
 

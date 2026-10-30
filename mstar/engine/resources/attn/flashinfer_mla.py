@@ -295,6 +295,12 @@ class FlashInferMLAManager(AttentionManager):
         # the latent is every TP rank's, so under TP placement it is attended for every partner's heads
         cfg = self._kv_config
         self._wrapper_kwargs.update(placement.local_geometry(cfg.page_size, cfg.num_qo_heads))
+        # the merge reads the natural-log lse fa2 and fa3 are known to return (`AttentionManager.build`
+        # refuses the others); under auto a plan they refuse would fall through to another backend
+        if self._wrapper_kwargs["backend"] == "auto" and torch.device(self._device).type == "cuda":
+            from mstar.platforms import current_platform
+
+            self._wrapper_kwargs["backend"] = "fa3" if current_platform.arch(self._device) == "sm_90" else "fa2"
 
     @property
     def uses_kernel(self) -> bool:
@@ -408,7 +414,20 @@ class FlashInferMLAManager(AttentionManager):
                 )
                 wrapper = self._eager_wrapper(label, ctx.slot, is_decode)
             if self._placement is not None:
-                wrapper.plan(self._placement, self._kv_config.page_size, kv_out, causal=step.causal, dtype=self._dtype)
+                try:
+                    wrapper.plan(
+                        self._placement, self._kv_config.page_size, kv_out, causal=step.causal, dtype=self._dtype,
+                    )
+                except ValueError as error:
+                    # FlashInfer's FA planner refusing the step (its work-item cap, say), the same on
+                    # every rank: the plan's shapes are the logical ones
+                    raise ValueError(
+                        f"FlashInfer's MLA planner refused a step of {int(indptrs.qo_indptr[-1])} query tokens "
+                        f"over context-parallel KV pool {self._kv_cache_name!r} ({error}). Under TP placement "
+                        "each rank plans every partner's query heads, so a step reaches its work-item cap "
+                        f"{self._placement.size}x sooner than unplaced: batch fewer prompt tokens a step "
+                        "(max_concurrent_requests) or place positions over SP ranks"
+                    ) from error
             else:
                 wrapper.plan(causal=step.causal, dtype=self._dtype, **indptrs.to_kwargs_dict())
             plan_states[label] = wrapper

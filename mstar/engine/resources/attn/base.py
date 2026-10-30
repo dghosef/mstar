@@ -86,15 +86,17 @@ class AttentionManager(AttentionResource):
         if info.joint_comm_group is not None:
             kv_config.shard(kv_config.head_shards(info.joint_comm_group))
         if isinstance(kv_config, PagedKVConfig) and kv_config.context_parallel:
+            # the backends whose partials' lse base the merge is known to read right; MLA's
+            # trtllm-gen isn't
+            lse_known = ("auto", "fa2", "fa3") + (() if backend == AttnBackend.FLASHINFER_MLA else ("trtllm-gen",))
+            flashinfer_backend = spec.config.flashinfer_backend
             unsupported = [name for name, refused in (
                 ("sliding_window", spec.config.sliding_window is not None),
                 # the mixed decode/prefill wrapper isn't used over a placed pool
                 ("splits", bool(spec.config.splits)),
                 # before it degrades to FlashInfer on some hosts, so a config loads on none
                 (f"backend {backend.value!r}", backend == AttnBackend.DENSE),
-                # the partials' lse bases these are known to report (`merge`)
-                (f"flashinfer_backend {spec.config.flashinfer_backend!r}",
-                 spec.config.flashinfer_backend not in ("auto", "fa2", "fa3", "trtllm-gen")),
+                (f"flashinfer_backend {flashinfer_backend!r}", flashinfer_backend not in lse_known),
             ) if refused]
             if unsupported:
                 raise ValueError(
