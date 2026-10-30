@@ -549,7 +549,9 @@ Qwen3-Omni notes
   log-mel features: a step's clips (up to 8 requests) go through one packed
   forward, attention windowed within each clip through a ragged attention
   resource, and the 32-layer stack replays a CUDA graph by packed token count
-  up to 4096 tokens (about 5 minutes of audio); a larger step runs eagerly. A
+  up to 4096 tokens (about 5 minutes of audio). A step over 4096 tokens runs
+  its clips one by one, each replayed if it fits a bucket, so only a clip
+  longer than that runs eagerly, on its own. A
   clip's embeddings can differ at the last bit with what it is batched beside,
   since the step's total tokens pick the captured bucket (or the eager GEMMs'
   shapes), and a prefix-cached audio prefix keeps the embeddings it was first
