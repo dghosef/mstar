@@ -449,7 +449,7 @@ class FlashInferMLAManager(AttentionManager):
         return ContextParallelWrapper(
             self._placement, self._kv_config.page_size, self._dtype, context, new, self._device,
             kwargs.get("batch_size"), max_total_tokens,
-            check=None if self._fa_sm_count is None else self._refuse_unplannable,
+            check=self._refuse_unplannable,
         )
 
     @property
@@ -511,6 +511,9 @@ class FlashInferMLAManager(AttentionManager):
         which differ by rank over a placed pool, so its refusal could come on one rank alone; the
         bound reads the query lengths alone. Under SP placement the context's and the own tokens'
         heads are the same."""
+        if self._fa_sm_count is None:
+            # not planned on the FA planner (bind stamps it where it is)
+            return
         heads = self._wrapper_kwargs["num_qo_heads"]
         bound = fa_work_items_bound(qo_indptr, heads, self._fa_sm_count)
         if bound > _FA_MAX_WORK_ITEMS:
