@@ -48,9 +48,11 @@ def _decode_pool() -> ThreadPoolExecutor:
 
 @functools.cache
 def _warn_no_key_frames() -> None:
+    # called while the first failure is handled, so exc_info logs its cause
     logger.warning(
-        "torchcodec's VideoDecoder has no usable _get_key_frame_indices: sampled "
-        "video frames decode on one decoder, not split by keyframe interval"
+        "could not read a video's keyframe index from torchcodec, so its sampled frames decode on "
+        "one decoder, not split by keyframe interval (warned once; each failure is logged at debug level)",
+        exc_info=True,
     )
 
 
@@ -90,6 +92,7 @@ def decode_frames_at(
             # private in torchcodec (0.5 to 0.16 at least): any failure means one decoder
             keys = sorted(int(i) for i in decoder._get_key_frame_indices())
         except Exception:  # noqa: BLE001
+            logger.debug("keyframe index unavailable: the sampled frames decode on one decoder", exc_info=True)
             _warn_no_key_frames()
     order = sorted(set(indices))
     by_gop: dict[int, list[int]] = {}
