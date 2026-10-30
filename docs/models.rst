@@ -653,7 +653,8 @@ Qwen3-TTS notes
   reference frames join the codec stream in ``postprocess``. Prefill and decode
   are one combined walk (``talker_mixed``): up to four new prompts ride a decode
   step instead of a prefill-only step every decode row waits behind, replaying
-  a packed capture sized to the decode batch. A decode-only step uses the
+  a packed capture sized to the decode batch (four long-reference clones can
+  outgrow the top token bucket and run eager). A decode-only step uses the
   whole-walk CUDA Graph (up to 64 rows a step), with the 15-step CodePredictor
   loop captured inside it; request-local EOS suppression is
   carried as a graph tensor input so replay does not consult capture-slot dummy
