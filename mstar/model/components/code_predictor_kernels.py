@@ -6,9 +6,9 @@ times per Talker step, over a dense frame-local KV cache.
 q/k norm, RoPE, the cache write and attention over the depth positions so far,
 each a few microseconds around a ~1 us job when launched apart.
 ``cp_embed_accumulate`` records a depth step's codes and sums their embeddings.
-``DepthAttention`` is a code predictor layer's attention built on ``cp_attend``,
-over the frame-local KV cache its ``DepthKV`` holds. ``cp_linear`` is a
-layer's projection with its RMSNorm and residual add or SwiGLU folded in, and
+``DepthKV`` holds the frame-local KV cache and runs ``cp_attend`` over it with a
+``DepthAttention``'s norms and heads. ``cp_linear`` is a layer's projection
+with its RMSNorm and residual add or SwiGLU folded in, and
 ``ResidualCodePredictor`` is the predictor: its layers, heads and depth loop.
 
 A captured forward compiles with static ints, so any compiled frame that holds a
@@ -266,20 +266,15 @@ class DepthKV:
 
 
 class DepthAttention(ParallelAttention):
-    """A code predictor layer's attention, ``(bs, S, hidden)`` in and out:
-    the qkv and o projections around its ``DepthKV``. The depth loop reads
-    its weights and runs ``cp_linear`` instead (``run_depth_layers``); this
-    forward is the unfused layer, kept as the reference."""
+    """A code predictor layer's attention parameters (qkv and o projections,
+    q/k norms): ``run_depth_layers`` runs them through ``cp_linear`` and the
+    predictor's ``DepthKV``, never through a forward."""
 
-    def __init__(self, depth: DepthKV, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__(qk_norm=True, **kwargs)
-        self.attend = depth
 
     def bind_resources(self, resources: dict) -> None:
-        """It attends through its ``DepthKV``, not the node's resources."""
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.o_proj(self.attend(self, self.qkv_proj(hidden_states)))
+        """It takes none of the node's resources: its ``DepthKV`` runs it."""
 
 
 # ---------------------------------------------------------------------------
@@ -512,8 +507,7 @@ def run_depth_layers(
     ``x``'s row sums of squares (0: the first projection takes them from ``x``).
     Returns the logits of LM head ``head`` (an index into ``w.heads``), or None.
 
-    Eager: every launch in it is a kernel compiling cannot fuse, and a compiled
-    frame would guard on ``head`` and ``n_part``, once per depth position."""
+    Eager: it only launches custom kernels, which compiling cannot fuse."""
     bs = x.shape[0]
     for i, attn in enumerate(attn_modules):
         depth.set_layer_idx(i)
@@ -557,7 +551,7 @@ class ResidualCodePredictor(nn.Module):
         layers = nn.ModuleList(
             DecoderLayer(
                 self_attn=DepthAttention(
-                    self.depth, hidden_size=cp.hidden_size, num_heads=cp.num_attention_heads,
+                    hidden_size=cp.hidden_size, num_heads=cp.num_attention_heads,
                     num_kv_heads=cp.num_key_value_heads, head_dim=cp.head_dim,
                     rope_theta=cp.rope_theta, rms_norm_eps=cp.rms_norm_eps,
                 ),

@@ -3,7 +3,8 @@ against the op sequences they replace (GPU only), and ``cp_linear``'s tiles.
 
 * ``cp_attend``: q/k RMSNorm + RoPE, the dense-KV write and causal attention
   over the depth cache, against the same math in fp32.
-* ``cp_embed_accumulate``: the index_select + add, and the projected next input.
+* ``cp_embed_accumulate``: the index_select + add, and the next input (projected
+  or not) with its norm partials.
 * ``ResidualCodePredictor``'s depth loop, which calls them with its own config:
   against its layers run unfused.
 """
@@ -76,8 +77,9 @@ def test_cp_attend_matches_the_unfused_ops(bs, seq_len, cache_pos):
 def test_cp_embed_accumulate_matches_the_unfused_ops(bs, projected, init):
     """The index_select + add (or, with ``init``, the sum's first term), the
     code recorded, and the next input: the embedding, or its row of the
-    projected table."""
-    from mstar.model.components.code_predictor_kernels import cp_embed_accumulate
+    projected table, with each 256-wide chunk's row sum of squares for the
+    first layer's norm."""
+    from mstar.model.components.code_predictor_kernels import EMBED_BLOCK, cp_embed_accumulate, depth_partials
 
     torch.manual_seed(2)
     weight = torch.randn(2048, 1024, device="cuda", dtype=torch.bfloat16)
@@ -91,10 +93,15 @@ def test_cp_embed_accumulate_matches_the_unfused_ops(bs, projected, init):
     ref_emb = torch.nn.functional.embedding(tokens, weight)
     ref_sum = ref_emb.float() if init else ref_sum.add_(ref_emb)
 
-    emb, _ = cp_embed_accumulate(tokens, weight, emb_sum, codes, 5, inputs=table, init=init)
+    partials = depth_partials(torch.device("cuda"))
+    emb, n_part = cp_embed_accumulate(tokens, weight, emb_sum, codes, 5, inputs=table, init=init, partials=partials)
     assert torch.equal(emb, ref_emb if table is None else torch.nn.functional.embedding(tokens, table))
     assert torch.equal(emb_sum, ref_sum)
     assert torch.equal(codes, ref_codes)
+    # one partial per chunk of the returned input, [chunk, row]
+    assert n_part == emb.shape[1] // EMBED_BLOCK
+    want_partials = emb.float().view(bs, n_part, EMBED_BLOCK).pow(2).sum(-1).T
+    torch.testing.assert_close(partials[:n_part, :bs], want_partials, rtol=1e-5, atol=1e-5)  # summation order
 
 
 @needs_cuda
@@ -143,19 +150,21 @@ def _rms(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
 
 
 @needs_cuda
-def test_code_predictor_depth_loop_matches_its_layers_unfused():
+@pytest.mark.parametrize("width", [2048, 1024])
+def test_code_predictor_depth_loop_matches_its_layers_unfused(width):
     """The depth loop drives the kernels with the predictor's own head counts,
-    eps and RoPE theta, through an input projection (Qwen3-TTS 1.7B's widths):
-    a frame's groups, teacher-forced, through the fused projections and
-    ``cp_attend`` against the same layers over the whole depth sequence at
-    once, norms, RoPE and causal attention in fp32, compared as each group's
-    logits."""
+    eps and RoPE theta, from a Talker of ``width``: 2048 through an input
+    projection (Qwen3-TTS 1.7B), 1024 without one (Qwen3-Omni, Qwen3-TTS 0.6B),
+    where the inputs are the raw embeddings and their norm partials. A frame's
+    groups, teacher-forced, through the fused projections and ``cp_attend``
+    against the same layers over the whole depth sequence at once, norms, RoPE
+    and causal attention in fp32, compared as each group's logits."""
     from mstar.model.components.code_predictor_kernels import ResidualCodePredictor
     from mstar.model.qwen3_tts.config import Qwen3TTSCodePredictorConfig
 
     torch.manual_seed(6)
     cp = Qwen3TTSCodePredictorConfig(num_hidden_layers=2)
-    width, bs, groups = 2048, 3, cp.num_code_groups
+    bs, groups = 3, cp.num_code_groups
     predictor = ResidualCodePredictor(cp, width, max_batch_size=4).to("cuda", torch.bfloat16).eval()
     for name, param in predictor.named_parameters():
         if name.endswith("norm.weight"):

@@ -1516,12 +1516,15 @@ def test_code_predictor_depth_step_is_bound_once_per_pass(monkeypatch):
         predictor.depth_step(x.clone(), depth_partials(x.device))
 
 
-def test_code_predictor_attention_keeps_its_depth_kv_when_the_node_binds(monkeypatch):
+def test_code_predictor_attention_takes_no_node_resources_when_the_node_binds(monkeypatch):
     """The engine binds the node's resources into every module; the code
-    predictor's attention attends through its own ``DepthKV`` regardless."""
+    predictor's attention runs through its own ``DepthKV`` and takes none."""
     predictor, x = _cpu_predictor(monkeypatch)
     NodeSubmodule.bind_node_resources(predictor, {"attn": object(), "kv": object(), "rope": object()})
-    assert all(layer.self_attn.attend is predictor.depth for layer in predictor.model.layers)
+    assert all(
+        (layer.self_attn.attn, layer.self_attn.kv, layer.self_attn.pos) == (None, None, None)
+        for layer in predictor.model.layers
+    )
     _first_step(predictor, x)
 
 
