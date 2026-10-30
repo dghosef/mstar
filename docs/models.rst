@@ -552,20 +552,24 @@ Qwen3-Omni notes
   serve ``configs/qwen3omni_2gpu_large_kv.yaml``, which keeps 2,048 pages (256k
   tokens) on the GPU; it should fit beside its captures on an H200 (not run since
   the prefill buckets grew to 8192 tokens). It has no host pages, so with the
-  Thinker's prefix cache on, a decode step that finds the pool full holds its
-  requests until they time out. Set ``max_concurrent_requests`` in that config:
-  2,048 / 256 = 8 requests of the full 32k context (see the prefix cache under
-  "Config files" in :doc:`serving`). On 80 GB GPUs such as the H100, serve
+  Thinker's prefix cache on, a decode step that finds the pool full has nothing to
+  offload and holds its requests until they time out. Set
+  ``max_concurrent_requests`` in that config: 2,048 / 256 = 8 requests of the full
+  32k context. The other configs' host pages help a pool that runs short now and
+  then but don't replace the cap (see the prefix cache under "Config files" in
+  :doc:`serving`). On 80 GB GPUs such as the H100, serve
   ``configs/qwen3omni_2gpu_h100.yaml``: the Thinker's GPU holds every prefill
   capture, and the larger ones don't fit beside a 1,024-page KV pool. The H100
   config's 512 pages (64k tokens) leave room for all of them. It also runs the
   audio and vision encoders on the Talker's GPU, so an encoder step doesn't wait
   behind a Thinker step.
-- When every attachment is audio, a clip is prefilled in one Thinker walk with the
-  text after it (and the text before it, if under a 128-token page), so the clip's
-  prefix-cache key includes that text: a later turn of an audio chat, or the same
-  clip with a different question, re-prefills the clip. On 4-turn chats with short
-  histories this measured neutral at concurrency 1 and faster at 16; long histories
+- When every attachment is audio, a clip is prefilled in one Thinker walk with all
+  the text after it up to the next clip (and the text before it, if under a
+  128-token page), so the clip's prefix-cache key includes that text. A later turn
+  of an audio chat, or the same clip with a different question, re-prefills the
+  clip and that text, which in a chat is the rest of the history, so the cost grows
+  with the history's length. On 4-turn chats with short histories this measured
+  neutral on later turns at concurrency 1 and faster at 16; long histories
   (thousands of tokens) were not measured.
 - Streamed audio starts after 12 codec frames (0.96 s of audio), then 13, then
   25-frame chunks behind 25 frames of left context. Playback stays gapless
