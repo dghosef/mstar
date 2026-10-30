@@ -20,9 +20,8 @@ from mstar.engine.resources.attn.wrappers import (
     check_flashinfer_head_dim,
 )
 from mstar.engine.resources.base import CGSlotKey, Resource
-from mstar.engine.resources.context_parallel import merge
 from mstar.engine.resources.kv.config import PagedKVConfig
-from mstar.engine.resources.kv.plan import KVPlanOutput, KVPlanOutputs, build_paged_indptrs, context_only_views
+from mstar.engine.resources.kv.plan import KVPlanOutputs
 from mstar.engine.resources.spec import CombinedSplit
 from mstar.engine.resources.step import SlotLease, StepContext
 from mstar.utils.profiler import PhaseLaps
@@ -224,18 +223,6 @@ class FlashInferManager(AttentionManager):
             )
         return FlashInferContextParallelWrapper(context, new, self._device, max_total_tokens or 0)
 
-    def _plan_placed(
-        self, wrapper: FlashInferContextParallelWrapper, kv_out: KVPlanOutput, causal: bool,
-    ) -> None:
-        page_size = self._kv_config.page_size
-        context = kv_out.cpu_indptrs
-        if wrapper.new is not None:
-            views = kv_out.views
-            context = build_paged_indptrs(
-                context_only_views(views, [view.to_compute for view in views], page_size), page_size,
-            )
-        wrapper.plan(self._placement, page_size, context, causal=causal, dtype=self._dtype)
-
     @property
     def supports_preplan(self):
         return True
@@ -292,7 +279,7 @@ class FlashInferManager(AttentionManager):
 
             if self._placement is not None:
                 laps.lap("wrapper")
-                self._plan_placed(wrapper, kv_out, step.causal)
+                wrapper.plan(self._placement, self._kv_config.page_size, kv_out, causal=step.causal, dtype=self._dtype)
                 laps.lap("wrapper_plan")
                 plan_states[label] = wrapper
                 continue
@@ -364,13 +351,10 @@ class FlashInferManager(AttentionManager):
                 "FlashInferManager over a context-parallel KV pool attends a step's own tokens from "
                 "the k and v run is passed; this step has more than one token a row and got none"
             )
-        out, lse, valid = wrapper.attend_context(self._placement.exchange_queries(q), kv_cache_layer)
-        outs, lses = self._placement.exchange_partials(out, lse, valid)
-        if wrapper.new is not None:
-            new_out, new_lse = wrapper.attend_new(q, k, v)
-            outs = torch.cat([outs, new_out.float().unsqueeze(0)])
-            lses = torch.cat([lses, new_lse.float().unsqueeze(0)])
-        return merge(outs, lses).to(q.dtype)
+        return self._placement.attend(
+            q, lambda queries: wrapper.attend_context(queries, kv_cache_layer),
+            None if wrapper.new is None else wrapper.attend_new(q, k, v),
+        ).to(q.dtype)
 
     @torch.compiler.disable
     def _attend(

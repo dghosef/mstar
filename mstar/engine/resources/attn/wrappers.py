@@ -20,6 +20,8 @@ import math
 import numpy as np
 import torch
 
+from mstar.engine.resources.kv.plan import build_paged_indptrs, context_only_views
+
 logger = logging.getLogger(__name__)
 
 
@@ -640,8 +642,10 @@ class FlashInferContextParallelWrapper:
     A step whose rows each query one token attends the pages after its write (``context`` is a
     decode wrapper, ``new`` None). Any other step is two attentions: the stored context, not
     causal, on a prefill wrapper planned on the context-only views; and the step's own tokens,
-    over the ``k``/``v`` the layer passes, on a ragged wrapper (``new``) that needs no exchange.
-    ``context`` is planned with ``page_size`` the pool's slots per page on this rank.
+    over the keys the layer passes, on a ragged wrapper (``new``) that needs no exchange.
+    ``context`` is planned with ``page_size`` the pool's slots per page on this rank. Another
+    backend may pass its own two; ``attend_context`` and ``attend_new`` take whatever their
+    ``run`` does.
     """
 
     def __init__(
@@ -668,9 +672,16 @@ class FlashInferContextParallelWrapper:
         self._valid_host = torch.zeros(n, dtype=torch.bool, pin_memory=self._device.type == "cuda")
 
     @torch.compiler.disable
-    def plan(self, placement, page_size: int, context, causal: bool = True, dtype: torch.dtype = torch.bfloat16):
-        """``context``: the logical ``PagedIndptrs`` the context attention reads (the step's own for
-        a one-token-a-row step, its context-only views' otherwise); ``page_size`` the logical one."""
+    def plan(self, placement, page_size: int, kv_out, causal: bool = True, dtype: torch.dtype = torch.bfloat16):
+        """``kv_out``: the step's logical ``KVPlanOutput`` for this label; ``page_size`` the logical one.
+        The context attention reads its indptrs for a one-token-a-row step, its context-only views'
+        otherwise."""
+        context = kv_out.cpu_indptrs
+        if self.new is not None:
+            views = kv_out.views
+            context = build_paged_indptrs(
+                context_only_views(views, [view.to_compute for view in views], page_size), page_size,
+            )
         local, valid_rows = placement.local_indptrs(context, page_size)
         if self.new is None:
             self.context.plan(dtype=dtype, **local.to_kwargs_dict())
@@ -692,10 +703,11 @@ class FlashInferContextParallelWrapper:
         if self._done is not None:
             self._done.record()
 
-    def attend_context(self, q: torch.Tensor, kv_cache_layer: torch.Tensor):
-        """``(out, lse, valid)`` over this rank's slots; ``valid`` as ``exchange_partials`` takes it."""
-        out, lse = self.context.run(q, kv_cache_layer, return_lse=True)
-        return out, lse, self._valid[: q.shape[0]]
+    def attend_context(self, *query_and_kv: torch.Tensor):
+        """``(out, lse, valid)`` over this rank's slots, from ``context.run``'s query and KV arguments;
+        ``valid`` as ``exchange_partials`` takes it."""
+        out, lse = self.context.run(*query_and_kv, return_lse=True)
+        return out, lse, self._valid[: query_and_kv[0].shape[0]]
 
-    def attend_new(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
-        return self.new.run(q, k, v, return_lse=True)
+    def attend_new(self, *query_and_kv: torch.Tensor):
+        return self.new.run(*query_and_kv, return_lse=True)

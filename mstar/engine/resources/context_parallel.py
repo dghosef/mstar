@@ -11,7 +11,7 @@ its log-sum-exp; the partners exchange partials and ``merge`` them, exactly.
 """
 
 import math
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import NamedTuple
 
 import numpy as np
@@ -100,6 +100,23 @@ class ContextParallel(NamedTuple):
             paged_kv_last_page_len=torch.from_numpy(last.astype(np.int32)),
             kv_lens=torch.from_numpy(lens.astype(np.int32)).as_subclass(HostLens),
         ), valid
+
+    def attend(
+        self,
+        q: torch.Tensor,
+        partial: Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+        new: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        """Attention over the whole pool for this rank's query ``q`` ``[N, H, D]``, fp32: ``partial``
+        attends this rank's slots for the queries ``exchange_queries`` returns and gives
+        ``(out, lse, valid)`` as ``exchange_partials`` takes them; ``new`` is the step's own
+        tokens' ``(out, lse)`` for ``q``'s heads, when it attends them apart from the pool. Runs
+        the same collectives on every rank."""
+        outs, lses = self.exchange_partials(*partial(self.exchange_queries(q)))
+        if new is not None:
+            outs = torch.cat([outs, new[0].float().unsqueeze(0)])
+            lses = torch.cat([lses, new[1].float().unsqueeze(0)])
+        return merge(outs, lses)
 
     def exchange_queries(self, q: torch.Tensor) -> torch.Tensor:
         """The queries this rank attends its slots for, from its own ``q`` ``[N, H, D]``. SP partners
