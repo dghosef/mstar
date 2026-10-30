@@ -157,15 +157,22 @@ def test_encode_image_honours_the_openai_output_knobs():
         encode_image(image, {"output_format": "gif"})
 
 
-@pytest.mark.parametrize("knob, value", [
-    ("output_compression", 101), ("output_compression", "high"), ("png_compress_level", 10),
-    ("png_compress_level", -1), ("png_compress_level", True), ("output_compression", 50.9),
+@pytest.mark.parametrize("knob, value, served", [
+    ("output_compression", 101, False), ("output_compression", "high", False), ("png_compress_level", 10, False),
+    ("png_compress_level", -1, False), ("png_compress_level", True, False), ("output_compression", 50.9, False),
+    ("output_compression", float("inf"), False),
+    # whole numbers that main read through int()
+    ("output_compression", 90.0, True), ("output_compression", "90", True), ("png_compress_level", 0.0, True),
 ])
-def test_an_output_knob_encode_image_cannot_apply_fails_at_intake(knob, value):
+def test_intake_refuses_only_an_output_knob_encode_image_cannot_apply(knob, value, served):
     """Models check the request with image_output_format before generating, so it must
-    refuse what encode_image would refuse (or misapply) after the denoise."""
-    with pytest.raises(ValueError, match=knob):
-        image_output_format({knob: value})
+    refuse what encode_image would refuse (or misapply) after the denoise, and serve the rest."""
+    kwargs = {"output_format": "jpeg" if knob == "output_compression" else "png", knob: value}
+    if served:
+        encode_image(torch.zeros(3, 16, 16, dtype=torch.uint8), kwargs)
+    else:
+        with pytest.raises(ValueError, match=knob):
+            image_output_format(kwargs)
 
 
 @pytest.mark.parametrize("shape", [(3, 40, 8), (3, 16, 4, 6)])

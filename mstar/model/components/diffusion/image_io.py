@@ -160,8 +160,16 @@ def image_output_format(request_kwargs: dict | None) -> str:
         raise ValueError(f"output_format must be one of {OUTPUT_FORMATS}, got {fmt!r}")
     for key, top in (("output_compression", 100), ("png_compress_level", 9)):
         value = kwargs.get(key)
-        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= top):
-            raise ValueError(f"{key} must be an integer from 0 to {top}, got {value!r}")
+        if value is None:
+            continue
+        try:
+            # a whole number as encode_image's int() reads it (90, 90.0, "90"), not True or 50.9
+            ok = not isinstance(value, bool) and (isinstance(value, str) or int(value) == value)
+            ok = ok and 0 <= int(value) <= top
+        except (TypeError, ValueError, OverflowError):
+            ok = False
+        if not ok:
+            raise ValueError(f"{key} must be a whole number from 0 to {top}, got {value!r}")
     return fmt
 
 
