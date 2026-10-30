@@ -329,7 +329,8 @@ def test_vjepa2_ac_decodes_only_the_frames_its_walk_encodes(monkeypatch, tmp_pat
 ])
 def test_gop_split_decode_returns_the_frames_in_the_order_asked(monkeypatch, key_frames, decoders):
     """Sampled frames grouped by keyframe interval decode on separate decoders, each frame
-    once, and come back in the order asked for, duplicates included."""
+    once, and come back in the order asked for, duplicates included; without a usable
+    keyframe index they decode on one decoder."""
     from mstar.model.components import video_decode
 
     pulled, opened = [], []

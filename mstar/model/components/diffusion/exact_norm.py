@@ -1,6 +1,6 @@
 """Bit-exact replicas of torch's eager CUDA norm kernels that run at full bandwidth.
 
-``compile_exact_ops: [norms]`` keeps a transformer's norms on torch's eager kernels so the
+``compile_exact_ops: [norms]`` keeps a transformer's norms on torch's eager result so the
 compiled forward matches eager bit for bit. For a per-head q/k RMSNorm (128 channels) torch's
 ``vectorized_layer_norm_kernel`` launches one 128-thread block per row, of which one warp does the
 work; at 1024^2 that is ~110k blocks per call and 4 ms of klein-4B's ~60 ms denoise step. The

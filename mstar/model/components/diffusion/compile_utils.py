@@ -90,8 +90,8 @@ def compile_transformer_forward(
     while its RMSNorms were breaks too, Z-Image 48%)."""
     types = exact_op_types(exact_ops)
     if types:
-        excluded = exclude_from_compile(transformer, types)
-        logger.info("compiled transformer keeps %d modules (%s) on the eager kernels", excluded,
+        kept = exclude_from_compile(transformer, types)
+        logger.info("compiled transformer keeps %d modules (%s) on the eager result", kept,
                     "all classes" if exact_ops is True else ", ".join(exact_ops))
     transformer.forward = with_inductor_rounding(
         torch.compile(transformer.forward, fullgraph=False, dynamic=False),
