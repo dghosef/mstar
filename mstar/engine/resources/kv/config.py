@@ -58,10 +58,10 @@ class KVConfig(ABC):
         they agree with the pool however each was built."""
         if joint is None:
             return 1
-        sp = joint.sp_group.world_size
         # only a paged pool places positions
-        over_sp = getattr(self, "context_parallel", False) and sp > 1
-        return joint.tp_group.world_size * (1 if over_sp else sp)
+        if getattr(self, "context_parallel", False) and joint.sp_group.world_size > 1:
+            return joint.tp_group.world_size
+        return joint.world_size
 
     def shard(self, num_shards: int) -> None:
         """Narrow the head counts to one rank's slice of ``num_shards`` (``head_shards``).
