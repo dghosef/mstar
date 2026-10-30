@@ -115,8 +115,8 @@ def random_decoder(config: FishS2ProConfig, seed: int = 0) -> FishDACDecoder:
     return decoder.double().eval()
 
 
-def stream_codes(num_frames: int, seed: int = 1, eos: bool = True) -> torch.Tensor:
-    """``[T (+1), 4]`` frames as the AR streams them; the last one is <|im_end|>."""
+def stream_codes(num_frames: int, seed: int = 1) -> torch.Tensor:
+    """``[T, 4]`` frames as the AR streams them (it withholds the <|im_end|> frame)."""
     g = torch.Generator().manual_seed(seed)
     codes = torch.cat(
         [
@@ -125,13 +125,10 @@ def stream_codes(num_frames: int, seed: int = 1, eos: bool = True) -> torch.Tens
         ],
         dim=1,
     )
-    if eos:
-        codes = torch.cat([codes, torch.tensor([[SEMANTIC_CODES, 0, 0, 0]])])
     return codes
 
 
 def whole_decode(decoder: FishDACDecoder, codes: torch.Tensor) -> torch.Tensor:
-    codes = codes[codes[:, 0] < SEMANTIC_CODES]
     with torch.no_grad():
         wav = decoder(codes.t()[None])[0]
     return (wav.clamp(-1, 1) * 32767).to(torch.int16)
@@ -254,9 +251,7 @@ def test_streamed_chunks_stitch_into_the_whole_decode(config, decoder, num_frame
     full = whole_decode(decoder, codes)
     assert full.numel() == num_frames * HOP
     for info, audio in steps:
-        # the window's new frames, less <|im_end|> (frame ``num_frames``) wherever it lands
-        new = min(info.start_offset + info.num_items, num_frames) - (info.start_offset + info.context_items)
-        assert audio.numel() == max(new, 0) * HOP
+        assert audio.numel() == (info.num_items - info.context_items) * HOP
     assert_same_audio(streamed(steps), full)
 
 
@@ -284,29 +279,22 @@ def test_streams_batched_at_different_offsets_each_stitch_into_their_own_decode(
 
 
 def test_context_only_terminal_flush_decodes_nothing(config, decoder):
-    """A stream whose last window holds only context and <|im_end|> emits nothing
-    and, alone in its batch, runs no decode."""
+    """A stream that ends after its consumer drained it gets a final window of
+    context only: it emits nothing and, alone in its batch, runs no decode."""
     submodule = CodecSubmodule(decoder, config)
-    # ramp 2 + 3, then chunks of 5: 15 frames end exactly on a window
-    steps, decodes = run_streams(submodule, {"r": stream_codes(15)})
-    steps = steps["r"]
-
-    info, audio = steps[-1]
-    assert info.is_final and info.num_items - info.context_items == 1  # just <|im_end|>
-    assert audio.numel() == 0
-    assert decodes == len(steps) - 1
-
-
-def test_codec_drops_the_end_of_stream_frame(config, decoder):
-    submodule = CodecSubmodule(decoder, config)
-    frames = stream_codes(3)
     item = submodule.prepare_inputs(
         "codec_chunk",
         SimpleNamespace(request_id="r", rid_handle="r"),
-        {"codec_tokens": [frames]},
+        {"codec_tokens": [stream_codes(5)]},
+        input_metadata=InputMetadata(stream_chunks={"codec_tokens": StreamChunkInfo(10, 5, 5, is_final=True)}),
     )
-    assert item.tensor_inputs["codec_tokens"].shape == (NUM_CODEBOOKS, 3)
-    assert item.kwargs == {"frames": 3, "context": 0, "conv_start": 0, "start_offset": 0}
+    engine_inputs = ModelInputsFromEngine(request_ids=["r"], per_request_info={})
+    packed = submodule.preprocess("codec_chunk", engine_inputs, [item])
+    assert packed["codec_tokens"].shape[-1] == 0
+    with torch.no_grad():
+        outputs = submodule.forward_batched("codec_chunk", engine_inputs, **packed)
+    submodule.postprocess("r", None, outputs["r"], inputs=item)
+    assert outputs["r"]["audio_chunk"][0].numel() == 0
 
 
 def test_codec_preprocess_stages_window_geometry_as_the_per_column_copies_did(config, decoder):
