@@ -1,5 +1,19 @@
 model: "qwen3_5_27b"
 max_seq_len: 32768
+# Speculate and pre-plan step N+1 of the TP LLM during step N, as single-GPU
+# nodes do (see MSTAR_TP_ASYNC_SCHED); without it each step's schedule and
+# plan run serially between the ranks' forwards.
+tp_async_sched: true
+# Plan a decode step from the last step's KV plan when its rows are unchanged,
+# and raise the gen-0 GC threshold (at CPython's 700 a 128-row decode step
+# collects almost every step and runs a full collection every few hundred).
+knobs:
+  kv_plan_cache: 1
+  gc_gen0_threshold: 50000
+# Captured text-prefill ladder (see docs/models.rst): the default powers of
+# two plus 3072-7168, which cut the padding of 27B's compute-bound long prefills.
+model_kwargs:
+  prefill_token_buckets: [32, 64, 128, 256, 512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192]
 node_groups:
   - node_names: [vision_encoder]
     ranks: [0]
