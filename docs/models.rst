@@ -779,9 +779,9 @@ Fish Audio S2-Pro notes
   once. With ``model_kwargs: {codec_exact_fp32: true}`` the codec runs in fp32
   with TF32 off and the streamed audio matches the whole-utterance decode to
   within one int16 step. The shipped ``configs/fish_s2_pro.yaml`` sets it to ``false``:
-  TF32 roughly halves the codec's conv stack (measured on the earlier windowed
-  codec; not re-measured since the codec decodes each frame once), and the audio
-  stays within ~60 dB SNR of the exact decode.
+  TF32 roughly halves the codec's conv stack and the audio stays within ~60 dB
+  SNR of the exact decode, both measured on the earlier windowed codec and not
+  re-measured since the codec decodes each frame once.
 
 Nemotron VoiceChat (``nemotron_duplex``) notes
 ----------------------------------------------
