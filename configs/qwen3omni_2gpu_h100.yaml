@@ -1,0 +1,26 @@
+model: "qwen3_omni"
+max_seq_len: 32768
+# qwen3omni_2gpu.yaml for 80 GB H100s. The Thinker's GPU also holds the audio and
+# vision encoders and every prefill capture bucket (up to 8192 tokens, 16384 for an
+# image), and beside a 1,024-page KV pool 27 of those buckets don't fit, so a step
+# that size would run eagerly. 512 pages (6 GiB, 64k tokens) leave room for all of
+# them. Host pages give a full pool a request to move.
+resources:
+  thinker_kv:
+    max_num_pages: 512
+    cpu_offload_pages: 1024
+node_groups:
+  - node_names: [audio_encoder, vision_encoder]
+    ranks: [1]
+  - node_names: [Thinker]
+    ranks: [1]
+
+  - node_names: [Talker]
+    ranks: [0]
+
+  - node_names: [Code2Wav]
+    ranks: [0]
+# A Thinker prefill row rides the speculated decode step instead of a step of
+# its own (a prefill reads nearly every expert, as a decode step at 16+ rows does).
+speculation_mixes_walks:
+  Thinker: true
