@@ -1282,19 +1282,18 @@ class PreprocessWorkerThread:
             rids = [rids[i] for i in keep]
             values = [values[i] for i in keep]
         kwargs = self.request_model_kwargs
+        # one step's values share one call, split evenly across its rows; on
+        # a failed call a row is also charged its own retry
+        start = time.perf_counter() if self.enable_prof else None
         try:
-            # one step's values share one call, split evenly across its rows
-            start = time.perf_counter() if self.enable_prof else None
             datas = self.model.postprocess_inline(
                 values, item.modality, [kwargs.get(rid) for rid in rids],
             )
         except Exception:  # noqa: BLE001 — retried row by row below
             # so a failure fails only the request it belongs to
             datas = None
-        postprocess_s = (
-            (time.perf_counter() - start) / len(rids) if start is not None and datas is not None and rids
-            else 0.0
-        )
+        share = (time.perf_counter() - start) / len(rids) if start is not None and rids else 0.0
+        postprocess_s = share
         states = self.request_output_state
         for i, request_id in enumerate(rids):
             state = states.get(request_id)
@@ -1309,7 +1308,7 @@ class PreprocessWorkerThread:
                         [values[i]], item.modality, [kwargs.get(request_id)],
                     )[0]
                     if row_start is not None:
-                        postprocess_s = time.perf_counter() - row_start
+                        postprocess_s = share + time.perf_counter() - row_start
                 else:
                     data = datas[i]
                 self._queue_completed_output(

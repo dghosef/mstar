@@ -64,16 +64,20 @@ def _refuse_unroutable_withholds(submodules: dict, model: Model) -> None:
     after the stop check, so it must be one the worker routes as a tensor on
     a streaming edge (which then gets no item; any other consumer would wait
     for one), and that no speculated step reads first. The loop-back signal
-    is sent inline or kept on the device, so withholding it does nothing."""
+    (``ARNodeSubmodule.device_loopback``) is sent inline or kept on the
+    device, so withholding it does nothing."""
     for walk, section in model.get_graph_walk_graphs().items():
         nodes = section.get_nodes()
         for name, node in nodes.items():
-            stop = getattr(submodules.get(name), "token_stop", None)
+            submodule = submodules.get(name)
+            stop = getattr(submodule, "token_stop", None)
             if stop is None:
                 continue
+            loopback = getattr(submodule, "device_loopback", None)
+            loopback_signal = loopback.signal if loopback is not None else None
             for edge in node.outputs:
                 if edge.name in stop.withhold and (
-                    not edge.is_streaming or edge.name == stop.loopback_signal
+                    not edge.is_streaming or edge.name == loopback_signal
                     or _speculates_into(node, edge, nodes, submodules)
                 ):
                     raise ValueError(

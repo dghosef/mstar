@@ -87,7 +87,8 @@ class RequestTiming:
     conductor_finish_time: float | None = None
     finish_time: float | None = None
     # the data worker: when it had the last output tensor read, and its total
-    # time in ``Model.postprocess`` (encoding) over the request's outputs
+    # time postprocessing (encoding) the request's outputs: ``Model.postprocess``,
+    # plus a per-row share of ``postprocess_inline`` for values sent inline
     last_output_read_time: float | None = None
     output_postprocess_s: float = 0.0
 
