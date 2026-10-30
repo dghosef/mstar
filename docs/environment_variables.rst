@@ -94,10 +94,16 @@ Communication
    * - ``MSTAR_KV_SHM_DIR``
      - ``/dev/shm`` (or ``/tmp`` if unavailable)
      - Base directory for host-staged KV snapshots when remote KV transfer
-       uses SHM. Each deployment creates a private child directory here;
-       request cleanup removes snapshots, and startup removes directories
-       left by dead deployments. All workers sharing KV snapshots must see
-       the same filesystem.
+       uses SHM (``make_deployment_kv_shm_dir``). Each deployment creates a
+       private child directory here, named under its tensor-file namespace
+       (see ``MSTAR_DEPLOYMENT_TOKEN``), and holds that namespace's lock
+       file here while it runs; request cleanup removes snapshots, and
+       startup removes this user's directories whose lock no live process
+       holds. All workers sharing KV snapshots must see the same
+       filesystem. The lock is ``flock``, which some cluster filesystems
+       (GPFS, for one) keep per node, so do not point deployments on
+       different nodes at one shared directory there: each would sweep the
+       other's live directories.
    * - ``MSTAR_SHM_ARENA_SEGMENT_MB``
      - ``256``
      - Size of each arena segment. The arena grows segment by segment;
@@ -524,9 +530,11 @@ Worker scheduling
      - unset
      - GIL switch interval, in seconds, of each worker process
        (``sys.setswitchinterval``, set at the top of ``Worker.run`` in
-       ``mstar/worker/worker.py``); unset keeps Python's 5 ms, and a value
-       that is not a positive number is ignored with a warning. Workers only: the API
-       server's interval is the serving config's ``api_switch_interval_s``.
+       ``mstar/worker/worker.py``). Unset keeps Python's 5 ms. A value
+       ``float()`` cannot parse, or 0 or below, is ignored with a warning
+       (``nan`` and ``inf`` are not). Workers only: the API server's
+       interval is the serving config's ``api_switch_interval_s``, else the
+       model's ``Model.API_SWITCH_INTERVAL_S``.
    * - ``MSTAR_QWEN35_PREFILL_TOKEN_BUCKETS``
      - ``32,64,128,256,512,1024,2048,4096,8192``
      - Total tokens of a packed Qwen3.5 text-prefill step that get a captured

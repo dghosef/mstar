@@ -350,7 +350,8 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
        model whose preprocessing runs long on the data-worker thread can lose from
        it (Kokoro's G2P: about -3.6% at c=32), so it is per model. It is
        re-measured once `#849 <https://github.com/mstar-project/mstar/pull/849>`_
-       lands, and deleted if neutral.
+       lands, and deleted if neutral. Workers take theirs from
+       ``MSTAR_PY_SWITCH_INTERVAL_SEC``.
    * - ``tp_async_sched``
      - *(optional)* Async scheduling for the parallel nodes: ``true``, ``false``
        (default) or a list of node names (see ``MSTAR_TP_ASYNC_SCHED``, which
