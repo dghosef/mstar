@@ -563,17 +563,20 @@ Qwen3-Omni notes
 - The audio encoder is the AuT encoder Qwen3-ASR also runs
   (``mstar/model/components/aut_encoder.py``). It takes the clips of up to 16
   requests a step and packs them into one pass, with attention windowed
-  within each clip, while they fit its largest capture (8192 encoder rows,
-  about 630 s of audio). A larger step runs its clips one at a time, each
-  replaying the captured layers when it fits 8192 rows; only a clip over
-  8192 rows runs the layers eagerly. A clip's last 1 s chunk is zero-padded
-  to a full chunk before the convolutions, as HF's encoder pads it whenever
-  its batch holds a full chunk, so a clip under 1 s encoded alone differs
-  from HF's in its last rows. A
-  clip's embeddings can differ at the last bit with what it is batched
-  beside, since the packed GEMMs' shapes change with the pass's total rows,
-  and a prefix-cached audio prefix keeps the embeddings it was first computed
-  with, so a later request reusing it inherits that first batch's rounding.
+  within each clip, while they fit its largest capture: 8192 encoder rows
+  (about 630 s of audio) in at most ``audio_attn.max_segments_per_request``
+  8 s attention windows (the default holds any step of 8192 rows). A larger
+  step runs its clips one at a time, each replaying the captured layers when
+  it fits; a clip over 8192 rows, or with more windows than
+  ``max_segments_per_request``, runs the layers eagerly. A clip's last 1 s
+  chunk is zero-padded to a full chunk before the convolutions, as HF's
+  encoder pads it whenever its batch holds a full chunk, so a clip under 1 s
+  encoded alone differs from HF's: in its last conv row and, through the
+  windowed attention, in every embedding of the clip. A clip's embeddings can
+  differ at the last bit with what it is batched beside, since the packed
+  GEMMs' shapes change with the pass's total rows, and a prefix-cached audio
+  prefix keeps the embeddings it was first computed with, so a later request
+  reusing it inherits that first batch's rounding.
 - The Thinker's text and audio prefill replay captured graphs on the ladder
   ``128 ... 2048`` tokens, and a longer step runs eagerly.
   ``model_kwargs: prefill_token_buckets: [...]`` sets a deployment's own
