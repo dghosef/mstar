@@ -310,9 +310,9 @@ def decode_dtype(fp32_env: str | None = None) -> torch.dtype:
 
     cuDNN ships fast Hopper bf16 conv3d for this decode only from 9.16; before
     that bf16 is 2-10x slower than fp32/TF32 (measured via a single-variable
-    cuDNN swap), so an upgrade flips the choice on its own. ``fp32_env``, the
-    model's override variable if it has one, forces fp32 unless it is
-    0/false/no/off."""
+    cuDNN swap), so an upgrade flips the choice on its own. ``fp32_env`` names
+    the model's override variable, if it has one: set, it forces fp32, or bf16
+    when it is 0/false/no/off."""
     override = os.environ.get(fp32_env) if fp32_env else None
     if override is not None:
         return torch.bfloat16 if override.lower() in ("0", "false", "no", "off") else torch.float32
