@@ -1750,7 +1750,7 @@ class _CodecDriver:
 
     BUCKETS = (1, 2, 4, 8)
 
-    def __init__(self, submodule: CodecSubmodule, max_slots: int = 8):
+    def __init__(self, submodule: CodecSubmodule, max_slots: int = 8, device: str = "cpu"):
         from mstar.engine.resources.base import EngineResourceInfo
         from mstar.engine.resources.recurrent import RecurrentStateConfig, RecurrentStateSpec
         from mstar.engine.resources.recurrent.pool import RecurrentStatePool
@@ -1760,7 +1760,7 @@ class _CodecDriver:
         self.node = submodule
         spec = RecurrentStateSpec(CODEC_STATE, {"Codec"}, RecurrentStateConfig(
             num_layers=1, blocks=codec_state_blocks(submodule.config.codec, torch.float32), max_slots=max_slots))
-        self.pool = RecurrentStatePool.build(spec, EngineResourceInfo(device=torch.device("cpu")))
+        self.pool = RecurrentStatePool.build(spec, EngineResourceInfo(device=torch.device(device)))
         self.runner = StepRunner({CODEC_STATE: self.pool})
 
     def step(
@@ -2040,28 +2040,35 @@ def _tiny_codec_config(**overrides) -> Qwen3TTSCodecConfig:
     return Qwen3TTSCodecConfig(**values)
 
 
+@pytest.mark.parametrize("device", [
+    "cpu",
+    # the served decode: compiled (Inductor), channels-last cuDNN convs
+    pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")),
+])
 @pytest.mark.parametrize("captured", [False, True])
-def test_qwen3_tts_streamed_codec_audio_matches_one_whole_decode(captured):
+def test_qwen3_tts_streamed_codec_audio_matches_one_whole_decode(captured, device, monkeypatch):
     """Streams decoded chunk by chunk from the state pool (StreamBuffer and
     policy -> prepare / declare / preprocess / forward / commit / postprocess,
     batched together, a clone's reference lead included) emit what decoding
     each stream's frames in one call gives. ``captured`` pads every step to a
     batch bucket, as a replay does."""
+    # fp32 throughout: cuDNN's TF32 convs would round the two decodes differently
+    monkeypatch.setattr(torch.backends.cudnn, "allow_tf32", False)
     config = _tiny_model_config()
     config.tts_model_type = "base"   # clone lead widths too
     config.codec = _tiny_codec_config(chunk_schedule=(1, 3, 8, 20, 5), chunk_frames=6, clone_lead_frames=5)
-    decoder = _tiny_decoder(config)
+    decoder = _tiny_decoder(config).to(device)
     reference = copy.deepcopy(decoder)
     submodule = CodecSubmodule(decoder, config)
     names = {type(m).__name__ for m in submodule.decoder.modules()}
     assert "FusedSnakeBeta" in names and "SnakeBeta" not in names
-    driver = _CodecDriver(submodule)
+    driver = _CodecDriver(submodule, device=device)
     up = submodule.total_upsample
     codec = config.codec
     eos = config.talker.codec_eos_token_id
 
     lengths, leads = {"a": 60, "b": 37, "c": 9}, {"a": 0, "b": 0, "c": 3}
-    frames = {rid: torch.randint(0, 32, (n, 4)) for rid, n in lengths.items()}   # below the codec EOS (35)
+    frames = {rid: torch.randint(0, 32, (n, 4), device=device) for rid, n in lengths.items()}   # below the EOS (35)
     streams = {}
     for rid in lengths:
         stream = StreamBuffer(request_id=rid, edge_name="codec_tokens", from_partition="Talker",
