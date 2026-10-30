@@ -11,7 +11,7 @@ its log-sum-exp; the partners exchange partials and ``merge`` them, exactly.
 """
 
 import math
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from typing import NamedTuple
 
 import numpy as np
@@ -118,10 +118,11 @@ class ContextParallel(NamedTuple):
             return gather_merge(self.group, *self.share(queries, partial, new))
         if partial is None:
             return new[0]
-        outs, lses = self.exchange_partials(*partial(*self.exchange_queries(queries)))
+        exchanged = self.exchange_partials(*partial(*self.exchange_queries(queries)))
+        outs, lses = (list(parts.unbind(0)) for parts in exchanged)
         if new is not None:
-            outs = torch.cat([outs, new[0].to(outs.dtype).unsqueeze(0)])
-            lses = torch.cat([lses, new[1].float().unsqueeze(0)])
+            outs.append(new[0])
+            lses.append(new[1])
         return merge(outs, lses)
 
     def share(
@@ -140,7 +141,7 @@ class ContextParallel(NamedTuple):
         if len(parts) == 1:
             return parts[0][0], parts[0][1].float()
         (a, lse_a), (b, lse_b) = parts
-        out, lse = _merged(a, lse_a, b, lse_b)
+        out, lse = _merged((a, b), (lse_a, lse_b))
         return out.to(a.dtype), lse
 
     def exchange_queries(self, queries: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
@@ -446,26 +447,22 @@ class ZigzagWrapper:
         return out[:n], lse[:n]
 
 
-def merge(outs: torch.Tensor, lses: torch.Tensor) -> torch.Tensor:
-    """Attention over the union of disjoint key sets from each set's partial: ``outs`` ``[K, ..., D]``
-    (``K >= 2``) and natural-log ``lses`` ``[K, ...]``; fp32, merged a pair at a time."""
-    out, lse = outs[0], lses[0]
-    for part, part_lse in zip(outs[1:], lses[1:], strict=True):
-        out, lse = _merged(out, lse, part, part_lse)
-    return out
+def merge(outs: Sequence[torch.Tensor], lses: Sequence[torch.Tensor]) -> torch.Tensor:
+    """Attention over the union of disjoint key sets from each set's partial: each out
+    ``[..., D]`` and natural-log lse ``[...]`` (a ``[K, ...]`` stack is a sequence too); fp32."""
+    return _merged(outs, lses)[0]
 
 
-def _merged(
-    a: torch.Tensor, lse_a: torch.Tensor, b: torch.Tensor, lse_b: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Attention over two disjoint key sets from each one's partial, out and lse fp32. A partial
-    with lse -inf and a finite out adds nothing, and a query neither has a key for (a captured
-    bucket's padding) comes out 0, -inf."""
-    lse_a, lse_b = lse_a.float(), lse_b.float()
-    lse = torch.logaddexp(lse_a, lse_b)
-    base = lse.masked_fill(lse == -math.inf, 0)
-    out = torch.exp(lse_a - base).unsqueeze(-1) * a
-    out.addcmul_(torch.exp(lse_b - base).unsqueeze(-1), b)
+def _merged(outs: Sequence[torch.Tensor], lses: Sequence[torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+    """``merge`` and the union's lse, in one pass: every part's weight from the stacked lses, then
+    one fp32 ``[..., D]`` accumulated a part at a time. A partial with lse -inf and a finite out adds
+    nothing, and a query no partial has a key for (a captured bucket's padding) comes out 0, -inf."""
+    lses = torch.stack([lse.float() for lse in lses])
+    lse = torch.logsumexp(lses, dim=0)
+    weights = torch.exp(lses - lse.masked_fill(lse == -math.inf, 0)).unsqueeze(-1)
+    out = weights[0] * outs[0]
+    for weight, part in zip(weights[1:], outs[1:], strict=True):
+        out.addcmul_(weight, part)
     return out, lse
 
 
