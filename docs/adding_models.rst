@@ -611,8 +611,8 @@ The spec types are:
        default, ``RaggedAttnBackend.FLASHINFER``, or ``RaggedAttnBackend.DENSE``),
        ``flashinfer_backend``, the
        two CUDA-graph ceilings ``max_segments_per_request`` and
-       ``max_tokens_per_request``, ``compile_op``, described under `Cacheless attention
-       (encoder towers)`_, ``shard_over_sp`` and ``workspace_mb``. ``DENSE`` runs FA3
+       ``max_tokens_per_request``, ``compile_op``, ``shard_over_sp`` and
+       ``workspace_mb``. ``DENSE`` runs FA3
        ``flash_attn_varlen`` (AITER on ROCm) and falls back to FlashInfer if that kernel is
        missing. By default the heads are split across all TP × SP ranks of the node (the TP
        ranks only, on a node that sets ``splits_heads = False``); ``shard_over_sp=False``
@@ -623,7 +623,7 @@ The spec types are:
        labels can declare less, since a ragged prefill only uses it for split-KV partials.
        ``compile_op``, ``shard_over_sp`` and ``workspace_mb`` are the model's declaration;
        the serving config's ``resources:`` overrides take only the backends and the two
-       ceilings. See `Cacheless attention (encoder towers)`_.
+       ceilings. See `Cacheless attention (encoder towers)`_ for ``compile_op``.
    * - ``RaggedCrossAttentionSpec(config=RaggedAttentionConfig(...))``
      - The cross-attention counterpart: one span of each request attends another
        (``RaggedCrossAttentionStep(pairs=...)``). Same config. See `Cross-attention

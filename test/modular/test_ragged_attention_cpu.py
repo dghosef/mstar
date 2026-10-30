@@ -193,7 +193,8 @@ def _load_heads(kind, splits_heads, tp=1, sp=2, shard_over_sp=True):
 @pytest.mark.parametrize("kind", ["ragged", "recurrent"])
 def test_a_node_whose_ranks_split_other_work_keeps_every_head(kind, tp, sp, splits_heads, heads):
     """Every resource the engine builds for a multi-rank node holds one rank's
-    slice of the heads, whatever the resource kind. A node whose SP ranks
+    slice of the heads, whatever the resource kind (a ragged resource declaring
+    ``shard_over_sp=False`` is the exception, tested below). A node whose SP ranks
     split something else (``splits_heads = False``, e.g. guidance branches)
     keeps every head across them; its TP ranks still split them."""
     assert _load_heads(kind, {"dit": splits_heads}, tp=tp, sp=sp) == heads
