@@ -150,9 +150,17 @@ class _RaggedSpecBase(NodeResourceSpec):
         """Which kernel to run is the deployment's call as much as the model's —
         an image that cannot build FA3 pins FA2 here.
 
-        The two ceilings are here rather than on the model because they size
-        CUDA-graph buckets, which is a deployment's memory/coverage trade.
+        The ceilings are here rather than on the model because they size
+        CUDA-graph buckets, which is a deployment's memory/coverage trade. A
+        resource sized per step (``max_segments_per_step``) never reads the
+        per-request segment ceiling, so an override of that is refused.
         """
+        per_step = self.config.max_segments_per_step if max_segments_per_step is None else max_segments_per_step
+        if max_segments_per_request is not None and per_step is not None:
+            raise ValueError(
+                f"resource {self.resource_key!r} is sized per step: set max_segments_per_step, "
+                "not max_segments_per_request"
+            )
         if backend is not None:
             self.config.backend = RaggedAttnBackend(backend)
         if flashinfer_backend is not None:

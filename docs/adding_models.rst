@@ -1893,6 +1893,7 @@ that a misspelled setting is never silently ignored:
        (``auto`` / ``fa2`` / ``fa3``), ``max_segments_per_request``,
        ``max_segments_per_step``, ``max_tokens_per_request``. The ceilings size CUDA-graph
        buckets, which is a memory-against-coverage trade the deployment makes, not the model.
+       A resource sized per step refuses ``max_segments_per_request``, which it would ignore.
 
 Tune the cache shape on the KV resource, not on the attention resource that reads it. For
 example, ``configs/qwen3tts.yaml`` selects FA2 under ``talker_attn``,
