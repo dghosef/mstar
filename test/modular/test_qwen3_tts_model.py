@@ -1081,9 +1081,9 @@ def test_qwen3_tts_batched_stop_check_agrees_with_the_per_request_one():
     assert submodule.check_stop_batched(list(cases), infos, host_rows) == BatchedStopCheck(stops, withheld)
 
 
-def test_qwen3_tts_talker_returns_row_outputs_except_for_the_clone_prefill():
-    """A decode or plain prefill step is one frame per row, handed back as
-    batch tensors; the codec reads a ``[1, groups]`` row view as one frame."""
+def test_qwen3_tts_talker_returns_row_outputs():
+    """A decode, prefill or clone prefill step is one frame per row, handed back
+    as batch tensors; the codec reads a ``[1, groups]`` row view as one frame."""
     config = _tiny_model_config()
     submodule = TalkerSubmodule(Qwen3TTSTalkerModel(config), _code_predictor(config), config)
     groups = config.talker.num_code_groups
