@@ -18,6 +18,7 @@ import numpy as np
 import torch
 
 from mstar.distributed.communication import CommGroup
+from mstar.engine.resources.attn.ragged.block_causal import token_runs
 from mstar.engine.resources.kv.config import KVSpec, PagedKVConfig
 from mstar.engine.resources.kv.plan import SINK_PAGE, HostLens, PagedIndptrs
 from mstar.engine.resources.spec import NodeResourceSpec
@@ -71,7 +72,7 @@ class ContextParallel(NamedTuple):
         rank: FlashInfer's split-KV planner counts a row's pages where its kernel counts its tokens,
         and a last page with none of this rank's slots puts the two out of step. Such a page is
         dropped from its row. A row with no slot here attends one slot of SINK_PAGE instead, and its
-        partial is masked before the exchange (``exchange_partials``)."""
+        partial is masked before the merge (``_masked``)."""
         kvp = indptrs.paged_kv_indptr.numpy().astype(np.int64)
         npages = np.diff(kvp)
         # this rank's slots in each row's last page, and its KV length
@@ -131,7 +132,9 @@ class ContextParallel(NamedTuple):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Under SP placement, this rank's ``(out, lse)`` for every query as ``attend`` gathers it:
         its slots' partial merged with its share of the step's own tokens. Each own token's keys
-        are attended by one rank, so merging every rank's share is the whole attention."""
+        are attended by one rank, so merging every rank's share is the whole attention. The merge
+        here rounds back to the partial's dtype for the gather, one rounding more than merging
+        every part at once in fp32."""
         parts = [] if partial is None else [_masked(*partial(*queries))]
         if new is not None:
             parts.append(new)
@@ -283,9 +286,11 @@ class ContextParallelWrapper:
 class ZigzagRows(NamedTuple):
     """This rank's share of a step's own-token attention under SP placement. Each row's ``T``
     tokens are cut into ``2P`` chunks, chunk ``i`` of ``T // 2P`` tokens and one more when
-    ``i < T % 2P``. Rank ``r`` attends chunks ``r`` and ``2P - 1 - r``, so every rank does the same
-    causal work, each chunk's queries over its row's tokens up to the chunk's end. Arrays run over
-    the non-empty chunks, row by row; token indices are the step's."""
+    ``i < T % 2P``. Rank ``r`` attends chunks ``r`` and ``2P - 1 - r``, each chunk's queries over
+    its row's tokens up to the chunk's end (every token of the row on a step that isn't causal),
+    so on rows a multiple of ``2P`` long every rank does the same work; shorter rows' chunks fall
+    to the low ranks. Arrays run over the non-empty chunks, row by row; token indices are the
+    step's."""
 
     # [M] the queries this rank attends, chunk by chunk
     tokens: np.ndarray
@@ -293,11 +298,11 @@ class ZigzagRows(NamedTuple):
     qo_indptr: np.ndarray
     # [S + 1] each chunk's keys in ``kv_tokens``
     kv_indptr: np.ndarray
-    # [K] each chunk's keys: its row's first token to the chunk's last
+    # [K] each chunk's keys: its row's first token to the chunk's last (or the row's)
     kv_tokens: np.ndarray
 
 
-def zigzag_rows(qo_indptr: np.ndarray, size: int, index: int) -> ZigzagRows:
+def zigzag_rows(qo_indptr: np.ndarray, size: int, index: int, causal: bool = True) -> ZigzagRows:
     """Rank ``index`` of ``size``'s zigzag chunks of the rows ``qo_indptr`` lays out."""
     starts, lens = qo_indptr[:-1].astype(np.int64), np.diff(qo_indptr).astype(np.int64)
     chunks = 2 * size
@@ -309,23 +314,12 @@ def zigzag_rows(qo_indptr: np.ndarray, size: int, index: int) -> ZigzagRows:
 
     (lo, lo_end), (hi, hi_end) = bounds(index), bounds(chunks - 1 - index)
     first, end = np.stack([lo, hi], 1).ravel(), np.stack([lo_end, hi_end], 1).ravel()
-    row = np.repeat(starts, 2)
+    row, row_len = np.repeat(starts, 2), np.repeat(lens, 2)
     keep = end > first
-    first, end, row = first[keep], end[keep], row[keep]
-    q_lens = end - first
-    return ZigzagRows(_ranges(row + first, q_lens), _indptr(q_lens), _indptr(end), _ranges(row, end))
-
-
-def _indptr(lens: np.ndarray) -> np.ndarray:
-    out = np.zeros(len(lens) + 1, dtype=np.int64)
-    np.cumsum(lens, out=out[1:])
-    return out
-
-
-def _ranges(starts: np.ndarray, lens: np.ndarray) -> np.ndarray:
-    """Every ``arange(start, start + len)``, concatenated."""
-    offsets = _indptr(lens)
-    return np.repeat(starts - offsets[:-1], lens) + np.arange(offsets[-1])
+    first, end, row, row_len = first[keep], end[keep], row[keep], row_len[keep]
+    qo, tokens = token_runs(row + first, end - first)
+    kv, kv_tokens = token_runs(row, end if causal else row_len)
+    return ZigzagRows(tokens, qo, kv, kv_tokens)
 
 
 class ZigzagWrapper:
@@ -335,12 +329,13 @@ class ZigzagWrapper:
 
     The kernel is the backend's paged prefill wrapper over pages of one slot, page ``i`` the step's
     token ``i``, viewed from the keys ``run`` is passed. A chunk's keys are then a list of page
-    indices, so a rank's two chunks, whose key prefixes overlap, plan as two rows of one call with
-    no copy of the keys. ``run`` gathers the chunks' queries and scatters their outputs back.
+    indices (``token_runs``), so a rank's two chunks, whose key prefixes overlap, plan as two rows
+    of one call. ``run`` gathers the chunks' queries and scatters their outputs back.
 
-    ``paged`` builds the kernel, given ``batch_size``, ``max_total_tokens`` and ``max_num_pages`` for
-    a captured one; ``as_pages`` makes the one-slot pages from ``run``'s keys; the first
-    ``num_queries`` of ``run``'s arguments are query parts, the rest keys."""
+    ``paged`` builds the kernel: called with no arguments for an eager one, and with ``batch_size``,
+    ``max_total_tokens`` and ``max_num_pages`` for a captured one. ``as_pages`` makes the one-slot
+    pages from ``run``'s keys; the first ``num_queries`` of ``run``'s arguments are query parts,
+    the rest keys."""
 
     def __init__(
         self,
@@ -359,48 +354,64 @@ class ZigzagWrapper:
         self._device, self._dtype = device, dtype
         self._stager = PinnedStager(torch.int64)
         self._captured = captured_tokens > 0
-        # how many queries the last plan gave this rank
-        self._planned = 0
-        self._tokens = None
+        # the step's token count the last plan was for
+        self._step_tokens = 0
+        # each planned query's token to gather and row to scatter to; None when the last plan gave
+        # this rank none
+        self._gather = self._scatter = None
         if not self._captured:
             self.kernel = paged()
             return
-        # fixed for the bucket: at most 2 chunks a row, of at most ceil(T / 2P) tokens each, whose
-        # keys are at most 2T; and one more row for the padding queries
+        # fixed for the bucket: at most 2 chunks a row, of at most ceil(T / 2P) queries each, whose
+        # keys are at most T each; and one more row for the padding queries. The padding and
+        # leftover rows' one key each fit in the batch_size spare indices the kernel adds
         p = placement.size
         self._segments = 2 * captured_rows + 1
         self._queries = min(captured_tokens, -(-(captured_tokens + captured_rows * (2 * p - 1)) // p))
         self.kernel = paged(
-            batch_size=self._segments, max_total_tokens=self._queries,
-            max_num_pages=2 * captured_tokens + self._queries,
+            batch_size=self._segments, max_total_tokens=self._queries, max_num_pages=2 * captured_tokens,
         )
-        # a padding entry scatters to the row past the step's last token, which ``run`` drops
-        self._pad = captured_tokens
-        self._tokens = torch.full((self._queries,), captured_tokens, dtype=torch.int64, device=device)
+        # never reallocated, so a replay reads the addresses it was captured with
+        self._tokens = torch.zeros(2, self._queries, dtype=torch.int64, device=device)
+        self._gather, self._scatter = self._tokens
+        self._bucket_tokens = captured_tokens
+
+    def layout(self, qo_indptr: np.ndarray, index: int, causal: bool = True) -> ZigzagRows:
+        """Partner ``index``'s share as this wrapper plans it: ``zigzag_rows``, and on a captured
+        wrapper padded to the bucket's queries and rows. Its padding queries are one row over one
+        key, so they cost O(pad): under causal alignment all but the last see none, and their
+        outputs land in the row ``run`` drops. The rows left over hold no query and one key."""
+        rows = zigzag_rows(qo_indptr, self._placement.size, index, causal)
+        if not self._captured:
+            return rows
+        extra = self._segments - len(rows.qo_indptr) + 1
+        return rows._replace(
+            qo_indptr=np.concatenate([rows.qo_indptr, np.full(extra, self._queries)]),
+            kv_indptr=np.concatenate([rows.kv_indptr, rows.kv_indptr[-1] + 1 + np.arange(extra)]),
+            kv_tokens=np.concatenate([rows.kv_tokens, np.zeros(extra, dtype=np.int64)]),
+        )
 
     @torch.compiler.disable
     def plan(self, qo_indptr: torch.Tensor, causal: bool = True) -> None:
-        rows = zigzag_rows(qo_indptr.numpy(), self._placement.size, self._placement.index)
-        qo, kv, kv_tokens = rows.qo_indptr, rows.kv_indptr, rows.kv_tokens
-        self._planned = len(rows.tokens)
+        rows = self.layout(qo_indptr.numpy(), self._placement.index, causal)
+        self._step_tokens = int(qo_indptr[-1])
         if self._captured:
-            # a captured plan takes the batch size it was built for, and FlashInfer's run the
-            # planned query count: the padding queries are one row, attending as many copies of
-            # token 0 causally, and the rows left over hold no query and one key
-            pad_queries, empty = self._queries - int(qo[-1]), self._segments - len(qo)
-            qo = np.concatenate([qo, [self._queries], np.full(empty, self._queries)])
-            kv = np.concatenate([kv, kv[-1] + max(pad_queries, 1) + np.arange(empty + 1)])
-            kv_tokens = np.concatenate([kv_tokens, np.zeros(int(kv[-1]) - len(kv_tokens), dtype=np.int64)])
-            self._stager.copy_(self._tokens, rows.tokens, pad_value=self._pad)
-        elif self._planned:
-            self._tokens = self._stager.to_device(rows.tokens, self._device)
+            # a padding query gathers token 0 and scatters to the row past the bucket's, dropped
+            host = np.zeros((2, self._queries), dtype=np.int64)
+            host[:, : len(rows.tokens)] = rows.tokens
+            host[1, len(rows.tokens):] = self._bucket_tokens
+            self._stager.copy_(self._tokens, host.reshape(-1))
+        elif len(rows.tokens):
+            self._gather = self._scatter = self._stager.to_device(rows.tokens, self._device)
         else:
             # none of the step's tokens is this rank's to attend
+            self._gather = self._scatter = None
             return
+        qo, kv = rows.qo_indptr, rows.kv_indptr
         self.kernel.plan(
             qo_indptr=torch.from_numpy(qo.astype(np.int32)),
             paged_kv_indptr=torch.from_numpy(kv.astype(np.int32)),
-            paged_kv_indices=torch.from_numpy(kv_tokens.astype(np.int32)),
+            paged_kv_indices=torch.from_numpy(rows.kv_tokens.astype(np.int32)),
             paged_kv_last_page_len=torch.ones(len(qo) - 1, dtype=torch.int32),
             kv_lens=torch.from_numpy(np.diff(kv).astype(np.int32)).as_subclass(HostLens),
             causal=causal, dtype=self._dtype,
@@ -410,16 +421,16 @@ class ZigzagWrapper:
         assert return_lse, "a rank's share of the own tokens is only ever merged"
         queries, keys = queries_and_keys[: self._num_queries], queries_and_keys[self._num_queries:]
         n, heads = queries[0].shape[:2]
-        # one row past the step's, for padding entries to land in
-        out = queries[0].new_zeros(n + 1, heads, queries[0].shape[-1])
-        lse = torch.full((n + 1, heads), -math.inf, dtype=torch.float32, device=queries[0].device)
-        if self._captured or self._planned:
-            tokens = self._tokens
-            own = [q.index_select(0, tokens.clamp(max=n - 1)) for q in queries]
+        assert n >= self._step_tokens, f"{n} query tokens for a plan of {self._step_tokens}"
+        # one row past the bucket's (an eager step's), for padding queries to land in
+        rows = (self._bucket_tokens if self._captured else n) + 1
+        out = queries[0].new_zeros(rows, heads, queries[0].shape[-1])
+        lse = torch.full((rows, heads), -math.inf, dtype=torch.float32, device=queries[0].device)
+        if self._gather is not None:
+            own = [q.index_select(0, self._gather) for q in queries]
             got, got_lse = self.kernel.run(*own, self._as_pages(*keys), return_lse=True)
-            tokens = tokens.clamp(max=n)
-            out.index_copy_(0, tokens, got.to(out.dtype))
-            lse.index_copy_(0, tokens, got_lse.float())
+            out.index_copy_(0, self._scatter, got.to(out.dtype))
+            lse.index_copy_(0, self._scatter, got_lse.float())
         return out[:n], lse[:n]
 
 
@@ -440,6 +451,7 @@ def merge(outs: torch.Tensor, lses: torch.Tensor) -> torch.Tensor:
 
 def _merge_with_lse(outs: torch.Tensor, lses: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """``merge`` and the union's lse, fp32; a query no partial has a key for comes out 0, -inf."""
+    lses = lses.float()
     lse = torch.logsumexp(lses, dim=0)
     weights = torch.exp(lses - lse.masked_fill(lse == -math.inf, 0))
     return (weights.unsqueeze(-1) * outs).sum(dim=0), lse
