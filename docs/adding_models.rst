@@ -1912,17 +1912,15 @@ The MLA backend (``flashinfer_mla``) attends a placed pool the same way, its own
 second MLA call over the latents the layer passes as ``k`` (``MLAAttention`` does), and refuses
 a ``context_only`` step. An MLA pool's one latent is every TP rank's, so in TP mode ``P = tp``,
 and a multi-token step exchanges every head's queries and partials over the whole TP group each
-layer; that prefill cost is unmeasured. It plans on FA3 (Hopper) or FA2 rather than ``auto``'s
-other fallbacks. That planner caps a plan's work items, which TP mode's widened heads reach
-``P`` times sooner, and counts each rank's own KV lengths, so its own refusal could come on one
-rank alone. Instead a step is refused before it plans, on every rank alike, when a bound on its
-work items from its query lengths alone passes the cap. The bound copies FlashInfer 0.7.2's
-planner rules, so a placed MLA pool refuses any other FlashInfer at load. That planner's causal
-tile-bound check can also refuse a causal plan at a head count that doesn't divide its query tile
-(64 or 128), so a placed MLA pool is refused at load unless each rank's head count divides 64. The
-MLA path is tested on CPU through its torch fallback; its GPU tests are written but have not run.
-GLM-5.2 with ``dsa_long_context`` off (context capped at ``index_topk``) is an MLA model without
-DSA and loads under ``context_parallel``.
+layer. It plans on FA3 (Hopper) or FA2 rather than ``auto``'s other fallbacks. That planner caps
+a plan's work items, which TP mode's widened heads reach ``P`` times sooner, and counts each
+rank's own KV lengths, so its own refusal could come on one rank alone. Instead a step is refused
+before it plans, on every rank alike, when a bound on its work items from its query lengths alone
+passes the cap. The bound copies FlashInfer 0.7.2's planner rules, so a placed MLA pool refuses
+any other FlashInfer at load. That planner's causal tile-bound check can also refuse a causal plan
+at a head count that doesn't divide its query tile (64 or 128), so a placed MLA pool is refused at
+load unless each rank's head count divides 64. GLM-5.2 with ``dsa_long_context`` off (context
+capped at ``index_topk``) is an MLA model without DSA and loads under ``context_parallel``.
 
 Besides attention, the position resource (RoPE) and the recurrent state pool (GDN, KDA) support
 a placed pool; a recurrent pool on an SP-placed node holds the same state on every SP partner.
