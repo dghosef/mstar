@@ -546,8 +546,10 @@ Kokoro notes
 Qwen3-Omni notes
 ----------------
 
-- The default ``configs/qwen3omni_2gpu.yaml`` is for 141 GB H200-class GPUs. On 80 GB
-  GPUs such as the H100, serve with ``configs/qwen3omni_2gpu_h100.yaml``. The Thinker's
+- The default ``configs/qwen3omni_2gpu.yaml`` is for 141 GB H200-class GPUs. Its
+  Thinker KV pool of 1,024 pages dates from when it targeted 80 GB GPUs;
+  ``configs/qwen3omni_2gpu_large_kv.yaml`` runs the full 2,048-page pool for long
+  contexts or high concurrency on an H200. On 80 GB GPUs such as the H100, serve with ``configs/qwen3omni_2gpu_h100.yaml``. The Thinker's
   GPU holds every prefill capture, and on an 80 GB GPU the larger ones don't fit beside
   the default config's 1,024-page KV pool.
   The H100 config's 512 pages (64k tokens) leave room for all of them. It also runs

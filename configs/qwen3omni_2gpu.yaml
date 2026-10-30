@@ -1,8 +1,10 @@
 model: "qwen3_omni"
 max_seq_len: 32768
-# For 141 GB H200-class GPUs, with the Thinker's KV pool at 1,024 pages instead of its
-# default 2,048 (qwen3omni_2gpu_large_kv.yaml keeps the default). On 80 GB GPUs such as
-# the H100, serve qwen3omni_2gpu_h100.yaml. Host pages give a full pool a request to move.
+# For 141 GB H200-class GPUs. The Thinker's KV pool keeps the 1,024 pages (instead of
+# its default 2,048) it had when this config targeted 80 GB GPUs; for long contexts or
+# high concurrency on an H200, serve qwen3omni_2gpu_large_kv.yaml, the full-pool variant.
+# On 80 GB GPUs such as the H100, serve qwen3omni_2gpu_h100.yaml. Host pages give a full
+# pool a request to move.
 resources:
   thinker_kv:
     max_num_pages: 1024
