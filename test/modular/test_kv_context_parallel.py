@@ -742,17 +742,28 @@ def _emulate_fa_planner(monkeypatch, refuses) -> None:
     monkeypatch.setattr(fm.FlashInferMLAWrapper, "plan", planner)
 
 
-def _refusals(ranks, case) -> list[bool]:
-    """Per rank, whether it refuses to plan ``case``."""
+def _refusals(ranks, case, check: str) -> list[bool]:
+    """Per rank, whether it refuses to plan ``case``, by mstar's ``check`` and not the planner's."""
     decisions = []
     for attn in ranks:
         try:
             _plan(attn, case)
-        except ValueError:
+        except ValueError as error:
+            assert check in str(error)
             decisions.append(True)
         else:
             decisions.append(False)
     return decisions
+
+
+def _fa_work_items(q_lens, kv_lens, heads) -> int:
+    """A count FlashInfer's FA MLA planner could reach on these lengths: its query tiles, and up to
+    one KV split a cluster past them, how many read off the KV lengths, which differ by rank."""
+    if not len(q_lens):
+        return 0
+    cluster = 2 if q_lens.sum() * heads // len(q_lens) > 64 else 1
+    tiles = int(((q_lens * heads + 64 * cluster - 1) // (64 * cluster)).sum())
+    return tiles + min(132 // cluster, int(kv_lens.sum()) % (132 // cluster + 1))
 
 
 # under SP placement the one-token rows' zigzag chunks all fall to rank 0
@@ -763,9 +774,7 @@ def test_mla_ranks_refuse_the_same_steps_past_the_fa_planners_work_item_cap(monk
     pool (its context slots, and under SP placement its zigzag share of the own tokens), so its own
     refusal could come on one rank alone and hang the others in the exchange. The refusal before it
     is the same on every rank, whatever the cap."""
-    # at its worst: as many work items as the bound on its own query lengths
-    _emulate_fa_planner(monkeypatch, lambda q, kv, heads, causal: (
-        fm.fa_work_items_bound(np.concatenate([[0], np.cumsum(q)]), heads, 132) > fm._FA_MAX_WORK_ITEMS))
+    _emulate_fa_planner(monkeypatch, lambda q, kv, heads, causal: _fa_work_items(q, kv, heads) > fm._FA_MAX_WORK_ITEMS)
     case = _Case.build(rows, CPU, torch.float32, mla=True)
     joint = [JointGroups(tp_group=CommGroup.trivial(), sp_group=_group(rank, P)) if over_sp
              else JointGroups(tp_group=_group(rank, P), sp_group=CommGroup.trivial()) for rank in range(P)]
@@ -777,7 +786,7 @@ def test_mla_ranks_refuse_the_same_steps_past_the_fa_planners_work_item_cap(monk
     decisions = []
     for cap in range(1, 400):
         monkeypatch.setattr(fm, "_FA_MAX_WORK_ITEMS", cap)
-        decisions.append(_refusals([attn for attn, _ in ranks], case))
+        decisions.append(_refusals([attn for attn, _ in ranks], case, "work items"))
     assert all(a == b for a, b in decisions) and {a for a, _ in decisions} == {False, True}
     # the torch fallback runs no FA planner, so nothing is refused for it
     monkeypatch.undo()
@@ -798,7 +807,10 @@ def test_sp_mla_ranks_refuse_the_same_steps_at_the_fa_planners_causal_tile_bound
                       mla=True, num_qo_heads=60, flashinfer_backend="fa2")[0]
         for rank in range(P)
     ]
-    decisions = [_refusals(ranks, _Case.build(((0, n),), CPU, torch.float32, mla=True)) for n in range(1, 48)]
+    decisions = [
+        _refusals(ranks, _Case.build(((0, n),), CPU, torch.float32, mla=True), "causal tile-bound check")
+        for n in range(1, 48)
+    ]
     assert all(a == b for a, b in decisions) and {a for a, _ in decisions} == {False, True}
 
 
