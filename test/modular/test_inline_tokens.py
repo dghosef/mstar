@@ -13,6 +13,7 @@ from mstar.api_server.data_worker import InlineToken, PreprocessWorker, Preproce
 from mstar.api_server.request_types import APIServerMessage, ResultChunk, ResultTokens
 from mstar.communication import wire
 from mstar.graph.loop_indices import NestedLoopIndices
+from mstar.model.base import Model
 from mstar.model.submodule_base import HostRows
 from mstar.worker.worker import Worker
 
@@ -52,10 +53,12 @@ class _Model:
         return PartitionTopology(partitions=["default"])
 
     def postprocess(self, output, modality, request_kwargs=None):
+        # tensor-only, as most models' are: an inline value reaches it through
+        # the base ``postprocess_token_ids``
         assert modality == "text"
-        # a list, not a tensor: torch calls on this thread cost a GIL handoff each
-        assert isinstance(output, list)
-        return f"<{output[0]}>".encode()
+        return f"<{output.reshape(-1).tolist()[0]}>".encode()
+
+    postprocess_token_ids = Model.postprocess_token_ids
 
 
 class _Comm:

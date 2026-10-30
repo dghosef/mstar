@@ -62,6 +62,11 @@ class ChunkPolicy(ABC):
         """
         return False
 
+    def continues_in(self, consumer_walk: str | None) -> bool:
+        """Whether empty chunks keep coming, after the producer is done, while
+        the consumer is in ``consumer_walk``."""
+        return self.continue_after_producer_done()
+
 
 class SlidingWindowChunkPolicy(ChunkPolicy):
     """Fixed-size sliding window that advances by a stride.
@@ -142,10 +147,14 @@ class FixedChunkPolicy(ChunkPolicy):
     Args:
         chunk_size: number of items per chunk.
         continue_after_done: if True, keep producing empty chunks after
-            the producer finishes and all buffered items are consumed.
+            the producer finishes and all buffered items are consumed. A set
+            of consumer walks does so only while the consumer is in one of
+            them; in its other walks the stream just waits.
     """
 
-    def __init__(self, chunk_size: int, continue_after_done: bool = False):
+    def __init__(
+        self, chunk_size: int, continue_after_done: bool | frozenset[str] = False,
+    ):
         super().__init__()
         self._chunk_size = chunk_size
         self._continue_after_done = continue_after_done
@@ -160,6 +169,11 @@ class FixedChunkPolicy(ChunkPolicy):
         return self._chunk_size
 
     def continue_after_producer_done(self) -> bool:
+        return bool(self._continue_after_done)
+
+    def continues_in(self, consumer_walk: str | None) -> bool:
+        if isinstance(self._continue_after_done, frozenset):
+            return consumer_walk in self._continue_after_done
         return self._continue_after_done
 
 
@@ -233,7 +247,9 @@ class ScheduledLeftContextChunkPolicy(ChunkPolicy):
     up to ``left_context`` already-delivered items in front of them, so a
     causal decoder can warm up on frames it has processed before. Unlike
     ``LeftContextChunkPolicy`` the first chunk may be smaller than the
-    context: the context is whatever has been delivered so far, capped.
+    context: the context is whatever has been delivered so far, capped at
+    ``left_context``, except a first chunk's primed context (``prime``),
+    which may exceed it.
 
     Example (Qwen3-TTS, 12 Hz frames): ``schedule=(4, 8, 16)``, ``chunk=25``,
     ``left_context=25`` pops windows of 4, 4+8, 12+16, 25+25, 25+25, ...

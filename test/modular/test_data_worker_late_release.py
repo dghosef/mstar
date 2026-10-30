@@ -22,6 +22,7 @@ import pytest
 
 from mstar.api_server.data_worker import PreprocessWorker, PreprocessWorkerThread
 from mstar.api_server.request_types import PreprocessInput
+from mstar.model.base import Model
 from mstar.streaming.topology import PartitionTopology
 from mstar.utils.ipc_format import (
     ConductorMessageType,
@@ -45,6 +46,8 @@ class _Model:
 
     def postprocess(self, output, modality, request_kwargs=None):
         return f"<{int(output[0])}>".encode()
+
+    postprocess_token_ids = Model.postprocess_token_ids
 
 
 class _Conductor:

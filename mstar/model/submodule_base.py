@@ -224,22 +224,23 @@ class BatchedModelOutput:
 
         ``reuse`` holds clones already taken of the row outputs (see
         ``clone_row_outputs``); a stop buffer that is the very same tensor as a
-        row output takes that clone instead of a second copy. The row clone is
-        narrowed to the real rows, which is every row the stop check reads.
+        row output takes that clone instead of a second copy, and a tensor under
+        two names is cloned once. The row clone is narrowed to the real rows,
+        which is every row the stop check reads.
         """
         if self.check_stop_buffers is None:
             return None
         rows = self.row_outputs or {}
+        clones = {
+            id(rows[name]): clone for name, clone in (reuse or {}).items()
+            if name in rows and isinstance(clone, torch.Tensor)
+        }
 
-        def _clone(value, name=None):
+        def _clone(value):
             if isinstance(value, torch.Tensor):
-                if (
-                    reuse is not None and name is not None
-                    and value is rows.get(name)
-                    and isinstance(reuse.get(name), torch.Tensor)
-                ):
-                    return reuse[name]
-                return value.clone()
+                if id(value) not in clones:
+                    clones[id(value)] = value.clone()
+                return clones[id(value)]
             if isinstance(value, list):
                 return [
                     x.clone() if isinstance(x, torch.Tensor) else x for x in value
@@ -249,7 +250,7 @@ class BatchedModelOutput:
             # pass anything else through: dropping it could lose a stop signal
             return value
 
-        return {k: _clone(v, k) for k, v in self.check_stop_buffers.items()}
+        return {k: _clone(v) for k, v in self.check_stop_buffers.items()}
 
     def clone_row_outputs(self, num_rows: int) -> dict[str, torch.Tensor]:
         """One clone per row-addressed batch tensor, narrowed to the real rows
@@ -924,8 +925,8 @@ class NodeSubmodule(torch.nn.Module, ABC):
         the stop check already copies to the host, as signal name -> the name
         of the row-addressed stop buffer holding it. The worker then sends
         those values inline, one frame per step, instead of one tensor per
-        request, and the API server hands each to ``Model.postprocess`` as
-        a list of ints. Only for a walk whose emit edge is not persisted."""
+        request, and the API server hands each to ``Model.postprocess_token_ids``
+        as a list of ints. Only for a walk whose emit edge is not persisted."""
         del graph_walk
         return {}
 
@@ -1027,6 +1028,15 @@ class NodeSubmodule(torch.nn.Module, ABC):
         """
         return {}
 
+    def warmup_compiles(self) -> None:
+        """Compile what a forward would otherwise compile on its first request,
+        outside the accelerator graph runner. Called once, at the end of the
+        engine's warmup, after capture, under ``no_grad`` and the node's fp32
+        precision; the node's resources are bound but nothing is admitted or
+        planned, so it must not read or change resource state. On a lockstep
+        node every rank calls it in the same order, so it may run the
+        collectives its forward runs. Default: nothing."""
+
     def can_use_accelerator_graphs(
         self,
         batch: ExecutingBatch,
@@ -1122,7 +1132,7 @@ class NodeSubmodule(torch.nn.Module, ABC):
     def check_stop(
         self, request_id: str,
         request_info: CurrentForwardPassInfo,
-        outputs: dict[str, list[torch.Tensor]],
+        outputs: Mapping[str, list[torch.Tensor]],
     ) -> set[str] | StopCheck:
         """
         Return the set of dynamic-loop names that should stop after this step.
@@ -1141,6 +1151,9 @@ class NodeSubmodule(torch.nn.Module, ABC):
         A ``StopCheck`` also names outputs of this step that are not routed
         (``StopCheck.withheld``), decided off the same read; it may withhold
         without stopping.
+
+        ``outputs`` is read-only, and each name's host copy is made when the
+        check first reads it.
 
         Default: no stops.
         """
@@ -1226,7 +1239,7 @@ class ARNodeSubmodule(NodeSubmodule):
     def check_stop(
         self, request_id: str,
         request_info: CurrentForwardPassInfo,
-        outputs: dict[str, list[torch.Tensor]],
+        outputs: Mapping[str, list[torch.Tensor]],
     ) -> set[str] | StopCheck:
         stop = self.token_stop
         if stop is None:

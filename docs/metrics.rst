@@ -196,9 +196,10 @@ request's media and runs the model's prompt processing, one request at a time.
    :ref:`upload size <metrics-buckets>`.
 
 ``mstar_data_worker_queue_depth{model_name}``
-   Gauge, read at scrape time. Requests submitted and not yet taken up by the data
-   worker; the one it is working on is not counted. A request whose client went away
-   counts until the data worker takes it up.
+   Gauge, read at scrape time. Inputs (requests and client-stream appends) waiting in
+   the data worker: submitted, and neither being prepared nor handed on to the
+   conductor yet. One whose client went away counts until its turn comes and it is
+   dropped.
 
 HTTP refusals
 -------------
@@ -271,13 +272,15 @@ tensor or sequence parallel instance count once: the instance's first rank repor
 
 ``mstar_prefix_cache_query_tokens_total{model_name, component}``
    Counter. Prompt tokens looked up in the prefix cache, once per request (its whole
-   keyed prompt). Only models that key their prompts for prefix reuse count (BAGEL and
-   Orpheus). Under tensor parallelism only rank 0 counts a lookup.
+   keyed prompt). Only models that key their prompts for prefix reuse count (BAGEL,
+   Orpheus and Qwen3.5). Under tensor parallelism only rank 0 counts a lookup.
 
 ``mstar_prefix_cache_hit_tokens_total{model_name, component}``
    Counter. Tokens the prefix cache already held at that lookup. The hit rate is
    ``rate(mstar_prefix_cache_hit_tokens_total[5m])`` divided by
-   ``rate(mstar_prefix_cache_query_tokens_total[5m])``.
+   ``rate(mstar_prefix_cache_query_tokens_total[5m])``. For Qwen3.5 these are the KV
+   cache's tokens before the recurrent pool cuts the hit to a snapshot, so a hit the pool
+   cuts to 0 still counts.
 
 ``mstar_component_pending_steps{model_name, component}``
    Gauge. Requests whose next step on the node is ready (its inputs arrived) and not
