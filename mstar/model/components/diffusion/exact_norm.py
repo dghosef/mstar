@@ -8,19 +8,27 @@ kernel here does the same arithmetic in the same order -- each lane sums the squ
 contiguous elements with fused multiply-adds, the 32 lane sums are combined in the warp-shuffle
 tree order, then ``sum / N``, ``rsqrt(. + eps)`` and ``w * (rstd * x)`` in fp32 -- for 64 rows per
 program, so its output is identical to torch's (pinned by test/modular/test_flux2_klein_compile_exact.py
-on CUDA).
+on CUDA). That order is torch's private choice for NVIDIA's 32-lane warps, so the replica runs only
+there, and only once it has reproduced the installed torch's result on the device.
 """
 
 from __future__ import annotations
 
+import functools
+import logging
+
 import torch
 import torch.nn.functional as F
+
+from mstar.platforms import current_platform
 
 try:
     import triton
     import triton.language as tl
 except ImportError:  # pragma: no cover - CPU-only installs
     triton = None
+
+logger = logging.getLogger(__name__)
 
 # torch's vectorized kernel: 4-element vectors, a 32-lane warp; one vector per lane at N = 128
 _VEC, _LANES = 4, 32
@@ -70,19 +78,29 @@ if triton is not None:
 
 def _fits(x: torch.Tensor, weight: torch.Tensor | None) -> bool:
     return (
-        triton is not None and x.is_cuda and x.dtype in (torch.bfloat16, torch.float16)
+        triton is not None and x.is_cuda and current_platform.is_cuda()
+        and x.dtype in (torch.bfloat16, torch.float16)
         and x.shape[-1] == EXACT_RMS_DIM and x.stride(-1) == 1 and 1 <= x.dim() <= 4
         and weight is not None and weight.dtype == x.dtype and weight.is_contiguous()
+        and _reproduces_torch(x.device, x.dtype)
     )
 
 
-@torch.library.custom_op("mstar::exact_rms_norm", mutates_args=())
-def exact_rms_norm(x: torch.Tensor, weight: torch.Tensor | None, eps: float | None) -> torch.Tensor:
-    """``F.rms_norm(x, (128,), weight, eps)`` with torch's eager CUDA result, bit for bit; other
-    shapes and devices go to ``F.rms_norm`` itself. An op a compiled graph keeps whole: no graph
-    break, and inductor never decomposes the norm. The output is contiguous."""
-    if not _fits(x, weight):
-        return F.rms_norm(x, (x.shape[-1],), weight, eps).contiguous()
+@functools.cache
+def _reproduces_torch(device: torch.device, dtype: torch.dtype) -> bool:
+    """Whether the replica gives torch's result on ``device``, checked once on random rows; if not,
+    torch's kernel runs from then on. The first call is a warm-up forward, before any capture."""
+    gen = torch.Generator(device=device).manual_seed(0)
+    x = torch.randn(3 * _ROWS, EXACT_RMS_DIM, generator=gen, device=device).to(dtype)
+    w = torch.randn(EXACT_RMS_DIM, generator=gen, device=device).to(dtype)
+    if torch.equal(_replica(x, w, 1e-6), F.rms_norm(x, (EXACT_RMS_DIM,), w, 1e-6)):
+        return True
+    logger.warning("exact_rms_norm: the replica differs from torch %s's RMSNorm on %s; using torch's kernel",
+                   torch.__version__, device)
+    return False
+
+
+def _replica(x: torch.Tensor, weight: torch.Tensor, eps: float | None) -> torch.Tensor:
     if eps is None:  # torch's default: the epsilon of the fp32 math type
         eps = torch.finfo(torch.float32).eps
     lead = [1] * (4 - x.dim()) + list(x.shape[:-1])
@@ -94,6 +112,16 @@ def exact_rms_norm(x: torch.Tensor, weight: torch.Tensor | None, eps: float | No
             x, weight, y, m, lead[1], lead[2], strides[0], strides[1], strides[2], float(eps), ROWS=_ROWS,
         )
     return y
+
+
+@torch.library.custom_op("mstar::exact_rms_norm", mutates_args=())
+def exact_rms_norm(x: torch.Tensor, weight: torch.Tensor | None, eps: float | None) -> torch.Tensor:
+    """``F.rms_norm(x, (128,), weight, eps)`` with torch's eager CUDA result, bit for bit; other
+    shapes and devices go to ``F.rms_norm`` itself. An op a compiled graph keeps whole: no graph
+    break, and inductor never decomposes the norm. The output is contiguous."""
+    if not _fits(x, weight):
+        return F.rms_norm(x, (x.shape[-1],), weight, eps).contiguous()
+    return _replica(x, weight, eps)
 
 
 @exact_rms_norm.register_fake
