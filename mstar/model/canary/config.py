@@ -59,7 +59,8 @@ class CanaryModelConfig:
     # token id by content, for the prompt's task tokens
     special_ids: dict[str, int] = field(default_factory=dict)
     # the SentencePiece word-boundary piece "▁", which opens the prompt
-    word_boundary_id: int = 0
+    # (read from tokenizer.json by ``from_pretrained``)
+    word_boundary_id: int | None = None
     sampling_rate: int = 16_000
 
     @property
@@ -108,6 +109,8 @@ class CanaryModelConfig:
             f"<|{source_lang}|>", f"<|{target_lang}|>", "<|pnc|>" if punctuation else "<|nopnc|>",
             "<|noitn|>", "<|notimestamp|>", "<|nodiarize|>",
         ]
+        if self.word_boundary_id is None:
+            raise ValueError("Canary config has no word_boundary_id; build it with from_pretrained")
         return [self.word_boundary_id] + [self.special_ids[t] for t in tokens]
 
 
