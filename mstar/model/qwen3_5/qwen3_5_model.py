@@ -165,7 +165,7 @@ class Qwen3_5DenseModel(Model):
     # thread is steadier but slower (13 ms).
     PREPROCESS_TORCH_THREADS = 4
     # token streaming keeps three API-server threads busy: +4 to +8% tok/s on
-    # 0.8B text at c=64 (docs/serving.rst)
+    # 0.8B text at c=64 before #849; re-measure pending (docs/serving.rst)
     API_SWITCH_INTERVAL_S = 0.001
     INTERNAL_KWARGS = (IMAGE_GRIDS_KEY, VIDEO_GRIDS_KEY)
 
