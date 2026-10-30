@@ -369,11 +369,6 @@ class Qwen3OmniModel(Model):
     def checkpoint_path(self) -> str:
         return self.local_dir
 
-    def _audio_frames(self, seqlens: torch.Tensor) -> torch.Tensor:
-        from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import _get_feat_extract_output_lengths
-
-        return _get_feat_extract_output_lengths(seqlens, n_window=self.config.audio_encoder.n_window)
-
     def _get_max_talker_output_tokens(self, **model_kwargs):
         return model_kwargs.get("talker_max_output_tokens", MAX_OUTPUT_TOKENS)
 
@@ -1331,7 +1326,8 @@ class Qwen3OmniModel(Model):
                 kept = int(talker_text_mask(ids, self.config).sum())
             elif step.modality == "audio":
                 # the encoder's rows between two sentinels
-                rows = int(self._audio_frames(tensors["audio_seqlens"][step.index])) + 2
+                frames = int(tensors["audio_seqlens"][step.index])
+                rows = self.config.audio_encoder.tokens_for_frames(frames) + 2
                 span = Span("digest", "prefill_audio", rows, rows, ("audio", step.index))
                 kept = rows
             elif step.modality == "image":
