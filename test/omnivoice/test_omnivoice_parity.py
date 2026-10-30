@@ -271,12 +271,13 @@ def _reveal(tokens, pred_tokens, scores, reveal_count, layer_penalty_factor, pos
 
 
 @pytest.mark.parametrize("guidance", [(2.0, 2.0, 2.0), (2.0, 0.0, 3.0)])
-@pytest.mark.parametrize("class_temperature", [0.0, 1.0])
+@pytest.mark.parametrize("class_temperature", [0.0, 1.0, (0.0, 1.0, 0.0)])
 def test_batched_unmask_step_matches_the_per_request_reveal(guidance, class_temperature):
     """``unmask_step`` over a step's requests is the reference's scoring and
     reveal per request (``_predict``, ``_reveal``), with each request's own
     generator, cell for cell; also with CFG off for one request, and with
-    sampled tokens."""
+    sampled tokens, for every request or only some."""
+    temperatures = class_temperature if isinstance(class_temperature, tuple) else (class_temperature,) * 3
     gen = torch.Generator().manual_seed(0)
     items = [_item(prefix_len=4, target_len=n, guidance_scale=g) for n, g in zip((9, 5, 12), guidance, strict=True)]
     for item, done in zip(items, (0, 7, 30), strict=True):
@@ -291,10 +292,10 @@ def test_batched_unmask_step_matches_the_per_request_reveal(guidance, class_temp
         return [torch.Generator().manual_seed(100 + i) for i in range(len(items))]
 
     want = []
-    for item, count, g in zip(items, counts, gens(), strict=True):
+    for item, count, temperature, g in zip(items, counts, temperatures, gens(), strict=True):
         c_logits, u_logits = canvas.slice_logits(logits, item)
         u_logits = c_logits if u_logits is None else u_logits
-        pred, scores = _predict(c_logits.float(), u_logits.float(), item.guidance_scale, class_temperature, g)
+        pred, scores = _predict(c_logits.float(), u_logits.float(), item.guidance_scale, temperature, g)
         want.append(_reveal(
             item.tokens.clone(), pred, scores, count, layer_penalty_factor=5.0, position_temperature=5.0, generator=g,
         )[0])
@@ -302,7 +303,7 @@ def test_batched_unmask_step_matches_the_per_request_reveal(guidance, class_temp
     got = unmask_step(
         logits, [item.tokens[0] for item in items],
         [canvas.flat_target_total + item.flat_u_start if item.flat_u_start >= 0 else -1 for item in items],
-        counts, gens(), [item.guidance_scale for item in items], [class_temperature] * 3, [5.0] * 3, [5.0] * 3,
+        counts, gens(), [item.guidance_scale for item in items], list(temperatures), [5.0] * 3, [5.0] * 3,
         MASK_ID,
     )
     assert torch.equal(got, torch.cat(want, dim=-1))

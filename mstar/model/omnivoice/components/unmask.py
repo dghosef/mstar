@@ -115,9 +115,12 @@ def unmask_step(
     The reference's scoring (``_predict_tokens_with_scoring``) and reveal for
     each request, over the step's packed target positions at once. Each request
     draws from its own generator in the reference's order (token choice, then
-    reveal order), so a request's result does not depend on the batch, and it
-    is the reference's arithmetic when the requests share their knobs; a knob
-    that differs between requests changes only the rounding of one divide.
+    reveal order), and its result is the reference's arithmetic to the bit
+    when the step's requests share their knobs. A temperature that differs
+    between them is divided by per position instead of as one scalar, which
+    can round differently (CUDA divides by a scalar as a multiply by its
+    reciprocal), so a request batched with others can then flip a reveal at a
+    near-tie.
 
     Args:
         logits: ``[1, C, R, V]``: every request's conditional target block in
