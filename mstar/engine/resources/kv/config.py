@@ -492,11 +492,6 @@ class KVSpec(NodeResourceSpec):
     def apply_yaml_overrides(self, **kwargs):
         """Forwarded to the config: which keys are legal is a property of the
         storage strategy, so the config answers for them."""
-        if kwargs.get("context_parallel") and not isinstance(self.config, PagedKVConfig):
-            raise ValueError(
-                f"KV {self.resource_key!r}: context_parallel needs a paged pool, and this one "
-                f"holds a {type(self.config).__name__}"
-            )
         self.config.apply_yaml_overrides(**kwargs)
 
 
