@@ -1923,7 +1923,9 @@ indices); each rank merges that share, with lse ``-inf`` off its chunks, into it
 partial before the one gather. Rows, and every layer but attention, stay replicated, so the
 model changes nothing. The saving, ``1 - 1/P`` of the own-token attention, is an estimate: it is
 unmeasured, as is the one-slot-page kernel's speed against the ragged one, and an eager first
-prefill makes one gather a layer. A captured bucket's padding queries attend one key each.
+prefill makes one gather a layer. A captured bucket's padding queries attend one key each. The
+zigzag path has run only on CPU, with torch math in place of the kernel; its GPU tests are
+written but have not run.
 
 The MLA backend (``flashinfer_mla``) attends a placed pool the same way, its own tokens (in SP
 mode, its zigzag chunks of them) on a second MLA call over the latents the layer passes as ``k``
