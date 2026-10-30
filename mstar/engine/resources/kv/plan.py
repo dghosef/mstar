@@ -88,20 +88,17 @@ class PagedIndptrs(NamedTuple):
             kv_lens=self.kv_lens,
         )
 
-    def stored_lens(self, page_size: int) -> np.ndarray:
-        """Each row's KV length before the tokens the step appends (its queries, at the row's end)."""
-        npages = np.diff(self.paged_kv_indptr.numpy()).astype(np.int64)
-        lens = np.where(npages > 0, (npages - 1) * page_size + self.paged_kv_last_page_len.numpy(), 0)
-        return lens - np.diff(self.qo_indptr.numpy())
-
     def context_only(self, page_size: int, qo_indptr: torch.Tensor | None = None) -> "PagedIndptrs":
-        """Each row's KV cut to its stored context (``stored_lens``), the pages past it dropped, for
-        attention over the stored context alone (``AttentionStep.context_only``). ``qo_indptr``: the
-        rows' query counts, by default the step's own."""
+        """Each row's KV cut to its stored context (its KV before the tokens the step appends at the
+        row's end), the pages past it dropped, for attention over the stored context alone
+        (``AttentionStep.context_only``). ``qo_indptr``: the rows' query counts, by default the
+        step's own."""
         kvp = self.paged_kv_indptr.numpy().astype(np.int64)
         if qo_indptr is not None and len(qo_indptr) != len(kvp):
             raise ValueError(f"{len(qo_indptr) - 1} rows of query counts for a plan of {len(kvp) - 1}")
-        stored = np.maximum(self.stored_lens(page_size), 0)
+        npages = np.diff(kvp)
+        lens = np.where(npages > 0, (npages - 1) * page_size + self.paged_kv_last_page_len.numpy(), 0)
+        stored = np.maximum(lens - np.diff(self.qo_indptr.numpy()), 0)
         pages = -(-stored // page_size)
         new_kvp = np.zeros_like(kvp)
         np.cumsum(pages, out=new_kvp[1:])

@@ -63,16 +63,6 @@ class ContextParallel(NamedTuple):
         for them (``exchange_queries``)."""
         return dict(page_size=page_size // self.size, num_qo_heads=num_qo_heads * (1 if self.over_sp else self.size))
 
-    def local_last_page_len(
-        self, logical_last: np.ndarray, npages: np.ndarray, page_size: int,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Per row, this rank's slots in the last page (0 to ``page_size // P``) and its KV
-        length, from the logical last-page lengths and page counts. The page indices and
-        indptr stay as they are."""
-        slots = page_size // self.size
-        last = np.clip((logical_last - self.index + self.size - 1) // self.size, 0, slots)
-        return last, np.where(npages > 0, (npages - 1) * slots + last, 0)
-
     def local_indptrs(self, indptrs: PagedIndptrs, page_size: int) -> tuple[PagedIndptrs, np.ndarray]:
         """A plan's logical paged indptrs as this rank's (``page_size`` the logical one), and per row
         whether it holds any of this rank's slots.
@@ -84,7 +74,10 @@ class ContextParallel(NamedTuple):
         partial is masked before the exchange (``exchange_partials``)."""
         kvp = indptrs.paged_kv_indptr.numpy().astype(np.int64)
         npages = np.diff(kvp)
-        last, lens = self.local_last_page_len(indptrs.paged_kv_last_page_len.numpy(), npages, page_size)
+        # this rank's slots in each row's last page, and its KV length
+        slots = page_size // self.size
+        last = np.clip((indptrs.paged_kv_last_page_len.numpy() - self.index + self.size - 1) // self.size, 0, slots)
+        lens = np.where(npages > 0, (npages - 1) * slots + last, 0)
         valid = lens > 0
         drop = valid & (last == 0)
         kv_indptr, indices = indptrs.paged_kv_indptr, indptrs.paged_kv_indices
@@ -187,7 +180,7 @@ class ContextParallelWrapper:
     causal, planned on its context-only indptrs; and the step's own tokens, over the keys the layer
     passes to ``run``, on ``new``, which needs no exchange. ``context`` is planned with
     ``page_size`` the pool's slots per page on this rank. Each wrapper takes whatever its backend's
-    ``run`` does (``attend_context``, ``attend_new``); ``new`` plans as ``plan(qo_indptr, causal)``.
+    ``run`` does; ``new`` plans as ``plan(qo_indptr, causal)``.
     """
 
     def __init__(
@@ -253,7 +246,7 @@ class ContextParallelWrapper:
                 "a row and got none"
             )
         context = None if self.context_empty else lambda *parts: self.attend_context(*parts, kv_cache_layer)
-        new = None if self.new is None else self.attend_new(*queries, *new_keys)
+        new = None if self.new is None else self.new.run(*queries, *new_keys, return_lse=True)
         return placement.attend(queries, context, new).to(queries[0].dtype)
 
     @property
@@ -267,9 +260,6 @@ class ContextParallelWrapper:
         ``valid`` as ``exchange_partials`` takes it."""
         out, lse = self.context.run(*query_and_kv, return_lse=True)
         return out, lse, self._valid[: query_and_kv[0].shape[0]]
-
-    def attend_new(self, *query_and_kv: torch.Tensor):
-        return self.new.run(*query_and_kv, return_lse=True)
 
 
 def merge(outs: torch.Tensor, lses: torch.Tensor) -> torch.Tensor:
