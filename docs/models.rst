@@ -546,9 +546,10 @@ Kokoro notes
 Qwen3-Omni notes
 ----------------
 
-- On 80 GB GPUs such as the H100, serve with ``configs/qwen3omni_2gpu_h100.yaml``.
-  The Thinker's GPU holds every prefill capture, and beside the default config's
-  1,024-page KV pool the prefill captures of 4096 tokens and more don't fit there.
+- The default ``configs/qwen3omni_2gpu.yaml`` is for 141 GB H200-class GPUs. On 80 GB
+  GPUs such as the H100, serve with ``configs/qwen3omni_2gpu_h100.yaml``. The Thinker's
+  GPU holds every prefill capture, and on an 80 GB GPU the larger ones don't fit beside
+  the default config's 1,024-page KV pool.
   The H100 config's 512 pages (64k tokens) leave room for all of them. It also runs
   the audio and vision encoders on the Talker's GPU, so an encoder step doesn't wait
   behind a Thinker step.
