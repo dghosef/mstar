@@ -1,5 +1,12 @@
 model: "qwen3_5_0.8b"
 max_seq_len: 32768
+# 0.8B's decode step is host-bound, so per-step Python is throughput. Plan a
+# decode step from the last step's KV plan when its rows are unchanged, and
+# raise the gen-0 GC threshold: at CPython's 700 a 128-row step collects
+# almost every step and runs a full collection every few hundred.
+knobs:
+  kv_plan_cache: 1
+  gc_gen0_threshold: 50000
 node_groups:
   # Text, images and video. Colocated: the
   # encoder runs once per request, then idles.
