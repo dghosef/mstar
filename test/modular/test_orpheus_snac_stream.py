@@ -224,20 +224,13 @@ def test_windows_past_the_left_reach_share_the_widest_window(fake, config):
     assert set(keys[2:]) == {max(config.snac_window_frames())}
 
 
-def test_snac_24khz_left_reach_is_under_the_padding_bound(monkeypatch):
+def test_snac_24khz_left_reach_is_under_the_padding_bound():
     """Frames ``SNAC_LEFT_REACH_FRAMES`` or more into a window decode the same
     audio with frames prepended: the receptive field is the architecture's, so
-    random weights show it."""
-    from mstar.model.orpheus.components import snac as snac_module
+    the tiny decoder of the same geometry, with random weights, shows it."""
     from mstar.model.orpheus.config import SNAC_LEFT_REACH_FRAMES
 
-    monkeypatch.setattr(snac_module.NoiseBlock, "forward", lambda self, x: x)  # the injected noise off
-    torch.manual_seed(0)
-    model = SNAC(
-        sampling_rate=24000, encoder_dim=48, encoder_rates=[2, 4, 8, 8], decoder_dim=1024,
-        decoder_rates=[8, 8, 4, 2], attn_window_size=None, codebook_size=4096, codebook_dim=8,
-        vq_strides=[4, 2, 1], noise=True, depthwise=True,
-    ).eval()
+    model = _tiny_snac()
     frames, pad = 9, 5
     generator = torch.Generator().manual_seed(1)
     window = [torch.randint(0, 4096, (1, k * (frames + pad)), generator=generator) for k in (1, 2, 4)]
