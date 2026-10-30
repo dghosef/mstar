@@ -288,7 +288,8 @@ def test_a_deployment_may_size_a_thread_safe_pool_past_the_class_value():
 def test_a_prepared_request_waits_while_a_peer_cannot_take_more():
     """As on the inline path, nothing is handed on to the conductor while
     earlier sends are still queued for a peer that is backed up, including a
-    send made by the hand-off just before it."""
+    send made by the hand-off just before it. The queue gauge, read during a
+    hand-off, counts only the inputs behind it."""
     from mstar.api_server.data_worker import PreparingInput
     from mstar.api_server.request_types import PreprocessInput
 
@@ -299,8 +300,13 @@ def test_a_prepared_request_waits_while_a_peer_cannot_take_more():
     worker._preparing = deque(
         PreparingInput(PreprocessInput(rid, rid, None, [], ["text"], {}), None, done) for rid in ("r", "s")
     )
-    taken = []
-    worker._take_input = lambda *entry: taken.append(entry[0].request_id)
+    taken, waiting = [], []
+
+    def take_input(pre_input, profile=None, prepared=None):
+        taken.append(pre_input.request_id)
+        waiting.append(worker.waiting_inputs)
+
+    worker._take_input = take_input
     # each hand-off's send fills the peer until the next pass
     worker.communicator = SimpleNamespace(flush=lambda: bool(taken))
 
@@ -310,6 +316,7 @@ def test_a_prepared_request_waits_while_a_peer_cannot_take_more():
     assert taken == ["r"], "handed on behind a send the peer had not taken"
     PreprocessWorkerThread._take_new_input(worker, sends_pending=False)
     assert taken == ["r", "s"]
+    assert waiting == [1, 0], "counted the input being handed on as waiting"
 
 
 def test_the_pool_skips_the_prepare_of_a_request_the_api_server_let_go_of():

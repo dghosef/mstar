@@ -1251,6 +1251,8 @@ def test_queue_depth_counts_requests_waiting_for_the_data_worker(
     _wait(lambda: served.scrape()[("mstar_data_worker_queue_depth", _labels())] == 2)
     time.sleep(0.2)
     waited = time.perf_counter() - queued_at
+    # settled too: on the pool, #1 is prepared and waits its turn behind "hold"
+    assert served.scrape()[("mstar_data_worker_queue_depth", _labels())] == 2
     served.model.release.set()
     _wait(lambda: _preprocessed(served.scrape()) == 3)
 
