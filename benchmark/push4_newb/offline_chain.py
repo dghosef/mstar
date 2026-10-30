@@ -35,8 +35,18 @@ BENCH27 = [PY, "run_27b.py", "--phases", "bench", "--arms", "ladder,vllm,sglang"
 NSYS_PF = [PY, "nsysrun.py", "--model", "qwen3_5_27b_tp4", "--gpus", "0,1,2,3", "--port", "59100",
            "--cell", "random_1024_1:128", "--n", "512", "--out", str(R / "q27b_nsys_prefill")]
 
+HEAD = "/root/push4/newb/head"
+# head's 27B ShareGPT gap is decode (TPOT 25.8 vs vLLM 21.0 ms at c128): phase timing, then an nsys pair, same cell
+NSYS_SG = [PY, "nsysrun.py", "--model", "qwen3_5_27b_tp4", "--gpus", "0,1,2,3", "--port", "59100",
+           "--cell", "sharegpt:128", "--n", "512", "--out", str(R / "q27b_sg_nsys")]
+
 # (name, command, timeout s, env, needs GPUs 1-3)
 JOBS = [
+    ("sg_profile_head", [PY, "ab.py", "profile", "--arms", f"head={HEAD}", "--cells", "sharegpt:128,sharegpt:64",
+                         "--model", "qwen3_5_27b_tp4", "--gpus", "0,1,2,3", "--port", "59100",
+                         "--out", str(R / "q27b_sg_profile")], 3600, TP4, True),
+    ("sg_nsys_head", NSYS_SG[:2] + ["--arm", f"head={HEAD}"] + NSYS_SG[2:], 3600, TP4, True),
+    ("sg_nsys_vllm", NSYS_SG[:2] + ["--arm", "vllm=vllm"] + NSYS_SG[2:], 3600, TP4, True),
     # pi0.5 is mstar's losing cell (JCT p50 ~120 ms vs openpi 35 ms in-process; mstar's worker is ~16 ms of it):
     # where the rest of mstar's request goes, then openpi's own websocket server so both arms pay for serving,
     # then the mstar server unpacked (is the host path CPU-starved on 2 CPUs?)
@@ -102,7 +112,7 @@ def cleanup() -> None:
     for line in r.stdout.splitlines():
         pid, sid, args = line.split(None, 2) if len(line.split(None, 2)) == 3 else (None, None, "")
         if sid and int(sid) != me and "/root/push4/newb/" in args and any(
-                f"--port {pt}" in args for pt in ("59100", "59200", "59300", "59400", "59500")):
+                f"--port {pt}" in args for pt in ("59100", "59150", "59200", "59300", "59400", "59500")):
             sids.add(int(sid))
     for sid in sids:
         log(f"cleanup: killing leftover server session {sid}")

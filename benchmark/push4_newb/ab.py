@@ -38,6 +38,9 @@ DATA = Path(os.environ.get("OVN_DATA", HOME / "push4" / "newb" / "data"))
 HF = str(HOME / "hf")
 # push4c: NUMA 0 = even CPUs + GPUs 0-3 (NUMA ids interleave by parity)
 CORES = os.environ.get("PUSH4_CORES", ",".join(str(c) for c in range(0, 207, 2)))
+# mstar servers can be packed on their own few CPUs (push4c: blocking hand-offs on cores that never clock up):
+# they start on PUSH4_CORES + these to compile fast and are repinned once healthy. Competitors and clients keep CORES.
+MSTAR_CORES = os.environ.get("PUSH4_MSTAR_CORES", CORES)
 MEMNODE = os.environ.get("PUSH4_MEMNODE", "")
 CACHE = HOME / "push4" / "newb"
 CONFIGS = {
@@ -87,11 +90,11 @@ def model_id(model: str) -> str:
     return f"Qwen/Qwen3.5-{model.split('_')[2].upper()}"
 
 
-def pin(cmd: list[str]) -> list[str]:
+def pin(cmd: list[str], cores: str = CORES) -> list[str]:
     # the Runpod container may not set_mempolicy (no CAP_SYS_NICE): membind only when PUSH4_MEMNODE is set;
     # first-touch keeps memory local to the pinned CPUs anyway
     mem = [f"--membind={MEMNODE}"] if MEMNODE else []
-    return ["numactl", f"--physcpubind={CORES}", *mem] + cmd
+    return ["numactl", f"--physcpubind={cores}", *mem] + cmd
 
 
 def base_env(gpus: str) -> dict:
@@ -158,6 +161,9 @@ class Server:
             serve_model = "_".join(model.split("_")[:3])  # qwen3_5_9b_tp2 -> qwen3_5_9b
             cfg = env_extra.get("OVN_CONFIG", CONFIGS[model])
             config = cfg if cfg.startswith("/") else str(Path(tree) / cfg)
+            if MSTAR_CORES != CORES:
+                from run_gen import packed_config  # the API pool sized as a launch on the packed CPUs would size it
+                config = packed_config(config, len(MSTAR_CORES.split(",")), Path(logpath))
             cmd = [PY, "-m", "mstar.cli.main", "serve", serve_model, "--config", config, "--gpus", gpus,
                    "--port", str(port), "--socket-path-prefix", f"/tmp/p4n_{port}_{int(time.time())}/"]
             if env_extra.get("OVN_SERVE_EXTRA"):
@@ -177,7 +183,9 @@ class Server:
             env.update({k: v for k, v in env_extra.items() if not k.startswith("OVN_")})
             cmd = competitor_cmd(self.kind, model, port, env_extra)
             cwd = str(CACHE)
-        cmd = pin(cmd)
+        self.packed = self.kind == "mstar" and MSTAR_CORES != CORES
+        wide = ",".join(sorted({*CORES.split(","), *MSTAR_CORES.split(",")}, key=int))
+        cmd = pin(cmd, wide if self.packed else CORES)
         if env_extra.get("OVN_WRAP"):  # e.g. an nsys launch prefix
             cmd = env_extra["OVN_WRAP"].split() + cmd
         self.logf = open(logpath, "w")
@@ -192,7 +200,14 @@ class Server:
                 raise RuntimeError(f"server {name} died at startup; see {logpath}")
             if healthy(port):
                 self.startup_s = time.monotonic() - t0
-                log(f"server {name} up in {self.startup_s:.0f}s")
+                if self.packed:  # every process of the server's session, all threads
+                    ps = subprocess.run(["ps", "-eo", "pid=,sid="], capture_output=True, text=True, check=True)
+                    for line in ps.stdout.splitlines():
+                        f = line.split()
+                        if len(f) == 2 and int(f[1]) == self.p.pid:
+                            subprocess.run(["taskset", "-apc", MSTAR_CORES, f[0]], capture_output=True, check=False)
+                pinned = f", repinned to {MSTAR_CORES}" if self.packed else ""
+                log(f"server {name} up in {self.startup_s:.0f}s{pinned}")
                 return
             time.sleep(3)
         self.stop()
