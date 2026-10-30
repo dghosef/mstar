@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
-from api_server_helpers import make_test_api_server
+from api_server_helpers import idle_poll, make_test_api_server
 from fastapi import HTTPException
 
 from mstar.api_server.entrypoint import DeadConductorError, PendingRequest
@@ -296,7 +296,7 @@ def test_stopping_data_worker_drops_tracked_requests():
         setattr(wt, name, queue.Queue())
     wt.stop_event = threading.Event()
     wt.stop_event.set()
-    wt.communicator = SimpleNamespace(poll_for_messages=lambda timeout_ms=1: False, get_all_new_messages=lambda: [])
+    wt.communicator = SimpleNamespace(get_all_new_messages=lambda: [])
     cleaned = []
     wt.tensor_manager = SimpleNamespace(
         force_cleanup_request=cleaned.append,
@@ -329,7 +329,7 @@ def _api_server(conductor_proc, inbox=()):
     server = make_test_api_server(
         conductor_proc=conductor_proc,
         _liveness_interval_s=0.0,
-        communicator=SimpleNamespace(poll_for_messages=lambda timeout_ms=1: False, get_all_new_messages=_inbox(inbox)),
+        communicator=SimpleNamespace(poll_for_messages=idle_poll, get_all_new_messages=_inbox(inbox)),
         preprocess_worker=SimpleNamespace(
             get_profile_updates=lambda: [], get_result_chunks=lambda: []
         ),

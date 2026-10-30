@@ -17,7 +17,7 @@ import weakref
 from types import SimpleNamespace
 
 import pytest
-from api_server_helpers import make_test_api_server
+from api_server_helpers import idle_poll, make_test_api_server
 from fastapi import HTTPException
 
 from mstar.api_server import entrypoint
@@ -65,9 +65,6 @@ class _RecordingTensorManager:
 
 
 class _RecordingCommunicator:
-    def poll_for_messages(self, timeout_ms=1):
-        return False
-
     def get_all_new_messages(self):
         return []
 
@@ -573,7 +570,7 @@ def _deliver_result_chunks(server, *chunks):
         return []
 
     server.communicator = SimpleNamespace(
-        poll_for_messages=lambda timeout_ms=1: False, get_all_new_messages=stop_after_this_pass,
+        poll_for_messages=idle_poll, get_all_new_messages=stop_after_this_pass,
     )
     server.preprocess_worker = SimpleNamespace(
         get_profile_updates=lambda: [], get_result_chunks=lambda: chunks,

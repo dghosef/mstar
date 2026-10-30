@@ -296,9 +296,6 @@ class _BridgeSocket:
     def __init__(self, bridge, script):
         self.bridge, self.script = bridge, list(script)
 
-    def poll_for_messages(self, timeout_ms=1):
-        return False
-
     def get_all_new_messages(self, blocking=True, timeout_s=None):
         if not self.script:
             self.bridge.running = False
@@ -734,7 +731,6 @@ def test_the_data_worker_reports_preprocess_finish_once_asked(tmp_path):
         discard_tensor_queue=queue.Queue(), stop_event=stop,
         # codec / try_send_bytes: the thread's outbox sends through them
         communicator=types.SimpleNamespace(
-            poll_for_messages=lambda timeout_ms=1: False,
             get_all_new_messages=lambda: [],
             codec=types.SimpleNamespace(encode=lambda msg: msg),
             try_send_bytes=lambda entity, msg: sent.append(msg) or True,
@@ -1081,7 +1077,6 @@ class _RealDataWorker:
             discard_tensor_queue=facade.discard_tensor_queue, stop_event=facade.stop_event,
             # codec / try_send_bytes: the thread's outbox sends through them
             communicator=types.SimpleNamespace(
-                poll_for_messages=lambda timeout_ms=1: False,
                 get_all_new_messages=lambda: [],
                 codec=types.SimpleNamespace(encode=lambda msg: msg),
                 try_send_bytes=lambda entity, msg: self.sent.append(msg) or True,
