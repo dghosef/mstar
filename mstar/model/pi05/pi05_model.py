@@ -147,6 +147,9 @@ class Pi05Model(Model):
     """Pi0.5 vision-language-action model implementation."""
 
     PREPROCESS_ONLY_KWARGS = ("robot_state",)
+    # A request's API-server work is a few small camera images: a fork-join intra-op pool only adds
+    # waits for threads the host has descheduled (c=1 JCT p50 90 -> 52 ms on push4c H100).
+    PREPROCESS_TORCH_THREADS = 1
 
     PREFILL_WALK = "prefill"
     ACTION_GEN_WALK = "action_gen"
