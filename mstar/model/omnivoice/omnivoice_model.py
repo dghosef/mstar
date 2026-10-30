@@ -20,6 +20,7 @@ same batch.  A fixed-pipeline port has to pick one value for the whole server.
 """
 
 import logging
+import math
 import os
 
 import numpy as np
@@ -69,21 +70,48 @@ logger = logging.getLogger(__name__)
 REF_RMS_KEY = "output_ref_rms"
 
 
+def _finite_number(key: str, value) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        number = math.nan
+    if isinstance(value, bool) or not math.isfinite(number):
+        raise ValueError(f"{key} must be a finite number, not {value!r}")
+    return number
+
+
+# The longest silence pad, or fade, a request may ask for at each end, in seconds
+MAX_SHAPING_SECONDS = 10.0
+
+
 def output_shaping(kwargs: dict) -> dict:
     """The request's output-shaping kwargs as ``post_process`` takes them.
     ``process_prompt`` reads them too, so a bad value fails the request before
     it generates."""
     enabled = kwargs.get("postprocess_output", True)
-    if not isinstance(enabled, bool):
+    # 0 and 1 as well: JSON clients send them for booleans
+    if enabled not in (True, False):
         raise ValueError(f"postprocess_output must be true or false, not {enabled!r}")
-    try:
-        return {
-            "pad_duration": float(kwargs.get("pad_duration", 0.1)),
-            "fade_duration": float(kwargs.get("fade_duration", 0.1)),
-            "enabled": enabled,
-        }
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"pad_duration and fade_duration must be numbers: {exc}") from None
+    shaping = {"enabled": bool(enabled)}
+    for key in ("pad_duration", "fade_duration"):
+        seconds = _finite_number(key, kwargs.get(key, 0.1))
+        if not 0 <= seconds <= MAX_SHAPING_SECONDS:
+            raise ValueError(f"{key} must be between 0 and {MAX_SHAPING_SECONDS:g} seconds, not {seconds!r}")
+        shaping[key] = seconds
+    return shaping
+
+
+# The unmask loop's float knobs a request may set (``extra_body``)
+UNMASK_KNOBS = ("guidance_scale", "t_shift", "layer_penalty_factor", "position_temperature", "class_temperature")
+
+
+def unmask_knobs(kwargs: dict, defaults) -> dict[str, float]:
+    """The request's ``UNMASK_KNOBS`` over the checkpoint's ``defaults``.
+    ``process_prompt`` reads them too, so a value that is not a finite number
+    fails the request before it generates. A finite value extreme enough to
+    overflow the reveal's scores is not caught here: MASK cells it leaves on the
+    canvas fail the request in ``postprocess``, after the loop."""
+    return {key: _finite_number(key, kwargs.get(key, getattr(defaults, key))) for key in UNMASK_KNOBS}
 
 
 class OmniVoiceModel(Model):
@@ -352,6 +380,7 @@ class OmniVoiceModel(Model):
         if set(output_modalities) != {"audio"}:
             raise ValueError("OmniVoice generates audio only")
         output_shaping(kwargs)
+        unmask_knobs(kwargs, self.config.generation)
 
         self._ensure_data_worker_assets()
 
@@ -540,19 +569,7 @@ class OmniVoiceModel(Model):
             # from process_prompt, which settles it on the data worker
             TARGET_LEN: int(model_kwargs[TARGET_LEN]),
             "num_step": num_step,
-            "guidance_scale": float(
-                model_kwargs.get("guidance_scale", defaults.guidance_scale)
-            ),
-            "t_shift": float(model_kwargs.get("t_shift", defaults.t_shift)),
-            "layer_penalty_factor": float(
-                model_kwargs.get("layer_penalty_factor", defaults.layer_penalty_factor)
-            ),
-            "position_temperature": float(
-                model_kwargs.get("position_temperature", defaults.position_temperature)
-            ),
-            "class_temperature": float(
-                model_kwargs.get("class_temperature", defaults.class_temperature)
-            ),
+            **unmask_knobs(model_kwargs, defaults),
         }
 
         full_metadata = CurrentForwardConductorMetadata(
@@ -680,10 +697,11 @@ class OmniVoiceModel(Model):
             return b""
         kw = request_kwargs or {}
         waveform = output.detach().float().cpu().numpy().reshape(-1)
-        if np.isnan(waveform).any():
-            # code2wav poisons a canvas that still held MASK cells (see there)
+        if not np.isfinite(waveform).all():
+            # code2wav poisons a canvas that still held MASK cells with NaN (see there)
             raise RuntimeError(
-                "OmniVoice canvas still held masked cells at decode; the unmask loop ended early."
+                "OmniVoice decoded a waveform that is not finite: its canvas still held masked cells "
+                "at decode (the unmask loop ended early), or the codec itself produced NaN or inf."
             )
         waveform = post_process(
             waveform,

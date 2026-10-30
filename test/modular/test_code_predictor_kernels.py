@@ -1,5 +1,5 @@
 """The code predictor's kernels (Qwen3-Omni's and Qwen3-TTS's depth loops)
-against the op sequences they replace (GPU only).
+against the op sequences they replace (GPU only), and ``cp_linear``'s tiles.
 
 * ``cp_attend``: q/k RMSNorm + RoPE, the dense-KV write and causal attention
   over the depth cache, against the same math in fp32.
@@ -14,7 +14,7 @@ import math
 import pytest
 import torch
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
 
 
 def _norm_rope(x: torch.Tensor, w: torch.Tensor, pos: torch.Tensor, eps: float, theta: float) -> torch.Tensor:
@@ -28,6 +28,7 @@ def _norm_rope(x: torch.Tensor, w: torch.Tensor, pos: torch.Tensor, eps: float, 
     return torch.cat([first * angle.cos() - second * angle.sin(), second * angle.cos() + first * angle.sin()], -1)
 
 
+@needs_cuda
 @pytest.mark.parametrize("bs,seq_len,cache_pos", [(1, 1, 0), (5, 1, 7), (32, 1, 15), (64, 1, 3), (3, 2, 0), (5, 2, 4)])
 def test_cp_attend_matches_the_unfused_ops(bs, seq_len, cache_pos):
     """q/k RMSNorm + RoPE, the step's k/v written into the dense cache, and
@@ -70,6 +71,7 @@ def test_cp_attend_matches_the_unfused_ops(bs, seq_len, cache_pos):
         torch.testing.assert_close(out[:, s].float(), ref, rtol=2e-2, atol=2e-2)
 
 
+@needs_cuda
 @pytest.mark.parametrize("bs,projected,init", [(1, False, False), (8, False, True), (32, True, False), (5, True, True)])
 def test_cp_embed_accumulate_matches_the_unfused_ops(bs, projected, init):
     """The index_select + add (or, with ``init``, the sum's first term), the
@@ -89,13 +91,14 @@ def test_cp_embed_accumulate_matches_the_unfused_ops(bs, projected, init):
     ref_emb = torch.nn.functional.embedding(tokens, weight)
     ref_sum = ref_emb.float() if init else ref_sum.add_(ref_emb)
 
-    emb = cp_embed_accumulate(tokens, weight, emb_sum, codes, 5, inputs=table, init=init)
+    emb, _ = cp_embed_accumulate(tokens, weight, emb_sum, codes, 5, inputs=table, init=init)
     assert torch.equal(emb, ref_emb if table is None else torch.nn.functional.embedding(tokens, table))
     assert torch.equal(emb_sum, ref_sum)
     assert torch.equal(codes, ref_codes)
 
 
-@pytest.mark.parametrize("rows", [1, 16, 37, 64])
+@needs_cuda
+@pytest.mark.parametrize("rows", [1, 2, 16, 37, 64])
 def test_cp_linear_matches_the_unfused_ops(rows):
     """Each ``cp_linear`` mode against its op sequence in fp32: the folded
     RMSNorm (row sums of squares from x, and from a producer's partials), the
@@ -139,6 +142,7 @@ def _rms(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps) * weight.float()
 
 
+@needs_cuda
 def test_qwen3_tts_depth_loop_matches_its_layers_unfused():
     """Qwen3-TTS's depth loop drives the kernels with its own head counts, eps
     and RoPE theta: a frame's 16 depth steps (``depth_step``, the fused
@@ -196,7 +200,7 @@ def test_qwen3_tts_depth_loop_matches_its_layers_unfused():
             h = h + attn.o_proj(out.transpose(1, 2).reshape(bs, depth, -1).bfloat16()).float()
             h = h + layer.mlp(_rms(h, layer.post_attention_layernorm.weight, cp.rms_norm_eps).bfloat16()).float()
         want = _rms(h, predictor.model.norm.weight, cp.rms_norm_eps)
-        heads = predictor.lm_head_weight.float()
+        heads = torch.stack([head.weight for head in predictor.lm_head]).float()
         want = torch.stack([want[:, s] @ heads[max(s - 1, 0)].t() for s in range(depth)], 1)
 
     got = torch.stack(got, 1).float()

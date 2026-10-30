@@ -17,6 +17,7 @@ layers' frames, the projections included, compile once per shape.
 """
 from __future__ import annotations
 
+import functools
 from typing import NamedTuple
 
 import torch
@@ -175,20 +176,26 @@ def cp_embed_accumulate(
     tokens: torch.Tensor, weight: torch.Tensor, emb_sum: torch.Tensor,
     all_codes: torch.Tensor, group: int, inputs: torch.Tensor | None = None,
     init: bool = False, partials: torch.Tensor | None = None,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, int]:
     """For a depth step's sampled ``tokens (bs,)``: record them as ``all_codes[:, group]``,
     look up their embeddings in ``weight (V, H)`` and add those to ``emb_sum (bs, H)`` in
     its dtype (or, with ``init``, start the sum from them). Returns the next depth step's
     input: the embeddings, or their rows of ``inputs (V, H')`` when given (the embedding
-    table already projected to the predictor's width). One launch for what was an
-    index_select, a copy, a promoting add and the input projection. With
-    ``partials``, the input's row sums of squares go there in 256-wide chunks,
-    for ``cp_linear``'s norm (``EMBED_PARTIALS`` of them for a 1024-wide input)."""
+    table already projected to the predictor's width), and how many row partials it
+    left in ``partials`` for ``cp_linear``'s norm (one per 256-wide chunk of the
+    input; 0 without ``partials``). One launch for what was an index_select, a copy, a
+    promoting add and the input projection."""
     bs, hidden = tokens.shape[0], weight.shape[1]
     table = weight if inputs is None else inputs
     assert weight.stride(1) == 1 and table.stride(1) == 1 and emb_sum.stride(1) == 1
     block = EMBED_BLOCK
     assert hidden % block == 0 and table.shape[1] % block == 0
+    n_part = table.shape[1] // block if partials is not None else 0
+    if n_part and (bs > _MAX_ROWS or n_part > _MAX_PARTIALS):
+        raise ValueError(
+            f"cp_embed_accumulate records partials for at most {_MAX_ROWS} rows and {_MAX_PARTIALS} "
+            f"{block}-wide chunks, got {bs} rows and {n_part} chunks"
+        )
     emb = torch.empty(bs, table.shape[1], dtype=table.dtype, device=weight.device)
     chunks = hidden // block + (table.shape[1] // block if inputs is not None else 0)
     _cp_embed_accumulate_kernel[(bs, chunks)](
@@ -197,7 +204,7 @@ def cp_embed_accumulate(
         H=hidden, BLOCK=block, PROJ=inputs is not None, INIT=init,
         PARTS=partials is not None, MAX_ROWS=_MAX_ROWS, num_warps=2,
     )
-    return emb
+    return emb, n_part
 
 
 class DepthKV:
@@ -286,6 +293,7 @@ class DepthWeights(NamedTuple):
     eps: float
 
 
+@torch.no_grad()
 def fold_depth_weights(layers, norm, heads: torch.Tensor | None) -> DepthWeights:
     """``DepthWeights`` from ``DecoderLayer``s over ``DepthAttention`` and a
     gated MLP, the final ``norm`` and the stacked LM ``heads``."""
@@ -368,6 +376,48 @@ def _cp_linear_kernel(
         tl.store(P + pid * MAX_ROWS + rm, tl.sum(yf * yf, 1))
 
 
+class _Tile(NamedTuple):
+    block_m: int
+    block_n: int
+    block_k: int
+    warps: int
+    stages: int
+
+
+@functools.cache
+def _max_shared_memory(device_index: int) -> int:
+    return triton.runtime.driver.active.utils.get_device_properties(device_index)["max_shared_mem"]
+
+
+def _cp_linear_tile(rows: int, n: int, epi: int, elem_size: int, max_shared: int) -> _Tile:
+    """``cp_linear``'s tile for ``rows`` rows, ``n`` outputs and epilogue ``epi``.
+
+    Tuned on an H200: one or two rows reduce on CUDA cores, a warp per few
+    columns; up to 32 rows two warps and wide K steps keep a tile's weight
+    loads in flight. Each pipeline stage buffers a K step of x and of the
+    weights (two weights for the SwiGLU), so where they don't fit in
+    ``max_shared`` bytes (227 KB on an H200, 99 KB on sm_86/sm_89) it keeps
+    fewer stages, then shorter K steps."""
+    if rows == 1:
+        tile = _Tile(1, 2 if n >= 2048 and epi == 0 else 1, 1024, 1, 2)
+    elif rows == 2:
+        tile = _Tile(2, 4 if epi == 1 or (epi == 0 and n < 4096) else 2, 1024, 2 if epi == 1 else 1, 2)
+    else:
+        block_m = max(16, triton.next_power_of_2(rows))
+        block_n = STREAM_TILE if epi in (1, 3) else 32 if epi == 2 or (n >= 4096 and block_m >= 32) else 16
+        tile = _Tile(block_m, block_n, *((128, 4, 5) if block_m >= 64 else (256, 2, 4)))
+    weights = 2 if epi == 2 else 1
+
+    def stage_bytes(block_k: int) -> int:
+        return block_k * (tile.block_m + weights * tile.block_n) * elem_size
+
+    stages = max(1, min(tile.stages, max_shared // stage_bytes(tile.block_k)))
+    block_k = tile.block_k
+    while block_k > 64 and stages * stage_bytes(block_k) > max_shared:
+        block_k //= 2
+    return tile._replace(block_k=block_k, stages=stages)
+
+
 @torch.compiler.disable
 def cp_linear(
     x: torch.Tensor, w: torch.Tensor, *, out: torch.Tensor | None = None,
@@ -399,24 +449,18 @@ def cp_linear(
         out = torch.empty(rows, n, device=x.device, dtype=x.dtype)
     if not x.is_cuda:
         return _cp_linear_torch(x, w, out, norm_eps, residual, up, bias)
-    # tuned on an H200 (harness lin_sweep, gemv_sweep): one or two rows reduce
-    # on CUDA cores, a warp per few columns; up to 32 rows two warps and wide K
-    # steps keep a tile's weight loads in flight
-    if rows == 1:
-        block_m, block_n, block_k, warps, stages = 1, 2 if n >= 2048 and epi == 0 else 1, 1024, 1, 2
-        norm = 0 if norm_eps is None else 1  # no row partials in this mode
-    elif rows == 2:
-        block_n = 4 if epi == 1 or (epi == 0 and n < 4096) else 2
-        block_m, block_k, warps, stages = 2, 1024, 2 if epi == 1 else 1, 2
-        norm = 0 if norm_eps is None else 1
-    else:
-        block_m = max(16, triton.next_power_of_2(rows))
-        block_n = STREAM_TILE if epi in (1, 3) else 32 if epi == 2 or (n >= 4096 and block_m >= 32) else 16
-        block_k, warps, stages = (128, 4, 5) if block_m >= 64 else (256, 2, 4)
-        norm = 0 if norm_eps is None else (2 if n_part else 1)
-    assert rows <= _MAX_ROWS and n % block_n == 0 and k % block_k == 0 and w.stride(1) == 1 and x.stride(1) == 1
-    if epi in (1, 3) and block_m >= 16:
-        assert n // block_n <= _MAX_PARTIALS and partials is not None
+    tile = _cp_linear_tile(rows, n, epi, x.element_size(), _max_shared_memory(x.device.index))
+    block_m, block_n = tile.block_m, tile.block_n
+    # one or two rows (block_m < 16) take the norm from x and record no partials
+    norm = 0 if norm_eps is None else (2 if n_part and block_m >= 16 else 1)
+    if rows > _MAX_ROWS or n % block_n or k % tile.block_k:
+        raise ValueError(
+            f"cp_linear takes up to {_MAX_ROWS} rows, N a multiple of {block_n} and K of {tile.block_k}; "
+            f"got {rows} x {k} by {n}"
+        )
+    if epi in (1, 3) and block_m >= 16 and (n // block_n > _MAX_PARTIALS or partials is None):
+        raise ValueError(f"a residual or biased cp_linear records partials: N <= {_MAX_PARTIALS * block_n}, got {n}")
+    assert w.stride(1) == 1 and x.stride(1) == 1
     _cp_linear_kernel[(n // block_n,)](
         x, w, up if up is not None else w, out, bias if bias is not None else w,
         partials if partials is not None else out,
@@ -424,8 +468,8 @@ def cp_linear(
         x.stride(0), w.stride(0), out.stride(0),
         NORM=norm, EPI=epi,
         NP=_MAX_PARTIALS, MAX_ROWS=_MAX_ROWS,
-        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=block_k,
-        num_warps=warps, num_stages=stages,
+        BLOCK_M=block_m, BLOCK_N=block_n, BLOCK_K=tile.block_k,
+        num_warps=tile.warps, num_stages=tile.stages,
     )
     return out
 

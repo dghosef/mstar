@@ -237,11 +237,13 @@ OmniVoice notes
   ``fused_add_rmsnorm``), so logits match the reference to half-precision
   rounding rather than bit for bit. ``model_kwargs: {backbone_graphs: false}``
   runs the same layer loop eagerly.
-- ``configs/omnivoice_split.yaml`` runs code2wav (codec decode and the
-  host-side silence trim) on a second worker sharing GPU 0, so the unmask loop
-  no longer stops for each finished request. With a CUDA MPS daemon it raised
-  concurrency-32 throughput on an H200 from ~153 to 176-184 audio-s/s and cut
-  TTFA p95 from ~9 s to ~3 s; concurrency 1 is ~10% slower.
+- ``configs/omnivoice_split.yaml`` runs code2wav (the codec decode) on a
+  second worker sharing GPU 0, so the unmask loop no longer stops for each
+  finished request's decode; the silence trim and the rest of the output
+  shaping run on the API side in either config. With a CUDA MPS daemon it
+  raised concurrency-32 throughput on an H200 from ~153 to 176-184 audio-s/s
+  and cut TTFA p95 from ~9 s to ~3 s, measured while code2wav still did the
+  shaping on its worker; concurrency 1 was ~10% slower.
 
 Higgs Audio notes
 ~~~~~~~~~~~~~~~~~
@@ -432,7 +434,8 @@ needs FlashInfer's fused bf16 decode kernel (K = V = 128).
 Text prefill and mixed steps replay captured graphs by total tokens, on the
 ladder ``32 ... 8192`` (powers of two); a step pads to its bucket and a longer
 one runs eagerly. ``model_kwargs: prefill_token_buckets: [...]`` sets a
-deployment's own ladder: ``configs/qwen3_5_9b*.yaml`` add 3072, 5120, 6144 and
+deployment's own ladder (distinct positive token counts, checked when the
+worker loads): ``configs/qwen3_5_9b*.yaml`` add 3072, 5120, 6144 and
 7168, which cut the padding of compute-bound long prefills (+2% output tok/s
 on 9B, random 1024/256 at c=64/128, H200); the same ladder was not a win on
 0.8B, whose prefill is launch-bound. Each bucket adds captures and startup time.
@@ -568,21 +571,31 @@ Qwen3-Omni notes
   (``cp_attend``, shared with Qwen3-TTS), neither bit-exact with the unfused ops. Its 15 depth
   steps feed each sampled code into the next, so small differences can change
   later codes at near-ties.
-- The audio encoder takes the clips of up to 16 requests a step and packs
-  them along time in request order into one pass, with attention windowed
-  within each clip, while they fit its largest capture (8192 encoder rows,
-  about 630 s of audio). A larger step runs its clips one at a time, each
-  replaying the captured layers when it fits 8192 rows; only a clip over
-  8192 rows runs the layers eagerly. A
-  clip's embeddings can differ at the last bit with what it is batched
-  beside, since the packed GEMMs' shapes change with the pass's total rows,
-  and a prefix-cached audio prefix keeps the embeddings it was first computed
-  with, so a later request reusing it inherits that first batch's rounding.
+- The audio encoder is the AuT encoder Qwen3-ASR also runs
+  (``mstar/model/components/aut_encoder.py``). It takes the clips of up to 16
+  requests a step and packs them into one pass, with attention windowed
+  within each clip, while they fit its largest capture: 8192 encoder rows
+  (about 630 s of audio) in at most ``audio_attn.max_segments_per_request``
+  8 s attention windows (the default holds any step of 8192 rows). A larger
+  step runs its clips one at a time, each replaying the captured layers when
+  it fits; a clip over 8192 rows, or with more windows than
+  ``max_segments_per_request``, runs the layers eagerly. A clip's last 1 s
+  chunk is zero-padded to a full chunk before the convolutions, as HF's
+  encoder pads it whenever its batch holds a full chunk, so a clip under 1 s
+  encoded alone differs from HF's: in its last conv row and, through the
+  windowed attention, in every embedding of the clip. A clip's embeddings can
+  differ at the last bit with what it is batched beside, since the packed
+  GEMMs' shapes change with the pass's total rows, and a prefix-cached audio
+  prefix keeps the embeddings it was first computed with, so a later request
+  reusing it inherits that first batch's rounding.
 - The Thinker's text and audio prefill replay captured graphs on the ladder
-  ``128 ... 8192`` tokens (with 6144), so a burst of new prompts that batches
-  into one step of a few thousand tokens still replays; a longer step runs
-  eagerly. ``model_kwargs: prefill_token_buckets: [...]`` sets a deployment's
-  own ladder; each bucket adds captures and startup time.
+  ``128 ... 2048`` tokens, and a longer step runs eagerly.
+  ``model_kwargs: prefill_token_buckets: [...]`` sets a deployment's own
+  ladder; ``configs/qwen3omni_2gpu*.yaml`` run it to 8192 (with 4096 and
+  6144), so a burst of new prompts that batches into one step of a few
+  thousand tokens still replays (measured on 2xH200: the first t2t c=32
+  burst's TTFT p99 3.5 s -> 0.45 s). Each bucket adds captures, graph memory
+  and startup time.
 - The MoE layers route through the fused softmax-top-k kernel
   (``TopKRouter(fused_softmax_topk=True)``), which gives equal probabilities to
   the lower expert id where ``torch.topk`` may pick another.
@@ -620,17 +633,21 @@ Qwen3-TTS notes
   decodes every frame once: per stream it keeps each causal conv's last input
   samples, the transformer's sliding-window keys and values (71 per layer) and
   the frame count, about 5 MiB in float32, in the ``codec_state`` recurrent
-  pool (``resources: {codec_state: {max_slots: N}}`` sizes it; 256 streams by
-  default). A stream's audio equals a whole-utterance decode. Each chunk width
-  is a CUDA-graph bucket captured for batch sizes 1 to 32 (densely: the
-  codec's cost is per row, so a padding row costs as much as a real one); the
-  scheduler batches each width apart, so a stream's small first chunks are not
-  padded to a full chunk's width or queued behind a batch of them. A voice
-  clone's stream leads with the reference's last 72 frames, decoded with the
-  first chunk to warm the state on the voice and trimmed from its audio.
+  pool (``resources: {codec_state: {max_slots: N}}`` sizes it: N slots hold
+  N - 1 streams, as the pool's sink takes one; 256 streams by default). In
+  float32 with TF32 off (as on CPU), a stream's audio matches a
+  whole-utterance decode to within one PCM16 step. Each chunk width is a
+  CUDA-graph bucket captured for batch sizes 1 to 32 (densely: the
+  codec's cost is per row, so a padding row costs as much as a real one). A
+  step batches chunks of any width, padded to its widest. A voice clone's
+  stream leads with the reference's last 72 frames, decoded with the first
+  chunk to warm the state on the voice and trimmed from its audio, so on Base
+  the scheduler batches each width apart: a row batched with a clone's first
+  chunk would decode 73 frames.
   The SnakeBeta activations run as one fused kernel. A deployment sets the
   ramp and the steady chunk with ``model_kwargs: {codec_chunk_schedule: [1, 3,
-  8, 16], codec_chunk_frames: 25}``.
+  8, 16], codec_chunk_frames: 25}`` (positive integers; ``[]`` starts at the
+  steady chunk).
 - Talker prefill, the clone prefill included, replays a packed CUDA Graph for
   the smallest token bucket (32 to 1024 tokens) that holds the batch; a clone's
   reference frames join the codec stream in ``postprocess``. Prefill and decode
@@ -660,14 +677,15 @@ Qwen3-TTS notes
   ``mps: true`` in the YAML (see :doc:`serving`) the two workers' kernels also
   overlap, which raised c=32 throughput by about a fifth on an H100.
 - The codec decoder runs in float32 by default; ``configs/qwen3tts_1p7b.yaml``
-  serves it in bfloat16 (``model_kwargs: {codec_dtype: bfloat16}``, RMSNorm
-  and RoPE kept in float32; the Talker is bf16 either way), about 1.9x a codec
-  step's speed on an H200 once the captures keep cuDNN's searched conv plans
-  (``capture_cudnn_benchmark``). On a B300 with cuDNN's heuristic conv picks,
-  bf16 was slower, not faster (several of its convs ran on a kernel without
-  tensor cores), and it has not been measured there with the searched plans:
-  measure before switching on other hardware. Its decode is compiled
-  (Inductor) once for every capture.
+  serves it in bfloat16 (``model_kwargs: {codec_dtype: bfloat16}``; RMSNorm
+  and RoPE are computed in float32 from the bf16 weights and frequencies; the
+  Talker is bf16 either way), about 1.9x a codec step's speed on an H200 once
+  the captures keep cuDNN's searched conv plans (``capture_cudnn_benchmark``).
+  That config was gated on an H200 only. On a B300 with cuDNN's heuristic conv
+  picks, main's windowed codec ran bf16 slower, not faster (several of its
+  convs on a kernel without tensor cores), and this decoder has not been
+  measured there: serve ``codec_dtype: float32`` on other GPUs until it is.
+  Its decode is compiled (Inductor) once for every capture.
 - Opt-in AudioSeal watermark on the codec's output (off by default; install
   ``pip install -e '.[audioseal]'``). Turn it on in the deployment YAML::
 

@@ -59,68 +59,50 @@ class Qwen3OmniResizeMLP(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-class Qwen3OmniTalkerLayer(nn.Module):
+class Qwen3OmniTalkerLayer(DecoderLayer):
     """Single Talker transformer layer (pre-norm attention + MoE FFN)."""
 
     def __init__(
         self, config: TalkerTextConfig, layer_idx: int,
         comm_group: CommGroup | None = None,
     ):
-        super().__init__()
         hidden_size = config.hidden_size
         rms_norm_eps = config.rms_norm_eps
-
-        self.input_layernorm = RMSNorm(hidden_size, rms_norm_eps)
-        self.self_attn = Qwen3OmniAttention(
-            hidden_size=hidden_size,
-            num_heads=config.num_attention_heads,
-            num_kv_heads=config.num_key_value_heads,
-            head_dim=config.head_dim,
-            rope_theta=1_000_000.0,
-            rms_norm_eps=rms_norm_eps,
-            use_mrope=False,
-            comm_group=comm_group,
-            attn_key=TALKER_ATTN,
-            kv_key=TALKER_KV,
-            pos_key=TALKER_POS
-        )
-        self.post_attention_layernorm = RMSNorm(hidden_size, rms_norm_eps)
-
-        self.mlp = ParallelSparseMoeBlockWithSharedExpert(
-            hidden_size=hidden_size,
-            moe_intermediate_size=config.moe_intermediate_size,
-            num_experts=config.num_experts,
-            num_experts_per_tok=config.num_experts_per_tok,
-            norm_topk_prob=config.norm_topk_prob,
-            shared_expert=ParallelGatedMLP(
+        super().__init__(
+            self_attn=Qwen3OmniAttention(
                 hidden_size=hidden_size,
-                intermediate_size=config.shared_expert_intermediate_size,
-                activation="silu",
+                num_heads=config.num_attention_heads,
+                num_kv_heads=config.num_key_value_heads,
+                head_dim=config.head_dim,
+                rope_theta=1_000_000.0,
+                rms_norm_eps=rms_norm_eps,
+                use_mrope=False,
                 comm_group=comm_group,
+                attn_key=TALKER_ATTN,
+                kv_key=TALKER_KV,
+                pos_key=TALKER_POS
             ),
-            comm_group=comm_group,
-            router=TopKRouter(
-                hidden_size, config.num_experts, config.num_experts_per_tok,
-                norm_topk_prob=config.norm_topk_prob, fused_softmax_topk=True,
+            mlp=ParallelSparseMoeBlockWithSharedExpert(
+                hidden_size=hidden_size,
+                moe_intermediate_size=config.moe_intermediate_size,
+                num_experts=config.num_experts,
+                num_experts_per_tok=config.num_experts_per_tok,
+                norm_topk_prob=config.norm_topk_prob,
+                shared_expert=ParallelGatedMLP(
+                    hidden_size=hidden_size,
+                    intermediate_size=config.shared_expert_intermediate_size,
+                    activation="silu",
+                    comm_group=comm_group,
+                ),
+                comm_group=comm_group,
+                router=TopKRouter(
+                    hidden_size, config.num_experts, config.num_experts_per_tok,
+                    norm_topk_prob=config.norm_topk_prob, fused_softmax_topk=True,
+                ),
             ),
+            input_layernorm=RMSNorm(hidden_size, rms_norm_eps),
+            post_attention_layernorm=RMSNorm(hidden_size, rms_norm_eps),
         )
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Returns (this layer's MLP output, the residual stream before it): the
-        residual adds are deferred into the next norm (FlashInfer's fused add +
-        RMSNorm, in place). ``residual`` None means ``hidden_states`` is the input."""
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm.forward_residual(hidden_states, residual)
-        hidden_states = self.self_attn(hidden_states=hidden_states)
-        hidden_states, residual = self.post_attention_layernorm.forward_residual(hidden_states, residual)
-        return self.mlp(hidden_states), residual
 
 
 # ---------------------------------------------------------------------------
@@ -158,18 +140,11 @@ class Qwen3OmniTalkerLanguageModel(nn.Module):
         input_embeds: torch.Tensor,
         label: str = "main",
     ) -> torch.Tensor:
-        hidden_states = input_embeds
         # The label and layer index are cursors on the shared resources: bind
-        # the label once, advance the index per layer. Passing them as
-        # arguments instead would make inductor specialize on the int.
+        # the label once, advance the index per layer (`run_layers`). Passing
+        # them as arguments instead would make inductor specialize on the int.
         self.layers[0].self_attn.attend.bind_step(label)
-        residual = None
-        for layer_idx, decoder_layer in enumerate(self.layers):
-            decoder_layer.self_attn.attend.set_layer_idx(layer_idx)
-            hidden_states, residual = decoder_layer(hidden_states, residual)
-
-        hidden_states, _ = self.norm.forward_residual(hidden_states, residual)
-        return hidden_states
+        return run_layers(self.layers, input_embeds, self.norm)
 
 
 # ---------------------------------------------------------------------------

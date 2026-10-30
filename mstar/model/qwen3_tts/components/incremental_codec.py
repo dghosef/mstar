@@ -95,12 +95,12 @@ class IncrementalDecoder(nn.Module):
         for _, transposed, module in self.convs:
             conv = module.conv
             if transposed and conv.kernel_size[0] != 2 * conv.stride[0]:
-                raise TypeError("incremental decode assumes transposed convs of kernel 2 * stride")
+                raise ValueError("incremental decode assumes transposed convs of kernel 2 * stride")
             if not transposed and conv.stride[0] != 1:
-                raise TypeError("incremental decode assumes stride-1 causal convs")
+                raise ValueError("incremental decode assumes stride-1 causal convs")
         for tconv, _ in decoder.upsample:
             if tconv.conv.kernel_size != tconv.conv.stride:
-                raise TypeError("incremental decode assumes the upsampling transposed convs do not overlap")
+                raise ValueError("incremental decode assumes the upsampling transposed convs do not overlap")
         # Channels-last weights, in place: ``weight.unsqueeze(2)`` is then the
         # NHWC 2-D weight, and the reference modules still run on the same storage.
         with torch.no_grad():
@@ -134,7 +134,8 @@ class IncrementalDecoder(nn.Module):
         rel = qpos[:, :, None] - kpos[:, None, :]
         # the cached keys a stream has not produced yet sit at negative positions
         mask = ((kpos[:, None, :] >= 0) & (rel >= 0) & (rel < self.window))[:, None]
-        # RMSNorm and RoPE in fp32 whatever the decoder's dtype: bf16 loses precision there
+        # RMSNorm and RoPE computed in fp32 whatever the decoder's dtype (bf16 loses precision
+        # there); their weights and the RoPE frequencies are stored in the decoder's dtype
         cos, sin = transformer.rotary_emb(h.float(), qpos)
         cos, sin = cos[:, None], sin[:, None]
         for i, layer in enumerate(self.layers):
