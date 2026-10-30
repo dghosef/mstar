@@ -5,8 +5,8 @@ Up to a per-GPU token count (``_Tuning.pair_max_tokens``) gate/up and down are G
 over (token, expert) pairs; above it experts repeat across the batch, and grouped kernels read
 each expert's weights once. ``swiglu_limit`` picks the clamped SwiGLU or the plain one.
 The same per-pair kernels, as ``routed_experts``, run ``fused_experts``' bf16 / fp16 experts
-(no shared expert) at a few tokens. The router's top-k program, as ``router_topk``, also
-serves softmax routers (``TopKRouter``).
+(no shared expert) at a few tokens on NVIDIA GPUs, for shapes that pass ``routed_fits``.
+The router's top-k program, as ``router_topk``, also serves softmax routers (``TopKRouter``).
 """
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ _H100 = _Tuning(
 
 
 # ``routed_experts``: weights in x.dtype, no shared expert. Swept on the H100 at Qwen3-Omni's
-# Thinker and Talker expert shapes (hidden 2048 / 1024), used on every GPU. Past 7 tokens the
+# Thinker and Talker expert shapes (hidden 2048 / 1024), used on every NVIDIA GPU. Past 7 tokens the
 # Thinker's grouped GEMMs read each repeated expert once and win.
 ROUTED_MAX_TOKENS = 7
 _UNSCALED = _Tuning(
@@ -64,12 +64,12 @@ _UNSCALED = _Tuning(
 
 
 def routed_fits(H, I):
-    """Whether ``routed_experts``' tiles divide experts of hidden ``H`` and intermediate
-    ``I``; ``fused_experts`` sends other shapes (e.g. a TP shard of 192) to its grouped path."""
-    return (all(I % min(t["bj"], I) == 0 and H % min(t["bk"], H) == 0
-                for _, t in _UNSCALED.gate_up)
-            and all(H % min(t["bn"], H) == 0 and I % min(t["bc"], I) == 0
-                    for _, t in _UNSCALED.down))
+    """Whether ``routed_experts``' tiles, unclamped, divide experts of hidden ``H`` and
+    intermediate ``I``; ``fused_experts`` sends other shapes (TP shards of 192 or 96) to its
+    grouped path. A tile clamped to a smaller dimension needn't be a power of two, which
+    ``tl.arange`` requires."""
+    return (all(I % t["bj"] == 0 and H % t["bk"] == 0 for _, t in _UNSCALED.gate_up)
+            and all(H % t["bn"] == 0 and I % t["bc"] == 0 for _, t in _UNSCALED.down))
 
 
 @functools.cache

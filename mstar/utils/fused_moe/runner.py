@@ -122,7 +122,8 @@ def fused_experts(
     topk_weights = topk_weights.contiguous()
     if (alignment is None and not skip_invalid and activation == "silu"
             and hidden_states.is_cuda and current_platform.is_cuda()):
-        # imported here: it needs triton's CUDA extras, which CPU and ROCm hosts may lack
+        # imported here: it needs triton's CUDA extras, which CPU hosts may lack. Its per-pair
+        # tiles are tuned on NVIDIA GPUs only, so ROCm keeps the grouped path.
         from mstar.utils.fused_moe import decode
 
         if num_tokens <= decode.ROUTED_MAX_TOKENS and decode.routed_fits(hidden, inter):

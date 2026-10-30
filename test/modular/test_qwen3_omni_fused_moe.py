@@ -69,6 +69,7 @@ def _seed():
         (2048, 768, 128, 8),  # Thinker
         (1024, 384, 128, 8),  # Talker routed experts
         (1024, 192, 128, 8),  # Talker at TP2: the per-pair tiles don't divide it
+        (1024, 96, 128, 8),  # Talker at TP4: a tile clamped to 96 isn't a power of two
     ],
 )
 @pytest.mark.parametrize("reduce_results", [True, False])
