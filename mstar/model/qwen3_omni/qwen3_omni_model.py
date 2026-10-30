@@ -1716,19 +1716,11 @@ class Qwen3OmniModel(Model):
     def _create_audio_encoder_submodule(self, device: str, autocast_dtype: torch.dtype | None) -> NodeSubmodule:
         """The shared AuT encoder (Qwen3-ASR's too), loaded from ``thinker.audio_tower.*``."""
         from mstar.model.components.aut_encoder import AuTEncoder
-        from mstar.model.loader.iterators import iter_safetensors_shards
-
-        with torch.device("meta"):
-            audio_encoder = AuTEncoder(self.config.audio_encoder, attn_key=AUDIO_ATTN)
-        if autocast_dtype is not None:
-            audio_encoder = audio_encoder.to(autocast_dtype)
-        audio_encoder.to_empty(device=device)
-        prefix = "thinker.audio_tower."
-        weights = iter_safetensors_shards(self.local_dir, device=device, prefix=prefix)
-        audio_encoder.load_weights((k.removeprefix(prefix), v) for k, v in weights)
-        audio_encoder.eval()
-
         from mstar.model.qwen3_omni.submodules import AudioEncoderSubmodule
+
+        audio_encoder = AuTEncoder.from_checkpoint(
+            self.local_dir, self.config.audio_encoder, attn_key=AUDIO_ATTN, device=device, dtype=autocast_dtype,
+        )
         return AudioEncoderSubmodule(audio_encoder, config=self.config)
 
     def _create_vision_encoder_submodule(self, device: str) -> NodeSubmodule:
