@@ -626,8 +626,9 @@ class VisionEncoderSubmodule(NodeSubmodule):
     """
 
     # Patch-count buckets of one replay. 16384 patches merge to the LLM's
-    # 4096 `prefill_vision` bucket; a larger step runs eagerly.
-    BLOCK_LOOP_PATCH_BUCKETS = [256, 512, 1024, 2048, 4096, 8192, 16384]
+    # 4096 `prefill_vision` bucket; a larger step runs eagerly. 12288 holds a
+    # 30 s video at 2 fps (~11.8k patches), which 16384 pads by 39%.
+    BLOCK_LOOP_PATCH_BUCKETS = [256, 512, 1024, 2048, 4096, 8192, 12288, 16384]
     # Requests per encoder step. They share one replay, so a burst of image
     # requests pays the per-step host cost once per this many, not per image.
     MAX_BATCH_SIZE = 8
