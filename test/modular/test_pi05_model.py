@@ -318,6 +318,21 @@ class _StubTokenizer:
         return torch.tensor([0], dtype=torch.long)
 
 
+def test_pi05_refuses_to_start_without_a_tokenizer(monkeypatch):
+    """A served model that can't load a tokenizer must fail at load, not take
+    the dummy-mode path and fail every request at ingest."""
+    import transformers
+
+    def unavailable(repo, **kwargs):
+        raise OSError(f"{repo} is gated")
+
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", unavailable)
+    model = _make_model()
+    model.skip_weight_loading = False
+    with pytest.raises(ValueError, match="google/paligemma-3b-pt-224 is gated"):
+        model._load_tokenizer()
+
+
 def test_pi05_process_prompt_formats_state_into_text():
     """Pi05Model.process_prompt should produce the openpi-style template
     ``"Task: <text>, State: <bin0> <bin1> ... <bin31>;\\nAction: "`` and
