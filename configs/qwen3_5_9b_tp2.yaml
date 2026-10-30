@@ -42,11 +42,14 @@ warmup_requests:
   # LLM eager: its first shape compiles static and the next token count
   # recompiles the forward dynamic (~2 s with the batch waiting), so take both
   # before the server binds. Different texts, so neither hits a cached prefix.
+  # Each spec runs (once alone, then) one copy set per encoder replica, so the
+  # concurrencies are half the other configs' 6 and 12: the same 6 x ~2.7k and
+  # 12 x ~1.6k packed prefills.
   - text: "The quick brown fox jumps over the lazy dog while the cat sleeps by the fire. "
     repeat: 150
     model_kwargs: {max_output_tokens: 2}
-    concurrency: 6
+    concurrency: 3
   - text: "Pack my box with five dozen liquor jugs and send it to the harbor before noon. "
     repeat: 90
     model_kwargs: {max_output_tokens: 2}
-    concurrency: 12
+    concurrency: 6
