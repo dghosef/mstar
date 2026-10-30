@@ -99,6 +99,7 @@ from mstar.model.bagel.submodules import (
     ViTEncoderSubmodule,
     cfg_window,
     denoise_loop,
+    guided,
     image_gen_phases,
     vae_latents,
     vit_patches,
@@ -739,18 +740,20 @@ class BagelModel(Model):
             return result
         if prompt is None:
             parts, segments = parts_from_modalities(input_modalities), []
-        layout = self._kv_layout(parts, segments, images, output_modalities, params)
-        metadata = {"kv_layout": {"kv": layout}}
+        metadata = {}
+        window = None
         if "image" in output_modalities:
-            metadata[CFG_WINDOW] = tuple(cfg_window(
+            window = cfg_window(
                 self.config.num_timesteps, self.config.timestep_shift, tuple(params["cfg_interval"]),
                 params["cfg_text_scale"], params["cfg_img_scale"],
-            ))
+            )
+            metadata[CFG_WINDOW] = tuple(window)
+        metadata["kv_layout"] = {"kv": self._kv_layout(parts, segments, images, output_modalities, params, window)}
         return ProcessPromptOutput(result, metadata)
 
     def _kv_layout(
         self, parts: list[PromptPart], segments: list[torch.Tensor], images: list[torch.Tensor],
-        output_modalities: list[str], params: dict,
+        output_modalities: list[str], params: dict, window: CFGWindow | None,
     ) -> dict[str, LabelLayout]:
         """Each label's writes, in the order `_build_prefill_schedule` runs them.
 
@@ -759,8 +762,8 @@ class BagelModel(Model):
         doesn't cover the resize. Under guidance, ``cfg_img`` holds the text alone.
         ``cfg_text`` forks before a text walk and after an image walk, so it holds all
         but the last span when the last span is text, and every span when the prompt
-        ends on an image. Without guidance a generation still denoises on all three
-        labels on a CFG-parallel deployment, which isn't known here.
+        ends on an image. A branch label denoises (its scratch) only where the
+        request's ``window`` runs that branch.
         """
         cfg = self.config
         target_output = (output_modalities or ["text"])[0]
@@ -798,15 +801,16 @@ class BagelModel(Model):
         scratch = (height // cfg.latent_downsample) * (width // cfg.latent_downsample) + IMAGE_SENTINELS
         growth = (("decode_loop", 1),) if think_mode else ()
         main = LabelLayout(spans=tuple(spans), growth=growth, scratch=scratch, keyed_spans=keyed)
-        if not self._requires_cfg(target_output=target_output, **params):
-            return {"main": main, "cfg_text": LabelLayout(scratch=scratch), "cfg_img": LabelLayout(scratch=scratch)}
+        if not guided(window):
+            return {"main": main, "cfg_text": LabelLayout(), "cfg_img": LabelLayout()}
         return {
             "main": main,
             "cfg_text": LabelLayout(
                 spans=tuple(spans[:-1] if spans and spans[-1].walk == "prefill_text" else spans), scratch=scratch,
             ),
             "cfg_img": LabelLayout(
-                spans=tuple(span for span in spans if span.walk == "prefill_text"), growth=growth, scratch=scratch,
+                spans=tuple(span for span in spans if span.walk == "prefill_text"), growth=growth,
+                scratch=scratch if window.branches == 3 else 0,
             ),
         }
 
@@ -970,10 +974,10 @@ class BagelModel(Model):
             branch_labels = ["cfg_text", "cfg_img"]
             if self._has_cfg_parallel and not self._has_llm_disaggregation:
                 # The branch labels' only readers are the CFG walk's branch nodes, one
-                # label each: none without a window. (A remote LLM, on a split
-                # deployment, runs single-node walks that read both.)
-                cfg_walk = next((p.walk for p in request["image_gen_phases"] if p.walk in CFG_WALKS), None)
-                branch_labels = list(NODE_TO_CFG_LABEL.values())[1:CFG_WALKS[cfg_walk]] if cfg_walk else []
+                # label each. (A remote LLM, on a split deployment, runs single-node
+                # walks that read both.)
+                cfg_walk = next(p.walk for p in request["image_gen_phases"] if p.walk in CFG_WALKS)
+                branch_labels = list(NODE_TO_CFG_LABEL.values())[1:CFG_WALKS[cfg_walk]]
             for (node, walk), labels in {
                 ("LLM", "prefill_text"): ["cfg_text", "cfg_img"],
                 ("LLM", "prefill_vit"): ["cfg_text"],
@@ -1318,17 +1322,6 @@ class BagelModel(Model):
                     params[key] = model_kwargs[key]
         return params
 
-    def _requires_cfg(
-        self, **kwargs,
-    ):
-        return (
-            kwargs["target_output"] == "image" \
-                and (
-                    kwargs["cfg_img_scale"] > 1.0 \
-                    or kwargs["cfg_text_scale"] > 1.0
-                )
-        )
-
     def _get_step_metadata(
         self, full_metadata: CurrentForwardConductorMetadata,
     ) -> dict:
@@ -1458,10 +1451,12 @@ class BagelModel(Model):
             "think_mode": think_mode,
             **params,  # CFG params  + gen width / height
         }
-        kwargs["requires_cfg"] = self._requires_cfg(**kwargs)
+        kwargs["requires_cfg"] = False
         if target_output == "image":
             # process_prompt resolved the window with the request's guidance kwargs
-            kwargs["image_gen_phases"] = self._image_gen_phases((model_kwargs or {})[CFG_WINDOW])
+            window = CFGWindow(*(model_kwargs or {})[CFG_WINDOW])
+            kwargs["requires_cfg"] = guided(window)
+            kwargs["image_gen_phases"] = self._image_gen_phases(window)
             kwargs["image_gen_phase"] = 0
         full_metadata = CurrentForwardConductorMetadata(
             input_modalities=input_modalities,

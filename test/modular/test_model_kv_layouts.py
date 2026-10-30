@@ -172,12 +172,8 @@ class _BagelPool:
     def step(self, walk: str, rows: dict, guided: dict) -> None:
         from mstar.engine.resources import StepContext
         from mstar.engine.resources.step import SubmoduleStep
-        from mstar.model.bagel.submodules import DENOISE_WALKS
         from mstar.model.submodule_base import ARNodeInputs
 
-        if walk in DENOISE_WALKS and any(guided.values()):
-            # every label a guided request holds, as an image-guided window step runs them
-            walk = "image_gen_guided3"
         inputs = []
         for rid, count in rows.items():
             inputs.append(ARNodeInputs(input_seq_len=count, resource_step_info=guided[rid]))

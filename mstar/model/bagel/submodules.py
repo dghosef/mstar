@@ -246,6 +246,11 @@ def cfg_window(
     return window
 
 
+def guided(window: CFGWindow | None) -> bool:
+    """Whether a request runs guidance on any step: an image request whose window has steps."""
+    return window is not None and window.start < window.stop
+
+
 class ImageGenPhase(NamedTuple):
     """One denoise walk of a request."""
     walk: str

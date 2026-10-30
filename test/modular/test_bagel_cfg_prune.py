@@ -375,7 +375,8 @@ def test_a_guided_request_publishes_only_the_kv_its_cfg_walk_reads(kwargs, cfg_p
     guided request whose window has no step."""
 
     model, _, model_kwargs, fwd = _image_request_intake(kwargs, cfg_parallel)
-    assert fwd.full_metadata.kwargs["requires_cfg"]
+    # a window with no step runs no guidance anywhere
+    assert fwd.full_metadata.kwargs["requires_cfg"] == bool(published)
     kv = model.get_request_resource_configs({DEFAULT_PARTITION: fwd}, model_kwargs)["kv"]
     assert kv.publish_labels_per_node_walk == published
     assert kv.final_publish_labels_per_node_walk == final
