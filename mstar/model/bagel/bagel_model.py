@@ -132,7 +132,7 @@ from mstar.model.multimodal import (
     split_around_spans,
 )
 from mstar.model.submodule_base import NodeSubmodule
-from mstar.model.utils import TextChunkDetokenizer, drop_stop_tokens
+from mstar.model.utils import TextOutput
 
 logger = logging.getLogger(__name__)
 
@@ -290,7 +290,6 @@ class BagelModel(Model):
     through interleaved text and image inputs.
     """
 
-    _text_detokenizer: TextChunkDetokenizer | None = None
 
     INTERNAL_KWARGS = (CFG_WINDOW,)
 
@@ -843,16 +842,16 @@ class BagelModel(Model):
         )
         return resized.squeeze(0)
 
+    def text_output(self) -> TextOutput:
+        return TextOutput(self._chunk_detokenizer(), (self.eos_token_id,))
+
     def postprocess(
         self, output: torch.Tensor,
         modality: str, # text | image | video | audio
         request_kwargs: dict | None = None,
     ) -> bytes:
         if modality == "text":
-            ids = drop_stop_tokens(output, (self.eos_token_id,), request_kwargs)
-            if self._text_detokenizer is None or self._text_detokenizer.tokenizer is not self.tokenizer:
-                self._text_detokenizer = TextChunkDetokenizer(self.tokenizer)
-            return self._text_detokenizer.to_bytes(ids)
+            return super().postprocess(output, modality, request_kwargs)
         if modality == "image":
             # truncated to uint8, through the shared writer: PIL's default PNG encode
             # (adaptive filters, zlib 6) took ~0.4 s of every 1024^2 request
