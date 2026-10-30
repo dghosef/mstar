@@ -229,12 +229,28 @@ class ContextParallelWrapper:
         self.context_empty = False
 
     @torch.compiler.disable
-    def plan(self, kv_out, causal: bool = True):
+    def plan(
+        self, kv_out, causal: bool = True, check: Callable[[str, np.ndarray, np.ndarray | None, bool], None] | None = None,
+    ):
         """``kv_out``: the step's logical ``KVPlanOutput`` for this label. The context attention reads
-        its indptrs for a one-token-a-row step, its stored context alone otherwise."""
+        its indptrs for a one-token-a-row step, its stored context alone otherwise.
+
+        ``check(what, qo_indptr, kv_lens, causal)``, before anything is planned, is the backend's
+        refusal of a plan its kernel's planner may refuse on one rank of the lockstep instance
+        alone. It sees every plan any rank makes of the step, from what every rank knows: the
+        context's (``kv_lens`` None, since each rank plans its own slots), and under SP placement
+        every partner's zigzag share of the own tokens."""
         context = kv_out.cpu_indptrs
         if self.new is not None:
             context = context.context_only(self._page_size)
+        if check is not None:
+            qo = context.qo_indptr.numpy()
+            check("the context", qo, None, False)
+            if isinstance(self.new, ZigzagWrapper):
+                for index in range(self._placement.size):
+                    share = self.new.share(qo, index, causal)
+                    if len(share[1]):
+                        check(f"partner {index}'s own tokens", *share, causal)
         local, valid_rows = self._placement.local_indptrs(context, self._page_size)
         # no row has a stored page: logical, so the same on every rank
         self.context_empty = not self._captured and self.new is not None and not int(context.paged_kv_indptr[-1])
@@ -304,6 +320,17 @@ class ZigzagRows(NamedTuple):
 
 def zigzag_rows(qo_indptr: np.ndarray, size: int, index: int, causal: bool = True) -> ZigzagRows:
     """Rank ``index`` of ``size``'s zigzag chunks of the rows ``qo_indptr`` lays out."""
+    row, first, end, kv_end = _zigzag_chunks(qo_indptr, size, index, causal)
+    qo, tokens = token_runs(row + first, end - first)
+    kv, kv_tokens = token_runs(row, kv_end)
+    return ZigzagRows(tokens, qo, kv, kv_tokens)
+
+
+def _zigzag_chunks(
+    qo_indptr: np.ndarray, size: int, index: int, causal: bool,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """``zigzag_rows``' non-empty chunks as counts: each one's row start, its first and end token
+    in the row, and its keys' end in the row."""
     starts, lens = qo_indptr[:-1].astype(np.int64), np.diff(qo_indptr).astype(np.int64)
     chunks = 2 * size
     base, rem = lens // chunks, lens % chunks
@@ -317,9 +344,7 @@ def zigzag_rows(qo_indptr: np.ndarray, size: int, index: int, causal: bool = Tru
     row, row_len = np.repeat(starts, 2), np.repeat(lens, 2)
     keep = end > first
     first, end, row, row_len = first[keep], end[keep], row[keep], row_len[keep]
-    qo, tokens = token_runs(row + first, end - first)
-    kv, kv_tokens = token_runs(row, end if causal else row_len)
-    return ZigzagRows(tokens, qo, kv, kv_tokens)
+    return row, first, end, end if causal else row_len
 
 
 class ZigzagWrapper:
@@ -376,24 +401,31 @@ class ZigzagWrapper:
         self._gather, self._scatter = self._tokens
         self._bucket_tokens = captured_tokens
 
-    def layout(self, qo_indptr: np.ndarray, index: int, causal: bool = True) -> ZigzagRows:
-        """Partner ``index``'s share as this wrapper plans it: ``zigzag_rows``, and on a captured
-        wrapper padded to the bucket's queries and rows. Its padding queries are one row over one
-        key, so they cost O(pad): under causal alignment all but the last see none, and their
-        outputs land in the row ``run`` drops. The rows left over hold no query and one key."""
-        rows = zigzag_rows(qo_indptr, self._placement.size, index, causal)
+    def share(self, qo_indptr: np.ndarray, index: int, causal: bool = True) -> tuple[np.ndarray, np.ndarray]:
+        """Partner ``index``'s plan of a step as this wrapper makes it, as its kernel's planner reads
+        it: the chunks' ``qo_indptr`` and KV lengths. Every rank can lay out every partner's."""
+        _, first, end, kv_end = _zigzag_chunks(qo_indptr, self._placement.size, index, causal)
+        return self._padded(np.concatenate([[0], np.cumsum(end - first)]), kv_end)
+
+    def _padded(self, qo_indptr: np.ndarray, kv_lens: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """A share's chunks on a captured wrapper, padded to the bucket's queries and rows. Its
+        padding queries are one row over one key, so they cost O(pad): under causal alignment all
+        but the last see none, and their outputs land in the row ``run`` drops. The rows left over
+        hold no query and one key."""
         if not self._captured:
-            return rows
-        extra = self._segments - len(rows.qo_indptr) + 1
-        return rows._replace(
-            qo_indptr=np.concatenate([rows.qo_indptr, np.full(extra, self._queries)]),
-            kv_indptr=np.concatenate([rows.kv_indptr, rows.kv_indptr[-1] + 1 + np.arange(extra)]),
-            kv_tokens=np.concatenate([rows.kv_tokens, np.zeros(extra, dtype=np.int64)]),
+            return qo_indptr, kv_lens
+        extra = self._segments - len(kv_lens)
+        return (
+            np.concatenate([qo_indptr, np.full(extra, self._queries)]),
+            np.concatenate([kv_lens, np.ones(extra, dtype=np.int64)]),
         )
 
     @torch.compiler.disable
     def plan(self, qo_indptr: torch.Tensor, causal: bool = True) -> None:
-        rows = self.layout(qo_indptr.numpy(), self._placement.index, causal)
+        rows = zigzag_rows(qo_indptr.numpy(), self._placement.size, self._placement.index, causal)
+        qo, kv_lens = self._padded(rows.qo_indptr, np.diff(rows.kv_indptr))
+        # a padding or leftover row's one key is token 0
+        kv_tokens = np.concatenate([rows.kv_tokens, np.zeros(len(kv_lens) + 1 - len(rows.kv_indptr), dtype=np.int64)])
         self._step_tokens = int(qo_indptr[-1])
         if self._captured:
             # a padding query gathers token 0 and scatters to the row past the bucket's, dropped
@@ -407,13 +439,12 @@ class ZigzagWrapper:
             # none of the step's tokens is this rank's to attend
             self._gather = self._scatter = None
             return
-        qo, kv = rows.qo_indptr, rows.kv_indptr
         self.kernel.plan(
             qo_indptr=torch.from_numpy(qo.astype(np.int32)),
-            paged_kv_indptr=torch.from_numpy(kv.astype(np.int32)),
-            paged_kv_indices=torch.from_numpy(rows.kv_tokens.astype(np.int32)),
+            paged_kv_indptr=torch.from_numpy(np.concatenate([[0], np.cumsum(kv_lens)]).astype(np.int32)),
+            paged_kv_indices=torch.from_numpy(kv_tokens.astype(np.int32)),
             paged_kv_last_page_len=torch.ones(len(qo) - 1, dtype=torch.int32),
-            kv_lens=torch.from_numpy(np.diff(kv).astype(np.int32)).as_subclass(HostLens),
+            kv_lens=torch.from_numpy(kv_lens.astype(np.int32)).as_subclass(HostLens),
             causal=causal, dtype=self._dtype,
         )
 

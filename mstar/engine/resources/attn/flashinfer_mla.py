@@ -53,7 +53,7 @@ _FA_PLANNER_VERSION = "0.7.2"
 _FA_MAX_WORK_ITEMS = 16384
 
 
-def fa_work_items_bound(qo_indptr: torch.Tensor, num_heads: int, num_sm: int) -> int:
+def fa_work_items_bound(qo_indptr: np.ndarray | torch.Tensor, num_heads: int, num_sm: int) -> int:
     """At least the work items FlashInfer's FA MLA planner counts for a step, KV splits included,
     from its query lengths alone: one per (row, query tile), and at most one split per SM
     cluster past those, since a split is at least the average KV per cluster. Each rank of a
@@ -516,50 +516,38 @@ class FlashInferMLAManager(AttentionManager):
                 )
                 wrapper = self._eager_wrapper(label, ctx.slot, is_decode)
             if self._placement is not None:
-                self._refuse_unplannable(indptrs.qo_indptr, wrapper, step.causal)
-                wrapper.plan(kv_out, causal=step.causal)
+                wrapper.plan(
+                    kv_out, causal=step.causal, check=None if self._fa_sm_count is None else self._refuse_unplannable,
+                )
             else:
                 wrapper.plan(causal=step.causal, dtype=self._dtype, **indptrs.to_kwargs_dict())
             plan_states[label] = wrapper
         self._preplanned = ctx.is_preplan
 
-    def _refuse_unplannable(self, qo_indptr: torch.Tensor, wrapper, causal: bool) -> None:
-        """Refuses, before FlashInfer can, a step its FA planner may not plan. The planner reads the
-        lengths a rank plans, which differ by rank over a placed pool (its slots of the context, and
-        under SP placement its zigzag share of the own tokens), so its refusal could come on one rank
-        of the lockstep instance alone. These checks read what every rank knows: the step's query
-        lengths, and every partner's zigzag share, which each rank lays out alike."""
-        if self._fa_sm_count is None:
-            return
-        qo = qo_indptr.numpy()
-        # (what, its qo_indptr, its kv lengths when every rank knows them, its heads)
-        plans = [("the context", qo, None, self._wrapper_kwargs["num_qo_heads"])]
-        if isinstance(wrapper.new, ZigzagWrapper):
-            for index in range(self._placement.size):
-                share = wrapper.new.layout(qo, index, causal)
-                if len(share.qo_indptr) > 1:
-                    plans.append((
-                        f"partner {index}'s own tokens", share.qo_indptr, np.diff(share.kv_indptr),
-                        self._kv_config.num_qo_heads,
-                    ))
-        for what, rows, kv_lens, heads in plans:
-            bound = fa_work_items_bound(rows, heads, self._fa_sm_count)
-            if bound > _FA_MAX_WORK_ITEMS:
-                hint = "" if self._placement.over_sp else (
-                    f" Under TP placement each rank plans every partner's query heads, so a step reaches "
-                    f"it {self._placement.size}x sooner than unplaced: batch fewer prompt tokens a step "
-                    "(max_concurrent_requests) or place positions over SP ranks"
-                )
-                raise ValueError(
-                    f"{what} of a step of {int(qo[-1])} query tokens at {heads} heads can take FlashInfer's "
-                    f"FA MLA planner up to {bound} work items over context-parallel KV pool "
-                    f"{self._kv_cache_name!r}, past its cap of {_FA_MAX_WORK_ITEMS}.{hint}"
-                )
-            if causal and kv_lens is not None and fa_causal_tile_refusable(np.diff(rows), kv_lens, heads):
-                raise ValueError(
-                    f"{what} of a step over context-parallel KV pool {self._kv_cache_name!r} can meet "
-                    f"FlashInfer's FA MLA causal tile-bound check: {heads} heads don't divide its query tile"
-                )
+    def _refuse_unplannable(self, what: str, qo_indptr: np.ndarray, kv_lens: np.ndarray | None, causal: bool) -> None:
+        """Refuses, before FlashInfer can, a plan its FA planner may refuse (``ContextParallelWrapper.plan``'s
+        ``check``). The planner reads the KV lengths a rank plans, which differ by rank over a placed
+        pool, so its refusal could come on one rank alone; these checks read only what every rank
+        knows. A plan's heads are the planned ones: under SP placement the context's and the own
+        tokens' are the same."""
+        heads = self._wrapper_kwargs["num_qo_heads"]
+        bound = fa_work_items_bound(qo_indptr, heads, self._fa_sm_count)
+        if bound > _FA_MAX_WORK_ITEMS:
+            hint = "" if self._placement.over_sp else (
+                f" Under TP placement each rank plans every partner's query heads, so a step reaches "
+                f"it {self._placement.size}x sooner than unplaced: batch fewer prompt tokens a step "
+                "(max_concurrent_requests) or place positions over SP ranks"
+            )
+            raise ValueError(
+                f"{what} of a step of {int(qo_indptr[-1])} query tokens at {heads} heads can take FlashInfer's "
+                f"FA MLA planner up to {bound} work items over context-parallel KV pool "
+                f"{self._kv_cache_name!r}, past its cap of {_FA_MAX_WORK_ITEMS}.{hint}"
+            )
+        if causal and kv_lens is not None and fa_causal_tile_refusable(np.diff(qo_indptr), kv_lens, heads):
+            raise ValueError(
+                f"{what} of a step over context-parallel KV pool {self._kv_cache_name!r} can meet "
+                f"FlashInfer's FA MLA causal tile-bound check: {heads} heads don't divide its query tile"
+            )
 
     def clear_preplan(self):
         self._preplanned = False
