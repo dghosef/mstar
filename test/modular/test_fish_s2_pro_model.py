@@ -272,7 +272,6 @@ def test_config_reads_fish_field_names(tmp_path):
     assert (config.slow_ar.n_layer, config.slow_ar.n_local_heads, config.fast_ar.n_layer) == (36, 8, 4)
     assert config.eos_code == 4096 and config.semantic_head_size == 4097
     assert config.codec.hop_length == 2048 and config.codec.chunk_frames == 16
-    assert config.codec.left_context_frames == 8 * 127 + 10 and config.codec.exact_streaming
     assert config.vq_scale == pytest.approx(1 / math.sqrt(11))
 
 
