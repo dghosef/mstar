@@ -446,6 +446,17 @@ class FlashInferMLAManager(AttentionManager):
             workspace = self._workspaces.get(f"{label}.own_tokens", slot)
             if self._placement.over_sp:
                 # SP partners hold the same heads, so each attends its zigzag share of the own tokens
+                heads = self._kv_config.num_qo_heads
+                if max_total_tokens is not None and self._fa_sm_count is not None and 64 % heads and heads % 128:
+                    # the padding row's last query ends mid-tile for some pad counts
+                    # (`ZigzagWrapper._padded`), so a valid step could be refused
+                    raise ValueError(
+                        f"a captured step over context-parallel KV pool {self._kv_cache_name!r} pads each SP "
+                        f"partner's share of its own tokens with queries FlashInfer's FA MLA planner refuses "
+                        f"on some steps (its causal tile-bound check) at {heads} query heads a rank, which "
+                        "neither divides 64 nor is a multiple of 128: choose a TP size that gives each rank "
+                        "such a head count, or place positions over TP ranks (sp_size 1)"
+                    )
                 rows = own.pop("batch_size", None) or 0
                 del own["max_num_pages"]
                 own.pop("use_cuda_graph", None)

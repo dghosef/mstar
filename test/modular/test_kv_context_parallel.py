@@ -802,6 +802,22 @@ def test_sp_mla_ranks_refuse_the_same_steps_at_the_fa_planners_causal_tile_bound
     assert all(a == b for a, b in decisions) and {a for a, _ in decisions} == {False, True}
 
 
+def test_sp_mla_refuses_to_capture_at_a_head_count_its_padding_queries_can_trip(monkeypatch):
+    """A captured SP share pads with a row of queries over one key, whose last query FA's causal
+    tile-bound check refuses for some pad counts when the heads neither divide 64 nor are a multiple
+    of 128 (40 heads, a pad of 4). The bucket is refused when built rather than on such steps."""
+    monkeypatch.setattr(fm, "_sm_count", lambda device: 132)
+    # the wrappers a capture builds; on CPU they plan the torch fallback
+    monkeypatch.setattr(fm.FlashInferMLAManager, "uses_kernel", property(lambda self: True))
+    monkeypatch.setitem(sys.modules, "flashinfer", types.SimpleNamespace(__version__=fm._FA_PLANNER_VERSION))
+    attn, _ = _cp_attention(JointGroups(tp_group=CommGroup.trivial(), sp_group=_group(0, P)), CPU, torch.float32,
+                            mla=True, num_qo_heads=40, flashinfer_backend="fa2")
+    case = _Case.build(((0, 4),), CPU, torch.float32, mla=True)
+    with pytest.raises(ValueError, match="pads each SP partner's share of its own tokens"):
+        # 6 queries a share at most, 2 of them real: a pad of 4
+        _plan(attn, case, bucket=BucketKey("w", bs=1, num_tokens=9))
+
+
 @pytest.mark.parametrize("version, heads, refused", [
     ("0.7.3", Q_HEADS, r"FlashInfer 0\.7\.3 is installed"),
     # a local build of the release
