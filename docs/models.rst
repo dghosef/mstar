@@ -237,11 +237,13 @@ OmniVoice notes
   ``fused_add_rmsnorm``), so logits match the reference to half-precision
   rounding rather than bit for bit. ``model_kwargs: {backbone_graphs: false}``
   runs the same layer loop eagerly.
-- ``configs/omnivoice_split.yaml`` runs code2wav (codec decode and the
-  host-side silence trim) on a second worker sharing GPU 0, so the unmask loop
-  no longer stops for each finished request. With a CUDA MPS daemon it raised
-  concurrency-32 throughput on an H200 from ~153 to 176-184 audio-s/s and cut
-  TTFA p95 from ~9 s to ~3 s; concurrency 1 is ~10% slower.
+- ``configs/omnivoice_split.yaml`` runs code2wav (the codec decode) on a
+  second worker sharing GPU 0, so the unmask loop no longer stops for each
+  finished request's decode; the silence trim and the rest of the output
+  shaping run on the API side in either config. With a CUDA MPS daemon it
+  raised concurrency-32 throughput on an H200 from ~153 to 176-184 audio-s/s
+  and cut TTFA p95 from ~9 s to ~3 s, measured while code2wav still did the
+  shaping on its worker; concurrency 1 was ~10% slower.
 
 Higgs Audio notes
 ~~~~~~~~~~~~~~~~~
@@ -621,7 +623,8 @@ Qwen3-TTS notes
   samples, the transformer's sliding-window keys and values (71 per layer) and
   the frame count, about 5 MiB in float32, in the ``codec_state`` recurrent
   pool (``resources: {codec_state: {max_slots: N}}`` sizes it; 256 streams by
-  default). A stream's audio equals a whole-utterance decode. Each chunk width
+  default). A stream's audio matches a whole-utterance decode to within one
+  PCM16 step. Each chunk width
   is a CUDA-graph bucket captured for batch sizes 1 to 32 (densely: the
   codec's cost is per row, so a padding row costs as much as a real one). A
   step batches chunks of any width, padded to its widest. A voice clone's
