@@ -142,14 +142,9 @@ class ContextParallel(NamedTuple):
 def merge(outs: torch.Tensor, lses: torch.Tensor) -> torch.Tensor:
     """Attention over the union of disjoint key sets from each set's partial: ``outs`` ``[K, ..., D]``
     and natural-log ``lses`` ``[K, ...]``; fp32. A partial with lse -inf and a finite out adds
-    nothing, and a row with no keys in any partial comes out 0."""
-    lses = lses.float()
-    top = lses.amax(dim=0)
-    top = torch.where(top == -math.inf, 0.0, top)
-    weights = torch.exp(lses - top)
-    total = weights.sum(dim=0)
-    out = (weights.unsqueeze(-1) * outs.float()).sum(dim=0)
-    return out / torch.where(total > 0, total, 1.0).unsqueeze(-1)
+    nothing; every row has a key in some partial (its own token, on the paged path)."""
+    weights = torch.softmax(lses.float(), dim=0)
+    return (weights.unsqueeze(-1) * outs.float()).sum(dim=0)
 
 
 @torch.compiler.disable

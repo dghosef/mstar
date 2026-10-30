@@ -454,7 +454,7 @@ def _over_ranks(rank, world, backend, store, over_sp, rows):
         _plan(attn, case)
         heads = slice(None) if over_sp else slice(rank * Q_HEADS // world, (rank + 1) * Q_HEADS // world)
         k, v = case.new_kv()
-        if rows is PREFILL_ROWS:
+        if rows == PREFILL_ROWS:
             with pytest.raises(ValueError, match="got none"):
                 attn.run(case.q[:, heads].contiguous(), "main", kv_cache_layer=case.cache(placement))
         out = attn.run(case.q[:, heads].contiguous(), "main", kv_cache_layer=case.cache(placement), k=k, v=v)
