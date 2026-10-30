@@ -341,7 +341,7 @@ class FlashInferMLAManager(AttentionManager):
                         f"MLA attention over context-parallel KV pool {self._kv_cache_name!r} refuses, on every "
                         f"rank alike, the steps FlashInfer {_FA_PLANNER_VERSION}'s FA planner may refuse on one "
                         f"rank alone, from a copy of that planner's rules; FlashInfer {flashinfer.__version__} "
-                        f"is installed. Install flashinfer-python=={_FA_PLANNER_VERSION} (the glm extra pins it)"
+                        f"is installed. Install flashinfer-python=={_FA_PLANNER_VERSION}"
                     )
 
     @property

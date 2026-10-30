@@ -1917,9 +1917,8 @@ other fallbacks. That planner caps a plan's work items, which TP mode's widened 
 ``P`` times sooner, and counts each rank's own KV lengths, so its own refusal could come on one
 rank alone. Instead a step is refused before it plans, on every rank alike, when a bound on its
 work items from its query lengths alone passes the cap. The bound copies FlashInfer 0.7.2's
-planner rules, so a placed MLA pool refuses any other FlashInfer at load (the ``glm`` extra pins
-0.7.2). The MLA path is tested on CPU through its torch fallback; its GPU tests are written but
-have not run. GLM-5.2 with ``dsa_long_context`` off (context capped at ``index_topk``) is an MLA
+planner rules, so a placed MLA pool refuses any other FlashInfer at load. The MLA path is tested
+on CPU through its torch fallback; its GPU tests are written but have not run. GLM-5.2 with ``dsa_long_context`` off (context capped at ``index_topk``) is an MLA
 model without DSA and loads under ``context_parallel``.
 
 Besides attention, the position resource (RoPE) and the recurrent state pool (GDN, KDA) support
