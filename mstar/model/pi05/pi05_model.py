@@ -52,8 +52,17 @@ from mstar.graph.base import (
     TensorPointerInfo,
 )
 from mstar.graph.special_destinations import EMIT_TO_CLIENT
-from mstar.model.base import ForwardPassArgs, KVLabel, LabelLayout, Model, ProcessPromptOutput, Span
+from mstar.model.base import (
+    ForwardPassArgs,
+    KVLabel,
+    LabelLayout,
+    Model,
+    ProcessPromptOutput,
+    Span,
+    TensorAndMetadata,
+)
 from mstar.model.loader import LLAMA_STACKED_PARAMS, load_hf_weights
+from mstar.model.media_limits import read_image
 from mstar.model.pi05.components.action_expert import Pi05ActionExpert, Pi05TimeMLP
 from mstar.model.pi05.components.paligemma import Pi05PaliGemmaExpert
 from mstar.model.pi05.components.siglip import Pi05SiglipEncoder
@@ -548,6 +557,12 @@ class Pi05Model(Model):
             scratch=cfg.action_horizon,
         )
         return ProcessPromptOutput({"text_inputs": [text_ids]}, {"kv_layout": {LLM_KV: {"main": layout}}})
+
+    def load_image(self, filepath: str, device: str) -> TensorAndMetadata:
+        """The decoded RGB camera image, left uint8 ``(C, H, W)``: the ViT step
+        normalizes uint8 on the GPU, so the API server skips a float pass per
+        camera and stages a quarter of the bytes for the worker."""
+        return TensorAndMetadata(read_image(filepath, rgb=True).to(device))
 
     def kv_labels(self) -> dict[str, dict[str, KVLabel]]:
         return {LLM_KV: {"main": KVLabel()}}
