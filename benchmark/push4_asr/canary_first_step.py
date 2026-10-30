@@ -36,6 +36,7 @@ with torch.inference_mode():
         logits = m.log_softmax(hidden_states=hidden)[0, -1] if hasattr(m, "log_softmax") else None
         top = torch.topk(logits.float(), 5)
         if step == 0:
-            print("first step top-5:", [(tok.ids_to_tokens([int(i)])[0], round(float(v), 3)) for v, i in zip(*top, strict=True)])
+            best = [(tok.ids_to_tokens([int(i)])[0], round(float(v), 3)) for v, i in zip(*top, strict=True)]
+            print("first step top-5:", best)
         seq.append(int(top.indices[0]))
     print("greedy:", tok.ids_to_text(seq[len(ids):]))
