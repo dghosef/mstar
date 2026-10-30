@@ -550,10 +550,19 @@ class OmniVoiceCode2WavSubmodule(_SingleRequestMixin, NodeSubmodule):
         self.config = config
 
     def compile_regions(self) -> dict[str, list[tuple]]:
-        """The codec's acoustic decoder, compiled once for every canvas length:
+        """The codec's acoustic decoder, compiled for dynamic canvas lengths:
         Inductor fuses each Snake activation and residual add between its convs,
-        which eagerly are ~300 of a decode's ~430 kernels."""
-        return {"codec.acoustic_decoder": []}
+        which eagerly are ~300 of a decode's ~430 kernels. Warmed at start-up at
+        a short and a typical canvas (1 and 4 s), so the graphs Dynamo builds
+        for them exist before the first request rather than on it. The
+        inputs are made as the codec's ``decode`` makes them (``fc2``, then a
+        transpose): a tensor of other strides or view base fails the guards."""
+        fc2, frames = self.codec.fc2, self.codec.config.frame_rate
+        latents = [
+            torch.zeros(1, n * frames, fc2.in_features, dtype=fc2.weight.dtype, device=fc2.weight.device)
+            for n in (1, 4)
+        ]
+        return {"codec.acoustic_decoder": [(fc2(x).transpose(1, 2),) for x in latents]}
 
     def prepare_inputs(
         self,
