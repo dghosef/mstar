@@ -337,15 +337,8 @@ class LLMSubmodule(ARNodeSubmodule):
 
     @staticmethod
     def _captured_decode(engine_inputs: ModelInputsFromEngine, graph_walk: str) -> bool:
-        """A decode step replayed on a leased slot, or being captured for one.
-        The caller's walk decides (a capture's own context carries the
-        piecewise walk), the lease says the slot's static buffers are in
-        play."""
-        if graph_walk != "decode":
-            return False
-        step = getattr(engine_inputs, "step", None)
-        ctx = getattr(step, "ctx", None) if step is not None else None
-        return ctx is not None and getattr(ctx, "slot_lease", None) is not None
+        """A decode step replayed on a leased slot, or being captured for one."""
+        return graph_walk == "decode" and engine_inputs.captured
 
     def _decode_cos_sin(
         self, engine_inputs: ModelInputsFromEngine, num_tokens: int,
@@ -394,15 +387,15 @@ class LLMSubmodule(ARNodeSubmodule):
                 ])
             if PHASE_PERIOD:
                 phase_record("engine.preprocess.loopback", perf_counter() - t0)
-            if captured:
-                # the captured forward builds the rotary tables itself
-                return out
         elif inputs[0].input_ids is not None:
             out["input_ids"] = torch.cat([inp.input_ids for inp in inputs], dim=0)
         else:
             out["input_embeds"] = torch.cat(
                 [inp.input_embeds for inp in inputs], dim=0,
             )
+        if captured:
+            # the captured forward builds the rotary tables itself
+            return out
 
         laps = PhaseLaps("engine.preprocess.")
         position_ids_3d = self._position_ids_3d(inputs)  # (3, total_tokens)
