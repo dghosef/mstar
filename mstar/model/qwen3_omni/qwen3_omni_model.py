@@ -162,7 +162,9 @@ class ThinkerPrefillStep(NamedTuple):
     after: PromptPart | None = None
 
 
-# The Thinker's KV page (declared in ``get_node_resources``).
+# The Thinker's KV page as ``get_node_resources`` declares it, and the size
+# ``thinker_prefill_steps`` groups by. A deployment's ``resources:`` override
+# can change the real page size; grouping keeps this declared default.
 THINKER_KV_PAGE_SIZE = 128
 
 
