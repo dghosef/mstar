@@ -407,6 +407,11 @@ class CodecSubmodule(ARNodeSubmodule):
                 self.codec.transformer_context_frames + self.conv_context,
             )
 
+    def compile_regions(self) -> dict[str, list[tuple]]:
+        """The conv stack, compiled once for every bucket: Inductor fuses the
+        padding, Snake activations and residual adds between its convs."""
+        return {"decoder.run_conv_stack": []}
+
     def _bucket(self, frames: int) -> int:
         """Smallest captured window width that holds ``frames``."""
         for window in self.windows:
