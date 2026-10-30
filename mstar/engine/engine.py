@@ -1179,7 +1179,7 @@ class Engine:
         return mgmt.submodule.device_loopback_signals(graph_walk)
 
     def extend_prefix_chains(
-        self, batch: ExecutingBatch, outputs: dict[str, NameToTensorList],
+        self, batch: ExecutingBatch, outputs: Mapping[str, Mapping[str, list[torch.Tensor]]],
         host_rows: HostRows | None = None,
     ) -> None:
         """Key what this step generated, from the stop check's host copy."""

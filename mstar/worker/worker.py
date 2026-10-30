@@ -4476,22 +4476,20 @@ class Worker:
         outputs: "BatchedModelOutput",
         completion_event: torch.Event | None,
         request_ids: list[int] | None = None,
-    ) -> tuple[dict[int, NameToTensorList], HostRows | None]:
-        """Side-stream D→H of every CUDA tensor in ``outputs`` so the subsequent
+    ) -> tuple[Mapping[int, Mapping[str, list[torch.Tensor]]], HostRows | None]:
+        """Side-stream D→H of the CUDA tensors in ``outputs`` so the subsequent
         ``check_stop`` reads (typically ``.item()`` on the sampled token)
         don't trigger a default-stream sync. With same-thread async,
         GPU(N+1)'s kernels are already queued on default stream behind
         N's outputs by the time we get here — a default-stream sync would
         block waiting for N+1 to finish, defeating the overlap.
 
-        Returns per-rid outputs with the CUDA tensors replaced by CPU
-        copies, plus ``HostRows`` when the submodule handed over row-addressed
-        buffers, for a batched stop check. Skipped (returns ``outputs`` unchanged) when there's no completion
-        event (CPU execution) or when CUDA is unavailable.
-
-        AR engines emit small per-rid output dicts (sampled token + maybe
-        a code) so the cost is negligible. If a future engine emits large
-        tensors here (e.g. activations), revisit.
+        Returns per-rid host outputs, plus ``HostRows`` when the submodule
+        handed over row-addressed buffers, for a batched stop check. Without
+        those, the outputs are a ``_LazyHostOutputs``, which copies an output
+        name for every rid the first time it is read. Skipped (returns
+        ``outputs`` unchanged) when there's no completion event (CPU execution)
+        or when CUDA is unavailable.
 
         The host tensors are views of pinned buffers the next step reuses. Their
         one other reader, a ``needs_cpu_tensor`` transport, gets them through
