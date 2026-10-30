@@ -67,8 +67,8 @@ class TokenStop(NamedTuple):
     # the loop ``max_output_tokens - 1`` (GLM-5.2, Command A+). A stop
     # id sampled there has no loop to stop, so the reply ends at the loop's
     # first step (``ARNodeSubmodule.ended_at_prefill``), which withholds its
-    # ``buffer`` and ``withhold`` (``StopCheck.withheld``), so the loop's
-    # client edge must carry ``buffer``
+    # ``buffer``, ``withhold`` and a ``DeviceLoopback``'s signal
+    # (``StopCheck.withheld``), so the loop's client edge must carry one of them
     prefill_walks: frozenset[str] = frozenset()
     # outputs left unrouted on a row whose token is a stop id, ``ignore_eos``
     # or not (``StopCheck.withheld``): a frame streamed beside the stop token
@@ -1277,8 +1277,7 @@ class ARNodeSubmodule(NodeSubmodule):
         token = outputs[stop.buffer][0].reshape(-1)[0].item()
         stops = {stop.loop} if self._token_stops(request_id, token, request_info) else set()
         if stops and stop.prefill_walks and self.ended_at_prefill(request_id):
-            # the step closing a reply that ended at prefill: none of its outputs are the reply's
-            return StopCheck(stops, withheld=(stop.buffer, *stop.withhold))
+            return StopCheck(stops, withheld=self._closing_withheld())
         if stop.withhold and token in stop.stop_ids:
             return StopCheck(stops, withheld=stop.withhold)
         return stops
@@ -1306,9 +1305,16 @@ class ARNodeSubmodule(NodeSubmodule):
                 if token in stop.stop_ids:
                     withheld[rid] = stop.withhold
         if stop.prefill_walks:
-            # rows closing a reply that ended at prefill: none of their outputs are the reply's
-            withheld.update({rid: (stop.buffer, *stop.withhold) for rid in stops if self.ended_at_prefill(rid)})
+            closing = self._closing_withheld()
+            withheld.update({rid: closing for rid in stops if self.ended_at_prefill(rid)})
         return BatchedStopCheck(stops, withheld) if withheld else stops
+
+    def _closing_withheld(self) -> tuple[str, ...]:
+        """What the step closing a reply that ended at prefill withholds: none
+        of its outputs are the reply's, the client's inline copy of a loop-back
+        token included."""
+        stop, loopback = self.token_stop, self.device_loopback
+        return (stop.buffer, *(() if loopback is None else (loopback.signal,)), *stop.withhold)
 
     def ended_at_prefill(self, request_id: str) -> bool:
         """Whether a walk in ``token_stop.prefill_walks`` sampled a stop id for
