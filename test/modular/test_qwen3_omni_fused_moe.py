@@ -102,6 +102,25 @@ def test_fused_experts_numerical_parity(num_tokens, hidden, inter, num_experts, 
     torch.testing.assert_close(fused_out, naive_out, atol=2e-2, rtol=2e-2)
 
 
+def test_one_token_runs_a_block_per_expert_without_the_sort():
+    """One token's top-k experts are distinct, so a block per (token, expert) pair is the tiling the sort
+    would produce: the same bits, without the sort's launches."""
+    from mstar.utils.fused_moe import MoeAlignment, fused_experts, moe_block_m
+    from mstar.utils.fused_moe.align import moe_align_block_size
+
+    hidden_states = torch.randn(1, 2048, device="cuda", dtype=torch.bfloat16)
+    w1 = torch.randn(128, 2 * 768, 2048, device="cuda", dtype=torch.bfloat16) * 0.02
+    w2 = torch.randn(128, 2048, 768, device="cuda", dtype=torch.bfloat16) * 0.02
+    topk_weights, topk_ids = _random_router_output(hidden_states, 128, 8, norm_topk_prob=True)
+    block_m = moe_block_m(1, w1, 8)
+    sorted_ = MoeAlignment(*moe_align_block_size(topk_ids.to(torch.int32), block_m, 128), block_m)
+
+    assert torch.equal(
+        fused_experts(hidden_states, w1, w2, topk_weights, topk_ids),
+        fused_experts(hidden_states, w1, w2, topk_weights, topk_ids, alignment=sorted_),
+    )
+
+
 # ------------------------------------------------------------------
 # Block-level parity: full forward through the nn.Module path
 # ------------------------------------------------------------------
