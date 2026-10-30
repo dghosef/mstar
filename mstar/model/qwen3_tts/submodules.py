@@ -1004,8 +1004,8 @@ class CodecSubmodule(ARNodeSubmodule):
     def compile_regions(self) -> dict[str, list[tuple]]:
         """The stateless decode, compiled with dynamic shapes: a few graphs
         (batch 1 and width 1 specialise) serve every chunk width and batch
-        bucket, where a static compile per captured shape cost ~16 minutes of
-        a ~19-minute cold start."""
+        bucket, where a static compile per captured shape took the cold start
+        from ~7 to ~19 minutes."""
         return {"incremental": []}
 
     def _bucket(self, frames: int) -> int:
