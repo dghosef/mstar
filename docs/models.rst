@@ -1471,13 +1471,12 @@ conditioning tokens, in order).
 Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
 
 ``attention_backend``
-   ``sdpa`` (klein's default) is the reference kernel, cuDNN on an H100. ``fa3`` runs the
-   joint attention on FlashAttention-3's dense kernel (Hopper only) as a traced op inside
-   the compiled transformer; Z-Image ships it (+3% images/s at 1 to 16 concurrent
-   requests on an H100, images at its plain compile's restart noise), while on klein it
-   gains under 1% and moves the exact output to 35 dB, so klein keeps ``sdpa``.
-   ``flashinfer`` runs the DiT's joint attention on the engine's ragged FlashInfer
-   resource. All three are CUDA-graph replayable.
+   ``fa3`` (the klein-4B and Z-Image default) runs the joint attention on
+   FlashAttention-3's dense kernel (Hopper only) as a traced op inside the compiled
+   transformer: 0.78-0.93x of cuDNN's time at DiT shapes on an H100, +3% images/s on
+   Z-Image. ``sdpa`` is the reference kernel, cuDNN on an H100. ``flashinfer`` runs the
+   DiT's joint attention on the engine's ragged FlashInfer resource. All three are
+   CUDA-graph replayable.
 
 ``compile``
    ``torch.compile`` of the transformer, one trace per shape.
@@ -1500,6 +1499,9 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
    * Z-Image's 180 norms per step cost 45% (1.25 vs 0.86 s at B=1), so it ships ``false``
      and lands at a median 34 dB. ``[norms]`` turns it reference-faithful (at least
      55.9 dB on every prompt).
+   * klein-4B ships ``false`` with ``fa3`` too: the other engines are not bit-exact either,
+     and together the two are worth 2.5 to 3.3% images/s on an H100. ``[norms]`` with
+     ``attention_backend: sdpa`` restores the reference-exact path.
    * Without it, the plain compile — even with eager rounding — lands at a median 35 to
      38 dB PSNR from eager over the 100 protocol prompts, because a 4- or 8-step
      distilled sampler amplifies the last bit of inductor's own reductions and activation
@@ -1546,10 +1548,12 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
    are rejected with a 400 before scheduling instead of occupying the worker for minutes
    (an 8192² request means 262k tokens of quadratic attention).
 
-With the klein defaults every served image is within 53 dB of the eager path on all 100
-protocol prompts, and with ``vae_compile: false`` it is bit-exact. For scale, the served
-images of the other engines are 10 to 16 dB from the diffusers reference for the same
-seeds.
+With klein's reference-exact settings (``compile_exact_ops: [norms]``, ``attention_backend:
+sdpa``) every served image is within 53 dB of the eager path on all 100 protocol prompts,
+and with ``vae_compile: false`` it is bit-exact. The shipped klein-4B defaults land at a
+median 32 to 34 dB (22 dB at worst over 64 PartiPrompts) from that exact output. For scale,
+the served images of the other engines are 10 to 16 dB from the diffusers reference for the
+same seeds.
 Requests at the same output size batch across users in every node, including the
 text encoder, whose input is always 512 tokens. ``lora`` lists adapters to fold into the
 transformer weights at load time (``[{path: ..., scale: ...}]``; diffusers/PEFT-format or
