@@ -623,9 +623,10 @@ Qwen3-TTS notes
   samples, the transformer's sliding-window keys and values (71 per layer) and
   the frame count, about 5 MiB in float32, in the ``codec_state`` recurrent
   pool (``resources: {codec_state: {max_slots: N}}`` sizes it: N slots hold
-  N - 1 streams, as the pool's sink takes one; 256 streams by default). A stream's audio matches a whole-utterance decode to within one
-  PCM16 step. Each chunk width
-  is a CUDA-graph bucket captured for batch sizes 1 to 32 (densely: the
+  N - 1 streams, as the pool's sink takes one; 256 streams by default). In
+  float32 with TF32 off (as on CPU), a stream's audio matches a
+  whole-utterance decode to within one PCM16 step. Each chunk width is a
+  CUDA-graph bucket captured for batch sizes 1 to 32 (densely: the
   codec's cost is per row, so a padding row costs as much as a real one). A
   step batches chunks of any width, padded to its widest. A voice clone's
   stream leads with the reference's last 72 frames, decoded with the first

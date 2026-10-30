@@ -12,6 +12,7 @@ import yaml
 
 from mstar.conductor.request_info import CurrentForwardConductorMetadata
 from mstar.engine.engine import ExecutingBatch
+from mstar.engine.fp32_precision import Fp32Precision, fp32_precision_scope
 from mstar.engine.resources import StepContext, apply_yaml_overrides
 from mstar.engine.resources.attn.config import AttentionSpec
 from mstar.engine.resources.attn.wrappers import (
@@ -2046,69 +2047,69 @@ def _tiny_codec_config(**overrides) -> Qwen3TTSCodecConfig:
     pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")),
 ])
 @pytest.mark.parametrize("captured", [False, True])
-def test_qwen3_tts_streamed_codec_audio_matches_one_whole_decode(captured, device, monkeypatch):
+def test_qwen3_tts_streamed_codec_audio_matches_one_whole_decode(captured, device):
     """Streams decoded chunk by chunk from the state pool (StreamBuffer and
     policy -> prepare / declare / preprocess / forward / commit / postprocess,
     batched together, a clone's reference lead included) emit what decoding
     each stream's frames in one call gives. ``captured`` pads every step to a
     batch bucket, as a replay does."""
-    # fp32 throughout: cuDNN's TF32 convs would round the two decodes differently
-    monkeypatch.setattr(torch.backends.cudnn, "allow_tf32", False)
-    config = _tiny_model_config()
-    config.tts_model_type = "base"   # clone lead widths too
-    config.codec = _tiny_codec_config(chunk_schedule=(1, 3, 8, 20, 5), chunk_frames=6, clone_lead_frames=5)
-    decoder = _tiny_decoder(config).to(device)
-    reference = copy.deepcopy(decoder)
-    submodule = CodecSubmodule(decoder, config)
-    names = {type(m).__name__ for m in submodule.decoder.modules()}
-    assert "FusedSnakeBeta" in names and "SnakeBeta" not in names
-    driver = _CodecDriver(submodule, device=device)
-    up = submodule.total_upsample
-    codec = config.codec
-    eos = config.talker.codec_eos_token_id
+    # fp32 throughout: TF32 matmuls and convs would round the two decodes differently
+    with fp32_precision_scope(Fp32Precision(matmul="highest", cudnn_allow_tf32=False)):
+        config = _tiny_model_config()
+        config.tts_model_type = "base"   # clone lead widths too
+        config.codec = _tiny_codec_config(chunk_schedule=(1, 3, 8, 20, 5), chunk_frames=6, clone_lead_frames=5)
+        decoder = _tiny_decoder(config).to(device)
+        reference = copy.deepcopy(decoder)
+        submodule = CodecSubmodule(decoder, config)
+        names = {type(m).__name__ for m in submodule.decoder.modules()}
+        assert "FusedSnakeBeta" in names and "SnakeBeta" not in names
+        driver = _CodecDriver(submodule, device=device)
+        up = submodule.total_upsample
+        codec = config.codec
+        eos = config.talker.codec_eos_token_id
 
-    lengths, leads = {"a": 60, "b": 37, "c": 9}, {"a": 0, "b": 0, "c": 3}
-    frames = {rid: torch.randint(0, 32, (n, 4), device=device) for rid, n in lengths.items()}   # below the EOS (35)
-    streams = {}
-    for rid in lengths:
-        stream = StreamBuffer(request_id=rid, edge_name="codec_tokens", from_partition="Talker",
-                              policy=ScheduledLeftContextChunkPolicy(codec.chunk_schedule, codec.chunk_frames, 0))
-        if leads[rid]:
-            stream.prime_context(leads[rid])
-        items = frames[rid]   # the Talker withholds its EOS frame (TokenStop.withhold)
-        for i in range(items.shape[0]):
-            stream.pre_read_register(f"t{i}")
-            stream.put(f"t{i}", items[i])
-        stream.signal_done(items.shape[0])
-        streams[rid] = stream
-    audio = {rid: [] for rid in lengths}
-    while streams:
-        items = {}
-        for rid, stream in list(streams.items()):
-            if not stream.has_chunk_ready():
-                del streams[rid]
-                continue
-            chunk = stream.pop_chunk()
-            data = chunk.data["data"]
-            # a drained stream's final flush has no frames: the worker hands over an empty input
-            items[rid] = submodule.prepare_inputs(
-                "codec_chunk", SimpleNamespace(request_id=rid, rid_handle=rid),
-                {"codec_tokens": [] if data is None else [data.reshape(-1, 4)]},
-                input_metadata=InputMetadata(stream_chunks={"codec_tokens": chunk.info}),
-            )
-            if chunk.is_final:
-                del streams[rid]
-        if items:
-            for rid, out in driver.step(items, captured=captured).items():
-                audio[rid].append(out["audio_chunk"][0])
-    with torch.no_grad():
+        lengths, leads = {"a": 60, "b": 37, "c": 9}, {"a": 0, "b": 0, "c": 3}
+        frames = {rid: torch.randint(0, 32, (n, 4), device=device) for rid, n in lengths.items()}   # below the EOS (35)
+        streams = {}
         for rid in lengths:
-            whole = reference(frames[rid].t()[None]).clamp(-1, 1)[0, 0, leads[rid] * up:]
-            expected = (whole * 32767).to(torch.int16)
-            got = torch.cat(audio[rid])
-            assert expected.float().std() > 1000   # a real signal, not silence or clipping
-            assert got.shape == expected.shape, (rid, got.shape, expected.shape)
-            assert (got.int() - expected.int()).abs().max().item() <= 1, rid
+            stream = StreamBuffer(request_id=rid, edge_name="codec_tokens", from_partition="Talker",
+                                  policy=ScheduledLeftContextChunkPolicy(codec.chunk_schedule, codec.chunk_frames, 0))
+            if leads[rid]:
+                stream.prime_context(leads[rid])
+            items = frames[rid]   # the Talker withholds its EOS frame (TokenStop.withhold)
+            for i in range(items.shape[0]):
+                stream.pre_read_register(f"t{i}")
+                stream.put(f"t{i}", items[i])
+            stream.signal_done(items.shape[0])
+            streams[rid] = stream
+        audio = {rid: [] for rid in lengths}
+        while streams:
+            items = {}
+            for rid, stream in list(streams.items()):
+                if not stream.has_chunk_ready():
+                    del streams[rid]
+                    continue
+                chunk = stream.pop_chunk()
+                data = chunk.data["data"]
+                # a drained stream's final flush has no frames: the worker hands over an empty input
+                items[rid] = submodule.prepare_inputs(
+                    "codec_chunk", SimpleNamespace(request_id=rid, rid_handle=rid),
+                    {"codec_tokens": [] if data is None else [data.reshape(-1, 4)]},
+                    input_metadata=InputMetadata(stream_chunks={"codec_tokens": chunk.info}),
+                )
+                if chunk.is_final:
+                    del streams[rid]
+            if items:
+                for rid, out in driver.step(items, captured=captured).items():
+                    audio[rid].append(out["audio_chunk"][0])
+        with torch.no_grad():
+            for rid in lengths:
+                whole = reference(frames[rid].t()[None]).clamp(-1, 1)[0, 0, leads[rid] * up:]
+                expected = (whole * 32767).to(torch.int16)
+                got = torch.cat(audio[rid])
+                assert expected.float().std() > 1000   # a real signal, not silence or clipping
+                assert got.shape == expected.shape, (rid, got.shape, expected.shape)
+                assert (got.int() - expected.int()).abs().max().item() <= 1, rid
 
 
 def test_qwen3_tts_codec_state_is_the_declared_pool_and_released_with_the_request():
