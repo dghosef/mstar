@@ -153,11 +153,13 @@ def unmask_step(
         # log_probs + scale * (log_probs - u_log_probs), to the bit, in u_log_probs' buffer: every
         # float32 [C, P, V] copy at once is what max_packed_tokens has to leave room for
         guided = torch.log_softmax(u_log_probs.neg_().add_(log_probs).mul_(scale).add_(log_probs), dim=-1)
+        del u_logits, u_log_probs
         if all(cfg):
             log_probs = guided
         else:
             on = _per_position(cfg, lens, device)
             log_probs = torch.where(on.view(1, 1, -1, 1), guided, log_probs)
+        del guided
     log_probs[..., audio_mask_id] = -float("inf")
 
     pred_tokens = log_probs.argmax(dim=-1)
