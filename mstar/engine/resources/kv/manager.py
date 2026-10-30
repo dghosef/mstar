@@ -533,15 +533,15 @@ class KVManager(AttentionResource):
         needs_remote_transfer: bool = False,
         leads: bool = True,
         nodes: Collection[str] | None = None,
-        head_shards: int | None = None,
     ):
-        """``head_shards`` is `EngineResourceInfo.head_shards`; None takes the joint group's size."""
         self.config = cfg
         tp_cache = False
         # before the cache is allocated: it is sized off the head counts and the placement
         placement = cfg.place(joint_comm_group, name)
         if joint_comm_group is not None:
-            cfg.shard(joint_comm_group.world_size if head_shards is None else head_shards)
+            # positions placed over SP ranks leave the heads to TP alone (`EngineResourceInfo.head_shards`)
+            over_sp = placement is not None and placement.over_sp
+            cfg.shard(joint_comm_group.tp_group.world_size if over_sp else joint_comm_group.world_size)
             tp_cache = joint_comm_group.world_size > 1 and cfg.prefix_cache and cfg.prefix_cache_tp
             if tp_cache and cfg.cpu_offload_pages > 0:
                 raise ValueError(
@@ -708,7 +708,6 @@ class KVManager(AttentionResource):
             needs_remote_transfer=info.needs_remote_transfer,
             leads=spec.leader is None or spec.leader in info.nodes,
             nodes=info.nodes,
-            head_shards=info.head_shards,
         )
 
     def build_accelerator_graph_buffers(

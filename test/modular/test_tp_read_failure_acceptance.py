@@ -364,7 +364,7 @@ def _engine(rank, group, kv, prefix_cache, graph_runtime):
     engine._runner = StepRunner(engine._resources, node_resources={NODE: [KV]})
     engine._submodules = {NODE: SubmoduleManagement(
         submodule=sub, forward=sub.forward, forward_batched=sub.forward_batched,
-        joint_comm_group=SimpleNamespace(rank=rank, world_size=2), resources={KV: kv},
+        joint_comm_group=SimpleNamespace(rank=rank, world_size=2), resources={KV: kv}, head_shards=2,
     )}
     engine._keyed_walks = {NODE: {TEXT_WALK}} if prefix_cache else {}
     engine._prefix_model = "_LLM"

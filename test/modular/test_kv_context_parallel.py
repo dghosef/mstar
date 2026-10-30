@@ -233,10 +233,11 @@ class _Submodule:
 def test_an_sp_placed_node_shards_heads_over_tp_and_refuses_a_dependent_without_support(supports):
     groups = WorkerParallelGroups(num_workers=P, global_rank=0)
     groups.add_sp(NODE, _group(0, P))
-    kv_spec = KVSpec(resource_key="kv", nodes={NODE}, config=PagedKVConfig(
+    pool = lambda: PagedKVConfig(  # noqa: E731
         num_layers=1, num_kv_heads=2, head_dim=8, max_seq_len=256, num_qo_heads=4, max_num_pages=8,
         page_size=PAGE_SIZE, context_parallel=True,
-    ))
+    )
+    kv_spec = KVSpec(resource_key="kv", nodes={NODE}, config=pool())
     # the resources Qwen3.5 puts over its pool, then a dependent without support
     specs = [
         kv_spec,
@@ -265,6 +266,13 @@ def test_an_sp_placed_node_shards_heads_over_tp_and_refuses_a_dependent_without_
     placement = engine._resources["kv"].placement
     assert (placement.size, placement.index, placement.over_sp) == (P, 0, True)
     assert engine._resources["kv"].kv_cache.page_slots == PAGE_SIZE // P
+    # built directly, as a harness does, the pool shards its heads the same way
+    direct = pool()
+    KVManager(
+        cfg=direct, name="kv", joint_comm_group=groups.get_joint_group_for_node(NODE),
+        transfer_engine_info=None, device=CPU, dtype=torch.float32,
+    )
+    assert (direct.num_kv_heads, direct.num_qo_heads) == (2, 4)
 
 
 # --- attention over a placed pool -------------------------------------------------------------

@@ -39,7 +39,6 @@ from mstar.engine.resources import (
 )
 from mstar.engine.resources.base import EngineResourceInfo, KeyedWalks, build_resource
 from mstar.engine.resources.context_parallel import positions_over_sp
-from mstar.engine.resources.kv.config import KVSpec, PagedKVConfig
 from mstar.engine.resources.kv.keys import fingerprint
 from mstar.engine.resources.kv.transfer import TransferEngineInfo
 from mstar.engine.resources.spec import resolve_spec_dependencies
@@ -143,8 +142,8 @@ class SubmoduleManagement:
     capture_runner: AcceleratorGraphRunner | None = None
     # the submodule's declared float32 settings; None keeps the process default
     fp32_precision: Fp32Precision | None = None
-    # see `EngineResourceInfo.head_shards`; None takes the joint group's size
-    head_shards: int | None = None
+    # see `EngineResourceInfo.head_shards`
+    head_shards: int = field(kw_only=True)
 
     # Rotated globally, not per runner: slot-keyed buffers are shared across
     # buckets and regions, so per-runner counters let consecutive steps collide
@@ -164,9 +163,6 @@ class SubmoduleManagement:
     )
 
     def __post_init__(self):
-        if self.head_shards is None:
-            joint = self.joint_comm_group
-            self.head_shards = joint.world_size if joint is not None else 1
         # Two hazards want a second slot, both of them the host running ahead of
         # the GPU: pre-plan needs plan(N+1) to write buffers replay(N) isn't
         # reading, and ``force_double_buffer`` is the same for a resource
@@ -553,7 +549,7 @@ class Engine:
             # validate_deployment checked share one parallel group.
             first_node = next(iter(relevant_nodes))
             joint_comm_group = parallel_groups.get_joint_group_for_node(first_node)
-            resource = self._resources[spec.resource_key] = build_resource(
+            self._resources[spec.resource_key] = build_resource(
                 spec,
                 EngineResourceInfo(
                     device=device,
@@ -575,21 +571,17 @@ class Engine:
                     head_shards=head_shards[first_node],
                 ),
             )
-            for key in spec.depends_on():
-                pool = specs_by_key[key]
-                if (
-                    isinstance(pool, KVSpec) and isinstance(pool.config, PagedKVConfig)
-                    and pool.config.context_parallel and not resource.supports_context_parallel
-                ):
-                    raise ValueError(
-                        f"resource {spec.resource_key!r} ({type(resource).__name__}) does not support "
-                        f"context parallelism, and KV pool {key!r} sets context_parallel"
-                    )
-
             for node in relevant_nodes:
                 node_to_resources.setdefault(node, []).append(spec.resource_key)
             self._resource_nodes[spec.resource_key] = frozenset(relevant_nodes)
             declared_by[spec.resource_key] = frozenset(spec.nodes)
+        for key, resource in self._resources.items():
+            for dep in sorted(specs_by_key[key].depends_on() & self._resources.keys()):
+                if self._resources[dep].placement is not None and not resource.supports_context_parallel:
+                    raise ValueError(
+                        f"resource {key!r} ({type(resource).__name__}) does not support context "
+                        f"parallelism, and the pool {dep!r} it depends on sets context_parallel"
+                    )
 
         # rid -> (node, walk) of its last step here when that step was rows-only,
         # i.e. the sampler's slot master holds the token its next step reads
