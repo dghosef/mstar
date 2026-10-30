@@ -771,7 +771,7 @@ class Conductor:
         self._all_worker_graph_ids_to_instances: dict[int, list[list[str]]] = {
             worker_graph_id: [
                 [f"worker_{rank}" for rank in instance]
-                for instance in (worker_graph._instance_ranks or [[r] for r in worker_graph.ranks])
+                for instance in worker_graph.replica_ranks
             ]
             for worker_graph_id, worker_graph in self.worker_graphs.items()
         }
