@@ -166,13 +166,6 @@ You must implement these abstract methods:
    (``request_done=True``). A simple prefill-decode model sets ``is_prefill`` to false
    once, then repeats the decode walk until EOS.
 
-``postprocess(self, output, modality) -> bytes``
-   Encode a finished output tensor to bytes for the client: ``utf-8`` for text, PNG for
-   images, raw PCM for audio, and so on. A value sent inline
-   (``NodeSubmodule.inline_client_signals``) arrives as a list of ints at
-   ``postprocess_token_ids``, whose default wraps it in a tensor for ``postprocess``; a
-   model whose inline outputs are token ids overrides it to detokenize the list directly.
-
 ``get_submodule(self, node_name, device="cpu", tp_group=None, autocast_dtype=None, sp_group=None, moe_parallel=None) -> NodeSubmodule | None``
    Build and return the ``NodeSubmodule`` for ``node_name``, and cache the result. Load
    weights here, on ``device``. Return ``None`` for dummy mode.
@@ -220,10 +213,41 @@ You must implement these abstract methods:
    data worker drops a client's value for it before ``process_prompt``. Qwen3-TTS
    lists its prompt layout, speaker, language, clip digest and codec stream lead.
 
+.. note::
+
+   The conductor merges each walk's ``ForwardPassArgs.step_metadata`` into the
+   request's ``metadata.kwargs``, so a request fact stored under a key that a
+   later walk's step metadata also uses is overwritten by that walk's value. Keep
+   such facts under their own key: LTX-2.5 nests the request's geometry under
+   ``kwargs["request"]``, since its stage-1 walk sends a half-size ``height``.
+
 The following methods have defaults and are optional to override:
+``text_output``, ``postprocess`` and ``postprocess_inline`` (described next),
 ``get_request_resource_configs`` (described below), ``get_sampling_config``,
 ``get_max_output_tokens``, ``get_autocast_dtype``, ``load_image``, ``load_audio``,
 ``load_video``, and the partition methods described at the end of this page.
+
+``text_output(self) -> TextOutput | None``
+   Declare how text output (token ids) becomes bytes: a detokenizer, and the ids that
+   end a reply, which are dropped unless the request sets ``ignore_eos``.
+   ``postprocess`` and ``postprocess_inline`` derive their text paths from it. A text
+   chunk may end inside a character, since the API server joins a request's text
+   chunks before decoding them, so a byte-level BPE model should declare
+   ``mstar.model.utils.TextChunkDetokenizer`` (or ``ByteLevelDetokenizer``), which
+   emits each token's raw bytes, rather than ``tokenizer.decode([id])``, which turns
+   a split character into U+FFFD.
+
+``postprocess(self, output, modality, request_kwargs=None) -> bytes``
+   Encode a finished output tensor to bytes for the client: ``utf-8`` for text, PNG for
+   images, raw PCM for audio, and so on. Override it for any modality other than
+   text, and hand text to ``super().postprocess``.
+
+``postprocess_inline(self, values, modality, request_kwargs) -> list[bytes]``
+   ``postprocess`` for one decode step's inline values (one sampled token id per
+   request), called once per step. With ``text_output`` declared, each id maps to
+   its memoized bytes; otherwise each value goes through ``postprocess`` as a
+   one-element tensor.
+
 ``Model.nodes`` is a read-only property. It returns the sorted set of node names that
 appear in any graph walk.
 
@@ -605,12 +629,21 @@ The spec types are:
        defaults to ``head_dim ** -0.5``, ``backend`` (``RaggedAttnBackend.AUTO``, the
        default, ``RaggedAttnBackend.FLASHINFER``, or ``RaggedAttnBackend.DENSE``),
        ``flashinfer_backend``, the
-       two CUDA-graph ceilings ``max_segments_per_request`` and
-       ``max_tokens_per_request``, and ``compile_op``, described under `Cacheless
-       attention (encoder towers)`_. ``compile_op`` is the model's declaration; the
-       serving config's ``resources:`` overrides take only the backends and the two
-       ceilings. ``DENSE`` runs FA3 ``flash_attn_varlen`` (AITER on ROCm)
-       and falls back to FlashInfer if that kernel is missing. See `Cacheless attention (encoder towers)`_.
+       two CUDA-graph ceilings ``max_segments_per_request`` (``max_segments_per_step``
+       for a ``one_row_per_step`` region) and
+       ``max_tokens_per_request``, ``compile_op``, ``shard_over_sp`` and
+       ``workspace_mb``. ``DENSE`` runs FA3
+       ``flash_attn_varlen`` (AITER on ROCm) and falls back to FlashInfer if that kernel is
+       missing. By default the heads are split across all TP × SP ranks of the node;
+       ``shard_over_sp=False`` splits them across the TP ranks only, for an attention
+       each sequence-parallel rank runs whole over its own tokens (one over a
+       replicated stream, or a cross-attention from the rank's query shard).
+       ``workspace_mb`` sizes each label's FlashInfer workspace per slot (default
+       ``MSTAR_WORKSPACE_BUFFER_MB``, 512); a node with many labels can declare less,
+       since a ragged prefill only uses it for split-KV partials. ``compile_op``,
+       ``shard_over_sp`` and ``workspace_mb`` are the model's declaration; the serving
+       config's ``resources:`` overrides take only the backends and the ceilings. See
+       `Cacheless attention (encoder towers)`_ for ``compile_op``.
    * - ``RaggedCrossAttentionSpec(config=RaggedAttentionConfig(...))``
      - The cross-attention counterpart: one span of each request attends another
        (``RaggedCrossAttentionStep(pairs=...)``). Same config. See `Cross-attention
@@ -894,6 +927,14 @@ span's tokens as ``k`` and ``v``. One resource has one head geometry, so a model
 attentions differ in head count or head dim declares one spec per (kind, geometry).
 LTX-2.5 is the reference (``mstar/model/ltx2_5/submodules.py``).
 
+Called with ``return_lse=True``, a ragged or ragged cross-attention resource's ``run`` on the
+FlashInfer backend also returns each query row's log-sum-exp (``[total_tokens, H]``, fp32,
+natural log) from the same plan, which is what merging attentions over disjoint key sets
+needs; a compiled caller breaks there even with ``compile_op``. Under sequence parallelism
+LTX-2.5's audio queries attend each rank's share of the video tokens, and
+``attention_over_sharded_keys`` (``mstar/model/components/distributed/sequence_parallel.py``)
+merges them.
+
 Block-causal attention within spans
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -1061,8 +1102,11 @@ methods are:
    whole-forward compile but wants parts of it compiled returns them from
    ``compile_regions()``: attribute paths (a module, or a method) mapped to example
    arguments to warm each with at start-up. The engine compiles them, with dynamic
-   shapes and before capture, on an accelerator only; don't call ``torch.compile`` in
-   model code. Qwen3.5's vision encoder and Omnilingual ASR are examples.
+   shapes and before capture, on an accelerator only; prefer it to calling
+   ``torch.compile`` in model code. Its options are fixed (dynamic shapes,
+   torch.compile's default mode), so a part that needs static shapes, a mode or
+   ``fullgraph`` still compiles in model code. Qwen3.5's vision encoder and
+   Omnilingual ASR are examples.
 
    Some submodules must run in their own parameter dtype. One example is an fp32 vocoder
    that is numerically sensitive. Such a submodule sets ``disable_autocast = True``. The
@@ -1088,12 +1132,6 @@ methods are:
    each captured shape is searched once, and eager steps keep the heuristic pick
    (Kokoro is an example).
 
-   Under TP or SP the engine sizes every resource it builds for a node (KV, attention,
-   recurrent state) for one rank's slice of the heads. A node whose SP ranks split other
-   work instead, such as one guidance branch per rank, sets ``splits_heads = False``,
-   and its SP ranks keep all the heads (TP ranks still split them). Nodes sharing a
-   resource must agree.
-
 ``postprocess(...)`` (optional)
    Metadata-only fixups that run on the GPU thread. This method must not read tensor
    values. Do not call ``.item()``, ``.cpu()`` or ``.tolist()`` here. This is a
@@ -1105,20 +1143,19 @@ methods are:
 ``check_stop(...) -> set[str] | StopCheck`` (optional)
    Runs off the GPU thread, and may read tensor values. Return the names of the ``Loop``
    objects to stop, for example after seeing the EOS token. This is how a decode loop
-   terminates. An AR submodule whose loop ends on a stop token or the token budget sets
+   terminates. An AR submodule whose loop ends on a stop token sets
    ``self.token_stop = TokenStop(...)`` in ``__init__`` instead of writing one; that also
    gives it ``check_stop_batched``, which checks a whole step off one host copy of its
-   tokens. Qwen3.5's ``LLMSubmodule`` is an example. A decode walk that feeds each row
-   its last sampled token can keep that token on the device instead of routing it: give
-   its ``TokenStop`` a ``walk`` and the ``loopback_signal`` the token feeds back to (see
-   `Device loop-back`_); the loop-back hooks and the client's inline copy of the token
-   follow from it (``MSTAR_DEVICE_LOOPBACK``). Qwen3.5, Higgs Audio, Qwen3-ASR and
-   Whisper declare it.
+   tokens. Qwen3.5's ``LLMSubmodule`` is an example. The token budget is the loop's cap
+   from ``get_loop_caps``, not a stop check. A decode walk that feeds each row
+   its last sampled token can keep that token on the device instead of routing it, with a
+   ``DeviceLoopback`` (see `Device loop-back`_).
    When a prefill walk outside the loop samples the reply's first token, list it
-   in ``prefill_walks``: the token counts toward ``max_tokens`` (a ``generated_key``
-   counter has to include it), and a stop id sampled
-   there ends the loop at its first step, whose ``buffer`` the engine drops, so the loop
-   has to emit the token under that name (GLM-5.2, Command A+).
+   in ``prefill_walks``; that token counts toward the budget, so ``get_loop_caps``
+   gives the loop ``max_output_tokens - 1``. A stop id sampled
+   there ends the loop at its first step, which withholds its ``buffer`` (see
+   ``StopCheck`` below), so the loop has to emit the token under that name (GLM-5.2,
+   Command A+).
    To also keep some of this step's outputs from being routed, return
    ``StopCheck(stops, withheld=(names...))``, for example a frame streamed alongside the
    EOS token: its consumer then never receives it, instead of finding and dropping it with
@@ -1361,18 +1398,19 @@ inductor specialize on that integer. The frame is then retraced once per layer.
 .. _Device loop-back:
 
 **Device loop-back.** A decode loop normally routes its sampled token back to itself as a
-tensor per request. A node whose ``TokenStop`` names a ``walk`` and a ``loopback_signal``
-instead reads each row's last sampled token off the sampler on the device: the base
-class's ``device_loopback_signals`` names the signal, so the worker routes it without a
-tensor, ``prepare_inputs`` returns ``self.uniform_row_inputs(...)`` for such a row, and
-``preprocess`` reads the tokens with ``sampler.loopback_tokens(request_ids)``. A row whose
-last step did not keep its value on the device (its first decode step, after the prefill)
-still brings it routed; put it over the one read from the device with
-``sampler.overwrite_rows(rows, (ids, routed_ids))``.
+tensor per request. An AR node that sets ``self.device_loopback = DeviceLoopback(walk,
+signal, sampler, buffer)`` instead reads each row's last sampled token off the sampler on
+the device (``MSTAR_DEVICE_LOOPBACK``): the base class's ``device_loopback_signals`` names
+the signal, so the worker routes it without a tensor and sends the client's copy inline,
+``prepare_inputs`` returns ``self.uniform_row_inputs(...)`` for such a row, and
+``preprocess`` reads the tokens with ``self.loopback_inputs(engine_inputs, inputs)``. A
+row whose last step did not keep its value on the device (its first decode step, after
+the prefill) still brings it routed, and that read puts it over the slot's. Qwen3.5,
+Higgs Audio, Qwen3-ASR and Whisper declare it.
 
 State that a decode loop carries from step to step beside the token, such as Whisper's
 timestamp rule state, is declared on the sampler, not kept in the model (Whisper adds its
-signal to ``device_loopback_signals``):
+signal to ``device_loopback_signals`` and passes its name to ``loopback_inputs``):
 
 .. code-block:: python
 
@@ -1658,18 +1696,19 @@ Both types share the base ``PiecewiseCudaGraphConfig`` fields:
   them.
 - ``can_lease`` has signature ``(inputs: list[NodeInputs]) -> bool``. It applies only with
   ``lease_before_step``, and lets the region refuse a batch for a limit that the
-  capture bucket key doesn't express, such as Qwen3.5's per-request segment count. The
-  engine then gives the region no lease for that step. Your forward must replay only
-  when the region was leased, that is when its label is in
-  ``engine_inputs.piecewise_leases``, and not whenever ``runner.can_run`` is true: a
-  refused batch can still fit a bucket, and replaying it would declare the region's
-  resources twice.
+  capture bucket key doesn't express, such as Qwen3.5's segment count per step. The
+  engine then gives the region no lease for that step. A ``lease_before_step`` region is
+  in ``engine_inputs.piecewise_runners`` only on a step that leased it, so the forward
+  replays it whenever its runner is there and runs it eagerly otherwise: an unleased
+  step declared the region's resources itself, and a replay would declare them twice.
 - ``one_row_per_step`` makes the runner lease, check (``can_run``) and replay the region as
   one row, whatever the step's batch size, under the step's first request. It is for a
   packed region that runs every request's segments as one ragged batch, such as a vision
-  tower, and needs ``lease_before_step`` and ``capture_batch_sizes=[1]``. The whole step's
-  segments then count against the ragged resource's ``max_segments_per_request``, so pair
-  it with a ``can_lease`` that refuses a step with more.
+  tower, and needs ``lease_before_step`` and ``capture_batch_sizes=[1]``. The region's
+  ``declare_step`` then receives ``[first_rid]`` with every request's ``seq_lens``, so the
+  whole step's segments count against one replay's plan: size its attention resource with
+  ``max_segments_per_step``, and pair it with a ``can_lease`` that refuses a step with
+  more.
 - ``capture_batch_sizes`` lists the batch sizes to record. ``None`` uses the runner
   default.
 - ``compile`` runs ``torch.compile`` on ``capture_fn`` before capture. The default is
@@ -1781,8 +1820,8 @@ sequence, and an eager section after the region.
        }
 
    # --- invoke it inside the forward ---
-   if BLOCK_LOOP_REGION in engine_inputs.piecewise_leases:   # leased before the step
-       runner = engine_inputs.piecewise_runners[BLOCK_LOOP_REGION]
+   runner = engine_inputs.piecewise_runners.get(BLOCK_LOOP_REGION)   # here when leased
+   if runner is not None:
        out = runner.run(                       # admits + plans + replays + commits
            static_inputs={"x": x, "d_pos": d_pos, ...},
            request_ids=engine_inputs.request_ids,
@@ -1875,8 +1914,9 @@ that a misspelled setting is never silently ignored:
    * - ``RaggedAttentionSpec``
      - ``backend`` (``auto`` / ``flashinfer``), ``flashinfer_backend``
        (``auto`` / ``fa2`` / ``fa3``), ``max_segments_per_request``,
-       ``max_tokens_per_request``. The two ceilings size CUDA-graph buckets, which is a
-       memory-against-coverage trade the deployment makes, not the model.
+       ``max_segments_per_step``, ``max_tokens_per_request``. The ceilings size CUDA-graph
+       buckets, which is a memory-against-coverage trade the deployment makes, not the model.
+       A resource sized per step refuses ``max_segments_per_request``, which it would ignore.
 
 Tune the cache shape on the KV resource, not on the attention resource that reads it. For
 example, ``configs/qwen3tts.yaml`` selects FA2 under ``talker_attn``,
@@ -1910,6 +1950,16 @@ The setting applies only to the API server process. The conductor and workers ke
 torch's default. It does not size video decoding: each torchcodec decode that asks
 ``media_limits.video_decode_threads`` (``Model.load_video`` does) runs FFmpeg with up to 8
 threads, no more than the CPUs the process may use (the same affinity and cgroup quota).
+
+A pool that small is slow for a large copy, and a 121-frame 832x480 video is 145 MB. A
+video decoder should therefore emit its clip in the layout the encoder takes, transposed
+on the GPU inside its forward, so ``postprocess`` hands the tensor it reads straight to the
+encoder: ``[T, C, H, W]`` for torchcodec's ``VideoEncoder`` (Cosmos3) and ``[T, H, W, 3]``
+rgb24 frames for PyAV (Wan2.2, LTX-2.5) or a raw ``video_frame`` stream (LingBot-World).
+A permute in ``postprocess`` costs a host copy of the whole clip, or a slower copy of each
+frame inside PyAV. The arena's CPU read of an output (``MSTAR_SHM_ARENA``) slices a large
+copy over threads of its own (``mstar.utils.host_copy.HostCopier``), one encode's share of
+the CPUs.
 
 A model whose media load and ``process_prompt`` are thread-safe can also prepare several
 requests at once on a thread pool by setting ``PREPROCESS_WORKERS`` on the class above 1
@@ -2254,23 +2304,28 @@ GPU 2:
    node_groups:
      - {node_names: [LLM], ranks: [0], graph_walks: [prefill_text, prefill_vit, prefill_vae]}
      - {node_names: [LLM], ranks: [1], graph_walks: [decode]}
-     - {node_names: [LLM], ranks: [2], graph_walks: [image_gen]}
+     - {node_names: [LLM], ranks: [2], graph_walks: [image_gen, image_gen_head, image_gen_guided2, image_gen_guided3]}
 
-BAGEL also supports a CFG-parallel mode. When the config names the extra
-``LLM_cfg_text`` and ``LLM_cfg_img`` nodes, as in ``configs/bagel_cfg_parallel.yaml``, a
-guided request's denoising runs as a sequence of walks. Its guided steps form one window,
-known when the request arrives, which runs as ``image_gen_cfg2`` (text guidance) or
-``image_gen_cfg3`` (text and image guidance). The loop body of that walk is a ``Parallel``
-of the guidance branches, each on its own GPU, feeding a ``combine_cfg`` node. The steps
-before the window run as ``image_gen_head`` on ``LLM`` alone, and the steps after it run as
-``image_gen``, which also decodes; a window that reaches the last step is followed by the
+A guided request's denoising runs as a sequence of walks. Its guided steps form one window,
+known when the request arrives, which runs as ``image_gen_guided2`` (text guidance) or
+``image_gen_guided3`` (text and image guidance), every branch in one combined forward on
+``LLM``. The steps before the window run as ``image_gen_head``, and the steps after it run
+as ``image_gen``, which also decodes; a window that reaches the last step is followed by the
 decode alone (``image_decode``). Each walk's loop is capped per request at its share of the
 steps (``get_loop_caps``), the conductor moves the request from one walk to the next, and
 the latents cross between walks as persisted edges. Each walk's branch count is fixed when
-the request arrives, so no node on these walks reads a loop counter to decide it. A request without guidance runs
-``image_gen`` and never reaches the branch GPUs. The model code detects this mode only from
-the node names present in the config, so the extra parallelism is enabled in YAML and
-requires no code change. One model can therefore run in many physical layouts.
+the request arrives, so no node reads a loop counter to decide it. A request without
+guidance runs ``image_gen`` alone. A config that places ``LLM`` per walk, as above, lists
+all four of its denoise walks.
+
+BAGEL also supports a CFG-parallel mode. When the config names the extra
+``LLM_cfg_text`` and ``LLM_cfg_img`` nodes, as in ``configs/bagel_cfg_parallel.yaml``, the
+window runs as ``image_gen_cfg2`` or ``image_gen_cfg3`` instead. The loop body of that walk
+is a ``Parallel`` of the guidance branches, each on its own GPU, feeding a ``combine_cfg``
+node, and a request without guidance never reaches the branch GPUs. The model code detects
+this mode only from the node names present in the config, so the extra parallelism is
+enabled in YAML and requires no code change. One model can therefore run in many physical
+layouts.
 
 Worked example: Whisper
 -----------------------

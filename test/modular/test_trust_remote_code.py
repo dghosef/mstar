@@ -62,8 +62,7 @@ def test_qwen3_omni_tokenizer_and_processor_without_remote_code(qwen3_omni, monk
     assert [c["trust_remote_code"] for c in tok_calls + proc_calls] == [False, False]
 
 
-def test_qwen3_omni_encoder_config_without_remote_code(qwen3_omni, monkeypatch, tmp_path):
-    # the vision encoder's; the audio encoder (AuT) reads the model's own parsed config
+def test_qwen3_omni_vision_encoder_config_without_remote_code(qwen3_omni, monkeypatch, tmp_path):
     from transformers import AutoConfig
 
     calls = []

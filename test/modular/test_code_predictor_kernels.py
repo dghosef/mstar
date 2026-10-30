@@ -3,9 +3,10 @@ against the op sequences they replace (GPU only), and ``cp_linear``'s tiles.
 
 * ``cp_attend``: q/k RMSNorm + RoPE, the dense-KV write and causal attention
   over the depth cache, against the same math in fp32.
-* ``cp_embed_accumulate``: the index_select + add, and the projected next input.
-* Qwen3-TTS's depth loop, which calls them with its own config: against its
-  layers run unfused.
+* ``cp_embed_accumulate``: the index_select + add, and the next input (projected
+  or not) with its norm partials.
+* ``ResidualCodePredictor``'s depth loop, which calls them with its own config:
+  against its layers run unfused.
 """
 from __future__ import annotations
 
@@ -43,10 +44,10 @@ def test_cp_attend_matches_the_unfused_ops(bs, seq_len, cache_pos):
     qkv = torch.randn(bs, seq_len, (hq + 2 * hkv) * d, device=dev, dtype=dt)
     wq = torch.randn(d, device=dev, dtype=dt)
     wk = torch.randn(d, device=dev, dtype=dt)
-    pos = torch.randint(0, 16, (bs, seq_len), device=dev)
     cache = torch.randn(layers, max_bs, 2, max_s, hkv, d, device=dev, dtype=dt)
     ref_cache = cache.clone()
-    flat_pos = pos.reshape(-1)
+    # a token's RoPE position is its cache slot
+    flat_pos = (cache_pos + torch.arange(seq_len, device=dev)).repeat(bs)
 
     q, k, v = qkv.split((hq * d, hkv * d, hkv * d), dim=-1)
     q = _norm_rope(q.reshape(bs * seq_len, hq, d), wq, flat_pos, 1e-6, 1e6).to(dt).view(bs, seq_len, hq, d)
@@ -56,7 +57,7 @@ def test_cp_attend_matches_the_unfused_ops(bs, seq_len, cache_pos):
     view[2, :, 1, cache_pos:cache_pos + seq_len] = v.view(bs, seq_len, hkv, d)
 
     out = cp_attend(
-        qkv.view(bs * seq_len, -1), wq, wk, flat_pos, cache[:, :bs][2], cache_pos, seq_len,
+        qkv.view(bs * seq_len, -1), wq, wk, cache[:, :bs][2], cache_pos, seq_len,
         1e-6, 1e-5, 1e6, hq, hkv, d,
     ).view(bs, seq_len, hq, d)
     # the kernel rounds k once to bf16 from the same fp32 arithmetic
@@ -76,8 +77,9 @@ def test_cp_attend_matches_the_unfused_ops(bs, seq_len, cache_pos):
 def test_cp_embed_accumulate_matches_the_unfused_ops(bs, projected, init):
     """The index_select + add (or, with ``init``, the sum's first term), the
     code recorded, and the next input: the embedding, or its row of the
-    projected table."""
-    from mstar.model.components.code_predictor_kernels import cp_embed_accumulate
+    projected table, with each 256-wide chunk's row sum of squares for the
+    first layer's norm."""
+    from mstar.model.components.code_predictor_kernels import EMBED_BLOCK, cp_embed_accumulate, depth_partials
 
     torch.manual_seed(2)
     weight = torch.randn(2048, 1024, device="cuda", dtype=torch.bfloat16)
@@ -91,10 +93,15 @@ def test_cp_embed_accumulate_matches_the_unfused_ops(bs, projected, init):
     ref_emb = torch.nn.functional.embedding(tokens, weight)
     ref_sum = ref_emb.float() if init else ref_sum.add_(ref_emb)
 
-    emb, _ = cp_embed_accumulate(tokens, weight, emb_sum, codes, 5, inputs=table, init=init)
+    partials = depth_partials(torch.device("cuda"))
+    emb, n_part = cp_embed_accumulate(tokens, weight, emb_sum, codes, 5, inputs=table, init=init, partials=partials)
     assert torch.equal(emb, ref_emb if table is None else torch.nn.functional.embedding(tokens, table))
     assert torch.equal(emb_sum, ref_sum)
     assert torch.equal(codes, ref_codes)
+    # one partial per chunk of the returned input, [chunk, row]
+    assert n_part == emb.shape[1] // EMBED_BLOCK
+    want_partials = emb.float().view(bs, n_part, EMBED_BLOCK).pow(2).sum(-1).T
+    torch.testing.assert_close(partials[:n_part, :bs], want_partials, rtol=1e-5, atol=1e-5)  # summation order
 
 
 @needs_cuda
@@ -143,65 +150,70 @@ def _rms(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
 
 
 @needs_cuda
-def test_qwen3_tts_depth_loop_matches_its_layers_unfused():
-    """Qwen3-TTS's depth loop drives the kernels with its own head counts, eps
-    and RoPE theta: a frame's 16 depth steps (``depth_step``, the fused
-    projections and ``cp_attend``) against the same layers over the whole frame
-    at once, norms, RoPE and causal attention in fp32, compared as each
-    position's logits."""
-    from mstar.model.components.code_predictor_kernels import depth_partials
-    from mstar.model.qwen3_tts.components.talker import Qwen3TTSCodePredictor
-    from mstar.model.qwen3_tts.config import (
-        Qwen3TTSCodePredictorConfig,
-        Qwen3TTSModelConfig,
-        Qwen3TTSTalkerConfig,
-    )
+@pytest.mark.parametrize("width", [2048, 1024])
+def test_code_predictor_depth_loop_matches_its_layers_unfused(width):
+    """The depth loop drives the kernels with the predictor's own head counts,
+    eps and RoPE theta, from a Talker of ``width``: 2048 through an input
+    projection (Qwen3-TTS 1.7B), 1024 without one (Qwen3-Omni, Qwen3-TTS 0.6B),
+    where the inputs are the raw embeddings and their norm partials. A frame's
+    groups, teacher-forced, through the fused projections and ``cp_attend``
+    against the same layers over the whole depth sequence at once, norms, RoPE
+    and causal attention in fp32, compared as each group's logits."""
+    from mstar.model.components.code_predictor_kernels import ResidualCodePredictor
+    from mstar.model.qwen3_tts.config import Qwen3TTSCodePredictorConfig
 
     torch.manual_seed(6)
     cp = Qwen3TTSCodePredictorConfig(num_hidden_layers=2)
-    config = Qwen3TTSModelConfig(talker=Qwen3TTSTalkerConfig(code_predictor=cp))
-    predictor = Qwen3TTSCodePredictor(config).to("cuda", torch.bfloat16).eval()
+    bs, groups = 3, cp.num_code_groups
+    predictor = ResidualCodePredictor(cp, width, max_batch_size=4).to("cuda", torch.bfloat16).eval()
     for name, param in predictor.named_parameters():
         if name.endswith("norm.weight"):
             param.data.uniform_(0.5, 1.5)  # a skipped or swapped norm weight shows
         else:
             param.data.normal_(std=0.02)
-    predictor.consolidate_stacked_weights(
-        torch.randn(config.talker.vocab_size, config.talker.hidden_size, device="cuda", dtype=torch.bfloat16),
-    )
+    talker_table = torch.randn(cp.vocab_size, width, device="cuda", dtype=torch.bfloat16)
+    predictor.consolidate_stacked_weights(talker_table)
     hq, hkv, d = cp.num_attention_heads, cp.num_key_value_heads, cp.head_dim
-    bs, depth = 3, config.num_code_groups
-    x = torch.randn(bs, depth, config.talker.hidden_size, device="cuda", dtype=torch.bfloat16)
+    last_hidden = torch.randn(bs, width, device="cuda", dtype=torch.bfloat16)
+    codes = torch.randint(0, cp.vocab_size, (bs, groups), device="cuda")
+    got_logits = []
 
-    cache = torch.zeros(cp.num_hidden_layers, bs, 2, depth, hkv, d, device="cuda", dtype=torch.bfloat16)
-    pos = torch.zeros(bs, 1, dtype=torch.int32, device="cuda")
-    partials = depth_partials(torch.device("cuda"))
-    got = []
+    def teacher(logits):
+        got_logits.append(logits.float())
+        return codes[:, len(got_logits)].contiguous()
+
     with torch.no_grad():
-        for s in range(depth):
-            pos.fill_(s)
-            predictor.depth.bind_step(cache, pos, cache_pos=s)
-            step_in, n_part = predictor.depth_input(x[:, s], partials)
-            got.append(predictor.depth_step(step_in, partials, n_part, head=max(s - 1, 0)))
+        got_codes, embed_sum = predictor.depth_loop(last_hidden, codes[:, 0].contiguous(), talker_table, teacher)
 
-        # the projection is the identity at these widths; linears run in bf16
-        h = x.float()
-        flat_pos = torch.arange(depth, device="cuda").repeat(bs)
+        # position 0 holds the Talker's hidden state, position g >= 1 the embedding
+        # of group g - 1's code, and predicts group g
+        layer0_embed = talker_table[codes[:, 0]]
+        embeds = [predictor.model.codec_embedding[g - 1](codes[:, g]) for g in range(1, groups)]
+        x = torch.stack([last_hidden, layer0_embed, *embeds[:-1]], dim=1)
+        h = predictor.small_to_mtp_projection(x).float()
+        flat_pos = torch.arange(groups, device="cuda").repeat(bs)
         for layer in predictor.model.layers:
             attn = layer.self_attn
             qkv = attn.qkv_proj(_rms(h, layer.input_layernorm.weight, cp.rms_norm_eps).bfloat16()).float()
             q, k, v = qkv.split((hq * d, hkv * d, hkv * d), dim=-1)
             q = _norm_rope(q.reshape(-1, hq, d), attn.q_norm.weight, flat_pos, cp.rms_norm_eps, cp.rope_theta)
             k = _norm_rope(k.reshape(-1, hkv, d), attn.k_norm.weight, flat_pos, cp.rms_norm_eps, cp.rope_theta)
-            q = q.view(bs, depth, hq, d).transpose(1, 2)
-            k = k.view(bs, depth, hkv, d).repeat_interleave(hq // hkv, dim=2).transpose(1, 2)
-            v = v.view(bs, depth, hkv, d).repeat_interleave(hq // hkv, dim=2).transpose(1, 2)
+            q = q.view(bs, groups, hq, d).transpose(1, 2)
+            k = k.view(bs, groups, hkv, d).repeat_interleave(hq // hkv, dim=2).transpose(1, 2)
+            v = v.view(bs, groups, hkv, d).repeat_interleave(hq // hkv, dim=2).transpose(1, 2)
             out = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
-            h = h + attn.o_proj(out.transpose(1, 2).reshape(bs, depth, -1).bfloat16()).float()
+            h = h + attn.o_proj(out.transpose(1, 2).reshape(bs, groups, -1).bfloat16()).float()
             h = h + layer.mlp(_rms(h, layer.post_attention_layernorm.weight, cp.rms_norm_eps).bfloat16()).float()
-        want = _rms(h, predictor.model.norm.weight, cp.rms_norm_eps)
+        h = _rms(h, predictor.model.norm.weight, cp.rms_norm_eps)
         heads = torch.stack([head.weight for head in predictor.lm_head]).float()
-        want = torch.stack([want[:, s] @ heads[max(s - 1, 0)].t() for s in range(depth)], 1)
+        want_logits = torch.stack([h[:, g] @ heads[g - 1].t() for g in range(1, groups)])
+        # summed in fp32 in group order, rounded once to the embeddings' dtype
+        want_sum = layer0_embed.float()
+        for embed in embeds:
+            want_sum = want_sum + embed.float()
 
-    got = torch.stack(got, 1).float()
-    torch.testing.assert_close(got, want, rtol=5e-2, atol=5e-2 * want.abs().max().item())
+    assert torch.equal(got_codes, codes)
+    torch.testing.assert_close(
+        torch.stack(got_logits), want_logits, rtol=5e-2, atol=5e-2 * want_logits.abs().max().item(),
+    )
+    assert torch.equal(embed_sum, want_sum.bfloat16())

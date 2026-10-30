@@ -134,15 +134,19 @@ class _RaggedPrefillBase(ABC):
         token count in graph mode and -1 in eager mode."""
 
     @abstractmethod
-    def run(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    def run(
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Run the planned attention.
 
         Args:
             q: [total_tokens, num_qo_heads, head_dim], packed by the query layout
             k, v: [total_kv_tokens, num_kv_heads, head_dim], packed by the key layout
                 (the query layout itself, for self-attention)
+            return_lse: also return each query row's log-sum-exp of its scaled scores
         Returns:
-            output: [total_tokens, num_qo_heads, head_dim]
+            output: [total_tokens, num_qo_heads, head_dim], and with ``return_lse``
+            the log-sum-exp [total_tokens, num_qo_heads], fp32, natural log
 
         Only rows before the planned ``cu_seqlens[-1]`` are computed; the rest
         read back zero. An oversized static buffer replays fine, but the caller
@@ -278,23 +282,29 @@ class _FlashInferRaggedPrefillBase(_RaggedPrefillBase):
         return torch.nn.functional.pad(t, (0, self.padded_head_dim - t.shape[-1]))
 
     @torch.compiler.disable
-    def run(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    def run(
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # q/k/v padded by the caller come back padded (see
         # `_FlashInferRaggedManagerBase.run`)
         padded_in = q.shape[-1] == self.padded_head_dim
         qp, kp, vp = (self._pad_head_dim(t.to(self.q_data_type)) for t in (q, k, v))
+        lse_kwargs = dict(return_lse=True, lse_base="ln") if return_lse else {}
         if not self.accelerator_graph:
-            out = self.attn_wrapper.run(qp, kp, vp)
+            out = self.attn_wrapper.run(qp, kp, vp, **lse_kwargs)
         else:
             self._check_rows(qp.shape[0])
             # Zeroed in the graph on every replay: the kernel writes only the
             # planned rows, and the next layer's KV built from this output is read
             # past cu_seqlens[-1] to the last segment's tile boundary under an
             # additive mask, which a NaN/Inf left in the tail would survive.
-            out = self.attn_wrapper.run(qp, kp, vp, out=torch.zeros_like(qp, memory_format=torch.contiguous_format))
+            out = self.attn_wrapper.run(
+                qp, kp, vp, out=torch.zeros_like(qp, memory_format=torch.contiguous_format), **lse_kwargs,
+            )
+        out, lse = out if return_lse else (out, None)
         if self.padded_head_dim != self.head_dim and not padded_in:
-            return out[..., : self.head_dim].contiguous()
-        return out
+            out = out[..., : self.head_dim].contiguous()
+        return (out, lse) if return_lse else out
 
 
 class FlashInferRaggedPrefillWrapper(_FlashInferRaggedPrefillBase, RaggedPrefillWrapper):

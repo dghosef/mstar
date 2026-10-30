@@ -243,25 +243,6 @@ class AuTEncoder(nn.Module):
         self.reset_buffers()
         return loaded
 
-    @classmethod
-    def from_checkpoint(
-        cls, local_dir: str, config: AuTEncoderConfig, *, attn_key: str | None,
-        device: str, dtype: torch.dtype | None,
-    ) -> AuTEncoder:
-        """Built on the meta device and loaded, in eval mode, from a Qwen3-Omni
-        or Qwen3-ASR checkpoint's ``thinker.audio_tower.*``."""
-        from mstar.model.loader.iterators import iter_safetensors_shards
-
-        with torch.device("meta"):
-            encoder = cls(config, attn_key=attn_key)
-        if dtype is not None:
-            encoder = encoder.to(dtype)
-        encoder.to_empty(device=device)
-        prefix = "thinker.audio_tower."
-        weights = iter_safetensors_shards(local_dir, device=device, prefix=prefix)
-        encoder.load_weights((k.removeprefix(prefix), v) for k, v in weights)
-        return encoder.eval()
-
     # -- layout ------------------------------------------------------------
 
     def layout(self, feature_lens: list[int]) -> AuTLayout:
