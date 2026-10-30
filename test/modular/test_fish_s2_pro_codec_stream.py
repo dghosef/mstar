@@ -168,10 +168,11 @@ def run_streams(submodule: CodecSubmodule, frames: dict[str, torch.Tensor]):
         packed = submodule.preprocess("codec_chunk", engine_inputs, items)
         decodes += packed["codec_tokens"].shape[-1] > 0
         with torch.no_grad():
-            outputs = submodule.forward_batched("codec_chunk", engine_inputs, **packed)
-        for rid, item in zip(rids, items, strict=True):
-            submodule.postprocess(rid, infos[rid], outputs[rid], inputs=item)
-            steps[rid].append((chunks[rid].info, outputs[rid]["audio_chunk"][0]))
+            rows = submodule.forward_batched("codec_chunk", engine_inputs, **packed).row_outputs["audio_chunk"]
+        for i, (rid, item) in enumerate(zip(rids, items, strict=True)):
+            outputs = {"audio_chunk": [rows[i]]}
+            submodule.postprocess(rid, infos[rid], outputs, inputs=item)
+            steps[rid].append((chunks[rid].info, outputs["audio_chunk"][0]))
     return steps, decodes
 
 
@@ -291,27 +292,33 @@ def test_context_only_terminal_flush_decodes_nothing(config, decoder):
     engine_inputs = ModelInputsFromEngine(request_ids=["r"], per_request_info={})
     packed = submodule.preprocess("codec_chunk", engine_inputs, [item])
     assert packed["codec_tokens"].shape[-1] == 0
+    assert not submodule.can_use_accelerator_graphs(None, [item])
     with torch.no_grad():
-        outputs = submodule.forward_batched("codec_chunk", engine_inputs, **packed)
-    submodule.postprocess("r", None, outputs["r"], inputs=item)
-    assert outputs["r"]["audio_chunk"][0].numel() == 0
+        rows = submodule.forward_batched("codec_chunk", engine_inputs, **packed).row_outputs["audio_chunk"]
+    outputs = {"audio_chunk": [rows[0]]}
+    submodule.postprocess("r", None, outputs, inputs=item)
+    assert outputs["audio_chunk"][0].numel() == 0
 
 
 def test_codec_preprocess_stages_window_geometry_as_the_per_column_copies_did(config, decoder):
     submodule = CodecSubmodule(decoder, config)
-    windows = [(0, 0, 4), (4, 4, 12), (40, 30, 62), (100, 30, 30)]  # (start_offset, context, frames)
+    windows = [(0, 0, 4), (4, 4, 12), (40, 30, 33), (100, 30, 30)]  # (start_offset, context, frames)
+    meta = {
+        str(i): InputMetadata(stream_chunks={"codec_tokens": StreamChunkInfo(start, context, frames, is_final=False)})
+        for i, (start, context, frames) in enumerate(windows)
+    }
     items = [
         submodule.prepare_inputs(
             "codec_chunk",
             SimpleNamespace(request_id=str(i), rid_handle=i),
             {"codec_tokens": [stream_codes(frames)]},
-            input_metadata=InputMetadata(
-                stream_chunks={"codec_tokens": StreamChunkInfo(start, context, frames, is_final=False)}
-            ),
+            input_metadata=meta[str(i)],
         )
         for i, (start, context, frames) in enumerate(windows)
     ]
     packed = submodule.preprocess("codec_chunk", ModelInputsFromEngine(request_ids=[], per_request_info={}), items)
+    # the capture key, known before prepare_inputs, is the width preprocess pads to
+    assert packed["codec_tokens"].shape[-1] == submodule.cg_key_info("codec_chunk", meta, meta) == 35
     for name in ("start_offset", "conv_start"):
         old = torch.tensor([item.kwargs[name] for item in items], dtype=torch.long)
         assert packed[name].dtype == old.dtype and packed[name].shape == old.shape and torch.equal(packed[name], old)

@@ -26,6 +26,7 @@ import itertools
 import logging
 import math
 from collections import OrderedDict
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -366,11 +367,16 @@ class CodecSubmodule(ARNodeSubmodule):
     ``conv_context`` frames of receptive field only. With the default
     context (the transformer's 1,016 frames plus the conv stack's 10), every
     emitted sample is the sample one decode of the whole stream produces.
+
+    A batch is padded on the right to its widest window's width bucket, each
+    bucket a CUDA graph: eager, the conv stack is hundreds of small launches
+    a step. Both stages are causal, so the padding never reaches a real frame.
     """
 
     disable_torch_compile = True
     disable_autocast = True
-    MAX_BATCH_SIZE = 32
+    CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16, 32]
+    MAX_BATCH_SIZE = CAPTURE_BATCH_SIZES[-1]
 
     def __init__(self, decoder: FishDACDecoder, config: FishS2ProConfig, *, exact_fp32: bool = True):
         super().__init__()
@@ -389,6 +395,9 @@ class CodecSubmodule(ARNodeSubmodule):
             )
         self.conv_context = self.codec.conv_context_frames
         self.max_new_frames = max([*self.codec.chunk_schedule, self.codec.chunk_frames])
+        max_window = self.codec.left_context_frames + self.max_new_frames
+        self.windows = sorted({w for w in (8, 16, 32, 64, 96, 128, 192, 256, 384, 512, 768) if w < max_window}
+                              | {max_window})
         self._geometry_stager = PinnedStager(torch.long, numel=2 * self.MAX_BATCH_SIZE)
         if not self.codec.exact_streaming:
             logger.warning(
@@ -397,6 +406,13 @@ class CodecSubmodule(ARNodeSubmodule):
                 self.codec.left_context_frames,
                 self.codec.transformer_context_frames + self.conv_context,
             )
+
+    def _bucket(self, frames: int) -> int:
+        """Smallest captured window width that holds ``frames``."""
+        for window in self.windows:
+            if frames <= window:
+                return window
+        raise ValueError(f"Fish codec window has {frames} frames, maximum is {self.windows[-1]}")
 
     def conv_frames(self, width: int) -> int:
         """Frames the conv stack decodes for a batch padded to ``width``."""
@@ -442,7 +458,7 @@ class CodecSubmodule(ARNodeSubmodule):
         engine_inputs: ModelInputsFromEngine,
         inputs: list[ARNodeInputs],
     ) -> dict[str, torch.Tensor]:
-        """Stack the batch's windows, zero-padded on the right to the widest.
+        """Stack the batch's windows, zero-padded on the right to the widest one's bucket.
 
         A batch whose windows carry no new frames (a stream's context-only
         terminal flush) gets width 0 and decodes nothing.
@@ -450,7 +466,7 @@ class CodecSubmodule(ARNodeSubmodule):
         del graph_walk, engine_inputs
         windows = [item.tensor_inputs["codec_tokens"] for item in inputs]
         has_new = any(item.kwargs["frames"] > item.kwargs["context"] for item in inputs)
-        width = max(window.shape[-1] for window in windows) if has_new else 0
+        width = self._bucket(max(window.shape[-1] for window in windows)) if has_new else 0
         device = windows[0].device
         codec_tokens = torch.stack(
             [
@@ -494,10 +510,9 @@ class CodecSubmodule(ARNodeSubmodule):
         start_offset: torch.Tensor,
         conv_start: torch.Tensor,
         **kwargs: Any,
-    ) -> dict[str, NameToTensorList]:
-        del graph_walk, kwargs
-        wavs = self._decode(codec_tokens, start_offset, conv_start)
-        return {request_id: {"audio_chunk": [wavs[i]]} for i, request_id in enumerate(engine_inputs.request_ids)}
+    ) -> BatchedModelOutput:
+        del graph_walk, engine_inputs, kwargs
+        return BatchedModelOutput(row_outputs={"audio_chunk": self._decode(codec_tokens, start_offset, conv_start)})
 
     def postprocess(
         self,
@@ -536,15 +551,55 @@ class CodecSubmodule(ARNodeSubmodule):
         del graph_walk
         return self.MAX_BATCH_SIZE
 
+    def cg_key_info(
+        self,
+        graph_walk: str,
+        per_request_info: Mapping[str, CurrentForwardPassInfo],
+        per_request_input_metadata: Mapping[str, InputMetadata] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """The bucket of the batch's widest window, which ``preprocess`` pads to."""
+        del graph_walk, kwargs
+        per_request_input_metadata = per_request_input_metadata or {}
+        widths = []
+        for request_id in per_request_info:
+            chunk = self._codec_chunk(per_request_input_metadata.get(request_id))
+            if chunk is None:
+                return None
+            widths.append(chunk.num_items)
+        return self._bucket(max(widths)) if widths and max(widths) > 0 else None
+
     def get_accelerator_graph_configs(
         self, device: torch.device, tp_world_size: int = 1
     ) -> list[AcceleratorGraphConfig]:
-        del device, tp_world_size
-        return []
+        """Every window bucket for every batch bucket, widest first."""
+        del tp_world_size
+        return [
+            BatchedAcceleratorGraphConfig(
+                capture_graph_walk="codec_chunk",
+                single_request_inputs=ARNodeInputs(
+                    tensor_inputs={
+                        "codec_tokens": torch.zeros(self.config.num_codebooks, width, dtype=torch.long, device=device)
+                    },
+                    # 1, not the width: batched buckets match on bs
+                    input_seq_len=1,
+                    kwargs={"frames": width, "context": 0, "conv_start": 0, "start_offset": 0},
+                ),
+                additional_key_info=width,
+                capture_batch_sizes=self.CAPTURE_BATCH_SIZES,
+                input_seq_dims={"codec_tokens": 0, "start_offset": 0, "conv_start": 0},
+                compile=False,
+            )
+            for width in sorted(self.windows, reverse=True)
+        ]
 
     def can_use_accelerator_graphs(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
-        del batch, model_inputs
-        return False
+        # a batch of context-only terminal flushes decodes nothing
+        return (
+            self.can_batch(batch, model_inputs)
+            and any(item.kwargs["frames"] > item.kwargs["context"] for item in model_inputs)
+            and super().can_use_accelerator_graphs(batch, model_inputs)
+        )
 
 
 # ===========================================================================
