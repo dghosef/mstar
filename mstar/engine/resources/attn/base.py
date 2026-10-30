@@ -84,9 +84,8 @@ class AttentionManager(AttentionResource):
             )
         kv_config.shard(info.head_shards)
         if isinstance(kv_config, PagedKVConfig) and kv_config.context_parallel:
-            # the backends whose partials' lse base the merge is known to read right; MLA's
-            # trtllm-gen isn't
-            lse_known = ("auto", "fa2", "fa3") + (() if backend == AttnBackend.FLASHINFER_MLA else ("trtllm-gen",))
+            # the backends whose partials' lse base the merge is known to read right
+            lse_known = ("auto", "fa2", "fa3")
             flashinfer_backend = spec.config.flashinfer_backend
             unsupported = [name for name, refused in (
                 ("sliding_window", spec.config.sliding_window is not None),
