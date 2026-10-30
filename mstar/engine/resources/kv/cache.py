@@ -280,7 +280,6 @@ class KVCache:
         self, layer_idx: int,
         k: torch.Tensor, v: torch.Tensor | None,
         page_idx: torch.Tensor, cache_idx: torch.Tensor,
-        return_tensor: bool=False
     ) -> None:
         """Scatter per-token K/V ([num_tokens, num_kv_heads, head_dim]) into
         the (page, offset-in-page) slots given by ``page_idx``/``cache_idx``.
@@ -289,9 +288,7 @@ class KVCache:
         if self.layout == KVLayout.MLA:
             assert v is None, "MLA caches one latent per token; pass it as k"
             _kv_scatter_mla_eager(self.tensor, layer_idx, k, page_idx, cache_idx)
-            if return_tensor:
-                return self.read_tokens(layer_idx, page_idx, cache_idx)
-            return None
+            return
         if self.layout != KVLayout.NHD:
             raise NotImplementedError(
                 f"write_tokens is not implemented for layout {self.layout}."
@@ -299,8 +296,6 @@ class KVCache:
         _kv_scatter_nhd_eager(
             self.tensor, layer_idx, k, v, page_idx, cache_idx,
         )
-        if return_tensor:
-            return self.read_tokens(layer_idx, page_idx, cache_idx)
 
     def layer_rows(
         self, layer_start: int, layer_end: int, page_idx: int,

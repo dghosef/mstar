@@ -86,7 +86,7 @@ def test_manager_plans_and_writes_latents(monkeypatch):
     latents = torch.randn(8, 12)
     mgr.set_default_layer_idx(1)
     mgr.write_kv(latents)  # v=None: MLA writes one latent per token
-    assert torch.equal(mgr.read_kv(), latents)
+    assert torch.equal(mgr.kv_cache.read_tokens(1, *mgr.write_slots()), latents)
     mgr.commit(step.get("mla_kv"), ctx)
     # decode step appends one token per request after the resident 5 / 3
     step2 = SubmoduleStep(segments=[Segment("a", "main", 1), Segment("b", "main", 1)], steps={"mla_kv": KVStep()})

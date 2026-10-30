@@ -116,11 +116,6 @@ def test_two_ranks_keep_logical_pages_alike_and_split_every_write():
         _ingest(kv, "a", a)
     steps = [_step(kv, "a", len(a)) for kv in ranks]
     _assert_split_writes(ranks, steps[0])
-    # reading the step's slots back would return the sink's contents for the tokens a rank doesn't own
-    with pytest.raises(ValueError, match="context_parallel"):
-        leader.read_kv(0, "main")
-    with pytest.raises(ValueError, match="context_parallel"):
-        leader.write_kv(torch.zeros(len(a), 1, 8), torch.zeros(len(a), 1, 8), 0, "main", return_tensor=True)
     for kv, step in zip(ranks, steps, strict=True):
         kv.commit(step, _ctx("a"))
 
