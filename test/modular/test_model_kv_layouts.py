@@ -172,15 +172,15 @@ class _BagelPool:
     def step(self, walk: str, rows: dict, guided: dict) -> None:
         from mstar.engine.resources import StepContext
         from mstar.engine.resources.step import SubmoduleStep
-        from mstar.model.bagel.submodules import CFG_BRANCHES
+        from mstar.model.bagel.submodules import DENOISE_WALKS
         from mstar.model.submodule_base import ARNodeInputs
 
+        if walk in DENOISE_WALKS and any(guided.values()):
+            # every label a guided request holds, as an image-guided window step runs them
+            walk = "image_gen_guided3"
         inputs = []
         for rid, count in rows.items():
             inputs.append(ARNodeInputs(input_seq_len=count, resource_step_info=guided[rid]))
-            if walk.startswith("image_gen"):
-                # every label a guided request holds, as an in-interval step stamps it
-                inputs[-1].kwargs[CFG_BRANCHES] = 3 if guided[rid] else 1
             if walk not in {"prefill_text", "decode"}:
                 positions = torch.zeros(count, dtype=torch.int32)
                 inputs[-1].custom_pos_ids = dict.fromkeys(("main", "cfg_text", "cfg_img"), positions)

@@ -14,17 +14,18 @@ Architecture (4 nodes, 7 with CFG-parallel placement):
     LLM_cfg_text, LLM_cfg_img, combine_cfg - only when the deployment places
                   the guidance branches on their own workers (the CFG walks)
 
-Graph walks (5, or 9 with CFG-parallel placement):
+Graph walks (9, or 11 with CFG-parallel placement):
     prefill_text   - Text token embedding + LLM prefill (causal)
     prefill_vit    - ViT encoding + LLM prefill (bidirectional for images)
     prefill_vae    - VAE encoding + LLM prefill (bidirectional for images)
     decode         - Autoregressive text generation
-    image_gen      - Flow matching loop (CFG + Euler) + VAE decode, every
-                     branch in the one LLM node
-    CFG-parallel only, a guided request's phases (``image_gen_phases``):
+    image_gen      - Flow matching loop (Euler, main branch only) + VAE decode
+    A guided request's phases (``image_gen_phases``):
     image_gen_head - The steps before the CFG window, on LLM alone
-    image_gen_cfg2, image_gen_cfg3 - The CFG window, one node per guidance
-                     branch, the velocities combined in combine_cfg
+    image_gen_guided2, image_gen_guided3 - The CFG window on LLM alone, every
+                     branch in one combined forward
+    image_gen_cfg2, image_gen_cfg3 - CFG-parallel only: the CFG window, one
+                     node per guidance branch, the velocities combined in combine_cfg
     image_decode   - The VAE decode alone, when the window reaches the last step
     (the steps after the window run as image_gen, from the window's end)
 
@@ -1160,35 +1161,36 @@ class BagelModel(Model):
             "prefill_vit": prefill_vit,
             "prefill_vae": prefill_vae,
             DECODE: decode,
-            IMAGE_GEN: self._denoise_walk(IMAGE_GEN),
+            IMAGE_DECODE: self._vae_decode(),
         }
-        if self._has_cfg_parallel:
-            walks.update({walk: self._denoise_walk(walk) for walk in DENOISE_WALKS if walk != IMAGE_GEN})
-            walks[IMAGE_DECODE] = self._vae_decode()
+        # the CFG-parallel walks need the branch nodes
+        walks.update({
+            walk: self._denoise_walk(walk) for walk, d in DENOISE_WALKS.items() if self._has_cfg_parallel or not d.split
+        })
         return walks
 
     @staticmethod
     def _denoise_nodes(walk: str) -> tuple[str, ...]:
         """The nodes of a denoise walk that read latents and time_index."""
-        branches = DENOISE_WALKS[walk].branches
-        if branches == 1:
+        branches, split, _ = DENOISE_WALKS[walk]
+        if not split:
             return ("LLM",)
         return (*list(NODE_TO_CFG_LABEL)[:branches], "combine_cfg")
 
     def _denoise_walk(self, walk: str) -> GraphSection:
-        """A denoise walk, from its `DenoiseWalk` (branches, decode).
+        """A denoise walk, from its `DenoiseWalk` (branches, split, decode).
 
         One Euler step per iteration, so a request's N timestep boundaries take
         N - 1 iterations in all; the request's loop cap (`get_loop_caps`) sets
-        the walk's share. One branch is the LLM node alone, running every
-        branch the step needs; more are a node per branch whose velocities
+        the walk's share. Unsplit is the LLM node alone, running the walk's
+        branches as one forward; split is a node per branch whose velocities
         combine_cfg combines into the step. Without the decode the loop's last
         latents and time_index persist for the request's next walk.
         """
-        branches, decode = DENOISE_WALKS[walk]
+        branches, split, decode = DENOISE_WALKS[walk]
         loop_back = [GraphEdge(next_node=node, name=name) for node in self._denoise_nodes(walk)
                      for name in ("latents", "time_index")]
-        if branches == 1:
+        if not split:
             section = GraphNode(
                 name="LLM",
                 input_names=["latents", "time_index"],
@@ -1341,11 +1343,6 @@ class BagelModel(Model):
             "width": full_metadata.kwargs["width"],
             "height": full_metadata.kwargs["height"],
             "image_preprocess": full_metadata.kwargs["image_preprocess"],
-            # a single-node denoise step's branches read these (`image_gen_step_branches`)
-            "cfg_window": full_metadata.kwargs.get(CFG_WINDOW),
-            "image_gen_branches": self._image_gen_phase(full_metadata).branches if (
-                full_metadata.graph_walk in DENOISE_WALKS
-            ) else None,
         }
 
     @staticmethod
@@ -1464,8 +1461,7 @@ class BagelModel(Model):
         kwargs["requires_cfg"] = self._requires_cfg(**kwargs)
         if target_output == "image":
             # process_prompt resolved the window with the request's guidance kwargs
-            kwargs[CFG_WINDOW] = (model_kwargs or {})[CFG_WINDOW]
-            kwargs["image_gen_phases"] = self._image_gen_phases(kwargs[CFG_WINDOW])
+            kwargs["image_gen_phases"] = self._image_gen_phases((model_kwargs or {})[CFG_WINDOW])
             kwargs["image_gen_phase"] = 0
         full_metadata = CurrentForwardConductorMetadata(
             input_modalities=input_modalities,

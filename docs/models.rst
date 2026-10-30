@@ -365,12 +365,17 @@ BAGEL notes
   main branch's velocity where it used to recombine all three and renormalize,
   which is equal only up to rounding, so images move slightly (median 41 dB
   PSNR against the previous output).
-- On a CFG-parallel deployment (``configs/bagel_cfg_parallel*.yaml``) only the
-  steps inside ``cfg_interval`` run on the guidance GPUs, as the
-  ``image_gen_cfg2`` walk (``image_gen_cfg3`` with image guidance); the other
-  steps run on the main GPU. A config that places ``LLM_cfg_text`` or
-  ``LLM_cfg_img`` with ``graph_walks`` names these walks: ``LLM_cfg_text`` and
-  ``combine_cfg`` both, ``LLM_cfg_img`` only ``image_gen_cfg3``.
+- A guided request's steps inside ``cfg_interval`` run as a walk of their own,
+  ``image_gen_guided2`` (``image_gen_guided3`` with image guidance), between
+  ``image_gen_head`` and ``image_gen``. A config that places ``LLM`` per walk
+  (``configs/bagel_*_disaggregated.yaml``) lists all four on the rank that
+  generates images.
+- On a CFG-parallel deployment (``configs/bagel_cfg_parallel*.yaml``) those
+  steps run on the guidance GPUs instead, as the ``image_gen_cfg2`` walk
+  (``image_gen_cfg3`` with image guidance); the other steps run on the main
+  GPU. A config that places ``LLM_cfg_text`` or ``LLM_cfg_img`` with
+  ``graph_walks`` names these walks: ``LLM_cfg_text`` and ``combine_cfg`` both,
+  ``LLM_cfg_img`` only ``image_gen_cfg3``.
 
 Qwen3.5 / Qwen3.8 (``qwen3_5_*``, ``qwen3_8_27b``)
 --------------------------------------------------
