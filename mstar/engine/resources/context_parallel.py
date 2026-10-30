@@ -107,14 +107,15 @@ class ContextParallel(NamedTuple):
         partial: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]] | None,
         new: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        """Attention over the whole pool for this rank's query parts (each ``[N, H, *]``), fp32
-        (``new``'s out as is when ``partial`` is None). ``partial`` gives ``(out, lse, valid)`` over
-        this rank's slots; ``new`` is the step's own tokens' ``(out, lse)`` this rank computes (under
-        SP placement its zigzag chunks, lse -inf on the rest). Every rank runs the same collectives:
-        under SP placement one all-gather, under TP placement two all-to-alls, or none when
-        ``partial`` is None (no row has stored context), which every rank must agree on."""
+        """Attention over the whole pool for this rank's query parts (each ``[N, H, *]``): fp32
+        under TP placement (``new``'s out as is when ``partial`` is None), the partial's dtype under
+        SP placement. ``partial`` gives ``(out, lse, valid)`` over this rank's slots; ``new`` is the
+        step's own tokens' ``(out, lse)`` this rank computes (under SP placement its zigzag chunks,
+        lse -inf on the rest). Every rank runs the same collectives: under SP placement one
+        all-gather, under TP placement two all-to-alls, or none when ``partial`` is None (no row
+        has stored context), which every rank must agree on."""
         if self.over_sp:
-            return merge(*_gather_partials(self.group, *self.share(queries, partial, new)))
+            return gather_merge(self.group, *self.share(queries, partial, new))
         if partial is None:
             return new[0]
         outs, lses = self.exchange_partials(*partial(*self.exchange_queries(queries)))
@@ -129,24 +130,17 @@ class ContextParallel(NamedTuple):
         partial: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]] | None,
         new: tuple[torch.Tensor, torch.Tensor] | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Under SP placement, this rank's ``(out, lse)`` for every query as ``attend`` gathers it:
-        its slots' partial merged with its share of the step's own tokens. Each own token's keys
-        are attended by one rank, so merging every rank's share is the whole attention. The merge
-        here rounds back to the partial's dtype for the gather, one rounding more than merging
-        every part at once in fp32; it is written out for two parts so that it holds one fp32
-        ``[N, H, D]`` at a time."""
+        """Under SP placement, this rank's ``(out, lse)`` as ``attend`` gathers it: its slots' partial
+        merged with its share of the step's own tokens, rounded back to the partial's dtype for the
+        gather. Each own token's keys are attended by one rank, so merging every rank's share is the
+        whole attention."""
         parts = [] if partial is None else [_masked(*partial(*queries))]
         if new is not None:
             parts.append(new)
         if len(parts) == 1:
             return parts[0][0], parts[0][1].float()
         (a, lse_a), (b, lse_b) = parts
-        lse_a, lse_b = lse_a.float(), lse_b.float()
-        lse = torch.logaddexp(lse_a, lse_b)
-        # a query neither part has a key for (a captured bucket's padding) comes out 0, -inf
-        base = lse.masked_fill(lse == -math.inf, 0)
-        out = torch.exp(lse_a - base).unsqueeze(-1) * a
-        out.addcmul_(torch.exp(lse_b - base).unsqueeze(-1), b)
+        out, lse = _merged(a, lse_a, b, lse_b)
         return out.to(a.dtype), lse
 
     def exchange_queries(self, queries: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
@@ -188,11 +182,6 @@ def _pack(out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:
 def _unpack(packed: torch.Tensor, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
     """``_pack``'s ``(out, lse)`` back, as views of ``packed``."""
     return packed[..., :-4].view(dtype), packed[..., -4:].view(torch.float32).squeeze(-1)
-
-
-def _gather_partials(group: CommGroup, out: torch.Tensor, lse: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """Every rank of ``group``'s ``(out, lse)`` for the same queries, stacked on a new first dim."""
-    return _unpack(group.all_gather(_pack(out, lse).unsqueeze(0), dim=0), out.dtype)
 
 
 
@@ -468,25 +457,25 @@ class ZigzagWrapper:
 
 def merge(outs: torch.Tensor, lses: torch.Tensor) -> torch.Tensor:
     """Attention over the union of disjoint key sets from each set's partial: ``outs`` ``[K, ..., D]``
-    and natural-log ``lses`` ``[K, ...]``; fp32, one ``[..., D]`` accumulated a part at a time. A
-    partial with lse -inf and a finite out adds nothing, and a query no partial has a key for (a
-    captured bucket's padding) comes out 0."""
-    lses = lses.float()
-    # finite on a row with no key, so its every weight is 0
-    top = lses.amax(0).clamp_min(torch.finfo(torch.float32).min)
-    weights = (lses - top).exp_()
-    out = weights[0].unsqueeze(-1) * outs[0]
-    for weight, part in zip(weights[1:], outs[1:], strict=True):
-        out.addcmul_(weight.unsqueeze(-1), part)
-    return out.div_(weights.sum(0).clamp_min(torch.finfo(torch.float32).tiny).unsqueeze(-1))
+    (``K >= 2``) and natural-log ``lses`` ``[K, ...]``; fp32, merged a pair at a time."""
+    out, lse = outs[0], lses[0]
+    for part, part_lse in zip(outs[1:], lses[1:], strict=True):
+        out, lse = _merged(out, lse, part, part_lse)
+    return out
 
 
-def _merge_with_lse(outs: torch.Tensor, lses: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """``merge`` and the union's lse, fp32; a query no partial has a key for comes out 0, -inf."""
-    lses = lses.float()
-    lse = torch.logsumexp(lses, dim=0)
-    weights = torch.exp(lses - lse.masked_fill(lse == -math.inf, 0))
-    return (weights.unsqueeze(-1) * outs).sum(dim=0), lse
+def _merged(
+    a: torch.Tensor, lse_a: torch.Tensor, b: torch.Tensor, lse_b: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Attention over two disjoint key sets from each one's partial, out and lse fp32. A partial
+    with lse -inf and a finite out adds nothing, and a query neither has a key for (a captured
+    bucket's padding) comes out 0, -inf."""
+    lse_a, lse_b = lse_a.float(), lse_b.float()
+    lse = torch.logaddexp(lse_a, lse_b)
+    base = lse.masked_fill(lse == -math.inf, 0)
+    out = torch.exp(lse_a - base).unsqueeze(-1) * a
+    out.addcmul_(torch.exp(lse_b - base).unsqueeze(-1), b)
+    return out, lse
 
 
 @torch.compiler.disable
@@ -496,7 +485,8 @@ def gather_merge(group: CommGroup, out: torch.Tensor, lse: torch.Tensor) -> torc
     of both, then ``merge``. Moves query-sized results rather than the keys."""
     if group.world_size == 1:
         return out
-    return merge(*_gather_partials(group, out, lse)).to(out.dtype)
+    gathered = _unpack(group.all_gather(_pack(out, lse).unsqueeze(0), dim=0), out.dtype)
+    return merge(*gathered).to(out.dtype)
 
 
 def _paged_pools(specs: Iterable[NodeResourceSpec], node: str) -> dict[str, bool]:
