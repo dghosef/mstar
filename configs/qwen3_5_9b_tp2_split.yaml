@@ -1,0 +1,25 @@
+model: "qwen3_5_9b"
+max_seq_len: 32768
+# Two GPUs: the LLM tensor-parallel over both, and one vision-encoder worker per GPU beside its LLM rank
+# (rank_devices) under CUDA MPS, data-parallel across requests. The TP pair's lockstep steps never wait for
+# an encoder step on rank 0's worker loop, and encoder kernels overlap the LLM's.
+model_kwargs:
+  prefill_token_buckets: [32, 64, 128, 256, 512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192]
+rank_devices: {2: 0, 3: 1}
+mps: true
+node_groups:
+  - node_names: [LLM]
+    ranks: [0, 1]
+    tp_size: 2
+  - node_names: [vision_encoder]
+    ranks: [2, 3]
+resources:
+  gdn_state:
+    max_slots: 129
+warmup_requests:
+  - text: What is in this image?
+    files: [hf://nvidia/Cosmos3-Edge/assets/example_action_fd_umi_first_frame.png]
+    model_kwargs: {max_output_tokens: 4}
+  - text: What is in this image?
+    files: [hf://nvidia/Cosmos3-Edge/assets/edge_action_id_av_0_output.png]
+    model_kwargs: {max_output_tokens: 4}

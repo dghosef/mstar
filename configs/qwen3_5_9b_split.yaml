@@ -1,0 +1,24 @@
+model: "qwen3_5_9b"
+max_seq_len: 32768
+# One GPU, the vision encoder in a worker of its own beside the LLM's (rank_devices) under CUDA MPS:
+# the LLM's decode steps never wait for an encoder step on their worker loop, and the encoder's
+# kernels overlap the LLM's instead of time-slicing with them.
+model_kwargs:
+  prefill_token_buckets: [32, 64, 128, 256, 512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192]
+rank_devices: {1: 0}
+mps: true
+node_groups:
+  - node_names: [LLM]
+    ranks: [0]
+  - node_names: [vision_encoder]
+    ranks: [1]
+resources:
+  gdn_state:
+    max_slots: 129
+warmup_requests:
+  - text: What is in this image?
+    files: [hf://nvidia/Cosmos3-Edge/assets/example_action_fd_umi_first_frame.png]
+    model_kwargs: {max_output_tokens: 4}
+  - text: What is in this image?
+    files: [hf://nvidia/Cosmos3-Edge/assets/edge_action_id_av_0_output.png]
+    model_kwargs: {max_output_tokens: 4}
