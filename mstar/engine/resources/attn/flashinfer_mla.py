@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import functools
 import logging
-from collections.abc import Mapping
 
 import numpy as np
 import torch
@@ -25,8 +24,8 @@ from mstar.engine.resources.attn.base import (
     one_token_rows,
 )
 from mstar.engine.resources.attn.config import AttentionStep
-from mstar.engine.resources.base import CGSlotKey, Resource
-from mstar.engine.resources.context_parallel import ContextParallelWrapper
+from mstar.engine.resources.base import CGSlotKey
+from mstar.engine.resources.context_parallel import ContextParallel, ContextParallelWrapper
 from mstar.engine.resources.kv.config import KVConfig, KVLayout
 from mstar.engine.resources.kv.plan import KVPlanOutputs
 from mstar.engine.resources.step import SlotLease, StepContext
@@ -312,14 +311,7 @@ class FlashInferMLAManager(AttentionManager):
         # over a placed pool on the FA planner (the kernel in use), the device's SMs, for its work-item cap
         self._fa_sm_count: int | None = None
 
-    def depends_on(self):
-        return {self._kv_cache_name}
-
-    def bind_dependencies(self, resources: Mapping[str, Resource]) -> None:
-        placement = resources[self._kv_cache_name].placement
-        self._placement = placement
-        if placement is None:
-            return
+    def _bind_placement(self, placement: ContextParallel) -> None:
         # the latent is every TP rank's, so under TP placement it is attended for every partner's heads
         cfg = self._kv_config
         self._wrapper_kwargs.update(placement.local_geometry(cfg.page_size, cfg.num_qo_heads))

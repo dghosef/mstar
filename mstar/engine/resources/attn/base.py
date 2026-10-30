@@ -47,13 +47,27 @@ def resolve_attn_backend(backend: AttnBackend, device: torch.device) -> AttnBack
 
 class AttentionManager(AttentionResource):
     prefix_skip_safe = True
-    # the KV pool's placement, bound by a backend that supports a context-parallel pool
+    # the KV pool's placement (`bind_dependencies`)
     _placement: "ContextParallel | None" = None
 
     # Remains abstract except for build; will build based
     # on the attention backend
 
     # Label / layer cursors come from `AttentionResource`; `run` resolves them.
+
+    def depends_on(self):
+        return {self._kv_cache_name}
+
+    def bind_dependencies(self, resources) -> None:
+        placement = resources[self._kv_cache_name].placement
+        if placement is not None:
+            self._placement = placement
+            self._bind_placement(placement)
+
+    def _bind_placement(self, placement: "ContextParallel") -> None:
+        """This rank's share of a context-parallel pool, for a backend that supports one
+        (``supports_context_parallel``; the engine refuses the others at load)."""
+        raise ValueError(f"{type(self).__name__} does not support a context-parallel KV pool")
 
     def fingerprint(self) -> bytes:
         # the class, not the declared backend: `build` moves dense to another

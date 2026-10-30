@@ -19,8 +19,8 @@ from mstar.engine.resources.attn.wrappers import (
     FlashInferPrefillWrapper,
     check_flashinfer_head_dim,
 )
-from mstar.engine.resources.base import CGSlotKey, Resource
-from mstar.engine.resources.context_parallel import ContextParallelWrapper
+from mstar.engine.resources.base import CGSlotKey
+from mstar.engine.resources.context_parallel import ContextParallel, ContextParallelWrapper
 from mstar.engine.resources.kv.config import PagedKVConfig
 from mstar.engine.resources.kv.plan import KVPlanOutputs
 from mstar.engine.resources.spec import CombinedSplit
@@ -77,14 +77,7 @@ class FlashInferManager(AttentionManager):
 
         self._workspaces = WorkspacePool(device)
 
-    def depends_on(self):
-        return {self._kv_cache_name}
-
-    def bind_dependencies(self, resources: Mapping[str, Resource]) -> None:
-        placement = resources[self._kv_cache_name].placement
-        self._placement = placement
-        if placement is None:
-            return
+    def _bind_placement(self, placement: ContextParallel) -> None:
         cfg = self._kv_config
         self._wrapper_kv_kwargs.update(placement.local_geometry(cfg.page_size, cfg.num_qo_heads))
         self._new_kwargs = dict(
