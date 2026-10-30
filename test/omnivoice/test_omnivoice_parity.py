@@ -54,13 +54,13 @@ from mstar.model.omnivoice.components.unmask import (
     apply_reveal,
     build_reveal_schedule,
     predict_tokens_with_scoring,
+    unmask_step,
 )
 from mstar.model.omnivoice.config import OmniVoiceConfig
 from mstar.model.omnivoice.submodules import (
     UNMASK_LOOP_NAME,
     OmniVoiceBackboneSubmodule,
 )
-from mstar.model.submodule_base import NodeInputs
 
 MODEL_PATH = os.environ.get("OMNIVOICE_PATH", "k2-fsa/OmniVoice")
 NUM_CODEBOOK = 8
@@ -240,6 +240,49 @@ def test_sampling_is_reproducible_under_a_seed():
     assert torch.equal(pred_a, pred_b)
     assert torch.equal(rev_a, rev_b)
     assert not (torch.equal(pred_a, pred_c) and torch.equal(rev_a, rev_c))
+
+
+@pytest.mark.parametrize("guidance", [(2.0, 2.0, 2.0), (2.0, 0.0, 3.0)])
+@pytest.mark.parametrize("class_temperature", [0.0, 1.0])
+def test_batched_unmask_step_matches_the_per_request_reveal(guidance, class_temperature):
+    """``unmask_step`` over a step's requests is ``predict_tokens_with_scoring``
+    then ``apply_reveal`` per request, with each request's own generator, cell
+    for cell; also with CFG off for one request, and with sampled tokens."""
+    gen = torch.Generator().manual_seed(0)
+    items = [_item(prefix_len=4, target_len=n, guidance_scale=g) for n, g in zip((9, 5, 12), guidance, strict=True)]
+    for item, done in zip(items, (0, 7, 30), strict=True):
+        cells = torch.randperm(NUM_CODEBOOK * item.target_len, generator=gen)[:done]
+        item.tokens.view(-1)[cells] = torch.randint(0, MASK_ID, (done,), generator=gen)
+    canvas = build_packed_canvas(items, torch.device("cpu"))
+    rows = canvas.flat_target_total + canvas.flat_uncond_total
+    logits = torch.randn(1, NUM_CODEBOOK, rows, MASK_ID + 1, generator=gen).half()
+    counts = [4, 0, 11]
+
+    def gens():
+        return [torch.Generator().manual_seed(100 + i) for i in range(len(items))]
+
+    want = []
+    for item, count, g in zip(items, counts, gens(), strict=True):
+        c_logits, u_logits = canvas.slice_logits(logits, item)
+        u_logits = c_logits if u_logits is None else u_logits
+        pred, scores = predict_tokens_with_scoring(
+            c_logits.float(), u_logits.float(), MASK_ID, item.guidance_scale, class_temperature, generator=g,
+        )
+        want.append(apply_reveal(
+            item.tokens.clone(), pred, scores, count, MASK_ID, layer_penalty_factor=5.0,
+            position_temperature=5.0, generator=g,
+        )[0])
+    before = [item.tokens.clone() for item in items]
+    got = unmask_step(
+        logits, [item.tokens[0] for item in items],
+        [canvas.flat_target_total + item.flat_u_start if item.flat_u_start >= 0 else -1 for item in items],
+        counts, gens(), [item.guidance_scale for item in items], [class_temperature] * 3, [5.0] * 3, [5.0] * 3,
+        MASK_ID,
+    )
+    assert torch.equal(got, torch.cat(want, dim=-1))
+    assert all(torch.equal(item.tokens, b) for item, b in zip(items, before, strict=True)), (
+        "the step wrote its input canvas"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -638,7 +681,7 @@ def test_dense_agreement():
 
 
 # ---------------------------------------------------------------------------
-# preprocess / postprocess split
+# the unmask step
 # ---------------------------------------------------------------------------
 
 
@@ -652,37 +695,45 @@ def _fwd_info(request_id: str, iter_idx: int):
     return info
 
 
-def test_postprocess_reveals_without_touching_the_loop_edge():
-    """``postprocess`` owns the reveal, and the edge it reads stays intact.
+def test_unmask_step_reveals_without_touching_the_loop_edge():
+    """The forward reveals into a new canvas, and the edge it reads stays intact.
 
-    The canvas the engine routes in is the previous iteration's output edge.
-    ``apply_reveal`` writes in place, so the write has to land on a copy; if it
-    did not, the engine's own copy of that step's state would change under it.
+    The canvas the engine routes in is the previous iteration's output edge;
+    if the step wrote it in place, the engine's own copy of that step's state
+    would change under it.
     """
+    from types import SimpleNamespace
+
     target_len, vocab = 16, MASK_ID + 1
     sub = OmniVoiceBackboneSubmodule(backbone=None, config=OmniVoiceConfig())
+    sub.get_device = lambda: torch.device("cpu")
     edge = torch.full((NUM_CODEBOOK, target_len), MASK_ID, dtype=torch.long)
+    info = _fwd_info("a", 1)
+    info.step_metadata["target_len"] = target_len
+    row = sub.prepare_inputs("unmask", info, {
+        "prefix_ids": [torch.zeros(NUM_CODEBOOK, 3, dtype=torch.long)],
+        "prefix_audio_mask": [torch.zeros(3, dtype=torch.bool)],
+        "audio_tokens": [edge],
+        "step_index": [torch.ones(1, dtype=torch.int64)],
+    })
+    engine_inputs = SimpleNamespace(request_ids=[0], per_request_info={0: info})
+    pre = sub.preprocess("unmask", engine_inputs, [row])
 
     # Logits that make the argmax a fixed, non-mask token everywhere.
-    logits = torch.zeros(NUM_CODEBOOK, target_len, vocab)
+    logits = torch.zeros(1, NUM_CODEBOOK, len(pre["canvas"].tgt_index), vocab)
     logits[..., 7] = 10.0
-    outputs = {"c_logits": [logits], "u_logits": [logits.clone()]}
-    inputs = NodeInputs(tensor_inputs={
-        "audio_tokens": edge,
-        "step_index": torch.zeros(1, dtype=torch.int64),
-    }, kwargs={"step": 0})
+    sub._logits = lambda _inputs, _canvas: logits
+    outputs = sub.forward_batched("unmask", engine_inputs, **pre)[0]
 
-    sub.postprocess("a", _fwd_info("a", 0), outputs, inputs)
-
-    assert bool((edge == MASK_ID).all()), "postprocess wrote through the input edge"
-    assert "c_logits" not in outputs and "u_logits" not in outputs
+    assert bool((edge == MASK_ID).all()), "the unmask step wrote through the input edge"
     tokens = outputs["audio_tokens"][0]
     assert tokens.shape == (NUM_CODEBOOK, target_len)
-    assert int(outputs["step_index"][0].reshape(-1)[0]) == 1
+    assert int(outputs["step_index"][0].reshape(-1)[0]) == 2
+    assert set(tokens[tokens != MASK_ID].tolist()) == {7}
 
     revealed = int((tokens != MASK_ID).sum())
     expected = build_reveal_schedule(
         target_len=target_len, num_codebook=NUM_CODEBOOK,
         num_step=GREEDY["num_step"], t_shift=GREEDY["t_shift"],
-    )[0]
+    )[1]
     assert revealed == expected, f"revealed {revealed}, schedule says {expected}"

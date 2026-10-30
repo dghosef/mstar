@@ -59,20 +59,21 @@ def test_forward_batched_keys_rows_by_the_engine_ids():
     sub = OmniVoiceBackboneSubmodule(backbone=None, config=cfg)
     sub.get_device = lambda: torch.device("cpu")
     c = cfg.num_audio_codebook
-    meta = {"target_len": 4, "num_step": 2, "guidance_scale": 2.0}
+    meta = {
+        "target_len": 4, "num_step": 2, "guidance_scale": 2.0, "t_shift": 0.1, "class_temperature": 0.0,
+        "layer_penalty_factor": 5.0, "position_temperature": 5.0,
+    }
     inputs = {
         "prefix_ids": [torch.zeros(c, 3, dtype=torch.long)],
         "prefix_audio_mask": [torch.zeros(3, dtype=torch.bool)],
     }
-    rows = [
-        sub.prepare_inputs(
-            "speech_gen",
-            SimpleNamespace(request_id=f"speech-{h}#1", rid_handle=h, step_metadata=meta, dynamic_loop_iter_counts={}),
-            inputs,
-        )
+    infos = {
+        h: SimpleNamespace(request_id=f"speech-{h}#1", rid_handle=h, random_seed=h, step_metadata=meta,
+                           dynamic_loop_iter_counts={})
         for h in (0, 1)
-    ]
-    engine_inputs = SimpleNamespace(request_ids=[0, 1])
+    }
+    rows = [sub.prepare_inputs("speech_gen", info, inputs) for info in infos.values()]
+    engine_inputs = SimpleNamespace(request_ids=[0, 1], per_request_info=infos)
     pre = sub.preprocess("speech_gen", engine_inputs, rows)
     rows_out = pre["canvas"].tgt_index.shape[0]
     sub._logits = lambda _inputs, _canvas: torch.zeros(1, c, rows_out, cfg.audio_vocab_size)

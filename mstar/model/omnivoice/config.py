@@ -101,7 +101,7 @@ class OmniVoiceConfig:
     max_target_seconds: float = 30.0
 
     # Requests per step. Packing is ragged so length skew costs nothing; this
-    # bounds the Python-side per-item work and the number of reveal loops.
+    # bounds a step's per-request host work (inputs, the canvas layout).
     max_batch_size: int = 16
 
     # The cap that actually matters: a step's cost is sum(doc_lens) tokens
