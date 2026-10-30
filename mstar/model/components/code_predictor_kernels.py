@@ -125,7 +125,10 @@ def cp_attend(
     RoPE, the new k and v written into ``kv_layer (bs, 2, S, Hkv, D)``, and
     causal attention over the depth positions so far. Returns
     ``(tokens, Hq * D)``. One launch, one warp per (token, head): the depth
-    sequence is at most 16 long, so a warp holds its whole key range."""
+    sequence is at most 16 long, so a warp holds its whole key range. The
+    depth loop passes one token a step; ``seq_len > 1`` (causal within the
+    step) is kept for a multi-token opening pass, which needs ``cp_linear``
+    to take 2x the decode bucket's rows first."""
     tokens = qkv.shape[0]
     assert qkv.stride(1) == 1 and kv_layer.stride(-1) == 1 and tokens % seq_len == 0
     out = torch.empty(tokens, n_q_heads * head_dim, device=qkv.device, dtype=qkv.dtype)
