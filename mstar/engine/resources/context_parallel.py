@@ -292,13 +292,9 @@ class ContextParallelWrapper:
 
 
 class ZigzagRows(NamedTuple):
-    """This rank's share of a step's own-token attention under SP placement. Each row's ``T``
-    tokens are cut into ``2P`` chunks, chunk ``i`` of ``T // 2P`` tokens and one more when
-    ``i < T % 2P``. Rank ``r`` attends chunks ``r`` and ``2P - 1 - r``, each chunk's queries over
-    its row's tokens up to the chunk's end (every token of the row on a step that isn't causal),
-    so on rows a multiple of ``2P`` long every rank does the same work; shorter rows' chunks fall
-    to the low ranks. Arrays run over the non-empty chunks, row by row; token indices are the
-    step's."""
+    """This rank's zigzag chunks of a step's own tokens under SP placement (chunks ``r`` and
+    ``2P - 1 - r`` of each row's ``2P``; see the context-parallel docs). Arrays run over the
+    non-empty chunks, row by row; token indices are the step's."""
 
     # [M] the queries this rank attends, chunk by chunk
     tokens: np.ndarray
@@ -340,19 +336,14 @@ def _zigzag_chunks(
 
 
 class ZigzagWrapper:
-    """A step's own tokens under SP placement, attended for this rank's zigzag chunks alone
-    (``zigzag_rows``), as ``ContextParallel.share`` takes them: ``[N, H, D]`` and lse ``[N, H]``,
-    0 and -inf off its chunks.
+    """A step's own tokens under SP placement, attended for this rank's zigzag chunks alone, out 0
+    and lse -inf off them. The kernel is the backend's paged prefill wrapper over pages of one
+    slot (page ``i`` the step's token ``i``), so a rank's two chunks, whose key prefixes overlap,
+    plan as two rows of one call with no copy of the keys.
 
-    The kernel is the backend's paged prefill wrapper over pages of one slot, page ``i`` the step's
-    token ``i``, viewed from the keys ``run`` is passed. A chunk's keys are then a list of page
-    indices (``token_runs``), so a rank's two chunks, whose key prefixes overlap, plan as two rows
-    of one call. ``run`` gathers the chunks' queries and scatters their outputs back.
-
-    ``paged`` builds the kernel: called with no arguments for an eager one, and with ``batch_size``,
-    ``max_total_tokens`` and ``max_num_pages`` for a captured one. ``as_pages`` makes the one-slot
-    pages from ``run``'s keys; the first ``num_queries`` of ``run``'s arguments are query parts,
-    the rest keys."""
+    ``paged`` builds the kernel, with ``batch_size``, ``max_total_tokens`` and ``max_num_pages``
+    for a captured one; ``as_pages`` makes the one-slot pages from ``run``'s keys; the first
+    ``num_queries`` of ``run``'s arguments are query parts, the rest keys."""
 
     def __init__(
         self,
