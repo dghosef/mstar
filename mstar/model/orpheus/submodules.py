@@ -232,10 +232,15 @@ class SNACDecoderSubmodule(NodeSubmodule):
     the last whole frame.
 
     Batched: windows of one size decode in one SNAC forward, and every size
-    a stream can produce has a capture. The scheduler batches each size
-    apart (``split_batches_by_capture_key``), because the decoder is not
-    causal and padding would change the frames next to it; a batch that
-    mixes sizes anyway decodes each size apart, eagerly.
+    a stream can produce has a capture. A window whose own frames start
+    ``SNAC_LEFT_REACH_FRAMES`` or more in decodes them the same with anything
+    prepended, so it is padded on the left to the widest window
+    (``_left_pad``) and a stream's later windows share one size (all but the
+    first two, with the default geometry). A window that starts closer keeps
+    its own size: the decoder is not causal, and padding that near would
+    change the frames it emits.
+    The scheduler batches each size apart (``split_batches_by_capture_key``);
+    a batch that mixes sizes anyway decodes each size apart, eagerly.
     """
 
     # fp32, uncompiled: what ``get_stateless_flavor`` used to buy on the old
@@ -258,7 +263,9 @@ class SNACDecoderSubmodule(NodeSubmodule):
     def get_accelerator_graph_configs(
         self, device: torch.device, tp_world_size: int = 1
     ) -> list[AcceleratorGraphConfig]:
-        """One capture per window size a stream can produce, final flushes included.
+        """One capture per window size ``snac_window_frames`` lists, final
+        flushes included. That over-covers: sizes that occur only past the left
+        reach are padded to the widest and never replay.
 
         Not compiled, like the eager path (``disable_torch_compile``): the
         captured and eager decodes of a stream then run the same kernels, and
