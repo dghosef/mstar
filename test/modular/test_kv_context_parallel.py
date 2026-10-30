@@ -24,6 +24,7 @@ from test_startup_graph_validation import _qwen3_5
 
 from mstar.distributed.communication import CommGroup, JointGroups, WorkerParallelGroups
 from mstar.engine.engine import Engine
+from mstar.engine.resources.attn import flashinfer_mla as fm
 from mstar.engine.resources.attn.base import AttentionManager
 from mstar.engine.resources.attn.config import AttentionConfig, AttentionSpec, AttentionStep, AttnBackend
 from mstar.engine.resources.base import EngineResourceInfo, Resource
@@ -647,6 +648,37 @@ def test_mla_attention_refuses_a_context_only_step_over_a_placed_pool():
     attn, _ = _cp_attention(joint, CPU, torch.float32, mla=True)
     with pytest.raises(ValueError, match="context_only step over a context-parallel KV pool"):
         _plan(attn, _Case.build(PREFILL_ROWS, CPU, torch.float32, mla=True), context_only=True)
+
+
+def test_mla_ranks_refuse_the_same_steps_past_the_fa_planners_work_item_cap(monkeypatch):
+    """FlashInfer's FA MLA planner counts each rank's own KV lengths, which differ over a placed
+    pool, so its own refusal could come on one rank alone and hang the others in the exchange.
+    The refusal before it is the same on every rank, whatever the cap."""
+    monkeypatch.setattr(fm, "_sm_count", lambda device: 132)
+    case = _Case.build(PREFILL_ROWS, CPU, torch.float32, mla=True)
+    ranks = [
+        _cp_attention(JointGroups(tp_group=_group(rank, P), sp_group=CommGroup.trivial()), CPU, torch.float32,
+                      mla=True, flashinfer_backend="fa2")
+        for rank in range(P)
+    ]
+    # the context lengths each rank plans
+    indptrs = case.plan["main"].cpu_indptrs
+    lens = [place.local_indptrs(indptrs, CP_PAGE, context_only=True)[0].kv_lens.tolist() for _, place in ranks]
+    assert lens[0] != lens[1]
+
+    def refuses(attn) -> bool:
+        try:
+            _plan(attn, case)
+        except ValueError as error:
+            assert "work items" in str(error)
+            return True
+        return False
+
+    decisions = []
+    for cap in range(1, 400):
+        monkeypatch.setattr(fm, "_FA_MAX_WORK_ITEMS", cap)
+        decisions.append([refuses(attn) for attn, _ in ranks])
+    assert all(a == b for a, b in decisions) and {a for a, _ in decisions} == {False, True}
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")

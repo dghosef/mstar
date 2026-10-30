@@ -1908,9 +1908,9 @@ place first when the attention resource's ``reads_step_kv()`` says the step atte
 decode step keeps the fused kernel. The MLA backend (``flashinfer_mla``) attends a placed pool
 the same way, its own tokens on a second MLA call over the latents the layer passes as ``k``
 (``MLAAttention`` does), and refuses a ``context_only`` step. It plans on FA3 (Hopper) or FA2
-rather than ``auto``'s other fallbacks, and a step that planner refuses (FA MLA caps a plan's
-work items, which TP mode's widened heads reach ``P`` times sooner) fails with a message naming
-it. An MLA pool's one latent is every TP rank's, so in TP mode ``P = tp``, and a multi-token
+rather than ``auto``'s other fallbacks. That planner caps a plan's work items, which TP mode's
+widened heads reach ``P`` times sooner, and counts each rank's own KV lengths, so a step whose
+query lengths alone could pass the cap is refused before it plans, on every rank alike. An MLA pool's one latent is every TP rank's, so in TP mode ``P = tp``, and a multi-token
 step exchanges every head's queries and partials over the whole TP group each layer; that
 prefill cost is unmeasured. The MLA path is tested on CPU through its torch fallback; its GPU
 tests are written but have not run. GLM-5.2 with ``dsa_long_context`` off (context capped at

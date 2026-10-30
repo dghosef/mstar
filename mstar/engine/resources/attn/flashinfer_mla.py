@@ -14,6 +14,7 @@ import functools
 import logging
 from collections.abc import Mapping
 
+import numpy as np
 import torch
 
 from mstar.engine.resources.attn.base import (
@@ -44,6 +45,31 @@ def flashinfer_mla_supports(kv_lora_rank: int, qk_rope_head_dim: int) -> bool:
         return True
     # kpe 0 (a NoPE cache with no rope slot) plans from FlashInfer 0.6.18 on
     return qk_rope_head_dim == 0 and _flashinfer_at_least("0.6.18")
+
+
+# the work items a plan of FlashInfer's FA MLA planner (fa2, fa3) holds, as of 0.7.2
+_FA_MAX_WORK_ITEMS = 16384
+
+
+def fa_work_items_bound(qo_indptr: torch.Tensor, num_heads: int, num_sm: int) -> int:
+    """At least the work items FlashInfer's FA MLA planner counts for a step, KV splits included,
+    from its query lengths alone: one per (row, query tile), and at most one split per SM
+    cluster past those, since a split is at least the average KV per cluster. Each rank of a
+    context-parallel pool plans its own KV lengths, so the planner's count can differ by rank;
+    this can't."""
+    q = np.diff(qo_indptr.numpy()).astype(np.int64)
+    if not len(q):
+        return 0
+    # the planner's cluster and query tile
+    cluster = 2 if q.sum() * num_heads // len(q) > 64 else 1
+    tile = 64 * cluster
+    return int(((q * num_heads + tile - 1) // tile).sum()) + num_sm // cluster
+
+
+def _sm_count(device: torch.device) -> int | None:
+    """The device's SMs; None off CUDA, where the torch fallback plans."""
+    device = torch.device(device)
+    return torch.cuda.get_device_properties(device).multi_processor_count if device.type == "cuda" else None
 
 
 @functools.cache
@@ -283,6 +309,8 @@ class FlashInferMLAManager(AttentionManager):
         self._workspaces = WorkspacePool(device)
         # the KV pool's placement (`bind_dependencies`)
         self._placement = None
+        # over a placed pool on the FA planner, the device's SMs, for its work-item cap
+        self._fa_sm_count: int | None = None
 
     def depends_on(self):
         return {self._kv_cache_name}
@@ -301,6 +329,8 @@ class FlashInferMLAManager(AttentionManager):
             from mstar.platforms import current_platform
 
             self._wrapper_kwargs["backend"] = "fa3" if current_platform.arch(self._device) == "sm_90" else "fa2"
+        if self._wrapper_kwargs["backend"] in ("fa2", "fa3"):
+            self._fa_sm_count = _sm_count(self._device)
 
     @property
     def uses_kernel(self) -> bool:
@@ -414,24 +444,31 @@ class FlashInferMLAManager(AttentionManager):
                 )
                 wrapper = self._eager_wrapper(label, ctx.slot, is_decode)
             if self._placement is not None:
-                try:
-                    wrapper.plan(
-                        self._placement, self._kv_config.page_size, kv_out, causal=step.causal, dtype=self._dtype,
-                    )
-                except ValueError as error:
-                    # FlashInfer's FA planner refusing the step (its work-item cap, say), the same on
-                    # every rank: the plan's shapes are the logical ones
-                    raise ValueError(
-                        f"FlashInfer's MLA planner refused a step of {int(indptrs.qo_indptr[-1])} query tokens "
-                        f"over context-parallel KV pool {self._kv_cache_name!r} ({error}). Under TP placement "
-                        "each rank plans every partner's query heads, so a step reaches its work-item cap "
-                        f"{self._placement.size}x sooner than unplaced: batch fewer prompt tokens a step "
-                        "(max_concurrent_requests) or place positions over SP ranks"
-                    ) from error
+                self._refuse_past_work_item_cap(indptrs.qo_indptr)
+                wrapper.plan(
+                    self._placement, self._kv_config.page_size, kv_out, causal=step.causal, dtype=self._dtype,
+                )
             else:
                 wrapper.plan(causal=step.causal, dtype=self._dtype, **indptrs.to_kwargs_dict())
             plan_states[label] = wrapper
         self._preplanned = ctx.is_preplan
+
+    def _refuse_past_work_item_cap(self, qo_indptr: torch.Tensor) -> None:
+        """Refuses, before FlashInfer can, a step its FA planner may not hold. The planner counts
+        this rank's own KV lengths, so its refusal could come on one rank of the lockstep instance
+        alone; the bound reads the step's query lengths, the same on every rank."""
+        if self._fa_sm_count is None:
+            return
+        heads = self._wrapper_kwargs["num_qo_heads"]
+        bound = fa_work_items_bound(qo_indptr, heads, self._fa_sm_count)
+        if bound > _FA_MAX_WORK_ITEMS:
+            raise ValueError(
+                f"a step of {int(qo_indptr[-1])} query tokens at {heads} heads can take FlashInfer's FA MLA "
+                f"planner up to {bound} work items over context-parallel KV pool {self._kv_cache_name!r}, past "
+                f"its cap of {_FA_MAX_WORK_ITEMS}. Under TP placement each rank plans every partner's query "
+                f"heads, so a step reaches it {self._placement.size}x sooner than unplaced: batch fewer prompt "
+                "tokens a step (max_concurrent_requests) or place positions over SP ranks"
+            )
 
     def clear_preplan(self):
         self._preplanned = False
