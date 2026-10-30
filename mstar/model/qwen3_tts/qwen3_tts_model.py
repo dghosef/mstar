@@ -385,6 +385,25 @@ def codec_dtype(value: str | torch.dtype) -> torch.dtype:
         ) from None
 
 
+def apply_codec_chunking(codec, kwargs: dict[str, Any]) -> None:
+    """Server-init knobs (``model_kwargs``) onto ``codec``: the chunk ramp and
+    the steady chunk, in frames. A bigger first chunk gives a client more audio
+    to play while the next one is made; a smaller one, earlier first audio. An
+    empty ramp starts at the steady chunk."""
+    def is_count(value) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+    schedule, frames = kwargs.get("codec_chunk_schedule"), kwargs.get("codec_chunk_frames")
+    if schedule is not None:
+        if not isinstance(schedule, (list, tuple)) or not all(map(is_count, schedule)):
+            raise ValueError(f"codec_chunk_schedule must be a list of positive integers, got {schedule!r}")
+        codec.chunk_schedule = tuple(schedule)
+    if frames is not None:
+        if not is_count(frames):
+            raise ValueError(f"codec_chunk_frames must be a positive integer, got {frames!r}")
+        codec.chunk_frames = frames
+
+
 class Qwen3TTSModel(Model):
     """Qwen3-TTS 12 Hz model contract (CustomVoice, VoiceDesign, Base).
 
@@ -425,19 +444,7 @@ class Qwen3TTSModel(Model):
         # Rejects unknown ``tts_model_type`` values; every supported variant
         # is handled below through the config's capability properties.
         self.config = Qwen3TTSModelConfig.from_pretrained(self.local_dir)
-        # Server-init knobs: the codec's chunk ramp and steady chunk, in frames
-        # (a bigger first chunk gives a client more audio to play while the
-        # next one is made; a smaller one, earlier first audio).
-        codec = self.config.codec
-        if kwargs.get("codec_chunk_schedule") is not None:
-            codec.chunk_schedule = tuple(int(n) for n in kwargs["codec_chunk_schedule"])
-        if kwargs.get("codec_chunk_frames") is not None:
-            codec.chunk_frames = int(kwargs["codec_chunk_frames"])
-        if not codec.chunk_schedule or min(*codec.chunk_schedule, codec.chunk_frames) < 1:
-            raise ValueError(
-                f"codec_chunk_schedule {codec.chunk_schedule} and codec_chunk_frames {codec.chunk_frames} "
-                "must be positive frame counts"
-            )
+        apply_codec_chunking(self.config.codec, kwargs)
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.local_dir,
@@ -646,8 +653,8 @@ class Qwen3TTSModel(Model):
     def get_partition_topology(self) -> PartitionTopology:
         """Buffer codec frames in a ramp of chunks of new frames.
 
-        The first Codec invocation runs after ``chunk_schedule[0]`` frames so
-        audio starts flowing early; chunks then grow to ``chunk_frames``. No
+        The first Codec invocation runs after the ramp's first chunk of frames
+        so audio starts flowing early; chunks then grow to ``chunk_frames``. No
         chunk repeats earlier frames: the codec keeps its decoder state per
         stream (``CODEC_STATE``). Only an in-context clone's first chunk carries
         context, the reference tail primed into the stream.

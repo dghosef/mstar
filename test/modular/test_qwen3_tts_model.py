@@ -39,7 +39,7 @@ from mstar.model.qwen3_tts.config import (
     Qwen3TTSModelConfig,
     Qwen3TTSTalkerConfig,
 )
-from mstar.model.qwen3_tts.qwen3_tts_model import Qwen3TTSModel, clip_digest
+from mstar.model.qwen3_tts.qwen3_tts_model import Qwen3TTSModel, apply_codec_chunking, clip_digest
 from mstar.model.qwen3_tts.submodules import CodecSubmodule, TalkerSubmodule
 from mstar.model.registry import HF_MODELS, get_model_class
 from mstar.model.submodule_base import (
@@ -112,6 +112,20 @@ def _step_context(graph_walk: str, request_ids: list[str]) -> StepContext:
         capture=False,
         plan_results={},
     )
+
+@pytest.mark.parametrize("kwargs", [
+    {"codec_chunk_schedule": [2.5, 8]}, {"codec_chunk_schedule": [True]}, {"codec_chunk_schedule": 4},
+    {"codec_chunk_schedule": [0]}, {"codec_chunk_frames": 12.5}, {"codec_chunk_frames": 0},
+])
+def test_qwen3_tts_refuses_a_codec_chunk_knob_that_is_not_a_frame_count(kwargs):
+    """A deployment's chunk knobs are refused rather than truncated or failing
+    with a bare TypeError; an empty ramp starts at the steady chunk."""
+    with pytest.raises(ValueError, match="codec_chunk"):
+        apply_codec_chunking(Qwen3TTSModelConfig().codec, kwargs)
+    codec = Qwen3TTSModelConfig().codec
+    apply_codec_chunking(codec, {"codec_chunk_schedule": []})
+    assert codec.chunk_schedule == ()
+
 
 def test_qwen3_tts_config_reads_checkpoint_json(tmp_path):
     (tmp_path / "speech_tokenizer").mkdir()

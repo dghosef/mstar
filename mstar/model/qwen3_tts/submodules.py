@@ -1076,7 +1076,7 @@ class CodecSubmodule(ARNodeSubmodule):
         widths = {*codec.chunk_schedule, codec.chunk_frames}
         if config.supports_reference_audio:
             # a clone's first chunk: the reference tail, then the ramp's first chunk
-            widths.add(codec.clone_lead_frames + codec.chunk_schedule[0])
+            widths.add(codec.clone_lead_frames + (*codec.chunk_schedule, codec.chunk_frames)[0])
         self.windows = sorted(widths)
         self.max_window = self.windows[-1]
         self.total_upsample = 1

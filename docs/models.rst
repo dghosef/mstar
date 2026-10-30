@@ -634,7 +634,8 @@ Qwen3-TTS notes
   chunk would decode 73 frames.
   The SnakeBeta activations run as one fused kernel. A deployment sets the
   ramp and the steady chunk with ``model_kwargs: {codec_chunk_schedule: [1, 3,
-  8, 16], codec_chunk_frames: 25}``.
+  8, 16], codec_chunk_frames: 25}`` (positive integers; ``[]`` starts at the
+  steady chunk).
 - Talker prefill, the clone prefill included, replays a packed CUDA Graph for
   the smallest token bucket (32 to 1024 tokens) that holds the batch; a clone's
   reference frames join the codec stream in ``postprocess``. Prefill and decode
