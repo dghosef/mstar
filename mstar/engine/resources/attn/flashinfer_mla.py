@@ -206,7 +206,7 @@ class FlashInferMLAWrapper:
         """``q_nope [T, H, kv_lora_rank]`` (absorbed), ``q_pe [T, H, qk_rope_head_dim]``,
         ``kv_cache_layer [pages, page_size, latent]`` -> ``[T, H, kv_lora_rank]`` (and, with
         ``return_lse``, the natural log-sum-exp of the scores ``[T, H]`` fp32), in ``out`` and
-        ``lse`` when given (the kernel's)."""
+        ``lse`` when given (the kernel path; the fallback returns its own)."""
         ckv = kv_cache_layer[..., : self.kv_lora_rank]
         kpe = kv_cache_layer[..., self.kv_lora_rank :]
         if self.fallback:
@@ -260,7 +260,8 @@ class FlashInferMLAOwnTokensWrapper(FlashInferMLAWrapper):
         if self.use_cuda_graph and not self.fallback:
             # as the ragged wrapper's (`_FlashInferRaggedPrefillBase`): the kernel writes only the
             # planned rows, so ``plan`` resets a captured bucket's padding to out 0, lse -inf, which
-            # merges to 0. A page a token, so the pages are the bucket's tokens
+            # merges to 0. ``run`` returns these buffers themselves (no clone, unlike the ragged out):
+            # read them before the next ``run``. A page a token, so the pages are the bucket's tokens
             rows = (kwargs["max_num_pages"], self.num_qo_heads)
             self._out_buf = torch.zeros(*rows, self.kv_lora_rank, dtype=dtype, device=self.device)
             self._lse_buf = torch.full(rows, -math.inf, dtype=torch.float32, device=self.device)
