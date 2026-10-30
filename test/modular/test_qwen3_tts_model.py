@@ -11,7 +11,7 @@ import torch
 import yaml
 
 from mstar.conductor.request_info import CurrentForwardConductorMetadata
-from mstar.engine.engine import ExecutingBatch
+from mstar.engine.engine import ExecutingBatch, compile_node_regions
 from mstar.engine.fp32_precision import Fp32Precision, fp32_precision_scope
 from mstar.engine.resources import StepContext, apply_yaml_overrides
 from mstar.engine.resources.attn.config import AttentionSpec
@@ -1960,6 +1960,9 @@ def test_qwen3_tts_streamed_codec_audio_matches_one_whole_decode(captured, devic
         decoder = _tiny_decoder(config).to(device)
         reference = copy.deepcopy(decoder)
         submodule = CodecSubmodule(decoder, config)
+        if device == "cuda":
+            # as the engine does (the codec declares no fp32 precision and opts out of autocast)
+            compile_node_regions("Codec", submodule, None, None, device)
         names = {type(m).__name__ for m in submodule.decoder.modules()}
         assert "FusedSnakeBeta" in names and "SnakeBeta" not in names
         driver = _CodecDriver(submodule, device=device)

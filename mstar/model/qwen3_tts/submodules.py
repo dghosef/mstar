@@ -1002,9 +1002,10 @@ class CodecSubmodule(ARNodeSubmodule):
         self._lengths_stager = PinnedStager(torch.long, numel=self.MAX_BATCH_SIZE)
 
     def compile_regions(self) -> dict[str, list[tuple]]:
-        """The stateless decode, compiled once with dynamic shapes for every
-        chunk width and batch bucket (a static compile per captured shape
-        made startup ~9x longer)."""
+        """The stateless decode, compiled with dynamic shapes: a few graphs
+        (batch 1 and width 1 specialise) serve every chunk width and batch
+        bucket, where a static compile per captured shape cost ~16 minutes of
+        a ~19-minute cold start."""
         return {"incremental": []}
 
     def _bucket(self, frames: int) -> int:
