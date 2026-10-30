@@ -70,35 +70,39 @@ logger = logging.getLogger(__name__)
 REF_RMS_KEY = "output_ref_rms"
 
 
+def _finite_number(key: str, value) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        number = math.nan
+    if isinstance(value, bool) or not math.isfinite(number):
+        raise ValueError(f"{key} must be a finite number, not {value!r}")
+    return number
+
+
+# The longest silence pad, or fade, a request may ask for at each end, in seconds
+MAX_SHAPING_SECONDS = 10.0
+
+
 def output_shaping(kwargs: dict) -> dict:
     """The request's output-shaping kwargs as ``post_process`` takes them.
     ``process_prompt`` reads them too, so a bad value fails the request before
     it generates."""
     enabled = kwargs.get("postprocess_output", True)
-    if not isinstance(enabled, bool):
+    # 0 and 1 as well: JSON clients send them for booleans
+    if enabled not in (True, False):
         raise ValueError(f"postprocess_output must be true or false, not {enabled!r}")
-    try:
-        return {
-            "pad_duration": float(kwargs.get("pad_duration", 0.1)),
-            "fade_duration": float(kwargs.get("fade_duration", 0.1)),
-            "enabled": enabled,
-        }
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"pad_duration and fade_duration must be numbers: {exc}") from None
+    shaping = {"enabled": bool(enabled)}
+    for key in ("pad_duration", "fade_duration"):
+        seconds = _finite_number(key, kwargs.get(key, 0.1))
+        if not 0 <= seconds <= MAX_SHAPING_SECONDS:
+            raise ValueError(f"{key} must be between 0 and {MAX_SHAPING_SECONDS:g} seconds, not {seconds!r}")
+        shaping[key] = seconds
+    return shaping
 
 
 # The unmask loop's float knobs a request may set (``extra_body``)
 UNMASK_KNOBS = ("guidance_scale", "t_shift", "layer_penalty_factor", "position_temperature", "class_temperature")
-
-
-def _finite_number(key: str, value) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        number = math.nan
-    if isinstance(value, bool) or not math.isfinite(number):
-        raise ValueError(f"{key} must be a finite number, not {value!r}")
-    return number
 
 
 def unmask_knobs(kwargs: dict, defaults) -> dict[str, float]:
