@@ -579,8 +579,11 @@ class OmniVoiceCode2WavSubmodule(_SingleRequestMixin, NodeSubmodule):
     unmask loop of every other request.
 
     A canvas that still holds a MASK cell means the loop ended early, which
-    would decode to noise -- a fault, not a degraded result. The step poisons
-    such a waveform with NaN (no host sync here), and ``postprocess`` refuses it.
+    would decode to noise -- a fault, not a degraded result. The MASK id is
+    outside the codebooks, so the decode reads code 0 there (an out-of-range
+    index on the GPU is a device-side assert that kills the worker), and the
+    step poisons the waveform with NaN (no host sync here) for
+    ``postprocess`` to refuse.
     """
 
     disable_torch_compile = True
@@ -607,7 +610,7 @@ class OmniVoiceCode2WavSubmodule(_SingleRequestMixin, NodeSubmodule):
         audio_tokens: torch.Tensor,
         **kwargs,
     ) -> NameToTensorList:
-        waveform = decode_canvas(self.codec, audio_tokens)
-        masked = (audio_tokens == self.config.audio_mask_id).any()
-        waveform = torch.where(masked, torch.full_like(waveform, float("nan")), waveform)
+        masked = audio_tokens == self.config.audio_mask_id
+        waveform = decode_canvas(self.codec, audio_tokens.masked_fill(masked, 0))
+        waveform = torch.where(masked.any(), torch.full_like(waveform, float("nan")), waveform)
         return {"audio_output": [waveform]}

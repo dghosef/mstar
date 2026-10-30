@@ -142,10 +142,14 @@ def test_a_clients_value_for_a_model_internal_key_never_reaches_the_model_or_con
     ({"pad_duration": "soon"}, "pad_duration"),
     # bool("false") is True
     ({"postprocess_output": "false"}, "postprocess_output"),
+    # an infinite reveal score ties every cell, which can leave MASK cells on the canvas
+    ({"position_temperature": float("inf")}, "position_temperature"),
+    ({"layer_penalty_factor": "steep"}, "layer_penalty_factor"),
 ])
-def test_omnivoice_refuses_a_bad_output_shaping_value_before_it_generates(kwargs, field):
-    """``postprocess`` shapes the waveform after the whole unmask loop; a bad
-    value there would fail a request whose generation already ran."""
+def test_omnivoice_refuses_a_bad_request_value_before_it_generates(kwargs, field):
+    """``postprocess`` shapes the waveform after the whole unmask loop, which
+    reads its knobs at every step; a bad value in either would fail a request
+    whose generation already ran (or, read at the conductor, hang its client)."""
     from mstar.model.omnivoice.config import OmniVoiceConfig
     from mstar.model.omnivoice.omnivoice_model import OmniVoiceModel
 

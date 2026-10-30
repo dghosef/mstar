@@ -74,6 +74,38 @@ def test_postprocess_shapes_the_waveform_and_refuses_a_masked_canvas(reference):
         model.postprocess(poisoned, "audio", request_kwargs={})
 
 
+def test_code2wav_never_looks_up_the_mask_id():
+    """A canvas that still holds MASK cells decodes with code 0 there and comes
+    out NaN-poisoned: the MASK id is one past the codebooks, and on the GPU that
+    lookup is a device-side assert that kills the worker and every request on it."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from mstar.model.omnivoice.config import OmniVoiceConfig
+    from mstar.model.omnivoice.submodules import OmniVoiceCode2WavSubmodule
+
+    config = OmniVoiceConfig()
+
+    class Codec(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.codebook = torch.nn.Embedding(config.audio_mask_id, 2)   # ids 0 .. mask - 1
+
+        @property
+        def device(self):
+            return self.codebook.weight.device
+
+        def decode(self, tokens):
+            return SimpleNamespace(audio_values=self.codebook(tokens))
+
+    code2wav = OmniVoiceCode2WavSubmodule(Codec(), config)
+    canvas = torch.randint(0, config.audio_mask_id, (config.num_audio_codebook, 5))
+    assert torch.isfinite(code2wav.forward("speech_gen", None, canvas)["audio_output"][0]).all()
+    canvas[3, 2] = config.audio_mask_id
+    assert torch.isnan(code2wav.forward("speech_gen", None, canvas)["audio_output"][0]).all()
+
+
 def _trim_over_a_reversed_copy(audio, rate, mid_sil, lead_sil, trail_sil):
     """The edge trim as pydub runs it: the trailing trim reverses the lead-trimmed
     samples and measures them afresh."""

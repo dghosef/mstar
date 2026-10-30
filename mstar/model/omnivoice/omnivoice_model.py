@@ -20,6 +20,7 @@ same batch.  A fixed-pipeline port has to pick one value for the whole server.
 """
 
 import logging
+import math
 import os
 
 import numpy as np
@@ -84,6 +85,28 @@ def output_shaping(kwargs: dict) -> dict:
         }
     except (TypeError, ValueError) as exc:
         raise ValueError(f"pad_duration and fade_duration must be numbers: {exc}") from None
+
+
+# The unmask loop's float knobs a request may set (``extra_body``)
+UNMASK_KNOBS = ("guidance_scale", "t_shift", "layer_penalty_factor", "position_temperature", "class_temperature")
+
+
+def _finite_number(key: str, value) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = math.nan
+    if isinstance(value, bool) or not math.isfinite(number):
+        raise ValueError(f"{key} must be a finite number, not {value!r}")
+    return number
+
+
+def unmask_knobs(kwargs: dict, defaults) -> dict[str, float]:
+    """The request's ``UNMASK_KNOBS`` over the checkpoint's ``defaults``.
+    ``process_prompt`` reads them too, so a value that is not a finite number
+    fails the request before it generates: an infinite score ties every cell of
+    the reveal, which can leave MASK cells on the finished canvas."""
+    return {key: _finite_number(key, kwargs.get(key, getattr(defaults, key))) for key in UNMASK_KNOBS}
 
 
 class OmniVoiceModel(Model):
@@ -352,6 +375,7 @@ class OmniVoiceModel(Model):
         if set(output_modalities) != {"audio"}:
             raise ValueError("OmniVoice generates audio only")
         output_shaping(kwargs)
+        unmask_knobs(kwargs, self.config.generation)
 
         self._ensure_data_worker_assets()
 
@@ -540,19 +564,7 @@ class OmniVoiceModel(Model):
             # from process_prompt, which settles it on the data worker
             TARGET_LEN: int(model_kwargs[TARGET_LEN]),
             "num_step": num_step,
-            "guidance_scale": float(
-                model_kwargs.get("guidance_scale", defaults.guidance_scale)
-            ),
-            "t_shift": float(model_kwargs.get("t_shift", defaults.t_shift)),
-            "layer_penalty_factor": float(
-                model_kwargs.get("layer_penalty_factor", defaults.layer_penalty_factor)
-            ),
-            "position_temperature": float(
-                model_kwargs.get("position_temperature", defaults.position_temperature)
-            ),
-            "class_temperature": float(
-                model_kwargs.get("class_temperature", defaults.class_temperature)
-            ),
+            **unmask_knobs(model_kwargs, defaults),
         }
 
         full_metadata = CurrentForwardConductorMetadata(
@@ -680,10 +692,11 @@ class OmniVoiceModel(Model):
             return b""
         kw = request_kwargs or {}
         waveform = output.detach().float().cpu().numpy().reshape(-1)
-        if np.isnan(waveform).any():
-            # code2wav poisons a canvas that still held MASK cells (see there)
+        if not np.isfinite(waveform).all():
+            # code2wav poisons a canvas that still held MASK cells with NaN (see there)
             raise RuntimeError(
-                "OmniVoice canvas still held masked cells at decode; the unmask loop ended early."
+                "OmniVoice decoded a waveform that is not finite: its canvas still held masked cells "
+                "at decode (the unmask loop ended early), or the codec itself produced NaN or inf."
             )
         waveform = post_process(
             waveform,
