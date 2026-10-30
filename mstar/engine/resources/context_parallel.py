@@ -113,14 +113,17 @@ class ContextParallel(NamedTuple):
     def attend(
         self,
         q: torch.Tensor,
-        partial: Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+        partial: Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor, torch.Tensor]] | None,
         new: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Attention over the whole pool for this rank's query ``q`` ``[N, H, D]``, fp32: ``partial``
         attends this rank's slots for the queries ``exchange_queries`` returns and gives
         ``(out, lse, valid)`` as ``exchange_partials`` takes them; ``new`` is the step's own
         tokens' ``(out, lse)`` for ``q``'s heads, when it attends them apart from the pool. Runs
-        the same collectives on every rank."""
+        the same collectives on every rank; none when ``partial`` is None, which every rank must
+        agree on: no row has stored context, so ``new`` is the whole attention."""
+        if partial is None:
+            return new[0].float()
         outs, lses = self.exchange_partials(*partial(self.exchange_queries(q)))
         if new is not None:
             outs = torch.cat([outs, new[0].to(outs.dtype).unsqueeze(0)])

@@ -666,6 +666,9 @@ class FlashInferContextParallelWrapper:
         self._captured = captured_tokens > 0
         self._valid = torch.zeros(captured_tokens, dtype=torch.bool, device=device) if self._captured else None
         self._stager = PinnedStager(torch.bool)
+        # an eager step with no stored context on any row (from the logical plan, so the same on
+        # every rank): it attends its own tokens alone, with no context call or exchange
+        self.context_empty = False
 
     @torch.compiler.disable
     def plan(self, placement, page_size: int, kv_out, causal: bool = True, dtype: torch.dtype = torch.bfloat16):
@@ -674,6 +677,9 @@ class FlashInferContextParallelWrapper:
         alone otherwise."""
         context = kv_out.cpu_indptrs
         local, valid_rows = placement.local_indptrs(context, page_size, context_only=self.new is not None)
+        self.context_empty = (
+            not self._captured and self.new is not None and not (context.stored_lens(page_size) > 0).any()
+        )
         if self.new is None:
             self.context.plan(dtype=dtype, **local.to_kwargs_dict())
         else:

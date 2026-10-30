@@ -516,8 +516,17 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla):
         if rows == PREFILL_ROWS:
             with pytest.raises(ValueError, match="got none"):
                 case.run(attn, placement, heads, keys=False)
+        tol = {"atol": 2e-2, "rtol": 2e-2} if cuda else {}
         out = case.run(attn, placement, heads)
-        torch.testing.assert_close(out.float(), case.want()[:, heads], **({"atol": 2e-2, "rtol": 2e-2} if cuda else {}))
+        torch.testing.assert_close(out.float(), case.want()[:, heads], **tol)
+        if rows == PREFILL_ROWS:
+            # an eager first prefill (no row holds stored context) attends its own tokens alone, on
+            # every rank, with no collective
+            first = _Case.build(((0, 5), (0, 3)), device, dtype, mla)
+            _plan(attn, first)
+            issued = len(calls)
+            torch.testing.assert_close(first.run(attn, placement, heads).float(), first.want()[:, heads], **tol)
+            assert len(calls) == issued
         everyone = [None] * world
         dist.all_gather_object(everyone, calls)
         assert calls and all(c == calls for c in everyone), everyone

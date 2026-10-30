@@ -476,7 +476,8 @@ class FlashInferMLAManager(AttentionManager):
         widths = [q_nope.shape[-1], q_pe.shape[-1]]
         return self._placement.attend(
             torch.cat([q_nope, q_pe], dim=-1),
-            lambda queries: wrapper.attend_context(*queries.split(widths, dim=-1), kv_cache_layer),
+            None if wrapper.context_empty
+            else lambda queries: wrapper.attend_context(*queries.split(widths, dim=-1), kv_cache_layer),
             None if wrapper.new is None else wrapper.attend_new(q_nope, q_pe, latent),
         ).to(q_nope.dtype)
 

@@ -360,7 +360,7 @@ class FlashInferManager(AttentionManager):
                 "the k and v run is passed; this step has more than one token a row and got none"
             )
         return self._placement.attend(
-            q, lambda queries: wrapper.attend_context(queries, kv_cache_layer),
+            q, None if wrapper.context_empty else lambda queries: wrapper.attend_context(queries, kv_cache_layer),
             None if wrapper.new is None else wrapper.attend_new(q, k, v),
         ).to(q.dtype)
 
