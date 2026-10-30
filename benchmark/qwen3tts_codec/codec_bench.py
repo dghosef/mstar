@@ -12,7 +12,7 @@ codec changes can be measured in seconds instead of a server restart:
 
 ``parity`` streams real code sequences through the served decode in the
 model's chunk ramp and reports SNR against one whole-sequence float32 decode
-(TF32 GEMMs and convs, as the server runs float32).
+(TF32 GEMMs and convs, matching a server whose codec runs in float32).
 """
 
 from __future__ import annotations
@@ -222,7 +222,7 @@ def snr_db(ref: torch.Tensor, test: torch.Tensor) -> float:
 @torch.no_grad()
 def cmd_parity(args):
     """SNR of the served streamed decode against one whole-sequence float32
-    decode (TF32 GEMMs and convs, as the server runs float32), both
+    decode (TF32 GEMMs and convs, matching a server whose codec runs in float32), both
     int16-quantized like the server's, and of the whole decode in ``--dtype``
     against it."""
     ref_model, ref_codec = load_codec("float32")
