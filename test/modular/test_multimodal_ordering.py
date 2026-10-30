@@ -595,7 +595,6 @@ def test_bagel_spans_come_from_one_tokenization(bagel):
 
 def test_qwen_schedule_walks_the_plan():
     """Qwen3-Omni prefills each attachment where it was written."""
-    pytest.importorskip("flashinfer")  # imported by Qwen3OmniModel's submodules
     from mstar.model.qwen3_omni.qwen3_omni_model import Qwen3OmniModel
 
     model = Qwen3OmniModel.__new__(Qwen3OmniModel)
@@ -619,7 +618,6 @@ def test_qwen_schedule_walks_the_plan():
 
 def test_qwen_placeholder_ids_come_from_the_tokenizer():
     """Not from thinker_config, which disagrees with it on the checkpoint."""
-    pytest.importorskip("flashinfer")  # imported by Qwen3OmniModel's submodules
     from mstar.model.qwen3_omni.qwen3_omni_model import Qwen3OmniModel
 
     vocab = {
@@ -639,7 +637,6 @@ def test_qwen_placeholder_ids_come_from_the_tokenizer():
 
 def test_a_modality_the_tokenizer_cannot_place_is_left_out():
     """A missing placeholder drops that modality rather than scanning for 0."""
-    pytest.importorskip("flashinfer")  # imported by Qwen3OmniModel's submodules
     from mstar.model.qwen3_omni.qwen3_omni_model import Qwen3OmniModel
 
     vocab = {"<|image_pad|>": 5, "<|vision_start|>": 6, "<|vision_end|>": 7}
@@ -751,7 +748,6 @@ def test_bagel_keys_an_understood_image_and_otherwise_only_a_leading_text_span(b
     ([5, 6], [1, 1]),
 ])
 def test_the_talker_skips_system_and_earlier_assistant_turns(ids, kept):
-    pytest.importorskip("flashinfer")  # imported by Qwen3OmniModel's submodules
     from mstar.model.qwen3_omni.submodules import talker_text_mask
 
     config = SimpleNamespace(im_start_token_id=1, system_token_id=2, assistant_token_id=4)
