@@ -18,6 +18,7 @@ from mstar.model.components.diffusion.exact_norm import _reproduces_torch, exact
 from mstar.model.flux2_klein.components.transformer import Flux2DiT
 from mstar.model.flux2_klein.config import Flux2TransformerConfig
 from mstar.model.z_image.components.transformer import ScaledRMSNorm
+from mstar.platforms import current_platform
 
 TINY = Flux2TransformerConfig(
     in_channels=8, out_channels=8, num_layers=1, num_single_layers=2, attention_head_dim=8,
@@ -155,7 +156,10 @@ def test_exact_rms_norm_matches_torch_bit_for_bit(scale):
     qkv = (torch.randn(2, 777, 3 * 6 * 128, device="cuda") * scale).to(torch.bfloat16)
     q = qkv.chunk(3, dim=-1)[1].unflatten(-1, (-1, 128))
     w = (1 + 0.3 * torch.randn(128, device="cuda")).to(torch.bfloat16)
-    assert _reproduces_torch(q.device, q.dtype)  # else exact_rms_norm runs torch's kernel itself
+    # on NVIDIA the replica must reproduce torch, else exact_rms_norm runs torch's kernel itself;
+    # elsewhere it always does
+    if current_platform.is_cuda():
+        assert _reproduces_torch(q.device, q.dtype)
     for x in (q, q.contiguous(), q[0], q.reshape(-1, 128)[:999]):
         assert torch.equal(exact_rms_norm(x, w, 1e-6), torch.nn.functional.rms_norm(x, (128,), w, 1e-6))
     assert torch.equal(exact_rms_norm(q, w, None), torch.nn.functional.rms_norm(q, (128,), w, None))
