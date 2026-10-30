@@ -10,9 +10,8 @@ resources:
     cpu_offload_pages: 1024
 node_groups:
   # The encoders run on the Talker's GPU (idle for text replies). Beside the Thinker
-  # they shared its worker, so at 16+ requests each encoder step waited behind a
-  # Thinker step (H100 a2t: c16/c32 +7/+11% tok/s, TTFT 92/121 -> 72/86 ms). The
-  # handoff across GPUs costs about 2 ms of TTFT, -4% tok/s for one short request.
+  # they shared its worker, so under load each encoder step waited behind a Thinker
+  # step. The handoff across GPUs costs a little TTFT for a lone short request.
   - node_names: [audio_encoder, vision_encoder]
     ranks: [0]
   - node_names: [Thinker]
