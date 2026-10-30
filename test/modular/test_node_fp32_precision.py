@@ -414,6 +414,22 @@ def test_the_setting_holds_under_either_graph_runtime(runtime, monkeypatch):
     assert _flags() == ("high", True)
 
 
+@pytest.mark.parametrize("before", [False, True])
+def test_cudnn_benchmark_is_scoped(before, torch_flag) -> None:
+    from mstar.engine.fp32_precision import cudnn_benchmark
+
+    torch_flag(torch.backends.cudnn, "benchmark", before)
+    with cudnn_benchmark(True):
+        assert torch.backends.cudnn.benchmark
+    assert torch.backends.cudnn.benchmark is before
+    with pytest.raises(RuntimeError), cudnn_benchmark(True):
+        raise RuntimeError
+    assert torch.backends.cudnn.benchmark is before
+    with cudnn_benchmark(False):
+        assert torch.backends.cudnn.benchmark is before
+    assert torch.backends.cudnn.benchmark is before
+
+
 def test_capture_cudnn_benchmark_covers_warmup_only(monkeypatch):
     """``capture_cudnn_benchmark`` turns cuDNN's algorithm search on around the
     node's capture warm-up alone: another node's warm-up and every eager step

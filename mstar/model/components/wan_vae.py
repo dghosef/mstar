@@ -18,8 +18,6 @@ import torch.nn.functional as F
 from diffusers.models.autoencoders.autoencoder_kl_wan import WanCausalConv3d, WanUpsample, unpatchify
 from torch import nn
 
-from mstar.engine.fp32_precision import cudnn_benchmark  # noqa: F401  (the VAE decode's scope, imported from here)
-
 
 class ChannelsLastCausalConv3d(WanCausalConv3d):
     """``WanCausalConv3d`` whose input reaches the kernel channels-last.
