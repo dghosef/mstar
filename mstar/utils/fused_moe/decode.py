@@ -63,6 +63,15 @@ _UNSCALED = _Tuning(
 )
 
 
+def routed_fits(H, I):
+    """Whether ``routed_experts``' tiles divide experts of hidden ``H`` and intermediate
+    ``I``; ``fused_experts`` sends other shapes (e.g. a TP shard of 192) to its grouped path."""
+    return (all(I % min(t["bj"], I) == 0 and H % min(t["bk"], H) == 0
+                for _, t in _UNSCALED.gate_up)
+            and all(H % min(t["bn"], H) == 0 and I % min(t["bc"], I) == 0
+                    for _, t in _UNSCALED.down))
+
+
 @functools.cache
 def _tuning(device: torch.device) -> _Tuning:
     """The H100 table on an H100, the H200 one everywhere else."""
@@ -682,7 +691,7 @@ def routed_experts(x, w13, w2, topk_w, topk_ids, *, reduce=True):
     """``fused_experts`` for up to ``ROUTED_MAX_TOKENS`` tokens: per-pair GEMVs over
     ``w13 (E, 2I, H)`` / ``w2 (E, H, I)`` in ``x.dtype``, no shared expert, SwiGLU and the
     routing weights in fp32. ``(T, H)``, or each slot's term ``(T, K, H)`` without ``reduce``.
-    ``topk_ids``: real experts only, distinct per token."""
+    ``topk_ids``: real experts only, distinct per token; the shapes must pass ``routed_fits``."""
     T, H = x.shape
     K = topk_ids.shape[1]
     assert T <= ROUTED_MAX_TOKENS and x.is_contiguous()

@@ -60,14 +60,15 @@ def _seed():
 # ------------------------------------------------------------------
 
 
-# 1 and 4 tokens take the per-pair GEMV path (fused_moe.decode), 16 and 64 the grouped GEMMs;
-# reduce_results=False is the TP path, summed after the all-reduce.
+# 1 and 4 tokens take the per-pair GEMV path (fused_moe.decode) where its tiles fit, 16 and 64
+# the grouped GEMMs; reduce_results=False is the TP path, summed after the all-reduce.
 @pytest.mark.parametrize("num_tokens", [1, 4, 16, 64])
 @pytest.mark.parametrize(
     "hidden,inter,num_experts,top_k",
     [
         (2048, 768, 128, 8),  # Thinker
         (1024, 384, 128, 8),  # Talker routed experts
+        (1024, 192, 128, 8),  # Talker at TP2: the per-pair tiles don't divide it
     ],
 )
 @pytest.mark.parametrize("reduce_results", [True, False])
