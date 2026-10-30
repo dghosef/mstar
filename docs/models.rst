@@ -1471,9 +1471,13 @@ conditioning tokens, in order).
 Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
 
 ``attention_backend``
-   ``sdpa`` (default) is the reference kernel, cuDNN on an H100 and measured as fast as
-   FlashInfer in the served path. ``flashinfer`` runs the DiT's joint attention on the
-   engine's ragged FlashInfer resource; both are CUDA-graph replayable.
+   ``sdpa`` (klein's default) is the reference kernel, cuDNN on an H100. ``fa3`` runs the
+   joint attention on FlashAttention-3's dense kernel (Hopper only) as a traced op inside
+   the compiled transformer; Z-Image ships it (+3% images/s at 1 to 16 concurrent
+   requests on an H100, images at its plain compile's restart noise), while on klein it
+   gains under 1% and moves the exact output to 35 dB, so klein keeps ``sdpa``.
+   ``flashinfer`` runs the DiT's joint attention on the engine's ragged FlashInfer
+   resource. All three are CUDA-graph replayable.
 
 ``compile``
    ``torch.compile`` of the transformer, one trace per shape.

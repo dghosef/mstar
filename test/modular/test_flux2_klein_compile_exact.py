@@ -146,3 +146,27 @@ def test_knob_reaches_both_models():
     assert Flux2KleinModel(model_path_hf="x", compile_exact_ops=["norms"]).compile_exact_ops == ["norms"]
     assert Flux2KleinModel(model_path_hf="x").compile_exact_ops is False
     assert ZImageModel(model_path_hf="x").compile_exact_ops is False
+
+
+def _fa3_runs() -> bool:
+    from mstar.model.components.diffusion import attention
+
+    return (torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0)
+            and attention._fa3_flash_attn_func is not None)
+
+
+@pytest.mark.skipif(not _fa3_runs(), reason="needs Hopper and the fa3-fwd wheel")
+def test_fa3_dense_attention_matches_sdpa_and_compiles_whole():
+    from mstar.model.components.diffusion.attention import FA3_DENSE, joint_attention, sdpa_attention
+
+    torch.manual_seed(0)
+    # klein's single block: q / k / v are strided chunks of one fused projection, [B, L, H, 128]
+    qkv = torch.randn(2, 4608, 3 * 4 * 128, device="cuda", dtype=torch.bfloat16)
+    q, k, v = (t.unflatten(-1, (-1, 128)) for t in qkv.chunk(3, dim=-1))
+    ref = sdpa_attention(q, k, v).float()
+    out = joint_attention(q, k, v, FA3_DENSE)
+    assert out.shape == q.shape and out.dtype == q.dtype
+    assert (out.float() - ref).abs().max().item() < 2e-2
+    # a traced op, not a graph break inside the compiled transformer
+    compiled = torch.compile(lambda a, b, c: joint_attention(a, b, c, FA3_DENSE) * 2, fullgraph=True)
+    assert torch.equal(compiled(q, k, v), out * 2)
