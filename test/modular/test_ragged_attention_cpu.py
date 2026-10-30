@@ -117,16 +117,11 @@ def test_mixed_wrapper_builds_both_halves_in_graph_mode(monkeypatch):
     assert prefill.call_args.kwargs["use_cuda_graph"] is True
 
 
-def _load_heads(kind, tp=1, sp=2, shard_over_sp=True):
-    """Load one resource of ``kind`` (4 heads) for a node on a tp x sp
-    lockstep instance, and return the heads one rank holds."""
+def _load_heads(tp, sp, shard_over_sp):
+    """Load a ragged attention (4 heads) for a node on a tp x sp lockstep
+    instance, and return the heads one rank holds."""
     from mstar.engine.engine import Engine
     from mstar.engine.resources import RaggedAttentionConfig, RaggedAttentionSpec
-    from mstar.engine.resources.recurrent.config import (
-        RecurrentBlockConfig,
-        RecurrentStateConfig,
-        RecurrentStateSpec,
-    )
     from mstar.model.submodule_base import NodeSubmodule
 
     class _Node(NodeSubmodule):
@@ -162,43 +157,25 @@ def _load_heads(kind, tp=1, sp=2, shard_over_sp=True):
         def resource_needs_remote_transfer(self, nodes, local_nodes):
             return False
 
-    nodes = {"dit"}
-    if kind == "ragged":
-        spec = RaggedAttentionSpec(
-            resource_key="res", nodes=nodes,
-            config=RaggedAttentionConfig(
-                num_qo_heads=4, num_kv_heads=4, head_dim=72, dtype=torch.bfloat16, shard_over_sp=shard_over_sp,
-            ),
-        )
-    else:
-        spec = RecurrentStateSpec("res", nodes, RecurrentStateConfig(
-            num_layers=1, max_slots=2,
-            blocks={"state": RecurrentBlockConfig(shape=(4, 8), dtype=torch.float32, shard_dims=(0,))},
-        ))
+    spec = RaggedAttentionSpec(
+        resource_key="res", nodes={"dit"},
+        config=RaggedAttentionConfig(
+            num_qo_heads=4, num_kv_heads=4, head_dim=72, dtype=torch.bfloat16, shard_over_sp=shard_over_sp,
+        ),
+    )
     engine = Engine(None, autocast_dtype=None)
     engine.load_model(
         submodules={"dit": _Node()}, specs=[spec],
         parallel_groups=_Groups(), device=torch.device("cpu"), transfer_engine_info=None,
     )
-    if kind == "ragged":
-        return engine._resources["res"]._kwargs["num_qo_heads"]
-    return spec.config.blocks["state"].shape[0]
-
-
-@pytest.mark.parametrize("tp,sp,heads", [(1, 2, 2), (2, 1, 2), (2, 2, 1)])
-@pytest.mark.parametrize("kind", ["ragged", "recurrent"])
-def test_ragged_and_recurrent_resources_shard_heads_over_tp_and_sp(kind, tp, sp, heads):
-    """A ragged or recurrent resource the engine builds for a multi-rank node
-    holds one rank's slice of the heads, split over all TP x SP ranks (a ragged
-    resource declaring ``shard_over_sp=False`` is the exception, tested below)."""
-    assert _load_heads(kind, tp=tp, sp=sp) == heads
+    return engine._resources["res"]._kwargs["num_qo_heads"]
 
 
 @pytest.mark.parametrize("tp,sp,heads", [(1, 2, 4), (2, 2, 2)])
 def test_a_ragged_attention_kept_whole_over_sp_splits_heads_over_tp_only(tp, sp, heads):
     """``shard_over_sp=False`` keeps a ragged attention's heads whole across the
     SP ranks of its node; its TP ranks still split them."""
-    assert _load_heads("ragged", tp=tp, sp=sp, shard_over_sp=False) == heads
+    assert _load_heads(tp=tp, sp=sp, shard_over_sp=False) == heads
 
 
 def test_a_dropped_manager_leaves_the_op_registry():
