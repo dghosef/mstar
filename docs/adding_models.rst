@@ -1117,11 +1117,6 @@ methods are:
    ``forward_batched`` only, not ``preprocess`` or ``postprocess``. It can also be set
    per instance in ``__init__``, for example only when the model loads in fp32.
 
-   Under TP or SP the engine sizes every resource it builds for a node (KV, attention,
-   recurrent state) for one rank's slice of the heads, split over all TP × SP ranks. A
-   ragged attention that each SP rank runs whole declares that on the resource, with
-   ``RaggedAttentionConfig(shard_over_sp=False)``.
-
 ``postprocess(...)`` (optional)
    Metadata-only fixups that run on the GPU thread. This method must not read tensor
    values. Do not call ``.item()``, ``.cpu()`` or ``.tolist()`` here. This is a
