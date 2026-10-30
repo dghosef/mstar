@@ -108,8 +108,9 @@ UNMASK_KNOBS = ("guidance_scale", "t_shift", "layer_penalty_factor", "position_t
 def unmask_knobs(kwargs: dict, defaults) -> dict[str, float]:
     """The request's ``UNMASK_KNOBS`` over the checkpoint's ``defaults``.
     ``process_prompt`` reads them too, so a value that is not a finite number
-    fails the request before it generates: an infinite score ties every cell of
-    the reveal, which can leave MASK cells on the finished canvas."""
+    fails the request before it generates. A finite value extreme enough to
+    overflow the reveal's scores is not caught here: MASK cells it leaves on the
+    canvas fail the request in ``postprocess``, after the loop."""
     return {key: _finite_number(key, kwargs.get(key, getattr(defaults, key))) for key in UNMASK_KNOBS}
 
 

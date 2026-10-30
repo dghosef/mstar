@@ -192,7 +192,10 @@ def cp_embed_accumulate(
     assert hidden % block == 0 and table.shape[1] % block == 0
     n_part = table.shape[1] // block if partials is not None else 0
     if n_part and (bs > _MAX_ROWS or n_part > _MAX_PARTIALS):
-        raise ValueError(f"cp_embed_accumulate records partials for at most {_MAX_ROWS} rows, got {bs}")
+        raise ValueError(
+            f"cp_embed_accumulate records partials for at most {_MAX_ROWS} rows and {_MAX_PARTIALS} "
+            f"{block}-wide chunks, got {bs} rows and {n_part} chunks"
+        )
     emb = torch.empty(bs, table.shape[1], dtype=table.dtype, device=weight.device)
     chunks = hidden // block + (table.shape[1] // block if inputs is not None else 0)
     _cp_embed_accumulate_kernel[(bs, chunks)](

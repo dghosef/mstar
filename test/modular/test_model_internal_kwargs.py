@@ -145,7 +145,7 @@ def test_a_clients_value_for_a_model_internal_key_never_reaches_the_model_or_con
     ({"fade_duration": float("nan")}, "fade_duration"),
     # bool("false") is True
     ({"postprocess_output": "false"}, "postprocess_output"),
-    # an infinite reveal score ties every cell, which can leave MASK cells on the canvas
+    # a non-finite unmask knob
     ({"position_temperature": float("inf")}, "position_temperature"),
     ({"layer_penalty_factor": "steep"}, "layer_penalty_factor"),
 ])
