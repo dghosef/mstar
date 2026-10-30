@@ -22,7 +22,6 @@ import time
 
 import torch
 import triton
-import triton.language as tl
 
 logger = logging.getLogger(__name__)
 
@@ -264,29 +263,3 @@ def _moe_align_block_size_torch(
     staged = torch.full((n + 1,), numel, dtype=torch.int32, device=device)
     staged[dest] = order.to(torch.int32)
     sorted_ids.copy_(staged[:n])
-
-
-@triton.jit
-def _block_per_pair_kernel(ids_ptr, sorted_ptr, experts_ptr, post_ptr, P, BLOCK_M: tl.constexpr, PB: tl.constexpr):
-    pairs = tl.arange(0, PB)
-    tl.store(experts_ptr + pairs, tl.load(ids_ptr + pairs, mask=pairs < P), mask=pairs < P)
-    slots = tl.arange(0, PB * BLOCK_M)
-    tl.store(sorted_ptr + slots, tl.where(slots % BLOCK_M == 0, slots // BLOCK_M, P), mask=slots < P * BLOCK_M)
-    tl.store(post_ptr, P * BLOCK_M)
-
-
-def block_per_pair(topk_ids: torch.Tensor, block_size: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """:func:`moe_align_block_size`'s outputs with one block per (token, expert) pair, in pair order.
-
-    For pairs that all name different experts (one token's top-k), that is the
-    tiling the sort produces, so the GEMMs do the same work, and it costs one
-    small launch instead of the sort's two. ``topk_ids`` must be int32 and
-    contiguous, with every id a real expert.
-    """
-    pairs = topk_ids.numel()
-    sorted_ids = torch.empty((pairs * block_size,), dtype=torch.int32, device=topk_ids.device)
-    expert_ids = torch.empty((pairs,), dtype=torch.int32, device=topk_ids.device)
-    num_tokens_post_pad = torch.empty((1,), dtype=torch.int32, device=topk_ids.device)
-    _block_per_pair_kernel[(1,)](topk_ids, sorted_ids, expert_ids, num_tokens_post_pad, pairs,
-                                 BLOCK_M=block_size, PB=triton.next_power_of_2(pairs))
-    return sorted_ids, expert_ids, num_tokens_post_pad

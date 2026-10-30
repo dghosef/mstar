@@ -60,6 +60,8 @@ def _seed():
 # ------------------------------------------------------------------
 
 
+# 1 and 4 tokens take the per-pair GEMV path (fused_moe.decode), 16 and 64 the grouped GEMMs;
+# reduce_results=False is the TP path, summed after the all-reduce.
 @pytest.mark.parametrize("num_tokens", [1, 4, 16, 64])
 @pytest.mark.parametrize(
     "hidden,inter,num_experts,top_k",
@@ -68,7 +70,9 @@ def _seed():
         (1024, 384, 128, 8),  # Talker routed experts
     ],
 )
-def test_fused_experts_numerical_parity(num_tokens, hidden, inter, num_experts, top_k):
+@pytest.mark.parametrize("reduce_results", [True, False])
+def test_fused_experts_numerical_parity(num_tokens, hidden, inter, num_experts, top_k,
+                                        reduce_results):
     from mstar.utils.fused_moe import fused_experts
 
     device = torch.device("cuda")
@@ -85,7 +89,11 @@ def test_fused_experts_numerical_parity(num_tokens, hidden, inter, num_experts, 
         norm_topk_prob=True,
     )
 
-    fused_out = fused_experts(hidden_states, w1, w2, topk_weights, topk_ids)
+    fused_out = fused_experts(hidden_states, w1, w2, topk_weights, topk_ids,
+                              reduce_results=reduce_results)
+    if not reduce_results:
+        assert fused_out.shape == (num_tokens, top_k, hidden)
+        fused_out = fused_out.float().sum(1).to(dtype)
     naive_out = _dispatch_experts_fused(
         hidden_states,
         w1,
@@ -100,25 +108,6 @@ def test_fused_experts_numerical_parity(num_tokens, hidden, inter, num_experts, 
     # bf16 accumulation -> loose tolerance; sglang uses atol=2e-2 in its
     # own parity tests so match that here.
     torch.testing.assert_close(fused_out, naive_out, atol=2e-2, rtol=2e-2)
-
-
-def test_one_token_runs_a_block_per_expert_without_the_sort():
-    """One token's top-k experts are distinct, so a block per (token, expert) pair is the tiling the sort
-    would produce: the same bits, without the sort's launches."""
-    from mstar.utils.fused_moe import MoeAlignment, fused_experts, moe_block_m
-    from mstar.utils.fused_moe.align import moe_align_block_size
-
-    hidden_states = torch.randn(1, 2048, device="cuda", dtype=torch.bfloat16)
-    w1 = torch.randn(128, 2 * 768, 2048, device="cuda", dtype=torch.bfloat16) * 0.02
-    w2 = torch.randn(128, 2048, 768, device="cuda", dtype=torch.bfloat16) * 0.02
-    topk_weights, topk_ids = _random_router_output(hidden_states, 128, 8, norm_topk_prob=True)
-    block_m = moe_block_m(1, w1, 8)
-    sorted_ = MoeAlignment(*moe_align_block_size(topk_ids.to(torch.int32), block_m, 128), block_m)
-
-    assert torch.equal(
-        fused_experts(hidden_states, w1, w2, topk_weights, topk_ids),
-        fused_experts(hidden_states, w1, w2, topk_weights, topk_ids, alignment=sorted_),
-    )
 
 
 # ------------------------------------------------------------------
