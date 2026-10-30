@@ -1509,12 +1509,11 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
      55.9 dB on every prompt).
    * klein-4B and 9B ship ``false`` too, since the other engines are not bit-exact
      either. What the plain compile gains over ``[norms]`` on ``sdpa`` has not been
-     measured since the Triton RMSNorm replica. ``[norms]`` makes the transformer exact;
-     with ``vae_compile: false`` too, served images are bit-exact.
+     measured since the Triton RMSNorm replica.
    * Without ``[norms]``, the plain compile — even with eager rounding — lands at a
-     median 35 to 38 dB PSNR from eager over the 100 protocol prompts, because a 4- or
-     8-step distilled sampler amplifies the last bit of inductor's own reductions and
-     activation decompositions.
+     median 37.6 dB (klein-4B) and 35.6 dB (9B) PSNR from eager over the 100 protocol
+     prompts, because a 4- or 8-step distilled sampler amplifies the last bit of
+     inductor's own reductions and activation decompositions.
 
 ``cuda_graph``, ``capture_sizes``, ``capture_batch_sizes``
    The denoise step, Euler update included, is captured per listed ``[height, width]``
@@ -1557,11 +1556,12 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
    are rejected with a 400 before scheduling instead of occupying the worker for minutes
    (an 8192² request means 262k tokens of quadratic attention).
 
-With ``compile_exact_ops: [norms]`` every served klein image is within 53 dB of the eager
-path on all 100 protocol prompts, and with ``vae_compile: false`` it is bit-exact. The
-shipped plain compile lands at a median 35 to 38 dB from the eager path (see
-``compile_exact_ops``). For scale, the served images of the other engines are 10 to 16 dB
-from the diffusers reference for the same seeds.
+The shipped plain compile is not reference-exact (see ``compile_exact_ops``). For the
+exact path, set ``compile_exact_ops: [norms]``: every served klein image is then within
+53 dB of the eager path on all 100 protocol prompts, and with ``vae_compile: false`` too
+it is bit-exact. For scale, SGLang 0.5.22's images sit at a median 23.8 dB (minimum
+13.1) on klein-4B and 24.0 dB (14.5) on 9B from klein's ``[norms]`` output at the same
+seeds (H100, 2 x 32 prompts).
 Requests at the same output size batch across users in every node, including the
 text encoder, whose input is always 512 tokens. ``lora`` lists adapters to fold into the
 transformer weights at load time (``[{path: ..., scale: ...}]``; diffusers/PEFT-format or
