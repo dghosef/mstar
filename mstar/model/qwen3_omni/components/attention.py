@@ -4,7 +4,7 @@ Reuses ``ParallelAttention`` (which already supports per-head QK-norm,
 fused QKV projection, and TP-sharded o_proj). The Qwen3-specific piece
 is the 3D MRoPE path used by the Thinker — for ``use_mrope=True`` q/k
 norm, the rotation by externally provided ``cos_sin_3d`` and the KV
-write run in one kernel (``qk_norm_rotary_kv_write``). Talker uses
+write run in one kernel (``AttentionCallable.norm_rope_attend``). Talker uses
 standard 1D RoPE (``use_mrope=False``) through the step surface's
 ``apply_rope``. Every rope and attention call names its layer and plan
 key explicitly.
@@ -108,7 +108,7 @@ class Qwen3OmniAttention(ParallelAttention):
         q, k, v = self._project_qkv(hidden_states)
 
         if self.use_mrope and cos_sin_3d is not None:
-            attn_output = self._norm_mrope_attend(q, k, v, *cos_sin_3d)
+            attn_output = self.attend.norm_rope_attend(q, k, v, self.q_norm, self.k_norm, cos_sin=cos_sin_3d)
         else:
             q, k = self._apply_qk_norm(q, k)
             q, k = self._apply_rope(q, k, self.attend.label)
@@ -116,21 +116,3 @@ class Qwen3OmniAttention(ParallelAttention):
 
         attn_output = attn_output.reshape(num_tokens, self.num_heads * self.head_dim)
         return self.o_proj(attn_output)
-
-    @torch.compiler.disable
-    def _norm_mrope_attend(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
-    ) -> torch.Tensor:
-        """q/k norm, the multimodal rotation (``cos``/``sin`` carry its three
-        position grids) and the step's KV write in one kernel, then attention.
-        At decode width each was a kernel of its own per layer."""
-        from mstar.utils.attention import qk_norm_rotary_kv_write
-
-        attend = self.attend
-        layer, page_idx, slot_idx, n = attend.kv.write_target()
-        qk_norm_rotary_kv_write(
-            q, k, v, self.q_norm.weight, self.k_norm.weight, cos, sin,
-            layer, page_idx, slot_idx, min(n, q.shape[0]),
-            float(self.q_norm.variance_epsilon), float(self.k_norm.variance_epsilon),
-        )
-        return attend.attn.run(q, kv_cache_layer=attend.kv.layer_view())
