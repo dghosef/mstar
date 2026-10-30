@@ -663,7 +663,7 @@ def test_flashinfer_partials_over_simulated_ranks_merge_to_full_attention(rows, 
             with torch.cuda.graph(graph):
                 result = partials()
             graph.replay()
-        outs.append(result[0])
+        outs.append(result[0].float())
         lses.append(result[1])
         new = result[2:] or None
     if new is not None:

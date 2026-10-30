@@ -123,7 +123,7 @@ class ContextParallel(NamedTuple):
         the same collectives on every rank."""
         outs, lses = self.exchange_partials(*partial(self.exchange_queries(q)))
         if new is not None:
-            outs = torch.cat([outs, new[0].float().unsqueeze(0)])
+            outs = torch.cat([outs, new[0].to(outs.dtype).unsqueeze(0)])
             lses = torch.cat([lses, new[1].float().unsqueeze(0)])
         return merge(outs, lses)
 
@@ -139,20 +139,35 @@ class ContextParallel(NamedTuple):
     def exchange_partials(
         self, out: torch.Tensor, lse: torch.Tensor, valid: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Every partner's partial for this rank's heads, ``[P, N, H, D]`` and ``[P, N, H]`` fp32, to
-        ``merge``; from this rank's ``out`` ``[N, H', D]`` and natural-log ``lse`` ``[N, H']`` over
-        its slots, for the heads ``exchange_queries`` returned. A query row ``valid`` (``[N]``)
-        marks as holding none of this rank's slots goes out as out 0, lse -inf, whatever the kernel
-        left there (a select, so a NaN cannot survive)."""
-        out = torch.where(valid[:, None, None], out.float(), 0.0)
+        """Every partner's partial for this rank's heads, ``[P, N, H, D]`` in ``out``'s dtype and
+        ``[P, N, H]`` fp32, to ``merge``; from this rank's ``out`` ``[N, H', D]`` and natural-log
+        ``lse`` ``[N, H']`` over its slots, for the heads ``exchange_queries`` returned. A query row
+        ``valid`` (``[N]``) marks as holding none of this rank's slots goes out as out 0, lse -inf,
+        whatever the kernel left there (a select, so a NaN cannot survive)."""
+        out = torch.where(valid[:, None, None], out, 0)
         lse = torch.where(valid[:, None], lse.float(), -math.inf)
-        packed = torch.cat([out, lse.unsqueeze(-1)], dim=-1)
         if self.over_sp:
-            gathered = self.group.all_gather(packed.unsqueeze(0), dim=0)
-        else:
-            heads = packed.shape[1] // self.size
-            gathered = self.group.to_partners(packed.unflatten(1, (self.size, heads)).transpose(0, 1), self.partners)
-        return gathered[..., :-1], gathered[..., -1]
+            return _gather_partials(self.group, out, lse)
+        heads = out.shape[1] // self.size
+        blocks = _pack(out, lse).unflatten(1, (self.size, heads)).transpose(0, 1)
+        return _unpack(self.group.to_partners(blocks, self.partners), out.dtype)
+
+
+def _pack(out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:
+    """A partial's ``out`` ``[..., D]`` in its own dtype and its lse ``[...]`` in fp32 as one byte
+    tensor ``[..., D * itemsize + 4]``, so one collective carries both at the out's width."""
+    lse = lse.float().unsqueeze(-1).contiguous()
+    return torch.cat([out.contiguous().view(torch.uint8), lse.view(torch.uint8)], dim=-1)
+
+
+def _unpack(packed: torch.Tensor, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+    """``_pack``'s ``(out, lse)`` back, as views of ``packed``."""
+    return packed[..., :-4].view(dtype), packed[..., -4:].view(torch.float32).squeeze(-1)
+
+
+def _gather_partials(group: CommGroup, out: torch.Tensor, lse: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Every rank of ``group``'s ``(out, lse)`` for the same queries, stacked on a new first dim."""
+    return _unpack(group.all_gather(_pack(out, lse).unsqueeze(0), dim=0), out.dtype)
 
 
 def merge(outs: torch.Tensor, lses: torch.Tensor) -> torch.Tensor:
@@ -160,7 +175,7 @@ def merge(outs: torch.Tensor, lses: torch.Tensor) -> torch.Tensor:
     and natural-log ``lses`` ``[K, ...]``; fp32. A partial with lse -inf and a finite out adds
     nothing; every row has a key in some partial (its own token, on the paged path)."""
     weights = torch.softmax(lses.float(), dim=0)
-    return (weights.unsqueeze(-1) * outs.float()).sum(dim=0)
+    return (weights.unsqueeze(-1) * outs).sum(dim=0)
 
 
 @torch.compiler.disable
@@ -170,9 +185,7 @@ def gather_merge(group: CommGroup, out: torch.Tensor, lse: torch.Tensor) -> torc
     of both, then ``merge``. Moves query-sized results rather than the keys."""
     if group.world_size == 1:
         return out
-    packed = torch.cat([out.float(), lse.float().unsqueeze(-1)], dim=-1)
-    gathered = group.all_gather(packed.unsqueeze(0), dim=0)
-    return merge(gathered[..., :-1], gathered[..., -1]).to(out.dtype)
+    return merge(*_gather_partials(group, out, lse)).to(out.dtype)
 
 
 def positions_over_sp(specs: Iterable[NodeResourceSpec], node: str, sp_size: int) -> bool:
