@@ -1321,6 +1321,13 @@ class CodecSubmodule(ARNodeSubmodule):
         del batch
         return 0 < len(model_inputs) <= self.MAX_BATCH_SIZE
 
+    def split_batches_by_capture_key(self, graph_walk: str) -> bool:
+        """Batch each width apart on a variant that clones (Base): a clone's
+        first chunk leads with the reference tail (73 frames by default), and
+        every row batched with it would pay a decode that wide. Elsewhere
+        widths mix, so a small ramp chunk does not wait for a batch of its own."""
+        return graph_walk == "codec_chunk" and self.config.supports_reference_audio
+
     def max_batch_size(self, graph_walk: str) -> int:
         del graph_walk
         return self.MAX_BATCH_SIZE
