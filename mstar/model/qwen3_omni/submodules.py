@@ -958,17 +958,14 @@ class ThinkerSubmodule(ARNodeSubmodule):
             PackedAcceleratorGraphConfig(
                 capture_graph_walk="prefill_text",
                 replay_graph_walks=["prefill_text", "prefill_audio", THINKER_MIXED],
+                # text rows, so padded text and mixed steps keep the broadcast
+                # positions; an audio row brings its own
                 make_node_input=lambda n: ARNodeInputs(
                     input_seq_len=n,
                     input_ids=torch.zeros((n,), dtype=torch.long, device=device),
                     input_embeds=torch.zeros(
                         (n, self.config.thinker_hidden_size),
                         device=device, dtype=torch.bfloat16
-                    ),
-                    custom_pos_ids=torch.zeros(
-                        (3, n),
-                        dtype=torch.float,
-                        device=device,
                     ),
                     tensor_inputs={
                         "masks_for_talker": torch.zeros(
