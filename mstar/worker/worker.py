@@ -214,10 +214,10 @@ def _env_number(name: str, default, parse, minimum):
     """A numeric tuning knob from the environment.
 
     A malformed value falls back to *default* and one below *minimum* is
-    raised to it, each with a warning, as ``MSTAR_PY_SWITCH_INTERVAL_SEC``
-    and ``MSTAR_RECOMPILE_LIMIT`` already do. The worker reads these when it
-    is built: raising from ``run()`` would come after weight load, warmup and
-    capture, and after the conductor has counted the worker ready.
+    raised to it, each with a warning, as ``MSTAR_RECOMPILE_LIMIT`` already
+    does. The worker reads these when it is built: raising from ``run()``
+    would come after weight load, warmup and capture, and after the conductor
+    has counted the worker ready.
     """
     raw = os.environ.get(name, "").strip()
     if not raw:
