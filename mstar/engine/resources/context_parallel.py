@@ -303,13 +303,9 @@ def gather_merge(group: CommGroup, out: torch.Tensor, lse: torch.Tensor) -> torc
     return merge(*_gather_partials(group, out, lse)).to(out.dtype)
 
 
-def positions_over_sp(specs: Iterable[NodeResourceSpec], node: str, sp_size: int) -> bool:
-    """Whether ``node``'s KV pool places positions over its SP ranks. Such a node shards heads
-    over TP alone and runs replicated across SP, so the model loads without its SP group.
-
-    Raises when the node has a paged pool that is placed and one that isn't."""
-    if sp_size == 1:
-        return False
+def _paged_pools(specs: Iterable[NodeResourceSpec], node: str) -> dict[str, bool]:
+    """``node``'s paged KV pools, each to whether it places positions over the node's ranks.
+    Raises when one is placed and another isn't."""
     pools = {
         spec.resource_key: spec.config.context_parallel for spec in specs
         if node in spec.nodes and isinstance(spec, KVSpec) and isinstance(spec.config, PagedKVConfig)
@@ -319,7 +315,15 @@ def positions_over_sp(specs: Iterable[NodeResourceSpec], node: str, sp_size: int
             f"node {node!r} places positions over its SP ranks, so every paged KV pool it uses must: "
             f"set context_parallel on {sorted(key for key, placed in pools.items() if not placed)} too"
         )
-    return any(pools.values())
+    return pools
+
+
+def positions_over_sp(specs: Iterable[NodeResourceSpec], node: str, sp_size: int) -> bool:
+    """Whether ``node``'s KV pool places positions over its SP ranks. Such a node shards heads
+    over TP alone and runs replicated across SP, so the model loads without its SP group.
+
+    Raises when the node has a paged pool that is placed and one that isn't."""
+    return sp_size > 1 and any(_paged_pools(specs, node).values())
 
 
 def sp_rank_placement(specs: Iterable[NodeResourceSpec], node: str, sp_size: int, sp_enabled_nodes) -> bool:
@@ -327,7 +331,8 @@ def sp_rank_placement(specs: Iterable[NodeResourceSpec], node: str, sp_size: int
     (`positions_over_sp`) rather than running the model's own sequence parallelism (it is in
     ``sp_enabled_nodes``). Raises when it does neither, or both: the placement loads the node
     without the SP group its own sequence parallelism needs."""
-    placed = positions_over_sp(specs, node, sp_size)
+    pools = _paged_pools(specs, node)
+    placed = any(pools.values())
     if placed and node in sp_enabled_nodes:
         raise ValueError(
             f"node {node!r} runs its own sequence parallelism (sp_enabled_nodes), and a paged KV pool over "
@@ -335,14 +340,10 @@ def sp_rank_placement(specs: Iterable[NodeResourceSpec], node: str, sp_size: int
             "to place positions over TP ranks"
         )
     if not placed and node not in sp_enabled_nodes:
-        pooled = any(
-            node in spec.nodes and isinstance(spec, KVSpec) and isinstance(spec.config, PagedKVConfig)
-            for spec in specs
-        )
         raise ValueError(
             f"node {node!r} on {sp_size} SP ranks is not in sp_enabled_nodes {sorted(sp_enabled_nodes)}"
             + (": set context_parallel on its paged KV pools to place positions over the SP ranks instead"
-               if pooled else ", and holds no paged KV pool to place over them: put it in a node group of "
+               if pools else ", and holds no paged KV pool to place over them: put it in a node group of "
                "its own with sp_size 1")
         )
     return placed

@@ -81,7 +81,7 @@ def check_worker_graphs(
     """Problems with the worker graphs ``model.get_worker_graphs`` built, and
     with the parallel groups the conductor would hand each worker. With no
     ``specs`` (the model could not declare them) the checks on resource
-    placement are skipped, and a node on SP ranks must be in ``sp_enabled_nodes``."""
+    placement, and on what a node's SP ranks do, are skipped."""
     walk_to_wgs: dict[str, list[WorkerGraph]] = {}
     for wg in worker_graphs:
         for walk in sorted(wg.graph_walks):
