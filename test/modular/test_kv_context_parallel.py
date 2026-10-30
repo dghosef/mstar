@@ -65,6 +65,8 @@ def _placed(rank: int, **overrides) -> KVCache:
 
 
 def _manager(rank: int, cfg: PagedKVConfig) -> KVManager:
+    # what `KVManager.build` does first: TP placement shards heads over the TP ranks
+    cfg.shard(P)
     kv = KVManager(
         cfg=cfg, name="kv", joint_comm_group=JointGroups(tp_group=_group(rank, P), sp_group=CommGroup.trivial()),
         transfer_engine_info=None, device=CPU, dtype=torch.float32,
