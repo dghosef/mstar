@@ -186,7 +186,7 @@ def _f32(x: float) -> float:
 def image_gen_timestep(time_index: int, num_timesteps: int, shift: float) -> float:
     """Host copy of the shifted timestep ``_forward_image_gen`` computes on the
     device for iteration ``time_index``, with the same float32 ops in the same
-    order so the CFG-interval test agrees with the one the old code ran there.
+    order, so the host's CFG-interval test sees the device's timestep exactly.
     Memoized: a request's schedule is a handful of distinct values."""
     t_uniform = 1.0 - torch.tensor([float(time_index)], dtype=torch.float32) / (num_timesteps - 1)
     return float(apply_timestep_shift(t=t_uniform, shift=shift)[0])
@@ -198,15 +198,15 @@ def cfg_branches(
 ) -> int:
     """How many CFG branches an image_gen step has to run at timestep ``t_value``.
 
-    1 (main only): guidance off, or ``t_value`` outside ``(lo, hi]``. The old
-       combine then ran with both effective scales at exactly 1.0, which is
-       ``v_main`` up to float rounding (``a + 1 * (b - a)``, and a renorm ratio
-       ``|v_main| / (|v_main| + 1e-8)`` clamped to <= 1).
-    2 (main, cfg_text): in the interval with ``img_scale <= 1``; the old combine
-       never read ``v_cfg_img`` then (``effective_img_scale > 1.0`` was False).
+    1 (main only): guidance off, or ``t_value`` outside ``(lo, hi]``. The CFG
+       combine at scales of exactly 1.0 is ``v_main`` up to float rounding
+       (``a + 1 * (b - a)``, and a renorm ratio ``|v_main| / (|v_main| + 1e-8)``
+       clamped to <= 1), so the step returns ``v_main``.
+    2 (main, cfg_text): in the interval with ``img_scale <= 1``, where the
+       combine never reads ``v_cfg_img``.
     3 (main, cfg_text, cfg_img): in the interval with image guidance on.
 
-    The bounds are compared at float32, as the old device-side compare did.
+    The bounds are compared at float32, the dtype of the device timestep.
     ``cfg_interval`` must be hashable (a tuple); callers convert a list.
     """
     if not (text_scale > 1.0 or img_scale > 1.0):

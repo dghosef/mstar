@@ -853,8 +853,8 @@ class BagelModel(Model):
                 self._text_detokenizer = TextChunkDetokenizer(self.tokenizer)
             return self._text_detokenizer.to_bytes(ids)
         if modality == "image":
-            # the same truncated pixels as before, through the shared writer: PIL's default PNG
-            # encode (adaptive filters, zlib 6) took ~0.4 s of every 1024^2 request
+            # truncated to uint8, through the shared writer: PIL's default PNG encode
+            # (adaptive filters, zlib 6) took ~0.4 s of every 1024^2 request
             return encode_image((output[0] * 255).to(torch.uint8), request_kwargs)
         raise ValueError(f"Unsupported modality: {modality!r}")
 
