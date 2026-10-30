@@ -57,7 +57,7 @@ import torch
 from mstar.communication.tensors import NameToTensorList
 from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.engine.resources import AttentionStep, Segment, SlotLease, SubmoduleStep
-from mstar.model.components.diffusion.attention import RaggedAttentionFn, RaggedAttentionMixin
+from mstar.model.components.diffusion.attention import DenseAttention, RaggedAttentionFn, RaggedAttentionMixin
 from mstar.model.components.diffusion.flow_match import FlowMatchSchedule
 from mstar.model.submodule_base import ModelInputsFromEngine, NodeInputs, NodeSubmodule
 from mstar.utils.h2d import to_device_nonblocking
@@ -124,6 +124,7 @@ class DenoiseLoopSubmodule(RaggedAttentionMixin, NodeSubmodule):
         loop_name: str,
         max_batch_size: int = 8,
         attn_resource_key: str | None = None,
+        dense_attention: DenseAttention | None = None,
         capture_buckets: Sequence[tuple[str, Hashable]] = (),
         capture_batch_sizes: Sequence[int] = (1, 2, 4, 8),
         replay_walks: Mapping[str, Sequence[str]] | None = None,
@@ -133,6 +134,7 @@ class DenoiseLoopSubmodule(RaggedAttentionMixin, NodeSubmodule):
         self.loop_name = loop_name
         self._max_batch_size = int(max_batch_size)
         self.attn_resource_key = attn_resource_key
+        self.dense_attention = dense_attention
         # (graph_walk, bucket_key) pairs to capture; the same key on another walk
         # replays only if ``replay_walks`` says so.
         self.capture_buckets = list(capture_buckets)
@@ -305,7 +307,7 @@ class DenoiseLoopSubmodule(RaggedAttentionMixin, NodeSubmodule):
     def step_index(self, fwd_info: CurrentForwardPassInfo) -> int:
         return int(fwd_info.dynamic_loop_iter_counts.get(self.loop_name, 0))
 
-    def _ragged(self) -> RaggedAttentionFn | None:
+    def _ragged(self) -> RaggedAttentionFn | DenseAttention | None:
         """The attention callable for the ``"main"`` span, or None (SDPA)."""
         return self.ragged_for(self.MAIN_SPAN)
 
