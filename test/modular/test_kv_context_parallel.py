@@ -354,6 +354,9 @@ def _reference_flashinfer() -> types.ModuleType:
             return (out, lse) if return_lse else out
 
     class Decode(Paged):
+        def __init__(self, *args, use_tensor_cores=False, **kwargs):
+            self.use_tensor_cores = use_tensor_cores
+
         def plan(self, **kwargs):
             super().plan(**kwargs)
             self.causal = False
@@ -599,6 +602,17 @@ def test_two_ranks_attend_a_placed_pool_like_one_rank_with_the_same_collectives(
 def test_two_gpus_attend_a_placed_pool_like_one(tmp_path, over_sp, rows, mla):
     pytest.importorskip("flashinfer")
     mp.spawn(_over_ranks, args=(P, "nccl", str(tmp_path / "store"), over_sp, rows, mla), nprocs=P)
+
+
+def test_tp_placed_decode_runs_on_tensor_cores_whatever_decode_tensor_cores_says(monkeypatch):
+    """A rank attends every partner's query heads over one KV head, a GQA group FlashInfer's
+    CUDA-core decode has no kernel for unless it is one of a few sizes."""
+    monkeypatch.setenv("MSTAR_WORKSPACE_BUFFER_MB", "1")
+    monkeypatch.setitem(sys.modules, "flashinfer", _reference_flashinfer())
+    joint = JointGroups(tp_group=_group(0, P), sp_group=CommGroup.trivial())
+    attn, _ = _cp_attention(joint, CPU, torch.float32, head_shards=P, decode_tensor_cores=False)
+    _plan(attn, _Case.build(DECODE_ROWS, CPU, torch.float32))
+    assert attn._current_plan_states["main"].context.attn_wrapper.use_tensor_cores
 
 
 def test_mla_attention_refuses_a_context_only_step_over_a_placed_pool():

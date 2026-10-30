@@ -208,9 +208,10 @@ class FlashInferManager(AttentionManager):
 
         workspace = self._workspaces.get(label, slot)
         if decode:
-            context = FlashInferDecodeWrapper(
-                workspace_buffer=workspace, use_tensor_cores=self._decode_tensor_cores, **kv_kwargs,
-            )
+            # under TP placement a rank attends every partner's query heads over one KV head, a GQA
+            # group FlashInfer's CUDA-core decode may have no kernel for
+            tensor_cores = self._decode_tensor_cores or not self._placement.over_sp
+            context = FlashInferDecodeWrapper(workspace_buffer=workspace, use_tensor_cores=tensor_cores, **kv_kwargs)
             new = None
         else:
             context = FlashInferPrefillWrapper(

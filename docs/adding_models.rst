@@ -1896,7 +1896,9 @@ they hold different query heads of one KV head: each sends its queries to its pa
 attends every partner's heads over its own slots, and sends the partials back to their
 heads' owners, two all-to-alls over the TP group. The collectives run on every layer of
 every step, so a request attends at one rank's speed over ``1/P`` of its context, plus the
-exchange. A step whose rows each query one token makes one paged call after its KV write.
+exchange. A step whose rows each query one token makes one paged call after its KV write; in
+TP mode it runs on tensor cores whatever ``decode_tensor_cores`` says, since a rank's query heads
+over its one KV head can form a group the CUDA-core decode kernel doesn't take.
 Any other step (prefill, chunked prefill, a prefix hit, speculative verify) attends its
 stored context on the paged kernel and its own tokens on FlashInfer's ragged prefill, over
 the ``k`` and ``v`` the layer passes to ``run``. A layer that calls ``attn.run`` itself must
