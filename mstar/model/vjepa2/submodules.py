@@ -123,14 +123,12 @@ class VJepa2EncoderSubmodule(NodeSubmodule):
         batch: ExecutingBatch,
         model_inputs: list[NodeInputs],
     ):
-        # Route B=1 through the sequential ``forward`` (proven sequential path).
-        # ``forward_batched`` is a distinct torch.compile cache from ``forward``
-        # and — empirically on vjepa2-ac-vitg — compiles a much slower kernel
-        # than ``forward`` when both are traced with the same [1, ...] shape.
-        # Observed: AC warm latency went 1 s → 23 s when B=1 traffic routed
-        # through forward_batched.  Keeping B=1 on forward sidesteps that
-        # entirely; batched-path cost (and value) only shows up when the
-        # scheduler actually co-batches concurrent requests.
+        # An eager B=1 step runs the sequential ``forward``: ``forward_batched``
+        # is a distinct torch.compile cache and, on vjepa2-ac-vitg, compiled a
+        # much slower kernel at the same [1, ...] shape (AC warm latency 1 s ->
+        # 23 s). This only routes eager steps: a step that leased the AC rollout
+        # capture replays its ``forward_batched`` graph at any batch size, B=1
+        # included, whatever this returns.
         if len(batch.request_ids) < 2:
             return False
         shapes: set[tuple] = {
@@ -169,7 +167,7 @@ class VJepa2EncoderSubmodule(NodeSubmodule):
             replay_graph_walks=list(self._AC_ROLLOUT_WALKS),
             single_request_inputs=NodeInputs(tensor_inputs={"video_frames": clip}, input_seq_len=frames),
             capture_batch_sizes=[1, 2, 4],
-            # an acceleration subset: larger encoder batches run eager, as before the capture
+            # an acceleration subset: larger encoder batches run eager
             caps_eager_batch_size=False,
             capture_forward_method="forward_batched",
             additional_key_info=self._ac_rollout_key(),
@@ -1205,7 +1203,7 @@ class VJepa2ACRolloutPredictorSubmodule(ARNodeSubmodule):
           4. advance_seq_len is called by the runner after replay.
           5. Postamble (drop action tokens, norm, proj) runs eagerly.
 
-        The eager path calls predictor.forward end-to-end (same as before).
+        The eager path calls predictor.forward end-to-end.
         """
         p = self.predictor
 
