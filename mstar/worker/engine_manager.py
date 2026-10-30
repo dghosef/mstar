@@ -9,7 +9,6 @@ from mstar.distributed.communication import WorkerParallelGroups
 from mstar.engine.engine import Engine
 from mstar.engine.node_dtype import resolve_model_dtype, resolve_node_dtype
 from mstar.engine.resources import ResourceReqConfig, apply_yaml_overrides
-from mstar.engine.resources.context_parallel import positions_over_sp
 from mstar.engine.resources.kv.transfer import TransferEngineInfo
 from mstar.graph.runtime.base import GraphRuntime
 from mstar.model.base import Model, node_moe_parallel_configs
@@ -133,16 +132,17 @@ class EngineManager:
         submodules: dict[str, torch.nn.Module] = {}
         # Checked by the conductor's get_sharding_config before spawn.
         moe_parallel = node_moe_parallel_configs(model_config["node_groups"])
+        sp_enabled = model.get_default_sharding_config().sp_enabled_nodes
         for name in sorted(node_names):
             # Sequence parallelism is opt-in per node; only forward the SP
-            # group when this node actually participates in one, so models
+            # group to a node that runs its own and is on SP ranks, so models
             # that don't support SP keep their existing get_submodule call.
+            # Any other node on SP ranks places its KV positions over them
+            # (validate_deployment), and runs replicated across them.
             # Likewise ``moe_parallel``, only for a node group's ``ep_config``.
-            # A node whose KV pool places positions over its SP ranks runs replicated across
-            # them, so it loads as TP alone and never sees its SP group.
             extra = {}
             node_sp_group = parallel_groups.get_sp_config_for_node(name)
-            if node_sp_group.world_size > 1 and not positions_over_sp(specs, name, node_sp_group.world_size):
+            if node_sp_group.world_size > 1 and name in sp_enabled:
                 extra["sp_group"] = node_sp_group
             if name in moe_parallel:
                 extra["moe_parallel"] = moe_parallel[name]

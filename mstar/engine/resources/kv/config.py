@@ -117,43 +117,51 @@ class PagedKVConfig(KVConfig):
         """This rank's placement of the pool, resolved from ``context_parallel``; None when it is off.
 
         The KV cache holds it (``KVCache.placement``), not this config, which every rank's
-        resources share. Positions go over the node's SP ranks when it has more than one, and
-        otherwise over the contiguous blocks of TP ranks that ``QKVParallelLinear`` gives one KV
-        head (``kv_head_idx = tp_rank // replicas``).
+        resources share. The partners are the node's SP ranks when it has more than one, and
+        otherwise the block of TP ranks holding this rank's KV head (`kv_head_replicas`).
         """
-        from mstar.distributed.utils import divide
         from mstar.engine.resources.context_parallel import ContextParallel
 
         if not self.context_parallel:
             return None
-        sp = joint.sp_group if joint is not None else None
-        if sp is not None and sp.world_size > 1:
-            placement = ContextParallel(
-                size=sp.world_size, index=sp.rank, group=sp, over_sp=True,
-                partners=tuple(range(sp.world_size)),
-            )
+        tp_size, sp_size = (1, 1) if joint is None else (joint.tp_group.world_size, joint.sp_group.world_size)
+        # raises on one rank alone, so past here there is a joint group
+        size = self.context_parallel_size(pool, tp_size, sp_size)
+        if sp_size > 1:
+            sp = joint.sp_group
+            return ContextParallel(size=size, index=sp.rank, group=sp, over_sp=True, partners=tuple(range(size)))
+        tp = joint.tp_group
+        first = tp.rank // size * size
+        return ContextParallel(
+            size=size, index=tp.rank % size, group=tp, over_sp=False, partners=tuple(range(first, first + size)),
+        )
+
+    def context_parallel_size(self, pool: str, tp: int, sp: int) -> int:
+        """How many ranks ``context_parallel`` stripes each page over on a node of ``tp`` x ``sp``
+        ranks: its SP ranks when it has more than one, else the TP ranks sharing a KV head.
+        Raises ``ValueError`` when they can't; ``validate_deployment`` checks it from
+        ``node_groups`` before any worker starts."""
+        from mstar.distributed.utils import kv_head_replicas
+
+        if sp > 1:
+            size = sp
         else:
-            tp = joint.tp_group.world_size if joint is not None else 1
-            if self._unsharded_kv_heads >= tp:
+            heads = self._unsharded_kv_heads
+            if heads >= tp or tp % heads:
                 raise ValueError(
                     f"KV {pool!r}: context_parallel places positions over the TP ranks that share a "
-                    f"KV head, and {self._unsharded_kv_heads} KV head(s) over {tp} TP rank(s) leave "
-                    "none sharing one. Raise TP past the KV heads, give the node SP ranks, or turn "
+                    f"KV head, and {heads} KV head(s) over {tp} TP rank(s) "
+                    f"{'leave none sharing one' if heads >= tp else 'do not divide evenly'}. Make TP a "
+                    "larger multiple of the KV heads, give the node SP ranks, or turn "
                     "context_parallel off."
                 )
-            size = divide(tp, self._unsharded_kv_heads)
-            rank = joint.tp_group.rank
-            first = rank - rank % size
-            placement = ContextParallel(
-                size=size, index=rank % size, group=joint.tp_group, over_sp=False,
-                partners=tuple(range(first, first + size)),
-            )
-        if self.page_size % placement.size:
+            size = kv_head_replicas(heads, tp)[1]
+        if self.page_size % size:
             raise ValueError(
-                f"KV {pool!r}: context_parallel stripes each page over {placement.size} ranks, "
+                f"KV {pool!r}: context_parallel stripes each page over {size} ranks, "
                 f"which doesn't divide page_size {self.page_size}"
             )
-        return placement
+        return size
 
     @property
     def request_pages(self) -> int:

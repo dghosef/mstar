@@ -6,6 +6,8 @@ from typing import Any
 
 from mstar.distributed.base import ShardingConfig
 from mstar.distributed.communication import GlobalParallelConfig
+from mstar.engine.resources.context_parallel import positions_over_sp
+from mstar.engine.resources.kv.config import KVSpec, PagedKVConfig
 from mstar.engine.resources.spec import NodeResourceSpec
 from mstar.graph.base import GraphSection, self_triggered, top_level_entities
 from mstar.model.base import Model, WorkerGraph
@@ -78,8 +80,8 @@ def check_worker_graphs(
 ) -> list[str]:
     """Problems with the worker graphs ``model.get_worker_graphs`` built, and
     with the parallel groups the conductor would hand each worker. With no
-    ``specs`` (the model could not declare them) only the checks on resource
-    placement are skipped."""
+    ``specs`` (the model could not declare them) the checks on resource
+    placement are skipped, and a node on SP ranks must be in ``sp_enabled_nodes``."""
     walk_to_wgs: dict[str, list[WorkerGraph]] = {}
     for wg in worker_graphs:
         for walk in sorted(wg.graph_walks):
@@ -90,6 +92,7 @@ def check_worker_graphs(
         *_loop_successors(walk_to_wgs),
         *_sharding_groups(worker_graphs, sharding_config),
         *_worker_parallelism(worker_graphs, specs or ()),
+        *_sequence_parallel(model, worker_graphs, specs or ()),
     ]
 
 
@@ -110,14 +113,12 @@ def _node_group_shapes(model: Model, node_groups: list[dict]) -> Iterator[str]:
                 f"node_groups[{i}] (nodes {names}) has {len(ranks)} ranks; not "
                 f"divisible by tp_size*sp_size ({tp}*{sp}={tp * sp})."
             )
-        for size, axis, enabled in (
-            (tp, "tp", sharding.tp_enabled_nodes), (sp, "sp", sharding.sp_enabled_nodes),
-        ):
-            if size > 1 and any(node not in enabled for node in names):
-                yield (
-                    f"node_groups[{i}] has {axis}_size {size} and contains nodes not "
-                    f"in {axis}_enabled_nodes {sorted(enabled)}: {names}"
-                )
+        # sp_size is checked with the resources, in `_sequence_parallel`
+        if tp > 1 and any(node not in sharding.tp_enabled_nodes for node in names):
+            yield (
+                f"node_groups[{i}] has tp_size {tp} and contains nodes not "
+                f"in tp_enabled_nodes {sorted(sharding.tp_enabled_nodes)}: {names}"
+            )
 
 
 def _walk_partitions(model: Model, walk_graphs: Mapping[str, GraphSection]) -> Iterator[str]:
@@ -386,3 +387,53 @@ def _worker_parallelism(
                     f"Resource spec {spec.resource_key} local nodes {sorted(local)} "
                     f"on {wid} must all be in the same parallel (tp x sp) group"
                 )
+
+
+def _sequence_parallel(
+    model: Model, worker_graphs: Sequence[WorkerGraph], specs: Sequence[NodeResourceSpec],
+) -> Iterator[str]:
+    """What a node group's SP ranks do, and whether each KV pool placed over a group's ranks can
+    stripe over them. A node on SP ranks runs the model's own sequence parallelism (it is in
+    ``sp_enabled_nodes``) or places its paged KV pools' positions over them
+    (``context_parallel``, `positions_over_sp`): not neither, and not both, since the
+    placement would load the node without its SP group."""
+    enabled = model.get_default_sharding_config().sp_enabled_nodes
+    groups: dict[int, tuple[int, int, set[str]]] = {}
+    for wg in worker_graphs:
+        groups.setdefault(wg._group_id, (wg._tp_comm_size, wg.sp_size, set()))[2].update(wg.section.get_nodes())
+    placed_pools = [
+        spec for spec in specs
+        if isinstance(spec, KVSpec) and isinstance(spec.config, PagedKVConfig) and spec.config.context_parallel
+    ]
+    for i, (tp, sp, nodes) in sorted(groups.items()):
+        for spec in placed_pools:
+            if spec.nodes & nodes:
+                try:
+                    spec.config.context_parallel_size(spec.resource_key, tp, sp)
+                except ValueError as e:
+                    yield f"node_groups[{i}]: {e}"
+        if sp == 1:
+            continue
+        unplaced, both = [], []
+        for node in sorted(nodes):
+            try:
+                placed = positions_over_sp(specs, node, sp)
+            except ValueError as e:
+                yield f"node_groups[{i}]: {e}"
+                continue
+            if placed and node in enabled:
+                both.append(node)
+            elif not placed and node not in enabled:
+                unplaced.append(node)
+        if unplaced:
+            yield (
+                f"node_groups[{i}] has sp_size {sp} and contains nodes not in sp_enabled_nodes "
+                f"{sorted(enabled)}: {unplaced}. Set context_parallel on their paged KV pools to "
+                "place positions over the SP ranks instead."
+            )
+        if both:
+            yield (
+                f"node_groups[{i}]: {both} run their own sequence parallelism (sp_enabled_nodes), "
+                "and a paged KV pool over them sets context_parallel, which would replace it; "
+                "turn context_parallel off, or use sp_size 1 to place positions over TP ranks."
+            )

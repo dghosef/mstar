@@ -1867,17 +1867,21 @@ declares nothing for it. Which ranks form the group depends on the node's shape:
 
 - **No SP ranks (TP mode).** The group is the TP ranks that share one KV head:
   ``P = tp / num_kv_heads`` (``tp`` for MLA, whose one latent is every rank's). Head sharding
-  is unchanged. Loading fails when the pool has as many KV heads as TP ranks or more, since
-  then no ranks share a head. The partners are contiguous blocks of ``P`` TP ranks, the
-  blocks ``QKVParallelLinear`` gives one KV head (``kv_head_idx = tp_rank // replicas``). A
-  model that shards K and V itself must place its replicas the same way.
+  is unchanged. TP must be a multiple of the KV heads and larger than them, so that ranks
+  share a head. The partners are contiguous blocks of ``P`` TP ranks, the blocks
+  ``kv_head_replicas`` (``mstar/distributed/utils.py``) gives one KV head, as
+  ``QKVParallelLinear`` loads them. A model that shards K and V itself must place its
+  replicas the same way.
 - **SP ranks (SP mode).** The group is the node's SP ranks: ``P = sp_size``. Heads shard over
   TP alone, and the node loads without its SP group, so its weights and every layer other
   than attention are replicated across SP. That pays off only where TP can't grow, for
   example when the query or recurrent head count isn't divisible by the GPU count. Where TP
   mode applies, prefer it. Every paged pool of such a node must set ``context_parallel``.
+  This is how a node outside the model's ``sp_enabled_nodes`` runs on SP ranks; a node in
+  ``sp_enabled_nodes`` runs its own sequence parallelism, and a pool over it can't set the key.
 
-``page_size`` must be divisible by ``P``. ``max_num_pages`` still counts whole logical
+``page_size`` must be divisible by ``P``. The conductor checks these rules against
+``node_groups`` before it starts a worker. ``max_num_pages`` still counts whole logical
 pages, so placement alone frees memory without adding capacity: raise ``max_num_pages`` by
 ``P`` to use it. The pool logs its bytes per rank at load. Every resource that depends on
 the pool has to support context parallelism, or loading fails and names it; a ring or

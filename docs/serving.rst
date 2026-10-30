@@ -383,8 +383,9 @@ ranks. Loading fails otherwise.
 
 ``context_parallel: true`` splits each request's positions over the ranks that would
 otherwise hold the same KV heads: the TP ranks that share a KV head, or the node's SP ranks
-when it has them. Raise ``max_num_pages`` by that factor to turn the freed memory into
-context. **Context parallelism** in :doc:`adding_models` covers when each mode applies and
+when it has them, which is how a model with no sequence parallelism of its own (such as
+Qwen3.5) runs on ``sp_size`` above 1. Raise ``max_num_pages`` by that factor to turn the
+freed memory into context. **Context parallelism** in :doc:`adding_models` covers when each mode applies and
 what it refuses.
 
 On a single rank, a request waits at the head of its pool's queue until its prompt fits
