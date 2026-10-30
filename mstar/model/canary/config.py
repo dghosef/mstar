@@ -27,8 +27,8 @@ CONTEXT_LABEL = "main"
 # the HF feature extractor's settings that NemoLogMel implements
 MEL_SETTINGS = dict(sampling_rate=16_000, n_fft=512, win_length=400, hop_length=160, preemphasis=0.97)
 
-# the decoder prompt is 9 tokens for every task (``prompt_ids``)
-PROMPT_LENGTH = 9
+# the decoder prompt is 10 tokens for every task (``prompt_ids``)
+PROMPT_LENGTH = 10
 
 # Languages canary-1b-v2 transcribes, and translates to or from English.
 LANGUAGES = GRANARY_LANGUAGES
@@ -58,6 +58,8 @@ class CanaryModelConfig:
     eos_token_id: int = 3
     # token id by content, for the prompt's task tokens
     special_ids: dict[str, int] = field(default_factory=dict)
+    # the SentencePiece word-boundary piece "▁", which opens the prompt
+    word_boundary_id: int = 0
     sampling_rate: int = 16_000
 
     @property
@@ -87,18 +89,32 @@ class CanaryModelConfig:
             max_position_embeddings=dec["max_position_embeddings"],
             eos_token_id=hf["eos_token_id"],
             special_ids={t["content"]: t["id"] for t in tok["added_tokens"]},
+            word_boundary_id=_word_boundary_id(tok),
         )
 
     def prompt_ids(
         self, source_lang: str = "en", target_lang: str | None = None, punctuation: bool = True,
     ) -> list[int]:
-        """The decoder prompt the checkpoint's chat template renders:
+        """The decoder prompt NeMo's canary2 prompt format builds: ``▁`` (the word
+        boundary SentencePiece puts at the start of the encoded template), then
         ``<|startofcontext|><|startoftranscript|><|emo:undefined|><|src|><|tgt|>``
-        ``<|pnc|><|noitn|><|notimestamp|><|nodiarize|>``."""
+        ``<|pnc|><|noitn|><|notimestamp|><|nodiarize|>``. The checkpoint's
+        ``chat_template.jinja`` renders the same tokens without the ``▁``; given
+        that prompt, greedy decoding loops on some clips NeMo transcribes
+        correctly."""
         source_lang, target_lang = check_task(source_lang, target_lang or source_lang)
         tokens = [
             "<|startofcontext|>", "<|startoftranscript|>", "<|emo:undefined|>",
             f"<|{source_lang}|>", f"<|{target_lang}|>", "<|pnc|>" if punctuation else "<|nopnc|>",
             "<|noitn|>", "<|notimestamp|>", "<|nodiarize|>",
         ]
-        return [self.special_ids[t] for t in tokens]
+        return [self.word_boundary_id] + [self.special_ids[t] for t in tokens]
+
+
+def _word_boundary_id(tokenizer: dict) -> int:
+    """The id of the bare ``▁`` piece in ``tokenizer.json``."""
+    vocab = tokenizer["model"]["vocab"]
+    ids = vocab if isinstance(vocab, dict) else {piece: i for i, (piece, _) in enumerate(vocab)}
+    if "▁" not in ids:
+        raise ValueError("tokenizer.json has no '▁' piece, which the Canary decoder prompt starts with")
+    return ids["▁"]
