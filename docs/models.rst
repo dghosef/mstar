@@ -661,14 +661,15 @@ Qwen3-TTS notes
   ``mps: true`` in the YAML (see :doc:`serving`) the two workers' kernels also
   overlap, which raised c=32 throughput by about a fifth on an H100.
 - The codec decoder runs in float32 by default; ``configs/qwen3tts_1p7b.yaml``
-  serves it in bfloat16 (``model_kwargs: {codec_dtype: bfloat16}``, RMSNorm
-  and RoPE kept in float32; the Talker is bf16 either way), about 1.9x a codec
-  step's speed on an H200 once the captures keep cuDNN's searched conv plans
-  (``capture_cudnn_benchmark``). On a B300 with cuDNN's heuristic conv picks,
-  bf16 was slower, not faster (several of its convs ran on a kernel without
-  tensor cores), and it has not been measured there with the searched plans:
-  measure before switching on other hardware. Its decode is compiled
-  (Inductor) once for every capture.
+  serves it in bfloat16 (``model_kwargs: {codec_dtype: bfloat16}``; RMSNorm
+  and RoPE are computed in float32 from the bf16 weights and frequencies; the
+  Talker is bf16 either way), about 1.9x a codec step's speed on an H200 once
+  the captures keep cuDNN's searched conv plans (``capture_cudnn_benchmark``).
+  That config was gated on an H200 only. On a B300 with cuDNN's heuristic conv
+  picks, main's windowed codec ran bf16 slower, not faster (several of its
+  convs on a kernel without tensor cores), and this decoder has not been
+  measured there: serve ``codec_dtype: float32`` on other GPUs until it is.
+  Its decode is compiled (Inductor) once for every capture.
 - Opt-in AudioSeal watermark on the codec's output (off by default; install
   ``pip install -e '.[audioseal]'``). Turn it on in the deployment YAML::
 

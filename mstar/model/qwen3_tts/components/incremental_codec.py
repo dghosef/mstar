@@ -134,7 +134,8 @@ class IncrementalDecoder(nn.Module):
         rel = qpos[:, :, None] - kpos[:, None, :]
         # the cached keys a stream has not produced yet sit at negative positions
         mask = ((kpos[:, None, :] >= 0) & (rel >= 0) & (rel < self.window))[:, None]
-        # RMSNorm and RoPE in fp32 whatever the decoder's dtype: bf16 loses precision there
+        # RMSNorm and RoPE computed in fp32 whatever the decoder's dtype (bf16 loses precision
+        # there); their weights and the RoPE frequencies are stored in the decoder's dtype
         cos, sin = transformer.rotary_emb(h.float(), qpos)
         cos, sin = cos[:, None], sin[:, None]
         for i, layer in enumerate(self.layers):

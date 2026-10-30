@@ -1,11 +1,14 @@
 # Qwen3-TTS-12Hz-1.7B-CustomVoice: built-in speakers, optional style instruction (instruct=...)
-# Same graph, resources and single-GPU placement as the 0.6B deployment
-# (configs/qwen3tts.yaml); only the checkpoint differs. KV geometry is
-# identical across sizes (28 layers, 8 KV heads, head_dim 128).
+# Same graph, pools and single-GPU placement as the 0.6B deployment
+# (configs/qwen3tts.yaml), with a bf16 codec and a 4-frame first chunk. KV
+# geometry is identical across sizes (28 layers, 8 KV heads, head_dim 128).
 model: "qwen3_tts_1p7b"
 max_seq_len: 32768
-# bf16 codec decoder (norms and RoPE stay fp32): ~1.9x a codec step's speed,
-# within the WER/speaker gate on this checkpoint
+# bf16 codec decoder (its norm and RoPE arithmetic in fp32): ~1.9x a codec
+# step's speed on an H200, within the WER/speaker gate on this checkpoint.
+# Measured on H200 only: on a B300, main's windowed codec ran bf16 slower under
+# cuDNN's heuristic conv picks, and this decoder has not been measured there;
+# set codec_dtype: float32 on other GPUs until it is.
 model_kwargs:
   codec_dtype: bfloat16
   # A 4-frame first chunk (320 ms of audio, three Talker steps later): with a
@@ -23,15 +26,16 @@ model_kwargs:
 resources:
   talker_attn:
     flashinfer_backend: fa2
-  # Room for the requests that pile up past saturation: with the default pools
-  # an overload ran the KV pages and codec stream slots out and admit failures
-  # collapsed throughput (B at 80 req/s: 9.8 done/s, TTFA p99 119 s); with these
-  # it saturates softly (78/86/91 done/s at 80/88/96 req/s, TTFA p99 89-222 ms).
-  # Memory only: 70 GB peak on an H200.
-  talker_kv:
-    max_num_pages: 4096
-  codec_state:
-    max_slots: 512
+  # Default pools (2048 Talker KV pages, about 30 GB). On a GPU with 80 GB or
+  # more, these overload-sized pools held up past saturation on an
+  # H200 (78/86/91 done/s at 80/88/96 req/s, TTFA p99 89-222 ms, 70 GB peak),
+  # where the default pools collapsed (9.8 done/s at 80 req/s). That was
+  # measured before admission queued requests for KV pages and codec slots
+  # instead of failing their admits, and is not re-measured since:
+  #   talker_kv:
+  #     max_num_pages: 4096
+  #   codec_state:
+  #     max_slots: 512
 node_groups:
   - node_names: [Talker]
     ranks: [0]
