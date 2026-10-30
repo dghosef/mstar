@@ -105,6 +105,21 @@ def healthy(port: int) -> bool:
     return False
 
 
+def wait_port_free(port: int, timeout: float = 120.0) -> None:
+    """The previous arm's server can hold its port for a while after stop(); binding then fails at startup."""
+    import socket
+    t0 = time.monotonic()
+    while True:
+        with socket.socket() as sk:
+            try:
+                sk.bind(("0.0.0.0", port))
+                return
+            except OSError:
+                if time.monotonic() - t0 > timeout:
+                    raise RuntimeError(f"port {port} still in use after {timeout:.0f} s") from None
+        time.sleep(2)
+
+
 def parse_arm(spec: str) -> tuple[str, dict]:
     name, _, envs = spec.partition(":")
     return name, (dict(kv.split("=", 1) for kv in envs.split(";") if kv) if envs else {})
@@ -115,6 +130,7 @@ class Server:
         self.port = port
         if healthy(port):
             raise RuntimeError(f"port {port} already serving")
+        wait_port_free(port)
         env = dict(os.environ)
         env.update({"HF_HOME": str(HOME / "hf"), "CUDA_VISIBLE_DEVICES": m.get("visible", m["gpus"]), "NCCL_NVLS_ENABLE": "0"})
         if arm in m["comps"]:
