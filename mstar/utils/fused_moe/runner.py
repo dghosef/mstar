@@ -14,7 +14,7 @@ from typing import NamedTuple
 import torch
 import triton.language as tl
 
-from mstar.utils.fused_moe.align import moe_align_block_size
+from mstar.utils.fused_moe.align import block_per_pair, moe_align_block_size
 from mstar.utils.fused_moe.kernels import (
     act_and_mul_triton,
     get_config,
@@ -125,7 +125,10 @@ def fused_experts(
 
     # 1. Token permute + per-expert block alignment.
     block_m = config["BLOCK_SIZE_M"]
-    if alignment is None:
+    if alignment is None and num_tokens == 1 and not skip_invalid and topk_ids.is_cuda:
+        # one token's experts are distinct: the sort would give each pair its own block anyway
+        alignment = MoeAlignment(*block_per_pair(topk_ids, block_m), block_m)
+    elif alignment is None:
         alignment = MoeAlignment(*moe_align_block_size(topk_ids, block_m, E), block_m)
     assert alignment.block_m == block_m, f"alignment uses BLOCK_SIZE_M={alignment.block_m}, config {block_m}"
     sorted_token_ids, expert_ids, num_tokens_post_padded, _ = alignment
