@@ -1874,11 +1874,12 @@ declares nothing for it. Which ranks form the group depends on the node's shape:
   replicas the same way.
 - **SP ranks (SP mode).** The group is the node's SP ranks: ``P = sp_size``. Heads shard over
   TP alone, and the node loads without its SP group, so its weights and every layer other
-  than attention are replicated across SP. That pays off only where TP can't grow, for
-  example when the query or recurrent head count isn't divisible by the GPU count. Where TP
-  mode applies, prefer it. Every paged pool of such a node must set ``context_parallel``.
-  This is how a node outside the model's ``sp_enabled_nodes`` runs on SP ranks; a node in
-  ``sp_enabled_nodes`` runs its own sequence parallelism, and a pool over it can't set the key.
+  than attention are replicated across SP (attention over the step's own tokens is split, see
+  below). That pays off only where TP can't grow, for example when the query or recurrent head
+  count isn't divisible by the GPU count. Where TP mode applies, prefer it. Every paged pool of
+  such a node must set ``context_parallel``. This is how a node outside the model's
+  ``sp_enabled_nodes`` runs on SP ranks; a node in ``sp_enabled_nodes`` runs its own sequence
+  parallelism, and a pool over it can't set the key.
 
 ``page_size`` must be divisible by ``P``. The conductor checks these rules against
 ``node_groups`` before it starts a worker. ``max_num_pages`` still counts whole logical
@@ -1891,36 +1892,48 @@ bounded KV pool can't set the key. The prefix cache's limits above one rank
 Over a placed pool, the FlashInfer attention backend (``flashinfer``, and ``auto``) attends
 each rank's slots and returns the partial with its log-sum-exp, and the partners exchange the
 partials and merge them exactly (``mstar/engine/resources/context_parallel.py``). In SP mode
-the partners hold the same query heads, so they all-gather the partials. In TP mode they hold
-different query heads of one KV head: each sends its queries to its partners, attends every
-partner's heads over its own slots, and sends the partials back to their heads' owners, two
-all-to-alls over the TP group. The collectives run on every layer of every step, so a request
-attends at one rank's speed over ``1/P`` of its context, plus the exchange. An eager step whose
-rows hold no stored context yet (a first prefill) skips both.
+the partners hold the same query heads, so they all-gather the partials, one gather a layer.
+In TP mode they hold different query heads of one KV head: each sends its queries to its
+partners, attends every partner's heads over its own slots, and sends the partials back to
+their heads' owners, two all-to-alls over the TP group. The collectives run on every layer of
+every step, so a request attends at one rank's speed over ``1/P`` of its context, plus the
+exchange. An eager step whose rows hold no stored context yet (a first prefill) skips the
+context call, and in TP mode the exchange too.
 
 A step whose rows each query one token makes one paged call after its KV write; in TP mode it
 runs on tensor cores whatever ``decode_tensor_cores`` says, since a rank's query heads over its
 one KV head can form a group the CUDA-core decode kernel doesn't take. Any other step (prefill,
 chunked prefill, a prefix hit, speculative verify) attends its stored context on the paged
-kernel and its own tokens on FlashInfer's ragged prefill, over the ``k`` and ``v`` the layer
-passes to ``run``. A layer that calls ``attn.run`` itself must pass them (``AttentionCallable``
-does); one that writes K/V in a fused kernel that leaves ``k`` unrotated (``Qwen3Attention`` in
+kernel and its own tokens, causally, over the ``k`` and ``v`` the layer passes to ``run``. In
+TP mode a rank attends every own token for its heads on FlashInfer's ragged prefill. A layer
+that calls ``attn.run`` itself must pass ``k`` and ``v`` (``AttentionCallable`` does); one that
+writes K/V in a fused kernel that leaves ``k`` unrotated (``Qwen3Attention`` in
 ``mstar/model/components/qwen3_lm.py``) rotates it in place first when the attention resource's
 ``reads_step_kv()`` says the step attends them, so a decode step keeps the fused kernel.
 
-The MLA backend (``flashinfer_mla``) attends a placed pool the same way, its own tokens on a
-second MLA call over the latents the layer passes as ``k`` (``MLAAttention`` does), and refuses a
-``context_only`` step. An MLA pool's one latent is every TP rank's, so in TP mode ``P = tp``, and
-a multi-token step exchanges every head's queries and partials over the whole TP group each layer.
-It plans on FA3 (Hopper) or FA2 rather than ``auto``'s other fallbacks. That planner caps a plan's
-work items, which TP mode's widened heads reach ``P`` times sooner, and counts each rank's own KV
-lengths, so its own refusal could come on one rank alone. Instead a step is refused before it
-plans, on every rank alike, when a bound on its work items from its query lengths alone passes the
-cap. The bound copies FlashInfer 0.7.2's planner rules, so a placed MLA pool refuses any other
-FlashInfer at load. That planner's causal tile-bound check can also refuse a causal plan at a head
-count that doesn't divide its query tile, which is 64 on a plan averaging few queries a row, so a
-placed MLA pool is refused at load unless each rank's head count divides 64, in TP mode too, where
-the refusal would otherwise fail steps mid-serving. GLM-5.2 with ``dsa_long_context`` off (context
+In SP mode, where attending every own token would be the same work on every partner, rank ``r``
+attends only *zigzag* chunks ``r`` and ``2P - 1 - r`` of each row (``zigzag_rows``; a row of
+``T`` tokens cut into ``2P`` chunks of ``T // 2P``, the first ``T % 2P`` one longer), so the
+partners share the causal work evenly. Each chunk's queries attend their row's tokens up to the
+chunk's end, on the backend's paged prefill kernel over the step's keys viewed as pages of one
+slot (a chunk's keys are then a list of page indices); each rank merges that share, with lse
+``-inf`` off its chunks, into its context partial before the one gather. Rows, and every layer
+but attention, stay replicated, so the model changes nothing.
+
+The MLA backend (``flashinfer_mla``) attends a placed pool the same way, its own tokens (in SP
+mode, its zigzag chunks of them) on a second MLA call over the latents the layer passes as ``k``
+(``MLAAttention`` does), and refuses a ``context_only`` step. An MLA pool's one latent is every TP
+rank's, so in TP mode ``P = tp``, and a multi-token step exchanges every head's queries and
+partials over the whole TP group each layer. It plans on FA3 (Hopper) or FA2 rather than
+``auto``'s other fallbacks. That planner caps a plan's work items, which TP mode's widened heads
+reach ``P`` times sooner, and counts each rank's own KV lengths, so its own refusal could come on
+one rank alone. Instead a step is refused before it plans, on every rank alike, when a bound on
+its work items from its query lengths alone passes the cap. The bound copies FlashInfer 0.7.2's
+planner rules, so a placed MLA pool refuses any other FlashInfer at load. That planner's causal
+tile-bound check can also refuse a causal plan at a head count that doesn't divide its query tile,
+which is 64 on a plan averaging few queries a row, so a placed MLA pool is refused at load unless
+each rank's head count divides 64, in TP mode too, where the refusal would otherwise fail steps
+mid-serving. GLM-5.2 with ``dsa_long_context`` off (context
 capped at ``index_topk``) is an MLA model without DSA and loads under ``context_parallel``.
 
 Besides attention, the position resource (RoPE) and the recurrent state pool (GDN, KDA) support
