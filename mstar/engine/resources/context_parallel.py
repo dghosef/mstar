@@ -248,7 +248,8 @@ class ContextParallelWrapper:
         if check is not None:
             qo = context.qo_indptr.numpy()
             check("the context", qo)
-            if isinstance(self.new, ZigzagWrapper):
+            # under SP placement ``new`` is a ``ZigzagWrapper``; TP mode's own-token plan is symmetric
+            if self._placement.over_sp and self.new is not None:
                 for index in range(self._placement.size):
                     share = self.new.share(qo, index, causal)
                     if len(share) > 1:
@@ -406,28 +407,26 @@ class ZigzagWrapper:
     def share(self, qo_indptr: np.ndarray, index: int, causal: bool = True) -> np.ndarray:
         """Partner ``index``'s plan of a step as this wrapper makes it: its chunks' ``qo_indptr``,
         padded as its kernel's planner reads it. Every rank can lay out every partner's."""
-        _, first, end, kv_end = _zigzag_chunks(qo_indptr, self._placement.size, index, causal)
-        return self._padded(np.concatenate([[0], np.cumsum(end - first)]), kv_end)[0]
+        _, first, end, _ = _zigzag_chunks(qo_indptr, self._placement.size, index, causal)
+        return self._padded(np.concatenate([[0], np.cumsum(end - first)]))
 
-    def _padded(self, qo_indptr: np.ndarray, kv_lens: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """A share's chunks on a captured wrapper, padded to the bucket's queries and rows. Its
-        padding queries are one row over one key, so they cost O(pad): under causal alignment all
-        but the last see none, and their outputs land in the row ``run`` drops. The rows left over
-        hold no query and one key."""
+    def _padded(self, qo_indptr: np.ndarray) -> np.ndarray:
+        """A share's chunks' ``qo_indptr`` on a captured wrapper, padded to the bucket's queries and
+        rows. Its padding queries are one row over one key (``plan``), so they cost O(pad): under
+        causal alignment all but the last see none, and their outputs land in the row ``run``
+        drops. The rows left over hold no query and one key."""
         if not self._captured:
-            return qo_indptr, kv_lens
-        extra = self._segments - len(kv_lens)
-        return (
-            np.concatenate([qo_indptr, np.full(extra, self._queries)]),
-            np.concatenate([kv_lens, np.ones(extra, dtype=np.int64)]),
-        )
+            return qo_indptr
+        return np.concatenate([qo_indptr, np.full(self._segments + 1 - len(qo_indptr), self._queries)])
 
     @torch.compiler.disable
     def plan(self, qo_indptr: torch.Tensor, causal: bool = True) -> None:
         rows = zigzag_rows(qo_indptr.numpy(), self._placement.size, self._placement.index, causal)
-        qo, kv_lens = self._padded(rows.qo_indptr, np.diff(rows.kv_indptr))
+        qo = self._padded(rows.qo_indptr)
         # a padding or leftover row's one key is token 0
-        kv_tokens = np.concatenate([rows.kv_tokens, np.zeros(len(kv_lens) + 1 - len(rows.kv_indptr), dtype=np.int64)])
+        extra = len(qo) - len(rows.qo_indptr)
+        kv_indptr = np.concatenate([rows.kv_indptr, rows.kv_indptr[-1] + np.arange(1, extra + 1)])
+        kv_tokens = np.concatenate([rows.kv_tokens, np.zeros(extra, dtype=np.int64)])
         self._step_tokens = int(qo_indptr[-1])
         if self._captured:
             # a padding query gathers token 0 and scatters to the row past the bucket's, dropped
@@ -443,10 +442,10 @@ class ZigzagWrapper:
             return
         self.kernel.plan(
             qo_indptr=torch.from_numpy(qo.astype(np.int32)),
-            paged_kv_indptr=torch.from_numpy(np.concatenate([[0], np.cumsum(kv_lens)]).astype(np.int32)),
+            paged_kv_indptr=torch.from_numpy(kv_indptr.astype(np.int32)),
             paged_kv_indices=torch.from_numpy(kv_tokens.astype(np.int32)),
             paged_kv_last_page_len=torch.ones(len(qo) - 1, dtype=torch.int32),
-            kv_lens=torch.from_numpy(kv_lens.astype(np.int32)).as_subclass(HostLens),
+            kv_lens=torch.from_numpy(np.diff(kv_indptr).astype(np.int32)).as_subclass(HostLens),
             causal=causal, dtype=self._dtype,
         )
 
