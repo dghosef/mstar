@@ -4,12 +4,6 @@ max_seq_len: 32768
 # two plus 3072-7168, which cut the padding of 9B's compute-bound long prefills.
 model_kwargs:
   prefill_token_buckets: [32, 64, 128, 256, 512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192]
-# Plan a decode step from the last step's KV plan when its rows are unchanged,
-# and raise the gen-0 GC threshold, as the 0.8B config does: fewer collections
-# of the per-step Python objects at 64-128 rows.
-knobs:
-  kv_plan_cache: 1
-  gc_gen0_threshold: 50000
 node_groups:
   # Text, images and video. Colocated: the
   # encoder runs once per request, then idles.
