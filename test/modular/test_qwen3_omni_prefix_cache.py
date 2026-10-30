@@ -365,6 +365,8 @@ def test_clips_past_the_largest_capture_run_one_per_pass():
     clips = [audio.prepare_inputs("prefill_audio", None, {"audio_features": [torch.zeros(1, 40_000)]})] * 2
     assert audio.can_batch(None, clips[:1])
     assert not audio.can_batch(None, clips), "two long clips were packed past the largest capture into one pass"
+    # every row of the step failed in prepare_inputs: the engine still asks
+    assert audio.can_batch(None, [])
 
 
 @requires_cuda

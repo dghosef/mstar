@@ -173,7 +173,8 @@ class AudioEncoderSubmodule(NodeSubmodule):
             full, rest = divmod(n, chunk)
             chunk_lengths += [chunk] * full + ([rest] if rest else [])
         after = [_get_feat_extract_output_lengths(n, enc.n_window) for n in chunk_lengths]
-        width = max(after)
+        # no clips: a step whose rows all failed in prepare_inputs
+        width = max(after, default=0)
         valid = [i * width + j for i, n in enumerate(after) for j in range(n)]
         # windows span a fixed number of chunks of the batch's widest chunk
         window = width * (enc.n_window_infer // chunk)
