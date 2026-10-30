@@ -1576,11 +1576,10 @@ def test_code_predictor_depth_loop_compiles_no_frame_per_position(monkeypatch, d
     """The engine compiles a captured forward with static ints, so a compiled
     frame that holds a depth step's ``cache_pos`` (or its LM head) recompiles
     at every depth position (and batch bucket) until the recompile limit: a
-    frame of four passes over the layers must compile no more frames than one
-    of two."""
-    _, fn4, args4 = _depth_loop(monkeypatch, groups=5)
-    _, fn2, args2 = _depth_loop(monkeypatch, groups=3)
-    assert dynamo_counts(fn4, *args4).compiles == dynamo_counts(fn2, *args2).compiles
+    frame of five codec groups must compile no more frames than one of three."""
+    _, fn5, args5 = _depth_loop(monkeypatch, groups=5)
+    _, fn3, args3 = _depth_loop(monkeypatch, groups=3)
+    assert dynamo_counts(fn5, *args5).compiles == dynamo_counts(fn3, *args3).compiles
 
 
 def test_qwen3_tts_per_request_sampler_configs_drive_code_predictor():
