@@ -320,3 +320,29 @@ def positions_over_sp(specs: Iterable[NodeResourceSpec], node: str, sp_size: int
             f"set context_parallel on {sorted(key for key, placed in pools.items() if not placed)} too"
         )
     return any(pools.values())
+
+
+def sp_rank_placement(specs: Iterable[NodeResourceSpec], node: str, sp_size: int, sp_enabled_nodes) -> bool:
+    """Whether ``node``, on ``sp_size`` > 1 SP ranks, places its KV pools' positions over them
+    (`positions_over_sp`) rather than running the model's own sequence parallelism (it is in
+    ``sp_enabled_nodes``). Raises when it does neither, or both: the placement loads the node
+    without the SP group its own sequence parallelism needs."""
+    placed = positions_over_sp(specs, node, sp_size)
+    if placed and node in sp_enabled_nodes:
+        raise ValueError(
+            f"node {node!r} runs its own sequence parallelism (sp_enabled_nodes), and a paged KV pool over "
+            "it sets context_parallel, which would replace it: turn context_parallel off, or use sp_size 1 "
+            "to place positions over TP ranks"
+        )
+    if not placed and node not in sp_enabled_nodes:
+        pooled = any(
+            node in spec.nodes and isinstance(spec, KVSpec) and isinstance(spec.config, PagedKVConfig)
+            for spec in specs
+        )
+        raise ValueError(
+            f"node {node!r} on {sp_size} SP ranks is not in sp_enabled_nodes {sorted(sp_enabled_nodes)}"
+            + (": set context_parallel on its paged KV pools to place positions over the SP ranks instead"
+               if pooled else ", and holds no paged KV pool to place over them: put it in a node group of "
+               "its own with sp_size 1")
+        )
+    return placed

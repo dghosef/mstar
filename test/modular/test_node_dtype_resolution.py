@@ -118,5 +118,5 @@ def test_a_node_on_sp_ranks_that_neither_runs_sp_nor_places_its_kv_is_refused_at
     model.get_default_sharding_config = lambda: ShardingConfig(groups=[], tp_enabled_nodes=set(), shard_dim={})
     groups = WorkerParallelGroups(num_workers=2, global_rank=0)
     groups.add_sp("inherit", CommGroup(my_global_rank=0, my_group_rank=0, group_members=[0, 1]))
-    with pytest.raises(ValueError, match="'inherit' is on 2 SP ranks and neither"):
+    with pytest.raises(ValueError, match="'inherit' on 2 SP ranks is not in sp_enabled_nodes"):
         _build(model, groups)
