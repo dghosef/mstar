@@ -137,11 +137,7 @@ class Qwen3OmniThinkerLayer(nn.Module):
         Returns:
             (this layer's MLP output, the residual stream before it)
         """
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm.forward_residual(hidden_states, residual)
+        hidden_states, residual = self.input_layernorm.forward_residual(hidden_states, residual)
         hidden_states = self.self_attn(
             hidden_states,
             cos_sin_3d=cos_sin_3d,

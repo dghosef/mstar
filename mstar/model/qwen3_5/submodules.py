@@ -129,12 +129,10 @@ class LLMSubmodule(ARNodeSubmodule):
         vision_config: Qwen3_5VisionConfig | None = None,
         prefill_token_buckets: list[int] | None = None,
     ):
-        super().__init__()
+        super().__init__(prefill_token_buckets)
         self.model = model
         self.config = config
         self.vision_config = vision_config
-        if prefill_token_buckets:
-            self.PREFILL_TOKEN_BUCKETS = sorted(int(n) for n in prefill_token_buckets)
         # only a decode row's token ends decode_loop; a prefill is not in it
         # yet. Decode reads its input ids off the sampler's slot masters.
         self.token_stop = TokenStop(

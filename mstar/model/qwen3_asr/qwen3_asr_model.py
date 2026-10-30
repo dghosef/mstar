@@ -472,19 +472,11 @@ class Qwen3ASRModel(Model):
 
     def _create_encoder_submodule(self, device: str, autocast_dtype: torch.dtype | None) -> NodeSubmodule:
         from mstar.model.components.aut_encoder import AuTEncoder
-        from mstar.model.loader.iterators import iter_safetensors_shards
-
-        with torch.device("meta"):
-            encoder = AuTEncoder(self.config.audio, attn_key=AUT_ATTN)
-        if autocast_dtype is not None:
-            encoder = encoder.to(autocast_dtype)
-        encoder.to_empty(device=device)
-        prefix = "thinker.audio_tower."
-        weights = iter_safetensors_shards(self.local_dir, device=device, prefix=prefix)
-        encoder.load_weights((k.removeprefix(prefix), v) for k, v in weights)
-        encoder.eval()
-
         from mstar.model.qwen3_asr.submodules import Qwen3ASREncoderSubmodule
+
+        encoder = AuTEncoder.from_checkpoint(
+            self.local_dir, self.config.audio, attn_key=AUT_ATTN, device=device, dtype=autocast_dtype,
+        )
         return Qwen3ASREncoderSubmodule(encoder=encoder, config=self.config)
 
     @staticmethod

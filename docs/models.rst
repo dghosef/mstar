@@ -434,7 +434,8 @@ needs FlashInfer's fused bf16 decode kernel (K = V = 128).
 Text prefill and mixed steps replay captured graphs by total tokens, on the
 ladder ``32 ... 8192`` (powers of two); a step pads to its bucket and a longer
 one runs eagerly. ``model_kwargs: prefill_token_buckets: [...]`` sets a
-deployment's own ladder: ``configs/qwen3_5_9b*.yaml`` add 3072, 5120, 6144 and
+deployment's own ladder (distinct positive token counts, checked when the
+worker loads): ``configs/qwen3_5_9b*.yaml`` add 3072, 5120, 6144 and
 7168, which cut the padding of compute-bound long prefills (+2% output tok/s
 on 9B, random 1024/256 at c=64/128, H200); the same ladder was not a win on
 0.8B, whose prefill is launch-bound. Each bucket adds captures and startup time.
@@ -570,21 +571,31 @@ Qwen3-Omni notes
   (``cp_attend``, shared with Qwen3-TTS), neither bit-exact with the unfused ops. Its 15 depth
   steps feed each sampled code into the next, so small differences can change
   later codes at near-ties.
-- The audio encoder takes the clips of up to 16 requests a step and packs
-  them along time in request order into one pass, with attention windowed
-  within each clip, while they fit its largest capture (8192 encoder rows,
-  about 630 s of audio). A larger step runs its clips one at a time, each
-  replaying the captured layers when it fits 8192 rows; only a clip over
-  8192 rows runs the layers eagerly. A
-  clip's embeddings can differ at the last bit with what it is batched
-  beside, since the packed GEMMs' shapes change with the pass's total rows,
-  and a prefix-cached audio prefix keeps the embeddings it was first computed
-  with, so a later request reusing it inherits that first batch's rounding.
+- The audio encoder is the AuT encoder Qwen3-ASR also runs
+  (``mstar/model/components/aut_encoder.py``). It takes the clips of up to 16
+  requests a step and packs them into one pass, with attention windowed
+  within each clip, while they fit its largest capture: 8192 encoder rows
+  (about 630 s of audio) in at most ``audio_attn.max_segments_per_request``
+  8 s attention windows (the default holds any step of 8192 rows). A larger
+  step runs its clips one at a time, each replaying the captured layers when
+  it fits; a clip over 8192 rows, or with more windows than
+  ``max_segments_per_request``, runs the layers eagerly. A clip's last 1 s
+  chunk is zero-padded to a full chunk before the convolutions, as HF's
+  encoder pads it whenever its batch holds a full chunk, so a clip under 1 s
+  encoded alone differs from HF's: in its last conv row and, through the
+  windowed attention, in every embedding of the clip. A clip's embeddings can
+  differ at the last bit with what it is batched beside, since the packed
+  GEMMs' shapes change with the pass's total rows, and a prefix-cached audio
+  prefix keeps the embeddings it was first computed with, so a later request
+  reusing it inherits that first batch's rounding.
 - The Thinker's text and audio prefill replay captured graphs on the ladder
-  ``128 ... 8192`` tokens (with 6144), so a burst of new prompts that batches
-  into one step of a few thousand tokens still replays; a longer step runs
-  eagerly. ``model_kwargs: prefill_token_buckets: [...]`` sets a deployment's
-  own ladder; each bucket adds captures and startup time.
+  ``128 ... 2048`` tokens, and a longer step runs eagerly.
+  ``model_kwargs: prefill_token_buckets: [...]`` sets a deployment's own
+  ladder; ``configs/qwen3omni_2gpu*.yaml`` run it to 8192 (with 4096 and
+  6144), so a burst of new prompts that batches into one step of a few
+  thousand tokens still replays (measured on 2xH200: the first t2t c=32
+  burst's TTFT p99 3.5 s -> 0.45 s). Each bucket adds captures, graph memory
+  and startup time.
 - The MoE layers route through the fused softmax-top-k kernel
   (``TopKRouter(fused_softmax_topk=True)``), which gives equal probabilities to
   the lower expert id where ``torch.topk`` may pick another.
