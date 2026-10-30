@@ -28,6 +28,7 @@ from mstar.model.qwen3_omni.components.rope import get_rope_index_vision
 from mstar.model.qwen3_omni.config import AUDIO_ATTN, THINKER_KV, THINKER_MIXED, THINKER_POS, Qwen3OmniModelConfig
 from mstar.model.qwen3_omni.qwen3_omni_model import Qwen3OmniModel, image_span
 from mstar.model.qwen3_omni.submodules import AudioEncoderSubmodule, ThinkerSubmodule, VisionEncoderSubmodule
+from mstar.model.submodule_base import NodeInputs
 
 RID = "r0"
 NODE = "Thinker"
@@ -361,10 +362,39 @@ def test_packed_clips_split_by_the_encoder_s_own_window():
         torch.testing.assert_close(packed[rid]["audio_embeds"][0], ref, rtol=1e-4, atol=1e-4)
 
 
+def _audio_as_declared(config: AuTEncoderConfig) -> AudioEncoderSubmodule:
+    """The submodule (no weights) bound to the attention ceiling the model declares for ``config``."""
+    model = Qwen3OmniModel.__new__(Qwen3OmniModel)
+    model.config = Qwen3OmniModelConfig(audio_encoder=config)
+    (spec,) = [s for s in model.get_node_resources() if s.resource_key == AUDIO_ATTN]
+    audio = AudioEncoderSubmodule(SimpleNamespace(config=config), config=None)
+    audio.bind_node_resources({AUDIO_ATTN: spec.config})
+    return audio
+
+
+@pytest.mark.parametrize("n_window_infer", [800, 400])
+def test_the_audio_encoder_captures_only_steps_its_attention_plan_holds(n_window_infer):
+    """A captured step's windows must fit the attention resource's segment
+    ceiling, read from the resource so a ``resources: audio_attn:
+    max_segments_per_request`` override holds: a step over it runs its clips one
+    at a time rather than failing the captured plan. The declared ceiling holds
+    the largest bucket's windows whatever the window size."""
+    audio = _audio_as_declared(AuTEncoderConfig(n_window_infer=n_window_infer))
+    window = audio.encoder.config.window_tokens
+    # the most windows a capture can take: a clip filling the top bucket's full windows, beside 15 one-row clips
+    widest = [NodeInputs(input_seq_len=n) for n in [8192 - 15] + [1] * 15]
+    assert audio.can_batch(None, widest)
+
+    audio.bind_node_resources({AUDIO_ATTN: SimpleNamespace(max_segments_per_request=32)})
+    clips = [NodeInputs(input_seq_len=8 * window)] * 8
+    assert audio.can_batch(None, clips[:1])
+    assert not audio.can_batch(None, clips), "a step of 64 windows was packed past a 32-segment attention plan"
+
+
 def test_clips_past_the_largest_capture_run_one_per_pass():
     """A step's clips pack into one encoder pass only while they fit the
     largest capture bucket, which bounds the pass's memory."""
-    audio = AudioEncoderSubmodule(SimpleNamespace(config=AuTEncoderConfig(n_window_infer=400)), config=None)
+    audio = _audio_as_declared(AuTEncoderConfig(n_window_infer=400))
     # 40k mel frames, ~5.2k encoder rows: one fits the 8192-row bucket, two don't
     clips = [audio.prepare_inputs("prefill_audio", None, {"audio_features": [torch.zeros(1, 40_000)]})] * 2
     assert audio.can_batch(None, clips[:1])

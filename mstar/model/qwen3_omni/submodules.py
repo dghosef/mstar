@@ -41,7 +41,7 @@ from mstar.engine.engine import ExecutingBatch
 from mstar.engine.resources import AttentionStep, KVStep, PositionStep, SamplerStep, Segment, SlotLease, SubmoduleStep
 from mstar.engine.resources.attn.flashinfer import FlashInferManager
 from mstar.engine.resources.sampler.resource import SamplerResource
-from mstar.model.components.aut_encoder import AuTEncoder
+from mstar.model.components.aut_encoder import AuTEncoder, AuTEncoderConfig
 from mstar.model.components.code_predictor_kernels import cp_embed_accumulate
 from mstar.model.components.mrope import mrope_position_ids
 from mstar.model.qwen3_omni.components.code2wav import Qwen3OmniMoeCode2Wav
@@ -125,8 +125,6 @@ class AudioEncoderSubmodule(NodeSubmodule):
     AUDIO_LAYERS = "audio_layers"
     # packed encoder rows a step (13 a second of audio)
     TOKEN_BUCKETS = [256, 512, 1024, 2048, 4096, 8192]
-    # attention windows a step: 8192 rows is 79 full windows, plus a short last one per clip
-    MAX_WINDOWS = 128
     # clips per encoder step
     MAX_BATCH_SIZE = 16
 
@@ -195,11 +193,20 @@ class AudioEncoderSubmodule(NodeSubmodule):
             )
         }
 
+    @classmethod
+    def max_windows(cls, config: AuTEncoderConfig) -> int:
+        """Attention windows the largest step can hold: the top bucket's full
+        windows, plus a short last one per clip."""
+        return cls.TOKEN_BUCKETS[-1] // config.window_tokens + cls.MAX_BATCH_SIZE
+
     def _fits_capture(self, inputs: list[NodeInputs]) -> bool:
-        """Whether a step fits the largest bucket, in rows and in attention windows."""
+        """Whether a step fits the largest bucket, in rows, and the replay's
+        attention plan, in windows: the resource's per-request ceiling, read
+        from it so a YAML override holds."""
         window = self.encoder.config.window_tokens
         rows = [inp.input_seq_len for inp in inputs]
-        return sum(rows) <= self.TOKEN_BUCKETS[-1] and sum(-(-n // window) for n in rows) <= self.MAX_WINDOWS
+        ceiling = self.node_resources[AUDIO_ATTN].max_segments_per_request
+        return sum(rows) <= self.TOKEN_BUCKETS[-1] and sum(-(-n // window) for n in rows) <= ceiling
 
     def _capture_layers(self, inp: PiecewiseCallInputs) -> dict[str, torch.Tensor]:
         """The captured region: reads the runner's buffer, never rebinds."""

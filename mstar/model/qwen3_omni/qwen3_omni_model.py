@@ -317,7 +317,7 @@ class Qwen3OmniModel(Model):
                     head_dim=audio.head_dim,
                     dtype=torch.bfloat16,
                     # a step's clips are one row of windows (see AudioEncoderSubmodule)
-                    max_segments_per_request=AudioEncoderSubmodule.MAX_WINDOWS,
+                    max_segments_per_request=AudioEncoderSubmodule.max_windows(audio),
                 ),
             ),
         ]
