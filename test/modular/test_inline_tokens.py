@@ -252,6 +252,31 @@ def test_a_withheld_output_rides_no_inline_value():
     assert sig == "new_token" and vals == [70, None]
 
 
+def test_a_withheld_output_skips_the_fused_route_and_send():
+    """The fused device-loopback call reads every row's value off the column,
+    so a withheld row would still ride inline: such a step takes the general
+    path, which sends that row None."""
+    class _Fused(_Runtime):
+        supports_route_and_send_inline = True
+
+        def route_and_send_inline(self, **kwargs):
+            raise AssertionError("a withheld row would ride inline")
+
+    class _LoopbackEngine(_Engine):
+        def device_loopback_signals(self, node_name, graph_walk):
+            return ["new_token"]
+
+    w = _worker(_Fused())
+    w.enable_prof, w._device_loopback = False, {}
+    batch = _Batch(withheld={8: ("new_token",)})
+    batch.partition = "p"
+    batch.batch.output_signals, batch.batch.graph_walk = ["new_token"], "decode"
+    batch.node_batch.stream_partition_done_rids = ()
+    rows = HostRows((7, 8), {"new_token": torch.tensor([[70], [80]])})
+    eng = _LoopbackEngine({"new_token": "new_token"})
+    assert w._route_and_send_fast(batch, rows, eng, [7, 8], set()) is False
+
+
 def test_inline_values_fall_back_when_a_rid_has_no_row_or_nothing_applies():
     rows = HostRows((7, 8), {"new_token": torch.tensor([70, 80])})
     w = _worker()
