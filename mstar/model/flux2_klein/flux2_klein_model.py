@@ -44,7 +44,6 @@ from mstar.engine.resources import NodeResourceSpec, RaggedAttentionConfig, Ragg
 from mstar.graph.base import GraphEdge, GraphNode, GraphSection, Loop, Sequential, TensorPointerInfo
 from mstar.graph.special_destinations import EMIT_TO_CLIENT, EMPTY_DESTINATION
 from mstar.model.base import ForwardPassArgs, Model, TensorAndMetadata
-from mstar.model.components.diffusion.attention import dense_attention_for
 from mstar.model.components.diffusion.image_io import encode_image, image_output_format
 from mstar.model.components.diffusion.lora import LoraSpec
 from mstar.model.components.diffusion.qwen3.submodule import (
@@ -80,7 +79,7 @@ ENCODE_IMAGE_WALK = "encode_image"
 IMAGE_GEN_WALK = "image_gen"
 IMAGE_EDIT_WALK = "image_edit"
 
-ATTENTION_BACKENDS = ("flashinfer", "sdpa", "fa3")
+ATTENTION_BACKENDS = ("flashinfer", "sdpa")
 
 
 class Flux2KleinModel(Model):
@@ -493,7 +492,6 @@ class Flux2KleinModel(Model):
             return KleinDenoiseSubmodule(
                 transformer, self.config, loop_name=DENOISE_LOOP,
                 attn_resource_key=DIT_ATTN if self.attention_backend == "flashinfer" else None,
-                dense_attention=dense_attention_for(self.attention_backend, device),
                 compile_transformer=self.compile_transformer,
                 compile_eager_rounding=self.compile_eager_rounding, compile_exact_ops=self.compile_exact_ops,
                 max_batch_size=self.max_batch_size,

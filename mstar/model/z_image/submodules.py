@@ -24,7 +24,6 @@ from torch import nn
 from mstar.communication.tensors import NameToTensorList
 from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.engine.accelerator_graph_config import geometric_batch_sizes
-from mstar.model.components.diffusion.attention import DenseAttention
 from mstar.model.components.diffusion.compile_utils import compile_transformer_forward
 from mstar.model.components.diffusion.decode_utils import (
     VAE_MAX_DECODE_BATCH,
@@ -121,14 +120,13 @@ class ZImageDenoiseSubmodule(DenoiseLoopSubmodule):
 
     def __init__(
         self, transformer: nn.Module, config: ZImageConfig, *, loop_name: str, attn_resource_key: str | None,
-        dense_attention: DenseAttention | None = None,
         compile_transformer: bool = True, compile_eager_rounding: bool = True,
         compile_exact_ops: bool | Sequence[str] = False, max_batch_size: int = 8,
         capture_buckets=(), capture_batch_sizes=(1, 2, 4, 8),
     ):
         super().__init__(
             loop_name=loop_name, max_batch_size=max_batch_size, attn_resource_key=attn_resource_key,
-            dense_attention=dense_attention, capture_buckets=capture_buckets, capture_batch_sizes=capture_batch_sizes,
+            capture_buckets=capture_buckets, capture_batch_sizes=capture_batch_sizes,
         )
         self.transformer = transformer
         self.config = config
