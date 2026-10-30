@@ -131,8 +131,7 @@ def cmd_timing(args):
             print(json.dumps(rows[-1]), flush=True)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    name = f"timing_{args.dtype}{'_tf32' if args.tf32 else ''}.jsonl"
-    (out / name).write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (out / f"timing_{args.dtype}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
 
 
 # ---------------------------------------------------------------------------
@@ -312,10 +311,7 @@ def main():
     e.add_argument("--wav-dir", required=True)
     e.add_argument("--out", required=True)
     e.add_argument("--limit", type=int, default=40)
-    for sp in sub.choices.values():
-        sp.add_argument("--tf32", action="store_true", help="TF32 matmuls (cuDNN convs use TF32 by default)")
     args = p.parse_args()
-    torch.backends.cuda.matmul.allow_tf32 = args.tf32
     with torch.inference_mode():
         {"timing": cmd_timing, "kernels": cmd_kernels, "parity": cmd_parity, "encode": cmd_encode}[args.cmd](args)
 
