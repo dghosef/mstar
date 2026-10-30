@@ -177,3 +177,20 @@ def test_encode_runs_through_a_bound_ragged_resource():
         out, layout = keyed(feats, [120])
     assert len(calls) == TINY["encoder_layers"] and calls[0] == (layout.total_tokens, 4, 16)
     assert out.shape == (layout.total_tokens, TINY["output_dim"])
+
+
+def test_a_float16_layer_keeps_its_residual_stream_finite():
+    """As HF's encoder layer does, an fp16 layer clamps its residual stream
+    short of the dtype's max, so a long clip's embeddings never overflow to inf."""
+    from mstar.model.components.aut_encoder import AuTEncoderLayer
+
+    layer = AuTEncoderLayer(AuTEncoderConfig(**TINY), attn_key=None).half()
+    with torch.no_grad():
+        for param in layer.parameters():
+            param.normal_(std=0.02)
+        # the MLP's output is fp16's largest value, so adding the stream to it overflows
+        layer.fc2.weight.zero_()
+        layer.fc2.bias.fill_(torch.finfo(torch.float16).max)
+        out = layer(torch.full((4, TINY["d_model"]), 40.0, dtype=torch.float16), [0, 4])
+    assert torch.isfinite(out).all()
+    assert out.max() == torch.finfo(torch.float16).max - 1000

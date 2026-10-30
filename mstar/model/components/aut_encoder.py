@@ -170,8 +170,12 @@ class AuTEncoderLayer(nn.Module):
         hidden_states = self.self_attn(self.self_attn_layer_norm(hidden_states), cu_seqlens)
         hidden_states = residual + hidden_states
         residual = hidden_states
-        hidden_states = self.fc2(self.act(self.fc1(self.final_layer_norm(hidden_states))))
-        return residual + hidden_states
+        hidden_states = residual + self.fc2(self.act(self.fc1(self.final_layer_norm(hidden_states))))
+        if hidden_states.dtype == torch.float16:
+            # HF's guard: a long clip's fp16 residual stream overflows to inf
+            bound = torch.finfo(torch.float16).max - 1000
+            hidden_states = hidden_states.clamp(-bound, bound)
+        return hidden_states
 
 
 @dataclass
