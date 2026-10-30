@@ -80,6 +80,10 @@ class Qwen3ASREncoderSubmodule(NodeSubmodule):
     one forward; every 8 s attention window of every request is one
     segment of the node's ragged-attention step, so the runner plans the
     kernel's layout before the forward and nothing is recomputed inside.
+
+    Built without a config it takes each clip's log-mel features as given
+    (``audio_features``): Qwen3-Omni's audio encoder is the same AuT, fed by
+    the API server's feature extractor.
     """
 
     MAX_BATCH_SIZE = 8
@@ -90,13 +94,13 @@ class Qwen3ASREncoderSubmodule(NodeSubmodule):
     # attention and cuBLAS GEMMs, there is nothing for inductor to fuse.
     disable_torch_compile = True
 
-    def __init__(self, encoder: AuTEncoder, config: Qwen3ASRModelConfig):
+    def __init__(self, encoder: AuTEncoder, config: Qwen3ASRModelConfig | None = None):
         super().__init__()
         self.encoder = encoder
         self.config = config
         # built here, after the encoder was materialized, so its filter bank
         # and window are real tensors on the encoder's device
-        self.log_mel = LogMelSpectrogram(
+        self.log_mel = None if config is None else LogMelSpectrogram(
             num_mel_bins=config.num_mel_bins,
             sampling_rate=config.sampling_rate,
             n_fft=config.n_fft,
@@ -121,8 +125,11 @@ class Qwen3ASREncoderSubmodule(NodeSubmodule):
         inputs: NameToTensorList,
         **kwargs,
     ) -> NodeInputs:
-        audio = inputs["audio"][0].reshape(-1).to(device=self.get_device(), dtype=torch.float32)
-        feats = self._mel(audio).to(self._param_dtype())  # (num_mel_bins, T)
+        if self.log_mel is None:
+            feats = inputs["audio_features"][0].to(device=self.get_device(), dtype=self._param_dtype())
+        else:
+            audio = inputs["audio"][0].reshape(-1).to(device=self.get_device(), dtype=torch.float32)
+            feats = self._mel(audio).to(self._param_dtype())  # (num_mel_bins, T)
         num_frames = int(feats.shape[-1])
         return NodeInputs(
             tensor_inputs={"audio_features": feats},

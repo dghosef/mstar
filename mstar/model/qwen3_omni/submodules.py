@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 #
 # Five submodules covering the full Thinker-Talker dual-AR pipeline:
-#   1. AudioEncoderSubmodule
+#   1. the audio encoder: Qwen3-ASR's AuT node (mstar.model.qwen3_asr)
 #   2. VisionEncoderSubmodule
 #   3. ThinkerSubmodule        (3D MRoPE, MoE, layer captures)
 #   4. TalkerSubmodule         (streaming decode, Code Predictor)
@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import functools
-import inspect
 import logging
 from collections.abc import Mapping
 from dataclasses import replace
@@ -21,7 +20,6 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import _get_feat_extract_output_lengths
 from transformers.vision_utils import (
     get_vision_cu_seqlens,
     get_vision_interpolation_indices_and_weights,
@@ -79,21 +77,6 @@ from mstar.model.submodule_base import (
 logger = logging.getLogger(__name__)
 
 
-def _accepts_kwarg(fn: Any, name: str) -> bool:
-    """True if fn takes `name` as a keyword (explicitly or via **kwargs)."""
-    try:
-        params = inspect.signature(fn).parameters
-    except (TypeError, ValueError):
-        return False
-    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
-        return True
-    param = params.get(name)
-    return param is not None and param.kind in (
-        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        inspect.Parameter.KEYWORD_ONLY,
-    )
-
-
 def talker_text_mask(input_ids: torch.Tensor, config: Qwen3OmniModelConfig) -> torch.Tensor:
     """
     Cut system prompt and previous assistant parts out of the talker input
@@ -113,149 +96,6 @@ def talker_text_mask(input_ids: torch.Tensor, config: Qwen3OmniModelConfig) -> t
         elif role_token == config.assistant_token_id:
             mask[im_start_index:segment_end_index] = 0
     return mask
-
-
-# ===================================================================
-# 1. AudioEncoderSubmodule (enc_dec engine)
-# ===================================================================
-
-
-class AudioEncoderSubmodule(NodeSubmodule):
-    """Thin wrapper around the HF Whisper-style audio encoder.
-
-    Runs the encoder over a step's mel spectrograms to produce the audio
-    embeddings the Thinker splices into its input sequence. A step's clips
-    are packed along time in request order, starting a new call when the next
-    clip would pass the frame budget (``forward_batched``).
-    """
-
-    # The HF encoder splits its input by host-side chunk lengths (``.tolist()``),
-    # so compiled frames guard on the chunk count and recompile for nearly
-    # every new clip length, seconds each, on the request's critical path.
-    disable_torch_compile = True
-    # Clips per encoder step, and mel frames (100 per second) per encoder
-    # call. A clip may run 30 min (``media_io.MAX_AUDIO_SECONDS``), and a
-    # call's activations grow with its total frames, so the budget bounds one
-    # call's memory; a step over it packs its clips into several calls. This
-    # sits in the forward until the scheduler can budget a step's tokens.
-    MAX_BATCH_SIZE = 16
-    MAX_BATCH_FRAMES = 30_000
-
-    def __init__(self, audio_encoder: nn.Module, config: Qwen3OmniModelConfig):
-        super().__init__()
-        self.audio_encoder = audio_encoder
-        self.config = config
-        # Older transformers take return_dict; newer ones dropped it.
-        self._encoder_takes_return_dict = _accepts_kwarg(audio_encoder.forward, "return_dict")
-
-    def prepare_inputs(
-        self,
-        graph_walk: str,
-        fwd_info: CurrentForwardPassInfo,
-        inputs: NameToTensorList,
-        **kwargs
-    ) -> NodeInputs:
-        # Edge name from graph walk is "audio_features"
-        audio_features = inputs["audio_features"][0]
-        audio_seqlens = inputs["audio_seqlens"][0]
-        # one clip, its valid mel frames packed along time: its length is the
-        # tensor's width, known on the host
-        frames = audio_features.shape[-1]
-        return NodeInputs(
-            tensor_inputs={
-                "audio_features": audio_features,
-                "audio_seqlens": audio_seqlens,
-            },
-            kwargs={"embed_len": int(_get_feat_extract_output_lengths(frames, self.audio_encoder.n_window))},
-            input_seq_len=frames,
-        )
-
-    def forward(
-        self,
-        graph_walk: str,
-        engine_inputs: ModelInputsFromEngine,
-        audio_features: torch.Tensor,
-        audio_seqlens: torch.Tensor,
-        **kwargs,
-    ) -> NameToTensorList:
-        """Run the audio encoder and return embeddings.
-
-        Returns:
-            {"audio_embeds": [tensor of shape (audio_tokens, hidden_size)]}
-        """
-        logger.debug(
-            "Running AudioEncoder with audio_features shape=%s",
-            audio_features.shape,
-        )
-        extra_kwargs = {"return_dict": True} if self._encoder_takes_return_dict else {}
-        audio_out = self.audio_encoder(
-            audio_features,
-            feature_lens=audio_seqlens,
-            **extra_kwargs,
-        )
-        audio_embeds = getattr(audio_out, "last_hidden_state", audio_out)
-
-        # Flatten to (num_audio_tokens, hidden_size) if needed
-        if audio_embeds.dim() == 3:
-            audio_embeds = audio_embeds.squeeze(0)
-
-        return {"audio_embeds": [audio_embeds]}
-
-    def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
-        return True
-
-    def max_batch_size(self, graph_walk: str) -> int:
-        return self.MAX_BATCH_SIZE
-
-    def preprocess(
-        self,
-        graph_walk: str,
-        engine_inputs: ModelInputsFromEngine,
-        inputs: list[NodeInputs],
-    ) -> dict[str, torch.Tensor | Any]:
-        return {
-            "audio_features": [inp.tensor_inputs["audio_features"] for inp in inputs],
-            "audio_seqlens": [inp.tensor_inputs["audio_seqlens"].reshape(-1) for inp in inputs],
-            "embed_lens": [inp.kwargs["embed_len"] for inp in inputs],
-        }
-
-    def forward_batched(
-        self,
-        graph_walk: str,
-        engine_inputs: ModelInputsFromEngine,
-        audio_features: list[torch.Tensor],
-        audio_seqlens: list[torch.Tensor],
-        embed_lens: list[int],
-        **kwargs,
-    ) -> dict[str, NameToTensorList]:
-        """Encode the step's clips packed along time in request order, starting
-        a new call (each ~10 ms on an H200, mostly launches, whatever the clip
-        length) when the next clip would pass ``MAX_BATCH_FRAMES``, and split
-        each call's embeddings back by clip.
-        The encoder windows its attention within each clip (``feature_lens``),
-        so packing does not mix clips."""
-        groups: list[list[int]] = []
-        frames = 0
-        for row, features in enumerate(audio_features):
-            n = features.shape[-1]
-            if groups and frames + n <= self.MAX_BATCH_FRAMES:
-                groups[-1].append(row)
-                frames += n
-            else:
-                groups.append([row])
-                frames = n
-        parts: list[torch.Tensor] = []
-        for group in groups:
-            embeds = self.forward(
-                graph_walk, engine_inputs,
-                torch.cat([audio_features[row] for row in group], dim=-1),
-                torch.cat([audio_seqlens[row] for row in group]),
-            )["audio_embeds"][0]
-            parts.extend(embeds.split([embed_lens[row] for row in group]))
-        return {
-            rid: {"audio_embeds": [part]}
-            for rid, part in zip(engine_inputs.request_ids, parts, strict=True)
-        }
 
 
 # ===================================================================
