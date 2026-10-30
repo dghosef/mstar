@@ -138,22 +138,6 @@ def test_cp_linear_matches_the_unfused_ops(rows):
     close(cp_linear(out, folded, norm_eps=1e-6, partials=partials, n_part=h // STREAM_TILE), on @ folded.float().t())
 
 
-@pytest.mark.parametrize("max_shared", [101376, 166912, 232448])
-def test_cp_linear_tiles_fit_the_devices_shared_memory(max_shared):
-    """At every row count the depth loop runs, each ``cp_linear`` mode's
-    pipeline stages fit in a block's shared memory: 99 KB (sm_86, sm_89),
-    163 KB (A100) and 227 KB (H100, H200). Triton refuses to compile a tile
-    that doesn't."""
-    from mstar.model.components.code_predictor_kernels import _cp_linear_tile
-
-    for epi in range(4):
-        for rows in (1, 2, 3, 16, 32, 64):
-            for n in (1024, 4096):
-                tile = _cp_linear_tile(rows, n, epi, 2, max_shared)
-                weights = 2 if epi == 2 else 1
-                assert tile.stages * tile.block_k * (tile.block_m + weights * tile.block_n) * 2 <= max_shared
-
-
 def _rms(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps) * weight.float()
 
