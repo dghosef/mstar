@@ -1,17 +1,20 @@
 model: "qwen3_omni"
 max_seq_len: 32768
-# qwen3omni_2gpu.yaml for 80 GB H100s. The Thinker's GPU also holds the audio and
-# vision encoders and every prefill capture bucket (up to 8192 tokens, 16384 for an
-# image), and beside a 1,024-page KV pool 27 of those buckets don't fit, so a step
-# that size would run eagerly. 512 pages (6 GiB, 64k tokens) leave room for all of
-# them. Host pages give a full pool a request to move.
+# qwen3omni_2gpu.yaml for 80 GB H100s. The Thinker's GPU holds every prefill capture
+# bucket (up to 8192 tokens, 16384 for an image), and beside a 1,024-page KV pool 27
+# of those buckets don't fit, so a step that size would run eagerly. 512 pages (6 GiB,
+# 64k tokens) leave room for all of them. Host pages give a full pool a request to move.
 resources:
   thinker_kv:
     max_num_pages: 512
     cpu_offload_pages: 1024
 node_groups:
+  # The encoders run on the Talker's GPU (idle for text replies). Beside the Thinker
+  # they shared its worker, so at 16+ requests each encoder step waited behind a
+  # Thinker step (H100 a2t: c16/c32 +7/+11% tok/s, TTFT 92/121 -> 72/86 ms). The
+  # handoff across GPUs costs about 2 ms of TTFT, -4% tok/s for one short request.
   - node_names: [audio_encoder, vision_encoder]
-    ranks: [1]
+    ranks: [0]
   - node_names: [Thinker]
     ranks: [1]
 
