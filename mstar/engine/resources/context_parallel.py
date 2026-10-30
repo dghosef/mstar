@@ -223,10 +223,10 @@ class ContextParallelWrapper:
         local, valid_rows = placement.local_indptrs(context, page_size)
         # no row has a stored page: logical, so the same on every rank
         self.context_empty = not self._captured and self.new is not None and not int(context.paged_kv_indptr[-1])
-        if self.new is None:
-            self.context.plan(dtype=dtype, **local.to_kwargs_dict())
-        else:
-            self.context.plan(causal=False, dtype=dtype, **local.to_kwargs_dict())
+        # not causal whatever the step: every query sees all of it (a one-token row's own key
+        # included), and FA MLA's causal tile check reads each rank's KV lengths
+        self.context.plan(causal=False, dtype=dtype, **local.to_kwargs_dict())
+        if self.new is not None:
             self.new.plan(context.qo_indptr, causal=causal)
         self._qo_indptr_buf = getattr(self.context, "_qo_indptr_buf", None)
         valid = np.repeat(valid_rows, np.diff(context.qo_indptr.numpy()))
