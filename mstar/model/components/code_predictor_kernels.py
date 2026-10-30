@@ -124,7 +124,7 @@ def cp_embed_accumulate(
     its dtype. Returns the embeddings, the next depth step's input. One launch for what
     was an index_select, a copy and a promoting add."""
     bs, hidden = tokens.shape[0], weight.shape[1]
-    assert tokens.stride(0) == 1 and weight.stride(1) == 1 and emb_sum.stride(1) == 1 and hidden % 256 == 0
+    assert tokens.is_contiguous() and weight.stride(1) == 1 and emb_sum.stride(1) == 1 and hidden % 256 == 0
     emb = torch.empty(bs, hidden, dtype=weight.dtype, device=weight.device)
     _cp_embed_accumulate_kernel[(bs,)](
         tokens, weight, emb, emb_sum, all_codes, group,
