@@ -767,29 +767,30 @@ def _fa_work_items(q_lens, kv_lens, heads) -> int:
 
 
 # under SP placement the long row's chunks plan on a smaller query tile than the step's, so a
-# partner's share can pass the bound on the context's queries
-@pytest.mark.parametrize("over_sp, rows", [(False, PREFILL_ROWS), (True, ((0, 2), (5, 52)))], ids=["tp", "sp"])
+# partner's share can pass the bound on the context's queries; and these two shares' bounds differ,
+# so a rank checking its own share alone would decide differently from its partner
+@pytest.mark.parametrize("over_sp, rows", [(False, PREFILL_ROWS), (True, ((0, 1), (3, 56)))], ids=["tp", "sp"])
 def test_mla_ranks_refuse_the_same_steps_past_the_fa_planners_work_item_cap(monkeypatch, over_sp, rows):
     """FlashInfer's FA MLA planner counts the lengths each rank plans, which differ over a placed
     pool (its context slots, and under SP placement its zigzag share of the own tokens), so its own
     refusal could come on one rank alone and hang the others in the exchange. The refusal before it
     is the same on every rank, whatever the cap."""
-    _emulate_fa_planner(monkeypatch, lambda q, kv, heads, causal: _fa_work_items(q, kv, heads) > fm._FA_MAX_WORK_ITEMS)
     case = _Case.build(rows, CPU, torch.float32, mla=True)
-    joint = [JointGroups(tp_group=CommGroup.trivial(), sp_group=_group(rank, P)) if over_sp
-             else JointGroups(tp_group=_group(rank, P), sp_group=CommGroup.trivial()) for rank in range(P)]
-    ranks = [_cp_attention(j, CPU, torch.float32, mla=True, flashinfer_backend="fa2") for j in joint]
-    # the context lengths each rank plans
-    indptrs = case.plan["main"].cpu_indptrs
-    lens = [place.local_indptrs(indptrs.context_only(CP_PAGE), CP_PAGE)[0].kv_lens.tolist() for _, place in ranks]
-    assert lens[0] != lens[1]
-    decisions = []
-    for cap in range(1, 400):
-        monkeypatch.setattr(fm, "_FA_MAX_WORK_ITEMS", cap)
-        decisions.append(_refusals([attn for attn, _ in ranks], case, "work items"))
-    assert all(a == b for a, b in decisions) and {a for a, _ in decisions} == {False, True}
+    with monkeypatch.context() as m:
+        _emulate_fa_planner(m, lambda q, kv, heads, causal: _fa_work_items(q, kv, heads) > fm._FA_MAX_WORK_ITEMS)
+        joint = [JointGroups(tp_group=CommGroup.trivial(), sp_group=_group(rank, P)) if over_sp
+                 else JointGroups(tp_group=_group(rank, P), sp_group=CommGroup.trivial()) for rank in range(P)]
+        ranks = [_cp_attention(j, CPU, torch.float32, mla=True, flashinfer_backend="fa2") for j in joint]
+        # the context lengths each rank plans
+        indptrs = case.plan["main"].cpu_indptrs
+        lens = [place.local_indptrs(indptrs.context_only(CP_PAGE), CP_PAGE)[0].kv_lens.tolist() for _, place in ranks]
+        assert lens[0] != lens[1]
+        decisions = []
+        for cap in range(1, 400):
+            m.setattr(fm, "_FA_MAX_WORK_ITEMS", cap)
+            decisions.append(_refusals([attn for attn, _ in ranks], case, "work items"))
+        assert all(a == b for a, b in decisions) and {a for a, _ in decisions} == {False, True}
     # the torch fallback runs no FA planner, so nothing is refused for it
-    monkeypatch.undo()
     monkeypatch.setattr(fm, "_sm_count", lambda device: 132)
     monkeypatch.setattr(fm, "_FA_MAX_WORK_ITEMS", 1)
     _plan(_cp_attention(JointGroups(tp_group=_group(0, P), sp_group=CommGroup.trivial()), CPU, torch.float32,
