@@ -1,5 +1,5 @@
 """The code predictor's kernels (Qwen3-Omni's and Qwen3-TTS's depth loops)
-against the op sequences they replace (GPU only).
+against the op sequences they replace (GPU only), and ``cp_linear``'s tiles.
 
 * ``cp_attend``: q/k RMSNorm + RoPE, the dense-KV write and causal attention
   over the depth cache, against the same math in fp32.
@@ -14,7 +14,7 @@ import math
 import pytest
 import torch
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
 
 
 def _norm_rope(x: torch.Tensor, w: torch.Tensor, pos: torch.Tensor, eps: float, theta: float) -> torch.Tensor:
@@ -28,6 +28,7 @@ def _norm_rope(x: torch.Tensor, w: torch.Tensor, pos: torch.Tensor, eps: float, 
     return torch.cat([first * angle.cos() - second * angle.sin(), second * angle.cos() + first * angle.sin()], -1)
 
 
+@needs_cuda
 @pytest.mark.parametrize("bs,seq_len,cache_pos", [(1, 1, 0), (5, 1, 7), (32, 1, 15), (64, 1, 3), (3, 2, 0), (5, 2, 4)])
 def test_cp_attend_matches_the_unfused_ops(bs, seq_len, cache_pos):
     """q/k RMSNorm + RoPE, the step's k/v written into the dense cache, and
@@ -70,6 +71,7 @@ def test_cp_attend_matches_the_unfused_ops(bs, seq_len, cache_pos):
         torch.testing.assert_close(out[:, s].float(), ref, rtol=2e-2, atol=2e-2)
 
 
+@needs_cuda
 @pytest.mark.parametrize("bs,projected,init", [(1, False, False), (8, False, True), (32, True, False), (5, True, True)])
 def test_cp_embed_accumulate_matches_the_unfused_ops(bs, projected, init):
     """The index_select + add (or, with ``init``, the sum's first term), the
@@ -95,6 +97,7 @@ def test_cp_embed_accumulate_matches_the_unfused_ops(bs, projected, init):
     assert torch.equal(codes, ref_codes)
 
 
+@needs_cuda
 @pytest.mark.parametrize("rows", [1, 16, 37, 64])
 def test_cp_linear_matches_the_unfused_ops(rows):
     """Each ``cp_linear`` mode against its op sequence in fp32: the folded
@@ -135,10 +138,27 @@ def test_cp_linear_matches_the_unfused_ops(rows):
     close(cp_linear(out, folded, norm_eps=1e-6, partials=partials, n_part=h // STREAM_TILE), on @ folded.float().t())
 
 
+@pytest.mark.parametrize("max_shared", [101376, 166912, 232448])
+def test_cp_linear_tiles_fit_the_devices_shared_memory(max_shared):
+    """At every row count the depth loop runs, each ``cp_linear`` mode's
+    pipeline stages fit in a block's shared memory: 99 KB (sm_86, sm_89),
+    163 KB (A100) and 227 KB (H100, H200). Triton refuses to compile a tile
+    that doesn't."""
+    from mstar.model.components.code_predictor_kernels import _cp_linear_tile
+
+    for epi in range(4):
+        for rows in (1, 2, 3, 16, 32, 64):
+            for n in (1024, 4096):
+                tile = _cp_linear_tile(rows, n, epi, 2, max_shared)
+                weights = 2 if epi == 2 else 1
+                assert tile.stages * tile.block_k * (tile.block_m + weights * tile.block_n) * 2 <= max_shared
+
+
 def _rms(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps) * weight.float()
 
 
+@needs_cuda
 def test_qwen3_tts_depth_loop_matches_its_layers_unfused():
     """Qwen3-TTS's depth loop drives the kernels with its own head counts, eps
     and RoPE theta: a frame's 16 depth steps (``depth_step``, the fused
