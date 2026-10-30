@@ -12,9 +12,9 @@ with its RMSNorm and residual add or SwiGLU folded in, and
 ``ResidualCodePredictor`` is the predictor: its layers, heads and depth loop.
 
 A captured forward compiles with static ints, so any compiled frame that holds a
-depth step's ``cache_pos`` or a layer index recompiles at every depth position
-or layer. Both live on the ``DepthKV``, which the depth loop binds per step and
-``run_depth_layers`` moves per layer, and are read only in its eager methods.
+depth step's ``cache_pos``, LM head or layer index recompiles at every depth
+position or layer. Those ints are read only in eager code: ``depth_step`` and
+``DepthKV``'s methods.
 """
 from __future__ import annotations
 
@@ -219,7 +219,7 @@ def cp_embed_accumulate(
 class DepthKV:
     """A code predictor's frame-local KV cache and the depth step attending
     over it, as its layers' attention cursor: the depth loop calls
-    ``bind_step`` per step, and ``run_depth_layers`` calls ``set_layer_idx``
+    ``bind_step`` per step, and ``depth_step`` calls ``set_layer_idx``
     per layer. Its methods are all eager, so the ints stay out of compiled
     frames. A binding serves one pass over the layers: the pass's first layer
     consumes it, so a step that was not bound fails instead of reusing the
@@ -270,7 +270,7 @@ class DepthKV:
 
 class DepthAttention(ParallelAttention):
     """A code predictor layer's attention parameters (qkv and o projections,
-    q/k norms): ``run_depth_layers`` runs them through ``cp_linear`` and the
+    q/k norms): ``depth_step`` runs them through ``cp_linear`` and the
     predictor's ``DepthKV``, never through a forward."""
 
     def __init__(self, **kwargs):
@@ -499,32 +499,6 @@ def depth_partials(device: torch.device) -> torch.Tensor:
     return torch.zeros(_MAX_PARTIALS, _MAX_ROWS, dtype=torch.float32, device=device)
 
 
-@torch.compiler.disable
-def run_depth_layers(
-    x: torch.Tensor, w: DepthWeights, depth: DepthKV, attn_modules, partials: torch.Tensor,
-    n_part: int = 0, head: int | None = None,
-) -> torch.Tensor | None:
-    """A code predictor's layers over one depth step's ``x (bs, H)``, the
-    residual stream, updated in place, through ``cp_linear`` and ``cp_attend``:
-    five launches a layer. ``n_part`` says whether ``partials`` already holds
-    ``x``'s row sums of squares (0: the first projection takes them from ``x``).
-    Returns the logits of LM head ``head`` (an index into ``w.heads``), or None.
-
-    Eager: it only launches custom kernels, which compiling cannot fuse."""
-    bs = x.shape[0]
-    for i, attn in enumerate(attn_modules):
-        depth.set_layer_idx(i)
-        qkv = cp_linear(x, w.qkv[i], norm_eps=w.eps, partials=partials, n_part=n_part)
-        att = depth(attn, qkv.view(bs, 1, -1)).view(bs, -1)
-        cp_linear(att, w.o[i], out=x, residual=True, partials=partials)
-        act = cp_linear(x, w.gate[i], up=w.up[i], norm_eps=w.eps, partials=partials, n_part=x.shape[1] // STREAM_TILE)
-        cp_linear(act, w.down[i], out=x, residual=True, partials=partials)
-        n_part = x.shape[1] // STREAM_TILE
-    if head is None:
-        return None
-    return cp_linear(x, w.heads[head], norm_eps=w.eps, partials=partials, n_part=n_part)
-
-
 class ResidualCodePredictor(nn.Module):
     """A Talker's residual code predictor: once the Talker samples a frame's
     group-0 code, a few decoder layers walk the frame's codec groups 1..G-1,
@@ -540,7 +514,7 @@ class ResidualCodePredictor(nn.Module):
     cache: the most rows a depth loop runs at once.
 
     The layers are parameter containers (checkpoint names, loading): the depth
-    loop runs them through ``run_depth_layers``, five launches a layer, on
+    loop runs them through ``depth_step``, five launches a layer, on
     weights ``consolidate_stacked_weights`` folds once they are loaded.
     """
 
@@ -608,18 +582,31 @@ class ResidualCodePredictor(nn.Module):
             return x, proj.weight.shape[0] // STREAM_TILE
         return last_hidden.clone(), 0
 
+    @torch.compiler.disable
     def depth_step(
         self, x: torch.Tensor, partials: torch.Tensor, n_part: int = 0, head: int | None = None,
     ) -> torch.Tensor | None:
-        """One depth step over ``x (bs, hidden)``, bound first with
-        ``depth.bind_step``, once per call. ``x`` holds the residual stream and
-        is overwritten; ``n_part`` says how many of its row sums of squares a
-        producer left in ``partials`` (0: none). Returns the logits of LM head
-        ``head`` (residual group ``head + 1``), or None."""
-        return run_depth_layers(
-            x, self.fused, self.depth, [layer.self_attn for layer in self.model.layers], partials,
-            n_part=n_part, head=head,
-        )
+        """One depth step over ``x (bs, hidden)``, the residual stream, updated
+        in place: every layer through ``cp_linear`` and ``cp_attend``, five
+        launches a layer. Bind it first with ``depth.bind_step``, once per call.
+        ``n_part`` says how many of ``x``'s row sums of squares a producer left
+        in ``partials`` (0: the first projection takes them from ``x``).
+        Returns the logits of LM head ``head`` (residual group ``head + 1``),
+        or None. Eager: its ints would make a compiled frame recompile per
+        depth position, and it only launches custom kernels."""
+        w, depth = self.fused, self.depth
+        bs, stream_parts = x.shape[0], x.shape[1] // STREAM_TILE
+        for i, layer in enumerate(self.model.layers):
+            depth.set_layer_idx(i)
+            qkv = cp_linear(x, w.qkv[i], norm_eps=w.eps, partials=partials, n_part=n_part)
+            att = depth(layer.self_attn, qkv.view(bs, 1, -1)).view(bs, -1)
+            cp_linear(att, w.o[i], out=x, residual=True, partials=partials)
+            act = cp_linear(x, w.gate[i], up=w.up[i], norm_eps=w.eps, partials=partials, n_part=stream_parts)
+            cp_linear(act, w.down[i], out=x, residual=True, partials=partials)
+            n_part = stream_parts
+        if head is None:
+            return None
+        return cp_linear(x, w.heads[head], norm_eps=w.eps, partials=partials, n_part=n_part)
 
     @torch.compiler.disable
     def _get_partials(self, device: torch.device) -> torch.Tensor:
