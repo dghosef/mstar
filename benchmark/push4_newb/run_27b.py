@@ -2,10 +2,13 @@
 noise arm. Resumable: each finished phase leaves <out>/stages/<phase>.done.
 
   run_27b.py --out ~/push4/results/newb/q27b_baseline [--phases profile,bench]
+  run_27b.py --out ~/push4/results/newb/q27b_mix --profile-arms ladder,mix --arms ladder,mix \
+      --cells random_1024_256:64,random_1024_256:128 --after-pid <soak pid>
 """
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -15,10 +18,12 @@ HERE = Path(__file__).resolve().parent
 TREE = Path.home() / "push4" / "newb" / "mstar"
 PY = str(Path.home() / "push4" / "newb" / "venv" / "bin" / "python")
 LADDER = "benchmark/push4_newb/cfg/q27b_tp4_async_knobs_ladder.yaml"
+MIX = "benchmark/push4_newb/cfg/q27b_ladder_mix.yaml"
 ARMS = {
     "base": f"base={TREE}",
     "base2": f"base2={TREE}",
     "ladder": f"ladder={TREE}:OVN_CONFIG={LADDER}",
+    "mix": f"mix={TREE}:OVN_CONFIG={MIX}",
     "vllm": "vllm=vllm",
     "sglang": "sglang=sglang",
 }
@@ -45,17 +50,28 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--phases", default="profile,bench")
     ap.add_argument("--arms", default="base,vllm,ladder,sglang,base2")
+    ap.add_argument("--profile-arms", default="base,ladder")
+    ap.add_argument("--cells", default=CELLS)
     ap.add_argument("--rounds", type=int, default=2)
+    ap.add_argument("--after-pid", type=int, action="append", default=[],
+                    help="wait for these processes (jobs ahead on the same GPUs) to exit first")
     a = ap.parse_args()
+    for pid in a.after_pid:
+        while True:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(20)
     out = Path(a.out).expanduser()
     out.mkdir(parents=True, exist_ok=True)
     phases = a.phases.split(",")
     if "profile" in phases:  # also the cold compile: the first mstar start, untimed
-        run("profile", out, ["profile", "--arms", f"{ARMS['base']},{ARMS['ladder']}",
+        run("profile", out, ["profile", "--arms", ",".join(ARMS[x] for x in a.profile_arms.split(",")),
                              "--cells", "random_1024_256:128", "--out", str(out / "profile")])
     if "bench" in phases:
         arms = ",".join(ARMS[x] for x in a.arms.split(","))
-        run("bench", out, ["bench", "--arms", arms, "--cells", CELLS, "--rounds", str(a.rounds),
+        run("bench", out, ["bench", "--arms", arms, "--cells", a.cells, "--rounds", str(a.rounds),
                            "--out", str(out / "bench")])
     return 0
 
