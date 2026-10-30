@@ -279,12 +279,14 @@ class AuTEncoder(nn.Module):
             chunks.append(padded.view(cfg.num_mel_bins, n_chunks, chunk).permute(1, 0, 2))
             valid += [cfg.tokens_per_chunk] * full + ([_conv_length(rem)] if rem else [])
         x = torch.cat(chunks, dim=0).unsqueeze(1).to(self.conv2d1.weight.dtype)  # (N, 1, mel, chunk)
-        # Empty chunks up to a power of two: cuDNN builds a plan for each new conv
-        # shape (tens of ms of host time), and the chunk count of a step varies.
-        n = x.shape[0]
-        bucket = max(8, 1 << (n - 1).bit_length())
-        if bucket > n:
-            x = torch.cat([x, x.new_zeros((bucket - n, *x.shape[1:]))])
+        # Empty chunks pad the last convolution launch up to a power of two (at
+        # most conv_chunksize): cuDNN builds a plan for each new conv shape (tens
+        # of ms of host time), and the chunk count of a step varies. Padding
+        # only the last launch bounds the extra work on a long step.
+        last = (x.shape[0] - 1) % cfg.conv_chunksize + 1
+        pad = min(cfg.conv_chunksize, max(8, 1 << (last - 1).bit_length())) - last
+        if pad > 0:
+            x = torch.cat([x, x.new_zeros((pad, *x.shape[1:]))])
 
         embeds = []
         for piece in x.split(cfg.conv_chunksize, dim=0):
@@ -292,7 +294,7 @@ class AuTEncoder(nn.Module):
             piece = self.act(self.conv2d2(piece))
             piece = self.act(self.conv2d3(piece))
             embeds.append(piece)
-        x = torch.cat(embeds, dim=0)  # (bucket, C, mel', t)
+        x = torch.cat(embeds, dim=0)  # (chunks padded, C, mel', t)
         b, c, f, t = x.shape
         x = self.conv_out(x.permute(0, 3, 1, 2).reshape(b, t, c * f))
         x = x + self.positional_embedding[:t].to(x.dtype)
