@@ -2031,7 +2031,7 @@ def _tiny_codec_config(**overrides) -> Qwen3TTSCodecConfig:
 
 @pytest.mark.parametrize("device", [
     "cpu",
-    # the served decode: compiled (Inductor), channels-last cuDNN convs
+    # the served code path (compiled, channels-last cuDNN convs), at fp32
     pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")),
 ])
 @pytest.mark.parametrize("captured", [False, True])

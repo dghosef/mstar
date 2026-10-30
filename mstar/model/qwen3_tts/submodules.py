@@ -153,8 +153,9 @@ class TalkerSubmodule(ARNodeSubmodule):
     PREFILL_TOKEN_BUCKETS = [32, 64, 128, 256, 512, 1024]
     PREFILL_CAPTURE_BATCH_SIZES = [1, 2, 4, 8]
     # A mixed step is a decode batch plus up to MIXED_MAX_PREFILL_ROWS prompts,
-    # which keeps it in the captured token buckets. Its captures run to the
-    # decode cap: one below it would split the batch.
+    # which keeps a typical step in the captured token buckets (long-reference
+    # clones can spill to eager, see ``max_rows_in_combined``). Its captures
+    # run to the decode cap: one below it would split the batch.
     MIXED_MAX_PREFILL_ROWS = 4
     MIXED_CAPTURE_BATCH_SIZES = [8, 16, 32, 48, 64]
     MIXED_TOKEN_BUCKETS = [128, 256, 512, 1024]

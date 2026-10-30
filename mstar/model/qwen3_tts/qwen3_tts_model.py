@@ -427,8 +427,8 @@ class Qwen3TTSModel(Model):
         # Server-init knob (deployment YAML ``model_kwargs``): the speech
         # codec decoder's dtype. float32 with TF32 off (as on CPU) matches a
         # whole-utterance reference decode to within one PCM16 step; served on
-        # CUDA, its GEMMs run in TF32. bfloat16 runs a codec step ~1.9x as
-        # fast on an H200 with the captures' searched conv plans
+        # CUDA, its GEMMs and cuDNN convs run in TF32. bfloat16 runs a codec
+        # step ~1.9x as fast on an H200 with the captures' searched conv plans
         # (``capture_cudnn_benchmark``); on a B300, main's windowed codec ran
         # it slower under cuDNN's heuristic picks, several of its convs on a
         # kernel without tensor cores.
