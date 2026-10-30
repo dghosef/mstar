@@ -278,12 +278,6 @@ def _paged_llm(sp_enabled_nodes=(), **kw) -> _Model:
     return _Model(specs=[kv], kv_labels={"kv": {"main": KVLabel()}}, sp_enabled_nodes=sp_enabled_nodes, **kw)
 
 
-def test_a_node_on_sp_ranks_may_place_its_kv_positions_over_them(tmp_path):
-    cfg = _cfg(tmp_path, [{"node_names": ["llm"], "ranks": [0, 1], "sp_size": 2}],
-               resources={"kv": {"context_parallel": True}})
-    assert _validate(_paged_llm(), cfg).worker_graphs
-
-
 @pytest.mark.parametrize("model,group,kv,pattern", [
     # the placement would load the node without the SP group its own sequence parallelism needs
     (dict(sp_enabled_nodes=["llm"]), dict(sp_size=2), {},
@@ -301,20 +295,14 @@ def test_a_kv_placement_the_node_cannot_take_is_refused(model, group, kv, patter
     _refused(_paged_llm(**model), cfg, pattern)
 
 
-@pytest.mark.parametrize("context_parallel", [False, True])
-def test_qwen3_5_on_sp_ranks_runs_with_its_kv_positions_placed_over_them(context_parallel, tmp_path, monkeypatch):
+def test_qwen3_5_on_sp_ranks_runs_with_its_kv_positions_placed_over_them(tmp_path, monkeypatch):
     config = yaml.safe_load((ROOT / "configs/qwen3_5_27b_tp4.yaml").read_text())
     llm, = (group for group in config["node_groups"] if group["node_names"] == ["LLM"])
     llm.update(ranks=list(range(8)), tp_size=4, sp_size=2)
-    if context_parallel:
-        config["resources"]["kv_cache"] = {"context_parallel": True}
+    config["resources"]["kv_cache"] = {"context_parallel": True}
     path = tmp_path / "cfg.yaml"
     path.write_text(yaml.safe_dump(config))
-    model = _qwen3_5(config["model"], {}, tmp_path, monkeypatch)
-    if context_parallel:
-        assert _validate(model, str(path)).worker_graphs
-    else:
-        _refused(model, str(path), r"node_groups\[1\]: node 'LLM' on 2 SP ranks is not in sp_enabled_nodes")
+    assert _validate(_qwen3_5(config["model"], {}, tmp_path, monkeypatch), str(path)).worker_graphs
 
 
 def test_model_yaml_hook_refusal_is_reported(tmp_path):

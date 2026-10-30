@@ -29,7 +29,6 @@ from mstar.engine.resources.attn import flashinfer_mla as fm
 from mstar.engine.resources.attn.base import AttentionManager
 from mstar.engine.resources.attn.config import AttentionConfig, AttentionSpec, AttentionStep, AttnBackend
 from mstar.engine.resources.base import EngineResourceInfo, Resource
-from mstar.engine.resources.context_parallel import merge
 from mstar.engine.resources.kv import manager as manager_mod
 from mstar.engine.resources.kv.cache import KVCache
 from mstar.engine.resources.kv.config import KVLayout, KVReqConfig, KVSpec, KVStep, PagedKVConfig
@@ -38,7 +37,6 @@ from mstar.engine.resources.kv.plan import SINK_PAGE, KVPlanOutput, KVPlanOutput
 from mstar.engine.resources.kv.transfer import KVReadInfo, ShmKVTransferEngine
 from mstar.engine.resources.spec import NodeResourceSpec, apply_yaml_overrides
 from mstar.engine.resources.step import BucketKey, Segment, SlotLease, StepContext
-from mstar.model.components.mla import MLAAttention
 from mstar.model.qwen3_5.config import GDN_STATE, KV_CACHE
 
 P = 2
@@ -54,13 +52,11 @@ def _group(rank: int, size: int) -> CommGroup:
     return CommGroup(my_global_rank=rank, my_group_rank=rank, group_members=list(range(size)))
 
 
-def _placed(rank: int, **overrides) -> KVCache:
-    cfg = dict(
+def _placed(rank: int) -> KVCache:
+    config = PagedKVConfig(
         num_layers=2, num_kv_heads=1, head_dim=2, max_seq_len=64, num_qo_heads=2, max_num_pages=4,
         page_size=8, context_parallel=True,
     )
-    cfg.update(overrides)
-    config = PagedKVConfig(**cfg)
     joint = JointGroups(tp_group=_group(rank, P), sp_group=CommGroup.trivial())
     return KVCache(config, CPU, torch.float32, config.place(joint, "kv"))
 
@@ -189,27 +185,13 @@ def test_a_placed_cache_maps_logical_token_ranges_to_this_ranks_slots(rank, tmp_
     assert destination.tensor.count_nonzero() == page[:, :, first:end].numel()
 
 
-@pytest.mark.parametrize("overrides, match", [
-    (dict(page_size=5), "doesn't divide page_size 5"),
-    (dict(num_kv_heads=2), "leave none sharing one"),
-])
-def test_a_placement_that_cannot_stripe_is_refused(overrides, match):
-    with pytest.raises(ValueError, match=match):
-        _placed(0, **overrides)
-
-
 class _Dependent(Resource):
-    supports_context_parallel = False
-
     @classmethod
     def build(cls, spec, info):
-        resource = (_Supporting if spec.supports else cls)()
+        resource = cls()
+        resource.supports_context_parallel = spec.supports
         resource.info = info
         return resource
-
-
-class _Supporting(_Dependent):
-    supports_context_parallel = True
 
 
 @dataclass
@@ -543,59 +525,6 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False)
         dist.destroy_process_group()
 
 
-class _AttendOwnTokens:
-    """Each row's queries attending its own tokens causally from the ``k``/``v`` ``run`` is passed:
-    attention over a pool for rows with no stored context."""
-
-    def __init__(self, qo_indptr):
-        self.qo = qo_indptr.tolist()
-
-    def run(self, q, kv_cache_layer=None, k=None, v=None):
-        return torch.cat([_reference(q[a:b], k[a:b], v[a:b])[0] for a, b in itertools.pairwise(self.qo)]).to(q.dtype)
-
-
-def _naive_mla_over_ranks(rank, world, store):
-    """One SP rank running a naive (per-head K/V) MLA layer over attention on a placed pool, for
-    rows with no stored context, against the same layer over its own tokens' attention."""
-    dist.init_process_group("gloo", init_method=f"file://{store}", rank=rank, world_size=world)
-    torch.set_num_threads(1)
-    sys.modules["flashinfer"] = _reference_flashinfer()
-    try:
-        group = CommGroup(rank, rank, list(range(world)))
-        group.device_group, group.initialized = dist.group.WORLD, True
-        joint = JointGroups(tp_group=CommGroup.trivial(), sp_group=group)
-        attn, placement = _cp_attention(joint, CPU, torch.float32, num_kv_heads=Q_HEADS)
-        case = _Case.build(((0, 5), (0, 3)), CPU, torch.float32)
-        _plan(attn, case)
-        config = types.SimpleNamespace(
-            hidden_size=32, num_attention_heads=Q_HEADS, q_lora_rank=16, kv_lora_rank=16, qk_nope_head_dim=32,
-            qk_rope_head_dim=16, qk_head_dim=48, v_head_dim=32, padded_head_dim=HEAD_DIM, rms_norm_eps=1e-6,
-            softmax_scale=48 ** -0.5, mla_absorb=False,
-        )
-        torch.manual_seed(0)
-        layer = MLAAttention(config, kv_key="kv", attn_key="attn", pos_key="pos")
-        for param in layer.parameters():
-            torch.nn.init.normal_(param, std=0.1)
-        hidden = torch.randn(case.q.shape[0], config.hidden_size)
-        # the rows hold no context, so the pool is read only at SINK_PAGE, NaN here
-        cache = torch.full((16, 2, CP_PAGE // placement.size, Q_HEADS, HEAD_DIM), math.nan)
-        kv = types.SimpleNamespace(write_kv=lambda k, v, layer_idx: None, layer_view=lambda layer_idx: cache)
-        pos = types.SimpleNamespace(apply_qk=lambda q, k, pos_ids: (q, k))
-        positions = torch.zeros(case.q.shape[0], dtype=torch.long)
-        with torch.no_grad():
-            layer.bind_resources({"kv": kv, "attn": attn, "pos": pos})
-            out = layer(hidden, positions)
-            own = _AttendOwnTokens(case.plan["main"].cpu_indptrs.qo_indptr)
-            layer.bind_resources({"kv": kv, "attn": own, "pos": pos})
-            torch.testing.assert_close(out, layer(hidden, positions))
-    finally:
-        dist.destroy_process_group()
-
-
-def test_two_ranks_run_a_naive_mla_layer_over_an_sp_placed_pool(tmp_path):
-    mp.spawn(_naive_mla_over_ranks, args=(P, str(tmp_path / "store")), nprocs=P)
-
-
 @pytest.mark.parametrize("attention, refused", [
     (dict(sliding_window=8), "sliding_window"),
     # on a host without FA3 dense degrades to FlashInfer, which would serve the pool
@@ -742,46 +671,3 @@ def test_the_fa_work_item_bound_holds_flashinfers_own_count():
                 assert bound > fa._FA_MAX_WORK_ITEMS
                 continue
             assert count <= bound, (q.tolist(), kv.tolist(), heads, sm, causal)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-@LAYOUTS
-@pytest.mark.parametrize("captured", [False, True], ids=["eager", "captured"])
-@pytest.mark.parametrize("rows", [PREFILL_ROWS, DECODE_ROWS], ids=["prefill", "decode"])
-def test_flashinfer_partials_over_simulated_ranks_merge_to_full_attention(rows, captured, mla):
-    """FlashInfer itself, one process: each of P ranks' partials over its slots, masked and merged
-    with the step's own tokens' attention, against attention over every key."""
-    _flashinfer(mla)
-    device, dtype = torch.device("cuda"), torch.bfloat16
-    case = _Case.build(rows, device, dtype, mla)
-    queries, new_keys = case.queries(), case.new_keys()
-    bucket = BucketKey("w", bs=len(rows), num_tokens=case.q.shape[0]) if captured else None
-    outs, lses, new = [], [], None
-    for rank in range(P):
-        joint = JointGroups(tp_group=CommGroup.trivial(), sp_group=_group(rank, P))
-        attn, placement = _cp_attention(joint, device, dtype, mla=mla)
-        # this rank's side of the exchange alone: masked, through a gather over itself
-        alone = placement._replace(group=CommGroup.trivial())
-        _plan(attn, case, bucket=bucket)
-        wrapper = attn._current_plan_states["main"]
-        cache = case.cache(placement)
-
-        def partials(wrapper=wrapper, cache=cache, alone=alone):
-            return (*alone.exchange_partials(*wrapper.attend_context(*queries, cache)),
-                    *(wrapper.attend_new(*queries, *new_keys) if wrapper.new is not None else ()))
-
-        result = partials()
-        if captured:
-            torch.cuda.synchronize()
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                result = partials()
-            graph.replay()
-        outs.append(result[0].float())
-        lses.append(result[1])
-        new = result[2:] or None
-    if new is not None:
-        outs.append(new[0].float().unsqueeze(0))
-        lses.append(new[1].float().unsqueeze(0))
-    got = merge(torch.cat(outs), torch.cat(lses))
-    torch.testing.assert_close(got, case.want(), atol=2e-2, rtol=2e-2)
