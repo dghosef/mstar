@@ -5,9 +5,11 @@ model: "z_image_turbo"
 max_seq_len: 512
 
 model_kwargs:
-  # sdpa (cuDNN on H100) served as fast as FlashInfer FA3 (0.349 vs 0.355 s at B=1) and is the
-  # reference kernel; flashinfer stays available
-  attention_backend: sdpa
+  # fa3: FlashAttention-3's dense kernel (Hopper). Z-Image's 4128-4224-token joint attention is not a
+  # multiple of cuDNN's tile, where cuDNN SDPA runs 10-20% slower than FA3: +3% images/s at 1-16 concurrent
+  # requests on an H100, images at the plain compile's own restart noise. sdpa is the reference kernel (and
+  # the only one off Hopper); flashinfer stays available
+  attention_backend: fa3
   compile: true
   # inductor rounds intermediates where eager PyTorch does (and fuses no FMAs); on its own the compiled
   # transformer still lands at a median 34.4 dB from the eager path over the 100 protocol prompts (78 of 100 below 40 dB)
