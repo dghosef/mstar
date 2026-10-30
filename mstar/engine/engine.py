@@ -23,6 +23,7 @@ from mstar.engine.accelerator_graph_runner import (
     plan_captures,
 )
 from mstar.engine.fp32_precision import Fp32Precision, cudnn_benchmark, fp32_precision_scope, node_fp32_precision
+from mstar.engine.node_dtype import resolve_node_dtype
 from mstar.engine.resources import (
     AdmitFailedReason,
     FullAdmitOutcome,
@@ -132,6 +133,8 @@ class SubmoduleManagement:
     forward_batched: Callable
     joint_comm_group: JointGroups
     resources: dict[str, Resource]
+    # cast and autocast dtype, None if the node opted out; resolved once at load
+    node_dtype: torch.dtype | None = None
     accelerator_graph_runner: AcceleratorGraphRunner | None = None
     # the runner capture ran with, graphs or none: a bucket it didn't capture
     # runs eager, and the floor covers eager steps only up to its largest
@@ -550,9 +553,6 @@ class Engine:
                 EngineResourceInfo(
                     device=device,
                     joint_comm_group=joint_comm_group,
-                    head_shards=self._head_shards(
-                        spec.resource_key, relevant_nodes, submodules, joint_comm_group,
-                    ),
                     transfer_engine_info=transfer_engine_info,
                     kv_dtype=kv_cache_type,
                     needs_remote_transfer=(
@@ -602,6 +602,8 @@ class Engine:
                 forward_batched=submodule.forward_batched,
                 joint_comm_group=parallel_groups.get_joint_group_for_node(node_name),
                 resources=resources,
+                # the dtype the engine manager cast this node to
+                node_dtype=resolve_node_dtype(submodule, self._autocast_dtype),
                 fp32_precision=node_fp32_precision(node_name, submodule),
             )
             submodule.bind_node_resources(resources)
@@ -692,15 +694,15 @@ class Engine:
                 # an instance attribute shadows the method for every caller
                 setattr(owner, name, with_inductor_overrides(torch.compile(target, dynamic=True)))
                 with torch.no_grad(), fp32_precision_scope(submodule_mgmt.fp32_precision), autocast_scope(
-                    self._autocast_dtype_for(submodule), self._device.type,
+                    self._autocast_dtype_for(node_name), self._device.type, node_name,
                 ):
                     for args in examples:
                         getattr(owner, name)(*args)
                 logger.info("Engine: torch.compile applied to %s.%s", node_name, path)
 
-    def _autocast_dtype_for(self, submodule: NodeSubmodule) -> torch.dtype | None:
-        """This node's autocast dtype, or None for one that opted out."""
-        return None if submodule.disable_autocast else self._autocast_dtype
+    def _autocast_dtype_for(self, node_name: str) -> torch.dtype | None:
+        """This node's resolved dtype, or None for one that opted out."""
+        return self._submodules[node_name].node_dtype
 
     def warmup(self) -> None:
         # before capture: a region inside a captured graph compiles in its warm-up
@@ -715,7 +717,7 @@ class Engine:
                 resources=submodule_mgmt.resources,
                 step_runner=self._runner,
                 device=self._device,
-                autocast_dtype=self._autocast_dtype_for(submodule),
+                autocast_dtype=self._autocast_dtype_for(node_name),
                 joint_comm_group=submodule_mgmt.joint_comm_group,
                 num_slots=submodule_mgmt.num_slots,
                 enable_nvtx=self._enable_nvtx,
@@ -880,7 +882,7 @@ class Engine:
         The caller captures them, and drops a region whose capture failed so
         its forward takes the eager path for that label.
         """
-        node_dtype = self._autocast_dtype_for(submodule_mgmt.submodule)
+        node_dtype = self._autocast_dtype_for(node_name)
         configs = submodule_mgmt.submodule.get_piecewise_accelerator_graph_configs(
             self._device,
             # the dtype the region runs in; an opted-out node keeps its params'
@@ -1333,8 +1335,9 @@ class Engine:
         try:
             # inference-only, under the same scope the capture path used
             with torch.no_grad(), autocast_scope(
-                self._autocast_dtype_for(self._submodules[batch.node_name].submodule),
+                self._autocast_dtype_for(batch.node_name),
                 device_type=self._device.type,
+                node_name=batch.node_name,
             ):
                 laps = PhaseLaps("engine.exec.")
                 # a caller that pre-planned already reserved one; otherwise take it here
@@ -2309,30 +2312,6 @@ class Engine:
             graph_walk, {request_id: request_info},
             per_request_input_metadata={request_id: input_metadata},
         )
-
-    @staticmethod
-    def _head_shards(
-        resource_key: str,
-        nodes: set[str],
-        submodules: dict[str, NodeSubmodule],
-        group: JointGroups | None,
-    ) -> int:
-        """How many ways the ranks of ``nodes`` split the heads of a resource
-        they share: TP ranks always do, SP ranks unless the node declares
-        ``splits_heads = False``. One value for all of them, since the
-        resource is built once."""
-        if group is None:
-            return 1
-        shards: dict[str, int] = {}
-        for node in sorted(nodes):
-            sp = group.sp_group.world_size if getattr(submodules[node], "splits_heads", True) else 1
-            shards[node] = group.tp_group.world_size * sp
-        if len(set(shards.values())) > 1:
-            raise ValueError(
-                f"resource {resource_key!r}: the nodes it serves split its "
-                f"heads differently ({shards}); give them the same splits_heads"
-            )
-        return next(iter(shards.values()))
 
     @staticmethod
     def _max_rows_in_combined(

@@ -117,10 +117,9 @@ def test_mixed_wrapper_builds_both_halves_in_graph_mode(monkeypatch):
     assert prefill.call_args.kwargs["use_cuda_graph"] is True
 
 
-def _load_heads(kind, splits_heads, tp=1, sp=2, shard_over_sp=True):
-    """Load one resource of ``kind`` (4 heads) for nodes declaring
-    ``splits_heads`` (node -> flag) on a tp x sp lockstep instance, and
-    return the heads one rank holds."""
+def _load_heads(kind, tp=1, sp=2, shard_over_sp=True):
+    """Load one resource of ``kind`` (4 heads) for a node on a tp x sp
+    lockstep instance, and return the heads one rank holds."""
     from mstar.engine.engine import Engine
     from mstar.engine.resources import RaggedAttentionConfig, RaggedAttentionSpec
     from mstar.engine.resources.recurrent.config import (
@@ -131,9 +130,8 @@ def _load_heads(kind, splits_heads, tp=1, sp=2, shard_over_sp=True):
     from mstar.model.submodule_base import NodeSubmodule
 
     class _Node(NodeSubmodule):
-        def __init__(self, splits):
+        def __init__(self):
             super().__init__()
-            self.splits_heads = splits
             self.weight = torch.nn.Parameter(torch.zeros(1))
 
         def prepare_inputs(self, *args, **kwargs):
@@ -164,7 +162,7 @@ def _load_heads(kind, splits_heads, tp=1, sp=2, shard_over_sp=True):
         def resource_needs_remote_transfer(self, nodes, local_nodes):
             return False
 
-    nodes = set(splits_heads)
+    nodes = {"dit"}
     if kind == "ragged":
         spec = RaggedAttentionSpec(
             resource_key="res", nodes=nodes,
@@ -179,7 +177,7 @@ def _load_heads(kind, splits_heads, tp=1, sp=2, shard_over_sp=True):
         ))
     engine = Engine(None, autocast_dtype=None)
     engine.load_model(
-        submodules={node: _Node(splits) for node, splits in splits_heads.items()}, specs=[spec],
+        submodules={"dit": _Node()}, specs=[spec],
         parallel_groups=_Groups(), device=torch.device("cpu"), transfer_engine_info=None,
     )
     if kind == "ragged":
@@ -187,48 +185,20 @@ def _load_heads(kind, splits_heads, tp=1, sp=2, shard_over_sp=True):
     return spec.config.blocks["state"].shape[0]
 
 
-@pytest.mark.parametrize("tp,sp,splits_heads,heads", [
-    (1, 2, True, 2), (1, 2, False, 4), (2, 1, False, 2), (2, 2, False, 2),
-])
+@pytest.mark.parametrize("tp,sp,heads", [(1, 2, 2), (2, 1, 2), (2, 2, 1)])
 @pytest.mark.parametrize("kind", ["ragged", "recurrent"])
-def test_a_node_whose_ranks_split_other_work_keeps_every_head(kind, tp, sp, splits_heads, heads):
-    """Every resource the engine builds for a multi-rank node holds one rank's
-    slice of the heads, whatever the resource kind (a ragged resource declaring
-    ``shard_over_sp=False`` is the exception, tested below). A node whose SP ranks
-    split something else (``splits_heads = False``, e.g. guidance branches)
-    keeps every head across them; its TP ranks still split them."""
-    assert _load_heads(kind, {"dit": splits_heads}, tp=tp, sp=sp) == heads
+def test_ragged_and_recurrent_resources_shard_heads_over_tp_and_sp(kind, tp, sp, heads):
+    """A ragged or recurrent resource the engine builds for a multi-rank node
+    holds one rank's slice of the heads, split over all TP x SP ranks (a ragged
+    resource declaring ``shard_over_sp=False`` is the exception, tested below)."""
+    assert _load_heads(kind, tp=tp, sp=sp) == heads
 
 
 @pytest.mark.parametrize("tp,sp,heads", [(1, 2, 4), (2, 2, 2)])
 def test_a_ragged_attention_kept_whole_over_sp_splits_heads_over_tp_only(tp, sp, heads):
     """``shard_over_sp=False`` keeps a ragged attention's heads whole across the
-    SP ranks of a node that splits heads there; its TP ranks still split them."""
-    assert _load_heads("ragged", {"dit": True}, tp=tp, sp=sp, shard_over_sp=False) == heads
-
-
-def test_nodes_sharing_a_resource_must_agree_on_splitting_heads():
-    """The resource is built once for every node it serves; nodes that would
-    size it differently are refused at load rather than one picked by set
-    order, which could differ across ranks."""
-    with pytest.raises(ValueError, match="split its heads differently"):
-        _load_heads("ragged", {"a": True, "b": False})
-
-
-def test_resource_info_built_without_head_shards_shards_over_its_group():
-    """Built outside the engine (a reference test, the checkpoint validator),
-    an ``EngineResourceInfo`` over a two-rank group gives one rank's heads."""
-    from mstar.engine.resources import RaggedAttentionConfig, RaggedAttentionSpec
-    from mstar.engine.resources.base import EngineResourceInfo, build_resource
-
-    spec = RaggedAttentionSpec(
-        resource_key="by_hand", nodes={"encoder"},
-        config=RaggedAttentionConfig(num_qo_heads=4, num_kv_heads=4, head_dim=64),
-    )
-    mgr = build_resource(spec, EngineResourceInfo(
-        device=torch.device("cpu"), kv_dtype=torch.bfloat16, joint_comm_group=SimpleNamespace(world_size=2),
-    ))
-    assert mgr._kwargs["num_qo_heads"] == 2
+    SP ranks of its node; its TP ranks still split them."""
+    assert _load_heads("ragged", tp=tp, sp=sp, shard_over_sp=False) == heads
 
 
 def test_a_dropped_manager_leaves_the_op_registry():
