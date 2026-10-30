@@ -321,11 +321,9 @@ class PreprocessWorker:
         self._signal()
 
     def queue_depth(self) -> int:
-        """Inputs submitted and not yet handed on to the conductor: queued, or
-        taken up and waiting their turn (``_preparing``, its length read from
-        this thread). One prepared on the data worker thread itself is not
-        counted."""
-        return self.request_input_queue.qsize() + len(self.data_worker._preparing)
+        """Inputs (requests and client-stream appends) waiting in the data
+        worker: submitted, and neither being prepared nor handed on yet."""
+        return self.request_input_queue.qsize() + self.data_worker.waiting_inputs
 
     def _signal(self):
         """End the thread's idle wait: new work is queued. getattr: tests
@@ -680,6 +678,8 @@ class PreprocessWorkerThread:
             self._prep_pool = ThreadPoolExecutor(preprocess_workers, thread_name_prefix="preprocess")
         # inputs in arrival order, waiting to be handed on (`PreparingInput`)
         self._preparing: deque[PreparingInput] = deque()
+        # those of them not being prepared, for the API server's queue gauge
+        self.waiting_inputs = 0
         self._encode_pool = ThreadPoolExecutor(
             max_workers=encode_workers(), thread_name_prefix="mstar-encode",
         )
@@ -1737,9 +1737,20 @@ class PreprocessWorkerThread:
                 break  # in_queue is empty, or this pass's appends are taken
         while not sends_pending and preparing and (preparing[0].prepared is None or preparing[0].prepared.done()):
             did_work = True
-            self._take_input(*preparing.popleft())
+            entry = preparing.popleft()
+            self._publish_waiting()
+            self._take_input(*entry)
             sends_pending = self.communicator.flush()
+        self._publish_waiting()
         return did_work
+
+    def _publish_waiting(self) -> None:
+        """``waiting_inputs`` for ``queue_depth``; set before each hand-off too,
+        as an inline prepare holds this thread. A pool prepare's end wakes the
+        thread, so the next pass counts it."""
+        self.waiting_inputs = sum(
+            entry.prepared is None or entry.prepared.done() for entry in self._preparing
+        )
 
     def _process_waiting_input(
         self, pre_input: PreprocessInput | ClientAppend,

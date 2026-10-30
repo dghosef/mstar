@@ -1231,13 +1231,13 @@ def test_the_data_worker_times_preprocessing_and_counts_failures_by_input_modali
     assert not _upload_buckets(s, "text")
 
 
-@pytest.mark.parametrize(("preprocess_workers", "waiting"), [(1, 2), (2, 3)], ids=["inline", "pool"])
+@pytest.mark.parametrize("preprocess_workers", [1, 2], ids=["inline", "pool"])
 def test_queue_depth_counts_requests_waiting_for_the_data_worker(
-    real_data_worker, tmp_path, preprocess_workers, waiting,
+    real_data_worker, tmp_path, preprocess_workers,
 ):
-    """Read at scrape time: requests not yet handed on behind the one the data
-    worker is working on, including those the pool prepares meanwhile. Its
-    preprocess time leaves their wait in the queue out."""
+    """Read at scrape time: the requests waiting behind the one being prepared,
+    the same with or without a pool (one the pool has prepared still waits its
+    turn). Its preprocess time leaves their wait in the queue out."""
     served = real_data_worker(metrics=True, preprocess_workers=preprocess_workers)
     clip = _wav(tmp_path / "clip.wav", 0.5)
     assert served.scrape()[("mstar_data_worker_queue_depth", _labels())] == 0
@@ -1248,7 +1248,7 @@ def test_queue_depth_counts_requests_waiting_for_the_data_worker(
     served.submit("transcribe", [("audio", clip)], ("audio", "text"))
     served.submit("transcribe", [("audio", clip)], ("audio", "text"))
     # _wait: the pool's prepare can signal before the data worker records it
-    _wait(lambda: served.scrape()[("mstar_data_worker_queue_depth", _labels())] == waiting)
+    _wait(lambda: served.scrape()[("mstar_data_worker_queue_depth", _labels())] == 2)
     time.sleep(0.2)
     waited = time.perf_counter() - queued_at
     served.model.release.set()

@@ -889,10 +889,10 @@ work.
   route and long transcriptions send WAV files they write from the decoded audio, so
   those count the WAV sizes. Requests refused before they were submitted (an oversized
   body, a bad form) are not counted.
-- ``mstar_data_worker_queue_depth{model_name}``: gauge, read at scrape time, requests
-  submitted and not yet handed on to the conductor, including those the preprocess pool
-  is preparing (one the data worker prepares on its own thread is not counted). A
-  request whose client went away still counts until its turn comes and it is dropped.
+- ``mstar_data_worker_queue_depth{model_name}``: gauge, read at scrape time, inputs
+  (requests and client-stream appends) waiting in the data worker: submitted, and
+  neither being prepared nor handed on to the conductor yet. One whose client went away
+  still counts until its turn comes and it is dropped.
 
 .. code-block:: bash
 
