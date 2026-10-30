@@ -335,6 +335,11 @@ class PiecewiseAcceleratorGraphConfig(ABC):
                 "with capture_batch_sizes=[1]"
             )
 
+    def region_step(self, request_ids: list[str], seq_lens: list[int]) -> SubmoduleStep | None:
+        """This region's step over the padded batch (``declare_step``); None
+        for a region that declares none."""
+        return None if self.declare_step is None else self.declare_step(request_ids, seq_lens)
+
     @abstractmethod
     def get_config_type(self) -> PiecewiseConfigType:
         ...
@@ -400,12 +405,12 @@ class PiecewisePackedConfig(PiecewiseAcceleratorGraphConfig):
 
     def __post_init__(self):
         super().__post_init__()
-        if self.attn_key is not None:
-            if self.declare_step is not None:
-                raise ValueError("attn_key declares the region's step; leave declare_step None")
-            self.declare_step = self._segment_per_row
+        if self.attn_key is not None and self.declare_step is not None:
+            raise ValueError("attn_key declares the region's step; leave declare_step None")
 
-    def _segment_per_row(self, request_ids: list[str], seq_lens: list[int]) -> SubmoduleStep:
+    def region_step(self, request_ids: list[str], seq_lens: list[int]) -> SubmoduleStep | None:
+        if self.attn_key is None:
+            return super().region_step(request_ids, seq_lens)
         if self.one_row_per_step:
             (rid,) = request_ids
             request_ids = [rid] * len(seq_lens)
