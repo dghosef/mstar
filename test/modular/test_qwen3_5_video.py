@@ -695,7 +695,7 @@ def test_the_vision_node_boots_on_an_image_processor_the_video_one_disagrees_wit
     mean, _ = model.pixel_normalizer()
     assert torch.allclose(mean, torch.full_like(mean, 0.4 * 255))
     with pytest.raises(ValueError, match="image_mean"):
-        model.video_processor
+        _ = model.video_processor
 
 
 def test_still_refuses_audio(model):
