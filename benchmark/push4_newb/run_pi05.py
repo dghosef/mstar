@@ -5,7 +5,8 @@ mstar is served (configs/pi05_droid.yaml) and timed per HTTP request with the re
 upload in it. Both use the same lerobot/droid_100 episodes. Rounds rotate the arm order, each mstar round is a
 fresh server, and a final mstar pass with MSTAR_PHASE_TIMING=100 is the profile (untimed).
 
-  PUSH4_CORES=<openpi + client> PUSH4_MSTAR_CORES=<mstar server> run_pi05.py --gpu 3 --out ~/push4/results/newb/pi05 [--rounds 2] [--n 50] [--after-pid PID]
+  PUSH4_CORES=<openpi + client> PUSH4_MSTAR_CORES=<mstar server> \
+      run_pi05.py --gpu 3 --out ~/push4/results/newb/pi05 [--rounds 2] [--n 50] [--after-pid PID]
 """
 from __future__ import annotations
 
@@ -72,7 +73,8 @@ def openpi_round(gpu: str, n: int, warm: int, out: Path, tag: str) -> dict:
     cmd = [OPENPI_PY, str(HERE.parents[0] / "openpi_pi05.py"), "--num-requests", str(n), "--num-warmup", str(warm),
            "--checkpoint", OPENPI_CKPT, "--device", "cuda:0", "--output-dir", str(res), "--local-cache", str(MEDIA)]
     with open(out / f"openpi_{tag}.log", "w") as f:
-        r = subprocess.run(run_gen.pin(cmd), cwd=str(HERE.parents[1]), env=env, stdout=f, stderr=subprocess.STDOUT)
+        r = subprocess.run(run_gen.pin(cmd), check=False, cwd=str(HERE.parents[1]), env=env, stdout=f,
+                           stderr=subprocess.STDOUT)
     if r.returncode:
         raise SystemExit(f"openpi {tag} failed rc={r.returncode}; see {out / f'openpi_{tag}.log'}")
     j = json.loads((res / "results.json").read_text())

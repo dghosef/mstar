@@ -38,7 +38,7 @@ def run(phase: str, out: Path, args: list[str]) -> None:
         return
     t0 = time.time()
     print(f"== {phase} {time.strftime('%H:%M:%S')}", flush=True)
-    r = subprocess.run([PY, str(HERE / "ab.py"), *args, *COMMON], cwd=str(HERE))
+    r = subprocess.run([PY, str(HERE / "ab.py"), *args, *COMMON], check=False, cwd=str(HERE))
     if r.returncode:
         raise SystemExit(f"{phase} failed rc={r.returncode}")
     mark.parent.mkdir(parents=True, exist_ok=True)
