@@ -37,6 +37,7 @@ from mstar.model.fish_s2_pro.config import (
 from mstar.model.fish_s2_pro.fish_s2_pro_model import FishS2ProModel, clip_digest, load_fast_ar_weights
 from mstar.model.fish_s2_pro.submodules import ARSubmodule
 from mstar.model.registry import HF_MODELS, get_model_class
+from mstar.model.submodule_base import StopCheck
 
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "configs" / "fish_s2_pro.yaml"
 SEMANTIC_START, SEMANTIC_CODES, EOS_ID = 100, 32, 99
@@ -442,34 +443,23 @@ def test_clone_prefill_splices_reference_frames_after_the_prefix():
 
 
 def test_check_stop_on_im_end_on_the_frame_limit_and_not_with_ignore_eos():
+    """The prefill frame counts toward the frame limit, and the <|im_end|>
+    frame is withheld from the codec stream, so the codec never reads it."""
     ar = tiny_ar()
 
-    def info(ignore_eos=False):
-        return SimpleNamespace(
-            step_metadata={},
+    def check(head, decoded=0, ignore_eos=False, walk="ar_decode"):
+        info = SimpleNamespace(
+            graph_walk=walk,
             max_tokens=3,
+            dynamic_loop_iter_counts={"ar_decode_loop": decoded},
             resource_configs={AR_SAMPLER: SamplingReqConfig(ignore_eos=ignore_eos)},
         )
+        return ar.check_stop("r", info, {"new_token": [torch.tensor(head)]})
 
-    def step(rid, head, ignore_eos=False):
-        outputs = {"new_token": [torch.tensor([head])]}
-        ar.postprocess(rid, info(ignore_eos), outputs)
-        return ar.check_stop(rid, info(ignore_eos), outputs)
-
-    assert step("a", 4) == set()
-    assert step("a", ar.eos_code) == {"ar_decode_loop"}
-    assert step("b", ar.eos_code, ignore_eos=True) == set()
-    assert step("b", 1) == set()
-    assert step("b", 2) == {"ar_decode_loop"}
-
-    # speculation: step N+1's postprocess runs before step N's stop check
-    frames = [{"new_token": [torch.tensor([head])]} for head in (4, 5, 6)]
-    ar.postprocess("c", info(), frames[0])
-    assert ar.check_stop("c", info(), frames[0]) == set()
-    ar.postprocess("c", info(), frames[1])
-    ar.postprocess("c", info(), frames[2])
-    assert ar.check_stop("c", info(), frames[1]) == set()
-    assert ar.check_stop("c", info(), frames[2]) == {"ar_decode_loop"}
+    assert check(4, walk="ar_prefill") == set()
+    assert check(4, decoded=0) == set()
+    assert check(ar.eos_code) == StopCheck({"ar_decode_loop"}, withheld=("codec_tokens",))
+    assert check(5, decoded=1) == {"ar_decode_loop"}
 
 
 def ar_info(ignore_eos=False, layout=None):
