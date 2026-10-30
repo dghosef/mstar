@@ -1,8 +1,8 @@
 """The captured backbone path's attention layout. No GPU, no weights: each
 request owns two documents (a zero-length unconditional one with CFG off), and
 the step spreads them over its ids. Its numerics against the reference are in
-``test_omnivoice_parity.py``. Also code2wav's compiled codec decoder, which is
-warmed for every canvas length.
+``test_omnivoice_parity.py``. Also code2wav's compiled codec decoder, whose
+warm-up covers every CPU canvas-length range of three frames or more.
 """
 
 from types import SimpleNamespace
@@ -86,10 +86,13 @@ def test_forward_batched_keys_rows_by_the_engine_ids():
 def test_the_codec_decoder_compiles_at_start_up_not_on_a_request(monkeypatch):
     """code2wav's warm-up builds the compiled acoustic decoder's graphs for
     very short, typical and 10 s canvases, so none of them compiles on the GPU
-    thread mid-serving. Dynamo guards the length against thresholds that
-    depend on the conv widths, so the decoder has the checkpoint's geometry
-    (k2-fsa/OmniVoice ``audio_tokenizer/config.json``); the encoders, which
-    decode never runs, are shrunk."""
+    thread mid-serving. This pins the CPU ranges as a proxy for the start-up
+    warm-up: it forces ``is_available`` on a CPU engine and counts Dynamo
+    frames, so neither Inductor's guards nor CUDA's ranges are covered. The
+    CPU ranges come from MKLDNN's numel heuristic, which depends on the conv
+    widths, so the decoder has the checkpoint's geometry (k2-fsa/OmniVoice
+    ``audio_tokenizer/config.json``); the encoders, which decode never runs,
+    are shrunk."""
     pytest.importorskip("transformers.models.higgs_audio_v2_tokenizer")
     import torch
     from torch._dynamo.testing import CompileCounter
