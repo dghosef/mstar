@@ -84,9 +84,8 @@ class _DummyTokenizer:
         return type("Out", (), {"input_ids": ids})()
 
 
-def _item(request_id: str, prefix_len: int, target_len: int, guidance_scale: float = 2.0):
+def _item(prefix_len: int, target_len: int, guidance_scale: float = 2.0):
     return CanvasItem(
-        request_id=request_id,
         prefix_ids=torch.randint(0, 1000, (NUM_CODEBOOK, prefix_len)),
         prefix_audio_mask=torch.zeros(prefix_len, dtype=torch.bool),
         tokens=torch.full((1, NUM_CODEBOOK, target_len), MASK_ID, dtype=torch.long),
@@ -102,8 +101,8 @@ def _item(request_id: str, prefix_len: int, target_len: int, guidance_scale: flo
 def test_packed_layout_doc_boundaries():
     """Two documents per item, laid out cond/uncond in request order."""
     items = [
-        _item("a", prefix_len=40, target_len=100),
-        _item("b", prefix_len=12, target_len=20),
+        _item(prefix_len=40, target_len=100),
+        _item(prefix_len=12, target_len=20),
     ]
     canvas = build_packed_canvas(items, torch.device("cpu"))
 
@@ -117,8 +116,8 @@ def test_packed_layout_doc_boundaries():
 
 def test_cfg_off_drops_the_unconditional_document():
     """guidance_scale 0 should not pay for logits scoring throws away."""
-    with_cfg = _item("a", prefix_len=40, target_len=100, guidance_scale=2.0)
-    without = _item("b", prefix_len=40, target_len=100, guidance_scale=0.0)
+    with_cfg = _item(prefix_len=40, target_len=100, guidance_scale=2.0)
+    without = _item(prefix_len=40, target_len=100, guidance_scale=0.0)
 
     c_on = build_packed_canvas([with_cfg], torch.device("cpu"))
     c_off = build_packed_canvas([without], torch.device("cpu"))
@@ -132,8 +131,8 @@ def test_cfg_off_drops_the_unconditional_document():
     # Mixed batch: the layout is per item, not per step.
     mixed = build_packed_canvas(
         [
-            _item("x", prefix_len=10, target_len=20, guidance_scale=2.0),
-            _item("y", prefix_len=12, target_len=30, guidance_scale=0.0),
+            _item(prefix_len=10, target_len=20, guidance_scale=2.0),
+            _item(prefix_len=12, target_len=30, guidance_scale=0.0),
         ],
         torch.device("cpu"),
     )
@@ -156,8 +155,8 @@ def test_cfg_off_drops_the_unconditional_document():
 def test_packed_layout_positions_restart_per_document():
     """RoPE must not read document n+1 as a continuation of document n."""
     items = [
-        _item("a", prefix_len=5, target_len=7),
-        _item("b", prefix_len=3, target_len=4),
+        _item(prefix_len=5, target_len=7),
+        _item(prefix_len=3, target_len=4),
     ]
     canvas = build_packed_canvas(items, torch.device("cpu"))
     pos = canvas.position_ids[0]
@@ -172,7 +171,7 @@ def test_packed_layout_positions_restart_per_document():
 
 def test_packed_layout_target_gather_is_the_canvas():
     """tgt_index must point at the target region, not the prefix."""
-    item = _item("a", prefix_len=9, target_len=6)
+    item = _item(prefix_len=9, target_len=6)
     canvas = build_packed_canvas([item], torch.device("cpu"))
 
     gathered = canvas.audio_mask[0][canvas.tgt_index]
@@ -198,7 +197,7 @@ def test_reveal_schedule_covers_the_canvas():
 
 
 def test_mask_class_is_never_predicted():
-    item = _item("solo", prefix_len=10, target_len=6)
+    item = _item(prefix_len=10, target_len=6)
     canvas = build_packed_canvas([item], torch.device("cpu"))
     logits = torch.randn(1, NUM_CODEBOOK, 2 * canvas.flat_target_total, 1025)
     c_logits, u_logits = canvas.slice_logits(logits, item)
@@ -216,7 +215,7 @@ def test_sampling_is_reproducible_under_a_seed():
     Both stochastic paths are covered: the token choice inside
     ``predict_tokens_with_scoring`` and the reveal order in ``apply_reveal``.
     """
-    item = _item("seeded", prefix_len=10, target_len=6)
+    item = _item(prefix_len=10, target_len=6)
     canvas = build_packed_canvas([item], torch.device("cpu"))
     logits = torch.randn(1, NUM_CODEBOOK, 2 * canvas.flat_target_total, 1025)
     c_logits, u_logits = canvas.slice_logits(logits, item)
@@ -390,11 +389,10 @@ def test_encode_head_matches_the_packed_reference():
 
     gen = torch.Generator().manual_seed(0)
     items = []
-    for rid, (prefix_len, target_len, guidance) in enumerate([(23, 40, 2.0), (31, 25, 0.0), (17, 52, 2.0)]):
+    for prefix_len, target_len, guidance in [(23, 40, 2.0), (31, 25, 0.0), (17, 52, 2.0)]:
         tokens = torch.full((1, NUM_CODEBOOK, target_len), MASK_ID, dtype=torch.long)
         tokens[..., ::3] = torch.randint(0, MASK_ID, tokens[..., ::3].shape, generator=gen)
         items.append(CanvasItem(
-            request_id=str(rid),
             prefix_ids=torch.randint(0, 1000, (NUM_CODEBOOK, prefix_len), generator=gen),
             prefix_audio_mask=torch.zeros(prefix_len, dtype=torch.bool),
             tokens=tokens,
@@ -424,14 +422,13 @@ def _run_ours(backbone, config, specs, num_step=None):
     """
     num_step = GREEDY["num_step"] if num_step is None else num_step
     items, schedules = [], []
-    for idx, (text, language, target_len) in enumerate(specs):
+    for text, language, target_len in specs:
         prefix_ids, prefix_audio_mask = build_prefix(
             tokenizer=backbone.model.text_tokenizer, text=text,
             num_audio_codebook=config.num_audio_codebook,
             language=language, denoise=True,
         )
         items.append(CanvasItem(
-            request_id=f"r{idx}",
             prefix_ids=prefix_ids.cuda(),
             prefix_audio_mask=prefix_audio_mask.cuda(),
             tokens=torch.full(
@@ -471,14 +468,13 @@ def _step0_logits(backbone, config, specs, which=0):
     difference into something that looks bigger than it is.
     """
     items = []
-    for idx, (text, language, target_len) in enumerate(specs):
+    for text, language, target_len in specs:
         prefix_ids, prefix_audio_mask = build_prefix(
             tokenizer=backbone.model.text_tokenizer, text=text,
             num_audio_codebook=config.num_audio_codebook,
             language=language, denoise=True,
         )
         items.append(CanvasItem(
-            request_id=f"r{idx}",
             prefix_ids=prefix_ids.cuda(),
             prefix_audio_mask=prefix_audio_mask.cuda(),
             tokens=torch.full(

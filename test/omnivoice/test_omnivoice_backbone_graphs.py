@@ -44,3 +44,36 @@ def test_node_resources_do_not_follow_backbone_graphs():
     for model in (on, off):
         (spec,) = model.get_node_resources()
         assert spec.resource_key == BACKBONE_ATTN and spec.config.max_segments_per_request == 2
+
+
+def test_forward_batched_keys_rows_by_the_engine_ids():
+    """The engine reads a row's outputs back by the worker's handle for the
+    request, which is not the request's wire id."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from mstar.model.omnivoice.config import OmniVoiceConfig
+
+    cfg = OmniVoiceConfig()
+    sub = OmniVoiceBackboneSubmodule(backbone=None, config=cfg)
+    sub.get_device = lambda: torch.device("cpu")
+    c = cfg.num_audio_codebook
+    meta = {"target_len": 4, "num_step": 2, "guidance_scale": 2.0}
+    inputs = {
+        "prefix_ids": [torch.zeros(c, 3, dtype=torch.long)],
+        "prefix_audio_mask": [torch.zeros(3, dtype=torch.bool)],
+    }
+    rows = [
+        sub.prepare_inputs(
+            "speech_gen",
+            SimpleNamespace(request_id=f"speech-{h}#1", rid_handle=h, step_metadata=meta, dynamic_loop_iter_counts={}),
+            inputs,
+        )
+        for h in (0, 1)
+    ]
+    engine_inputs = SimpleNamespace(request_ids=[0, 1])
+    pre = sub.preprocess("speech_gen", engine_inputs, rows)
+    rows_out = pre["canvas"].tgt_index.shape[0]
+    sub._logits = lambda _inputs, _canvas: torch.zeros(1, c, rows_out, cfg.audio_vocab_size)
+    assert set(sub.forward_batched("speech_gen", engine_inputs, **pre)) == {0, 1}
