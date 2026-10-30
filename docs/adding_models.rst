@@ -602,10 +602,11 @@ The spec types are:
        defaults to ``head_dim ** -0.5``, ``backend`` (``RaggedAttnBackend.AUTO``, the
        default, ``RaggedAttnBackend.FLASHINFER``, or ``RaggedAttnBackend.DENSE``),
        ``flashinfer_backend``, the
-       two CUDA-graph ceilings ``max_segments_per_request`` and
+       two CUDA-graph ceilings ``max_segments_per_request`` (``max_segments_per_step``
+       for a ``one_row_per_step`` region) and
        ``max_tokens_per_request``, and ``compile_op``, described under `Cacheless
        attention (encoder towers)`_. ``compile_op`` is the model's declaration; the
-       serving config's ``resources:`` overrides take only the backends and the two
+       serving config's ``resources:`` overrides take only the backends and the
        ceilings. ``DENSE`` runs FA3 ``flash_attn_varlen`` (AITER on ROCm)
        and falls back to FlashInfer if that kernel is missing. See `Cacheless attention (encoder towers)`_.
    * - ``RaggedCrossAttentionSpec(config=RaggedAttentionConfig(...))``
@@ -1654,9 +1655,9 @@ Both types share the base ``PiecewiseCudaGraphConfig`` fields:
   packed region that runs every request's segments as one ragged batch, such as a vision
   tower, and needs ``lease_before_step`` and ``capture_batch_sizes=[1]``. The region's
   ``declare_step`` then receives ``[first_rid]`` with every request's ``seq_lens``, so the
-  whole step's segments count against that one request's ``max_segments_per_request``,
-  which for this region is a per-step ceiling. Pair it with a ``can_lease`` that refuses a
-  step with more.
+  whole step's segments count against one replay's plan: size its attention resource with
+  ``max_segments_per_step``, and pair it with a ``can_lease`` that refuses a step with
+  more.
 - ``capture_batch_sizes`` lists the batch sizes to record. ``None`` uses the runner
   default.
 - ``compile`` runs ``torch.compile`` on ``capture_fn`` before capture. The default is
@@ -1862,8 +1863,8 @@ that a misspelled setting is never silently ignored:
    * - ``RaggedAttentionSpec``
      - ``backend`` (``auto`` / ``flashinfer``), ``flashinfer_backend``
        (``auto`` / ``fa2`` / ``fa3``), ``max_segments_per_request``,
-       ``max_tokens_per_request``. The two ceilings size CUDA-graph buckets, which is a
-       memory-against-coverage trade the deployment makes, not the model.
+       ``max_segments_per_step``, ``max_tokens_per_request``. The ceilings size CUDA-graph
+       buckets, which is a memory-against-coverage trade the deployment makes, not the model.
 
 Tune the cache shape on the KV resource, not on the attention resource that reads it. For
 example, ``configs/qwen3tts.yaml`` selects FA2 under ``talker_attn``,

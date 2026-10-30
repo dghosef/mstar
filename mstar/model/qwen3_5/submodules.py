@@ -617,7 +617,7 @@ class VisionEncoderSubmodule(NodeSubmodule):
     group of every request is its own attention segment.
 
     A replay's attention plan holds at most the vision attention resource's
-    ``max_segments_per_request`` segments. A batch that would overflow it or
+    ``max_segments_per_step`` segments. A batch that would overflow it or
     the top patch bucket runs its requests one at a time instead, each
     replaying if it fits alone; a request too large alone runs the block loop
     eagerly.
@@ -757,7 +757,7 @@ class VisionEncoderSubmodule(NodeSubmodule):
 
     def _fits_capture(self, inputs: list[NodeInputs]) -> bool:
         """Whether the batch's segments fit a replay's attention plan: the
-        resource's per-request ceiling, read from it so a YAML override holds.
+        resource's per-step ceiling, read from it so a YAML override holds.
 
         TODO: capture more than 64 segments, so long low-res videos replay
         too. The ceiling is sized for images (16384 patches / 256-patch
@@ -766,10 +766,9 @@ class VisionEncoderSubmodule(NodeSubmodule):
         2x2 merge block) would hold any prompt that fits, at small buckets'
         cost unchanged; that is a ragged-resource change.
         """
-        per_request = self.node_resources[VISION_ATTN].max_segments_per_request
         segments = sum(len(inp.tensor_inputs["seq_lengths"]) for inp in inputs)
         # the whole step replays as one row (`one_row_per_step`)
-        return segments <= per_request
+        return segments <= self.node_resources[VISION_ATTN].max_segments_per_step
 
     def _capture_block_loop(self, inp: PiecewiseCallInputs) -> dict[str, torch.Tensor]:
         """The captured region: reads the runner's buffers, never rebinds."""

@@ -232,6 +232,12 @@ class _RaggedManagerBase:
         return self._config.max_segments_per_request
 
     @property
+    def max_segments_per_step(self) -> int | None:
+        """Segments a one-row replay's plan holds for its whole step, as
+        configured; None for a resource sized per request."""
+        return self._config.max_segments_per_step
+
+    @property
     def force_double_buffer(self):
         # plan H2Ds each layout into static buffers that a captured replay reads
         return True

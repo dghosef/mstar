@@ -294,9 +294,9 @@ class Qwen3_5DenseModel(Model):
                     head_dim=vision.head_dim,
                     # A segment per image, not per request: the resize floors
                     # each image at `shortest_edge` pixels. A video frame group
-                    # has no floor; a prompt with more segments runs the block
+                    # has no floor; a step with more segments runs the block
                     # loop eagerly (`VisionEncoderSubmodule._fits_capture`).
-                    max_segments_per_request=(
+                    max_segments_per_step=(
                         VisionEncoderSubmodule.BLOCK_LOOP_PATCH_BUCKETS[-1] // min_patches
                     ),
                 ),

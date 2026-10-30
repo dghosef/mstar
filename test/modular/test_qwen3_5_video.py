@@ -517,7 +517,7 @@ def test_more_frame_groups_than_a_replay_holds_is_accepted(model):
     from mstar.model.qwen3_5.submodules import VisionEncoderSubmodule
 
     (spec,) = model._vision_resources()
-    limit = spec.config.max_segments_per_request
+    limit = spec.config.max_segments_per_step
     n = 2 * (limit + 1)
     video = torch.randint(0, 256, (n, 3, 32, 32), dtype=torch.uint8)
     frames, metadata = sampled(video, 2.0, model.video_processor)
@@ -542,7 +542,7 @@ def _encoder(max_segments: int):
         num_position_embeddings=16, out_hidden_size=64,
     )
     encoder = VisionEncoderSubmodule(nn.Linear(1, 1), config, (torch.zeros(1), torch.ones(1)))
-    encoder.node_resources = {VISION_ATTN: SimpleNamespace(max_segments_per_request=max_segments)}
+    encoder.node_resources = {VISION_ATTN: SimpleNamespace(max_segments_per_step=max_segments)}
     return encoder
 
 
