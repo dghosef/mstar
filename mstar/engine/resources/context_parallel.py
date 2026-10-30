@@ -56,6 +56,12 @@ class ContextParallel(NamedTuple):
         owned = offsets % self.size == self.index
         return where(owned, pages, SINK_PAGE), where(owned, offsets // self.size, 0)
 
+    def local_geometry(self, page_size: int, num_qo_heads: int) -> dict[str, int]:
+        """A paged attention wrapper's ``page_size`` and ``num_qo_heads`` over this rank's slots: the
+        slots a page it stores, and under TP placement every partner's query heads, which it attends
+        for them (``exchange_queries``)."""
+        return dict(page_size=page_size // self.size, num_qo_heads=num_qo_heads * (1 if self.over_sp else self.size))
+
     def local_last_page_len(
         self, logical_last: np.ndarray, npages: np.ndarray, page_size: int,
     ) -> tuple[np.ndarray, np.ndarray]:

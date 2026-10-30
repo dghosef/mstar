@@ -291,11 +291,9 @@ class FlashInferMLAManager(AttentionManager):
         self._placement = placement
         if placement is None:
             return
-        # as FlashInferManager's: this rank's slots of each page, attended under TP placement for
-        # every partner's query heads (the latent is every TP rank's)
+        # the latent is every TP rank's, so under TP placement it is attended for every partner's heads
         cfg = self._kv_config
-        self._wrapper_kwargs["page_size"] = cfg.page_size // placement.size
-        self._wrapper_kwargs["num_qo_heads"] = cfg.num_qo_heads * (1 if placement.over_sp else placement.size)
+        self._wrapper_kwargs.update(placement.local_geometry(cfg.page_size, cfg.num_qo_heads))
 
     @property
     def uses_kernel(self) -> bool:

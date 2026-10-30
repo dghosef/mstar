@@ -86,11 +86,8 @@ class FlashInferManager(AttentionManager):
         self._placement = placement
         if placement is None:
             return
-        # the wrappers read this rank's slots of each page; under TP placement each attends
-        # them for every partner's query heads (`ContextParallel.exchange_queries`)
         cfg = self._kv_config
-        self._wrapper_kv_kwargs["page_size"] = cfg.page_size // placement.size
-        self._wrapper_kv_kwargs["num_qo_heads"] = cfg.num_qo_heads * (1 if placement.over_sp else placement.size)
+        self._wrapper_kv_kwargs.update(placement.local_geometry(cfg.page_size, cfg.num_qo_heads))
         self._new_kwargs = dict(
             num_qo_heads=cfg.num_qo_heads, num_kv_heads=cfg.num_kv_heads, head_dim=cfg.head_dim,
             device=self._device, backend=self._wrapper_kv_kwargs["backend"], q_data_type=self._dtype,
