@@ -366,14 +366,17 @@ class ZigzagWrapper:
             self.kernel = paged()
             return
         # fixed for the bucket: at most 2 chunks a row, of at most ceil(T / 2P) tokens each, whose
-        # keys are at most 2T
+        # keys are at most 2T; and one more row for the padding queries
         p = placement.size
-        self._segments = 2 * captured_rows
-        queries = min(captured_tokens, -(-(captured_tokens + captured_rows * (2 * p - 1)) // p))
-        self.kernel = paged(batch_size=self._segments, max_total_tokens=queries, max_num_pages=2 * captured_tokens)
+        self._segments = 2 * captured_rows + 1
+        self._queries = min(captured_tokens, -(-(captured_tokens + captured_rows * (2 * p - 1)) // p))
+        self.kernel = paged(
+            batch_size=self._segments, max_total_tokens=self._queries,
+            max_num_pages=2 * captured_tokens + self._queries,
+        )
         # a padding entry scatters to the row past the step's last token, which ``run`` drops
         self._pad = captured_tokens
-        self._tokens = torch.full((queries,), captured_tokens, dtype=torch.int64, device=device)
+        self._tokens = torch.full((self._queries,), captured_tokens, dtype=torch.int64, device=device)
 
     @torch.compiler.disable
     def plan(self, qo_indptr: torch.Tensor, causal: bool = True) -> None:
@@ -381,12 +384,13 @@ class ZigzagWrapper:
         qo, kv, kv_tokens = rows.qo_indptr, rows.kv_indptr, rows.kv_tokens
         self._planned = len(rows.tokens)
         if self._captured:
-            # a captured plan takes the batch size it was built for: pad with rows of no query
-            # and one key
-            pad = self._segments - (len(qo) - 1)
-            qo = np.concatenate([qo, np.full(pad, qo[-1])])
-            kv = np.concatenate([kv, kv[-1] + np.arange(1, pad + 1)])
-            kv_tokens = np.concatenate([kv_tokens, np.zeros(pad, dtype=np.int64)])
+            # a captured plan takes the batch size it was built for, and FlashInfer's run the
+            # planned query count: the padding queries are one row, attending as many copies of
+            # token 0 causally, and the rows left over hold no query and one key
+            pad_queries, empty = self._queries - int(qo[-1]), self._segments - len(qo)
+            qo = np.concatenate([qo, [self._queries], np.full(empty, self._queries)])
+            kv = np.concatenate([kv, kv[-1] + max(pad_queries, 1) + np.arange(empty + 1)])
+            kv_tokens = np.concatenate([kv_tokens, np.zeros(int(kv[-1]) - len(kv_tokens), dtype=np.int64)])
             self._stager.copy_(self._tokens, rows.tokens, pad_value=self._pad)
         elif self._planned:
             self._tokens = self._stager.to_device(rows.tokens, self._device)
