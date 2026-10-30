@@ -2216,11 +2216,11 @@ class KVManager(AttentionResource):
         it over as one H2D.
         """
         pages, offsets = self._decode_locations(views)
-        if self.placement is not None:
-            pages, offsets = (a.tolist() for a in self.placement.write_slots(pages, offsets))
-        locations = torch.tensor(
-            [pages, offsets], dtype=torch.long
-        ).to(self._device, non_blocking=True)
+        if self.placement is None:
+            locations = torch.tensor([pages, offsets], dtype=torch.long)
+        else:
+            locations = torch.as_tensor(np.stack(self.placement.write_slots(pages, offsets)), dtype=torch.long)
+        locations = locations.to(self._device, non_blocking=True)
         return KVPlanState(
             token_to_page=locations[0],
             token_to_cache=locations[1],
@@ -4245,12 +4245,20 @@ class KVManager(AttentionResource):
             layer_idx = self._default_layer_idx
         return self.kv_cache.layer_view(layer_idx)
 
+    def _refuse_placed_read(self) -> None:
+        if self.placement is not None:
+            raise ValueError(
+                f"KV {self.name!r} places positions over ranks (context_parallel), so this rank "
+                "holds only its share of the step's tokens and reads the rest from the sink page"
+            )
+
     @torch.compiler.disable
     def read_kv(self, layer_idx: int=None, plan_label: str=None) -> torch.Tensor:
         """
         The slots this step's plan writes, e.g. for NHD:
         [num_tokens, 2, num_kv_heads, head_dim] (K at index 0, V at 1).
         """
+        self._refuse_placed_read()
         if layer_idx is None:
             layer_idx = self._default_layer_idx
         if plan_label is None:
@@ -4285,6 +4293,8 @@ class KVManager(AttentionResource):
         Returns nothing by default: reading the slots back is a gather no
         caller wants today, and skipping it keeps the write a pure mutation.
         """
+        if return_tensor:
+            self._refuse_placed_read()
         if layer_idx is None:
             layer_idx = self._default_layer_idx
         if label is None:

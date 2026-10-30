@@ -58,6 +58,8 @@ def test_write_read_and_pointers():
     assert torch.equal(cache.chunk_view(1, 2, 1, 3), latent[1:3])
     cache.copy_pages([2], [5])
     assert torch.equal(cache.layer_view(1)[5], latent[:4])
+    cache.copy_slots(2, 4, 3)
+    assert torch.equal(cache.layer_view(1)[4, :3], latent[:3]) and not cache.layer_view(1)[4, 3].any()
 
 
 class _StubTransfer:

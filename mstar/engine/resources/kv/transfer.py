@@ -162,9 +162,6 @@ class MooncakeKVTransferEngine(KVTransferEngine):
                 layer_idx=info.layer_idx, page_idx=info.local_page_idx,
                 token_start=info.token_start, token_end=info.token_end
             )
-            if nbytes == 0:
-                # under context parallelism a range can hold none of this rank's slots
-                continue
             remote_ptrs, _ = self._kv_cache.chunk_ptrs(
                 layer_idx=info.layer_idx, page_idx=info.remote_page_idx,
                 token_start=info.token_start, token_end=info.token_end,

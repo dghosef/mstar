@@ -213,6 +213,9 @@ class KVCache:
         it defaults to this cache's own storage.
         """
         token_start, token_end = self._slots(token_start, token_end)
+        if token_start == token_end:
+            # under context parallelism a range can hold none of this rank's slots
+            return [], 0
         if self.layout == KVLayout.MLA:
             layer_stride, page_stride, token_stride = self.tensor.stride()[:3]
             element_size = self.tensor.element_size()
@@ -316,6 +319,8 @@ class KVCache:
         if tensor is None:
             tensor = self.tensor
         token_start, token_end = self._slots(token_start, token_end)
+        if token_start == token_end:
+            return []
         page = tensor[layer_start:layer_end, page_idx]
         if self.layout == KVLayout.MLA:
             return [page[:, token_start:token_end]]
@@ -349,7 +354,10 @@ class KVCache:
         # Index with slices rather than tensors. Slices need no copy from the host,
         # so the copy doesn't wait on the stream.
         _, end = self._slots(0, end)
-        self.tensor[:, dst_page, :, :end] = self.tensor[:, src_page, :, :end]
+        if self.layout == KVLayout.MLA:
+            self.tensor[:, dst_page, :end] = self.tensor[:, src_page, :end]
+        else:
+            self.tensor[:, dst_page, :, :end] = self.tensor[:, src_page, :, :end]
 
     def chunk_view(
         self, layer_idx: int, page_idx: int,

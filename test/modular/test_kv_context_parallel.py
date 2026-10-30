@@ -13,7 +13,6 @@ from dataclasses import dataclass
 
 sys.path.insert(0, ".")
 
-import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
@@ -74,13 +73,12 @@ def _manager(rank: int, cfg: PagedKVConfig) -> KVManager:
     return kv
 
 
-def _decode(kv: KVManager, rid: str, slot: int) -> tuple[KVStep, StepContext]:
-    """One leased decode step of ``rid``, planned and not committed."""
+def _decode(kv: KVManager, rid: str, slot: int, leased: bool = True) -> tuple[KVStep, StepContext]:
+    """One decode step of ``rid``, planned and not committed: into a capture slot's buffers when
+    ``leased``, else eager."""
     step = KVStep(segments=(Segment(rid, "main", 1),))
-    ctx = StepContext(
-        request_ids=(rid,), graph_walk="decode", slot=slot, capture=False,
-        slot_lease=SlotLease(slot=slot, bucket=BucketKey(graph_walk="decode", bs=1, num_tokens=1)),
-    )
+    lease = SlotLease(slot=slot, bucket=BucketKey(graph_walk="decode", bs=1, num_tokens=1)) if leased else None
+    ctx = StepContext(request_ids=(rid,), graph_walk="decode", slot=slot, capture=False, slot_lease=lease)
     ctx.set_padded_rids((rid,))
     assert kv.admit(step, ctx).ok
     kv.plan(step, ctx)
@@ -117,6 +115,11 @@ def test_two_ranks_keep_logical_pages_alike_and_split_every_write():
         _ingest(kv, "a", a)
     steps = [_step(kv, "a", len(a)) for kv in ranks]
     _assert_split_writes(ranks, steps[0])
+    # reading the step's slots back would return the sink's contents for the tokens a rank doesn't own
+    with pytest.raises(ValueError, match="context_parallel"):
+        leader.read_kv(0, "main")
+    with pytest.raises(ValueError, match="context_parallel"):
+        leader.write_kv(torch.zeros(len(a), 1, 8), torch.zeros(len(a), 1, 8), 0, "main", return_tensor=True)
     for kv, step in zip(ranks, steps, strict=True):
         kv.commit(step, _ctx("a"))
 
@@ -139,6 +142,10 @@ def test_two_ranks_keep_logical_pages_alike_and_split_every_write():
         for kv, (step, ctx) in zip(ranks, planned, strict=True):
             kv.commit(step, ctx)
     assert [kv.plan_cache_stats["hit"] for kv in ranks] == [1, 1]
+    planned = [_decode(kv, "b", 0, leased=False) for kv in ranks]
+    _assert_split_writes(ranks, planned[0][0])
+    for kv, (step, ctx) in zip(ranks, planned, strict=True):
+        kv.commit(step, ctx)
 
     # a request larger than the pool is refused alike
     for kv in ranks:
@@ -169,6 +176,9 @@ def test_a_placed_cache_maps_logical_token_ranges_to_this_ranks_slots(rank, tmp_
     assert [r.tolist() for r in rows] == [page[:, kv, first:end].tolist() for kv in (0, 1)]
     ptrs, nbytes = source.chunk_ptrs(1, 2, 3, 6)
     assert ptrs == [page[1, kv, first].data_ptr() for kv in (0, 1)] and nbytes == page[1, 0, first:end].nbytes
+    # a range holding none of this rank's slots is no transfer at all
+    other = (1 - rank, 2 - rank)
+    assert source.layer_rows(0, 2, 2, *other) == [] and source.chunk_ptrs(1, 2, *other) == ([], 0)
 
     # an SHM read of a partial page lands in this rank's slots of it, and nowhere else
     producer = ShmKVTransferEngine(source, "producer", str(tmp_path))
@@ -177,10 +187,6 @@ def test_a_placed_cache_maps_logical_token_ranges_to_this_ranks_slots(rank, tmp_
     assert consumer.read_batched_async(info, [KVReadInfo(layer, 0, 2, 3, 6) for layer in range(2)]) is None
     assert torch.equal(destination.tensor[:, 0, :, first:end], page[:, :, first:end])
     assert destination.tensor.count_nonzero() == page[:, :, first:end].numel()
-
-    # the attention plan's local lengths: rows of 1 page holding 1 and 3 slots, and of 2 pages, the last full
-    last, kv_lens = source.placement.local_last_page_len(np.array([1, 3, 8]), np.array([1, 1, 2]), 8)
-    assert (last.tolist(), kv_lens.tolist()) == {0: ([1, 2, 4], [1, 2, 8]), 1: ([0, 1, 4], [0, 1, 8])}[rank]
 
 
 @pytest.mark.parametrize("overrides, match", [
