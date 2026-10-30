@@ -875,7 +875,9 @@ class TalkerSubmodule(ARNodeSubmodule):
 
     def max_rows_in_combined(self, graph_walk: str) -> int | None:
         # The cap is per walk, and a variant runs one of the prefill walks: Base
-        # always clones, the others never do.
+        # always clones, the others never do. It counts prompts, not tokens: four
+        # clones with long references (about 18 s or more each) outgrow the top
+        # mixed token bucket, and that step runs eager.
         return None if graph_walk == "talker_decode" else self.MIXED_MAX_PREFILL_ROWS
 
     def get_accelerator_graph_configs(
