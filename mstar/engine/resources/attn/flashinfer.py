@@ -204,7 +204,7 @@ class FlashInferManager(AttentionManager):
             new = FlashInferRaggedPrefillWrapper(
                 self._workspaces.get(f"{label}.own_tokens", slot),
                 max_num_segments=kv_kwargs.get("batch_size"), max_total_tokens=max_total_tokens,
-                accelerator_graph=kv_kwargs.get("accelerator_graph", False), **self._new_kwargs,
+                accelerator_graph=kv_kwargs.get("accelerator_graph", False), owns_lse=True, **self._new_kwargs,
             )
         return ContextParallelWrapper(
             self._placement, self._kv_config.page_size, self._dtype, context, new, self._device,

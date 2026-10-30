@@ -4,6 +4,7 @@
 FlashInfer wrappers live here; FA3 is in ``dense_wrappers.py``.
 """
 
+import math
 from abc import ABC, abstractmethod
 
 import torch
@@ -221,6 +222,7 @@ class _FlashInferRaggedPrefillBase(_RaggedPrefillBase):
         *,
         kv_layout: str = "NHD",
         backend: str = "auto",
+        owns_lse: bool = False,
         **kwargs,
     ):
         super().__init__(num_qo_heads, num_kv_heads, head_dim, **kwargs)
@@ -230,7 +232,7 @@ class _FlashInferRaggedPrefillBase(_RaggedPrefillBase):
 
         if not self.accelerator_graph:
             # eager callers pass exact-size q/k/v; no tail to read
-            self._out_buf = None
+            self._out_buf = self._lse_buf = None
             self.attn_wrapper = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
                 workspace_buffer, kv_layout, backend=backend
             )
@@ -253,6 +255,12 @@ class _FlashInferRaggedPrefillBase(_RaggedPrefillBase):
             self.max_total_tokens, num_qo_heads, self.padded_head_dim,
             dtype=self.q_data_type, device=self.device,
         )
+        # ``owns_lse``: a caller that merges this attention with another part by lse
+        # (``run(return_lse=True)``) gets it in a buffer of ours too, -inf past the plan
+        # (no keys), so a padding row merges to 0. Read it before the next ``run``.
+        self._lse_buf = torch.full(
+            (self.max_total_tokens, num_qo_heads), -math.inf, dtype=torch.float32, device=self.device,
+        ) if owns_lse else None
         # FlashInfer latches max rows on the FIRST plan; prime at the
         # bucket ceiling so a small first plan can't cap it.
         self._plan(
@@ -285,9 +293,11 @@ class _FlashInferRaggedPrefillBase(_RaggedPrefillBase):
             q_data_type=self.q_data_type,
         )
         if self._out_buf is not None:
-            # rows this layout leaves unwritten, zeroed outside the graph where
+            # rows this layout leaves unwritten, reset outside the graph where
             # the real token count is known; see __init__
             self._out_buf[total_tokens:].zero_()
+        if self._lse_buf is not None:
+            self._lse_buf[total_tokens:].fill_(-math.inf)
 
     def _pad_head_dim(self, t: torch.Tensor) -> torch.Tensor:
         if t.shape[-1] == self.padded_head_dim:
@@ -305,6 +315,8 @@ class _FlashInferRaggedPrefillBase(_RaggedPrefillBase):
         else:
             n = qp.shape[0]
             self._check_rows(n)
+            if return_lse and self._lse_buf is not None:
+                lse_kwargs["lse"] = self._lse_buf[:n]
             out = self.attn_wrapper.run(qp, kp, vp, out=self._out_buf[:n], **lse_kwargs)
         out, lse = out if return_lse else (out, None)
         if self.padded_head_dim != self.head_dim:

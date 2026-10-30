@@ -28,7 +28,9 @@ from mstar.engine.engine import Engine
 from mstar.engine.resources.attn import flashinfer_mla as fm
 from mstar.engine.resources.attn.base import AttentionManager
 from mstar.engine.resources.attn.config import AttentionConfig, AttentionSpec, AttentionStep, AttnBackend
+from mstar.engine.resources.attn.ragged.wrappers import FlashInferRaggedPrefillWrapper
 from mstar.engine.resources.base import EngineResourceInfo, Resource
+from mstar.engine.resources.context_parallel import merge
 from mstar.engine.resources.kv import manager as manager_mod
 from mstar.engine.resources.kv.cache import KVCache
 from mstar.engine.resources.kv.config import KVLayout, KVReqConfig, KVSpec, KVStep, PagedKVConfig
@@ -345,11 +347,16 @@ def _reference_flashinfer() -> types.ModuleType:
         def plan(self, qo_indptr, kv_indptr, *args, causal=False, **kwargs):
             self.qo, self.causal = qo_indptr.tolist(), causal
 
-        def run(self, q, k, v, out=None, return_lse=False, lse_base="log2"):
+        def run(self, q, k, v, out=None, lse=None, return_lse=False, lse_base="log2"):
             parts = [_reference(q[a:b], k[a:b], v[a:b], self.causal) for a, b in itertools.pairwise(self.qo)]
-            o, lse = torch.cat([p[0] for p in parts]).to(q.dtype), torch.cat([p[1] for p in parts])
-            lse = lse if lse_base == "ln" else lse / math.log(2)
-            return (o, lse) if return_lse else o
+            o, got = torch.cat([p[0] for p in parts]).to(q.dtype), torch.cat([p[1] for p in parts])
+            got = got if lse_base == "ln" else got / math.log(2)
+            # into the caller's buffers, when given, the planned rows alone
+            for buf, rows in ((out, o), (lse, got)):
+                if buf is not None:
+                    buf[:len(rows)] = rows
+            o, got = (rows if buf is None else buf for buf, rows in ((out, o), (lse, got)))
+            return (o, got) if return_lse else o
 
     fi.BatchPrefillWithPagedKVCacheWrapper = Paged
     fi.BatchDecodeWithPagedKVCacheWrapper = Decode
@@ -496,7 +503,15 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False)
         # a captured prefill's bucket holds 8 tokens past the step
         n = case.q.shape[0]
         pad = 8 if captured and rows == PREFILL_ROWS else 0
-        _plan(attn, case, bucket=BucketKey("w", bs=len(rows), num_tokens=n + pad) if captured else None)
+        bucket = BucketKey("w", bs=len(rows), num_tokens=n + pad) if captured else None
+        _plan(attn, case, bucket=bucket)
+        if pad:
+            # what another graph's freed pool block can leave in the own-token part's buffers: only
+            # plan's reset of the padding keeps it finite through the merge (and the next layer)
+            own = next(iter(attn._cg_plan_states.values())).new
+            own._out_buf.fill_(math.nan)
+            own._lse_buf.fill_(math.nan)
+            _plan(attn, case, bucket=bucket)
         # a one-token-a-row step attends the pages alone, so a fused KV-write kernel can serve it
         assert attn.reads_step_kv() == (rows == PREFILL_ROWS)
         heads = slice(None) if over_sp else slice(rank * Q_HEADS // world, (rank + 1) * Q_HEADS // world)
@@ -573,6 +588,25 @@ def test_two_ranks_attend_a_placed_pool_like_one_rank_with_the_same_collectives(
 def test_two_gpus_attend_a_placed_pool_like_one(tmp_path, over_sp, rows, captured, mla):
     _flashinfer(mla)
     mp.spawn(_over_ranks, args=(P, "nccl", str(tmp_path / "store"), over_sp, rows, mla, captured), nprocs=P)
+
+
+def test_a_captured_buckets_padding_merges_to_0_whatever_the_own_token_buffers_held(monkeypatch):
+    """The TP own-token part of a bucket larger than its step: the kernel writes only the planned
+    rows, and the padding's context partials are masked (out 0, lse -inf). So only the part's own
+    reset of the rest in ``plan`` keeps the padding finite (``_over_ranks`` captures this on GPU)."""
+    monkeypatch.setitem(sys.modules, "flashinfer", _reference_flashinfer())
+    own = FlashInferRaggedPrefillWrapper(
+        torch.empty(8, dtype=torch.uint8), Q_HEADS, 1, HEAD_DIM, max_num_segments=2, max_total_tokens=16,
+        device=CPU, accelerator_graph=True, q_data_type=torch.float32, owns_lse=True,
+    )
+    own._out_buf.fill_(math.nan)
+    own._lse_buf.fill_(math.nan)
+    own.plan(torch.tensor([0, 3, 5], dtype=torch.int32), causal=True)
+    gen = torch.Generator().manual_seed(0)
+    out, lse = own.run(*(torch.randn(16, h, HEAD_DIM, generator=gen) for h in (Q_HEADS, 1, 1)), return_lse=True)
+    context = (torch.zeros_like(out), torch.full_like(lse, -math.inf))
+    merged = merge(torch.stack([context[0], out]), torch.stack([context[1], lse]))
+    assert torch.isfinite(merged).all() and not merged[5:].any()
 
 
 def test_tp_placed_decode_runs_on_tensor_cores_whatever_decode_tensor_cores_says(monkeypatch):

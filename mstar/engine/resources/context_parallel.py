@@ -259,10 +259,17 @@ class ContextParallelWrapper:
 
 def merge(outs: torch.Tensor, lses: torch.Tensor) -> torch.Tensor:
     """Attention over the union of disjoint key sets from each set's partial: ``outs`` ``[K, ..., D]``
-    and natural-log ``lses`` ``[K, ...]``; fp32. A partial with lse -inf and a finite out adds
-    nothing; every row has a key in some partial (its own token, on the paged path)."""
-    weights = torch.softmax(lses.float(), dim=0)
-    return (weights.unsqueeze(-1) * outs).sum(dim=0)
+    and natural-log ``lses`` ``[K, ...]``; fp32, one ``[..., D]`` accumulated a part at a time. A
+    partial with lse -inf and a finite out adds nothing, and a query no partial has a key for (a
+    captured bucket's padding) comes out 0."""
+    lses = lses.float()
+    # finite on a row with no key, so its every weight is 0
+    top = lses.amax(0).clamp_min(torch.finfo(torch.float32).min)
+    weights = (lses - top).exp_()
+    out = weights[0].unsqueeze(-1) * outs[0]
+    for weight, part in zip(weights[1:], outs[1:], strict=True):
+        out.addcmul_(weight.unsqueeze(-1), part)
+    return out.div_(weights.sum(0).clamp_min(torch.finfo(torch.float32).tiny).unsqueeze(-1))
 
 
 @torch.compiler.disable

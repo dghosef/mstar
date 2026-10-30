@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import math
 
 import numpy as np
 import torch
@@ -200,15 +201,17 @@ class FlashInferMLAWrapper:
         self.kv_dtype = kv_dtype or dtype
 
     @torch.compiler.disable
-    def run(self, q_nope: torch.Tensor, q_pe: torch.Tensor, kv_cache_layer: torch.Tensor, return_lse: bool = False):
+    def run(self, q_nope: torch.Tensor, q_pe: torch.Tensor, kv_cache_layer: torch.Tensor, return_lse: bool = False,
+            out: torch.Tensor | None = None, lse: torch.Tensor | None = None):
         """``q_nope [T, H, kv_lora_rank]`` (absorbed), ``q_pe [T, H, qk_rope_head_dim]``,
         ``kv_cache_layer [pages, page_size, latent]`` -> ``[T, H, kv_lora_rank]`` (and, with
-        ``return_lse``, the natural log-sum-exp of the scores ``[T, H]`` fp32)."""
+        ``return_lse``, the natural log-sum-exp of the scores ``[T, H]`` fp32), in ``out`` and
+        ``lse`` when given (the kernel's)."""
         ckv = kv_cache_layer[..., : self.kv_lora_rank]
         kpe = kv_cache_layer[..., self.kv_lora_rank :]
         if self.fallback:
             return self._run_fallback(q_nope, q_pe, kv_cache_layer, return_lse)
-        return self.attn_wrapper.run(q_nope.to(self.dtype), q_pe.to(self.dtype), ckv, kpe,
+        return self.attn_wrapper.run(q_nope.to(self.dtype), q_pe.to(self.dtype), ckv, kpe, out=out, lse=lse,
                                      return_lse=return_lse, return_lse_base_on_e=return_lse)
 
     def _run_fallback(self, q_nope: torch.Tensor, q_pe: torch.Tensor, kv_cache_layer: torch.Tensor,
@@ -253,15 +256,31 @@ class FlashInferMLAOwnTokensWrapper(FlashInferMLAWrapper):
     def __init__(self, workspace_buffer: torch.Tensor, dtype: torch.dtype, **kwargs):
         super().__init__(workspace_buffer, page_size=1, **kwargs)
         self._plan_dtype = dtype
+        self._out_buf = self._lse_buf = None
+        if self.use_cuda_graph and not self.fallback:
+            # as the ragged wrapper's (`_FlashInferRaggedPrefillBase`): the kernel writes only the
+            # planned rows, so ``plan`` resets a captured bucket's padding to out 0, lse -inf, which
+            # merges to 0. A page a token, so the pages are the bucket's tokens
+            rows = (kwargs["max_num_pages"], self.num_qo_heads)
+            self._out_buf = torch.zeros(*rows, self.kv_lora_rank, dtype=dtype, device=self.device)
+            self._lse_buf = torch.full(rows, -math.inf, dtype=torch.float32, device=self.device)
 
     def plan(self, qo_indptr: torch.Tensor, causal: bool = True):
+        tokens = int(qo_indptr[-1])
         super().plan(
-            qo_indptr, qo_indptr, torch.arange(int(qo_indptr[-1]), dtype=torch.int32),
+            qo_indptr, qo_indptr, torch.arange(tokens, dtype=torch.int32),
             torch.ones(qo_indptr.shape[0] - 1, dtype=torch.int32), causal=causal, dtype=self._plan_dtype,
         )
+        if self._out_buf is not None:
+            self._out_buf[tokens:].zero_()
+            self._lse_buf[tokens:].fill_(-math.inf)
 
     def run(self, q_nope: torch.Tensor, q_pe: torch.Tensor, latent: torch.Tensor, return_lse: bool = False):
-        return super().run(q_nope, q_pe, latent.unsqueeze(1), return_lse=return_lse)
+        owned = {}
+        if self._out_buf is not None:
+            n = q_nope.shape[0]
+            owned = dict(out=self._out_buf[:n], lse=self._lse_buf[:n] if return_lse else None)
+        return super().run(q_nope, q_pe, latent.unsqueeze(1), return_lse=return_lse, **owned)
 
 
 class FlashInferMLAManager(AttentionManager):
