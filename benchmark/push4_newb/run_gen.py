@@ -105,6 +105,22 @@ def healthy(port: int) -> bool:
     return False
 
 
+def packed_config(cfg: str, cpus: int, logpath: Path) -> str:
+    """The config a packed server is served with. It starts on the whole slice and is repinned once healthy, but
+    the API server sizes its intra-op pool from the CPUs it starts on (default_preprocess_threads), so the
+    packed size is set here as default_preprocess_threads would choose on those CPUs. A config that sets it keeps its
+    own; a model's PREPROCESS_TORCH_THREADS is overridden, so this mirrors a packed launch only for models without one."""
+    import yaml
+
+    data = yaml.safe_load(Path(cfg).read_text()) or {}
+    if "preprocess_torch_threads" in data:
+        return cfg
+    data["preprocess_torch_threads"] = max(1, min(4, cpus // 4))
+    out = logpath.with_suffix(".config.yaml")
+    out.write_text(yaml.safe_dump(data, sort_keys=False))
+    return str(out)
+
+
 def wait_port_free(port: int, timeout: float = 120.0) -> None:
     """The previous arm's server can hold its port for a while after stop(); binding then fails at startup."""
     import socket
@@ -153,8 +169,11 @@ class Server:
                         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
             env.update({k: v for k, v in env_extra.items() if not k.startswith("OVN_")})
             cfg = env_extra.get("OVN_CONFIG", m["config"])
+            cfg = cfg if cfg.startswith("/") else str(tree / cfg)
+            if MSTAR_CORES != CORES:
+                cfg = packed_config(cfg, len(MSTAR_CORES.split(",")), logpath)
             cmd = [PY, "-m", "mstar.cli.main", "serve", m["mstar"], "--config",
-                   cfg if cfg.startswith("/") else str(tree / cfg), "--gpus", m.get("visible", m["gpus"]),
+                   cfg, "--gpus", m.get("visible", m["gpus"]),
                    "--port", str(port),
                    "--socket-path-prefix", f"/tmp/p4g_{port}_{int(time.time())}/"]
             cmd += env_extra.get("OVN_SERVE_EXTRA", "").split()
