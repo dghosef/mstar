@@ -454,10 +454,6 @@ class ThinkerSubmodule(ARNodeSubmodule):
             )
         return self._inv_freq
 
-    def _text_talker_masks(self, text_ids: torch.Tensor) -> torch.Tensor:
-        """A text span's ``(multimodal, text inclusion)`` masks for the Talker."""
-        return torch.stack([torch.zeros_like(text_ids, dtype=torch.bool), talker_text_mask(text_ids, self.config)])
-
     def _wrap_audio_input(self, audio_embeds: torch.Tensor):
         # Wrap the audio span in ``<|audio_bos|>`` / ``<|audio_eos|>``
         # sentinel token embeddings so the Thinker sees the same
@@ -514,8 +510,6 @@ class ThinkerSubmodule(ARNodeSubmodule):
         start_pos = self.node_resources[THINKER_POS].position(
             rid=fwd_info.rid_handle, label="main"
         )
-        # only the Talker reads the masks, and building a text span's syncs the host
-        audio_output = fwd_info.step_metadata.get("audio_output", True)
         if graph_walk == "thinker_decode":
             # The previous token, embedded with the step's other decode rows in
             # `preprocess`; its MRoPE position (the same for all 3 components)
@@ -532,13 +526,17 @@ class ThinkerSubmodule(ARNodeSubmodule):
             seq_len = text_ids.shape[0]
             # A text row leaves its positions to the plan, which starts from the
             # counter a cache hit has already moved.
+            masks_for_talker = torch.stack([
+                torch.zeros(text_ids.shape, dtype=torch.bool, device=device), # multimodal
+                talker_text_mask(text_ids, self.config) # text inclusion
+            ])
             return ARNodeInputs(
                 input_seq_len=seq_len,
                 input_embeds=embeds,
                 input_ids=text_ids,
                 tensor_inputs={
-                    "masks_for_talker": self._text_talker_masks(text_ids),
-                } if audio_output else {},
+                    "masks_for_talker": masks_for_talker
+                }
             )
 
         if graph_walk == "prefill_audio":
@@ -563,17 +561,16 @@ class ThinkerSubmodule(ARNodeSubmodule):
             pos_ids = torch.cat(
                 [start_pos_ids, audio_pos_ids, end_pos_ids], dim=1
             )
-            tensor_inputs = {}
-            if audio_output:
-                mm_mask = torch.ones(audio_len + 2, dtype=torch.bool, device=device)
-                mm_mask[0] = False
-                mm_mask[-1] = False
-                tensor_inputs["masks_for_talker"] = torch.stack([mm_mask, ~mm_mask])
+            mm_mask = torch.ones(audio_len + 2, dtype=torch.bool, device=device)
+            mm_mask[0] = False
+            mm_mask[-1] = False
             return ARNodeInputs(
                 input_seq_len=audio_len + 2,
                 input_embeds=self._wrap_audio_input(audio_embeds),
                 custom_pos_ids=pos_ids,
-                tensor_inputs=tensor_inputs,
+                tensor_inputs={
+                    "masks_for_talker": torch.stack([mm_mask, ~mm_mask])
+                }
             )
 
         if graph_walk == "prefill_vision":
@@ -581,7 +578,9 @@ class ThinkerSubmodule(ARNodeSubmodule):
             vision_len = vision_embeds.shape[0]
 
             mm_mask = torch.ones(vision_len + 2, dtype=torch.bool, device=device)
-            mm_mask[[0, -1]] = 0
+            # scalar writes: a list index uploads from pageable memory, a host sync
+            mm_mask[0] = False
+            mm_mask[-1] = False
             masks_for_talker = torch.stack([
                 mm_mask,
                 ~mm_mask
@@ -630,7 +629,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
             deepstack = []
             for deepstack_inp in inputs["deepstack"]:
                 full_deepstack = torch.zeros_like(wrapped_embeds)
-                full_deepstack[mm_mask, :] = deepstack_inp
+                full_deepstack[1:-1] = deepstack_inp  # between the sentinels
                 deepstack.append(full_deepstack)
 
             return ARNodeInputs(
@@ -654,10 +653,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
     ) -> ARNodeInputs:
         tensors = inputs.tensor_inputs
         cut = super().split_inputs(graph_walk, fwd_info, replace(inputs, tensor_inputs={}), start, end)
-        # a text-only request carries no Talker masks
-        cut.tensor_inputs = {}
-        if "masks_for_talker" in tensors:
-            cut.tensor_inputs["masks_for_talker"] = tensors["masks_for_talker"][:, start:end]
+        cut.tensor_inputs = {"masks_for_talker": tensors["masks_for_talker"][:, start:end]}
         if graph_walk == "prefill_vision":
             cut.tensor_inputs["deepstack"] = [layer[start:end] for layer in tensors["deepstack"]]
             cut.tensor_inputs["mrope_pos_advance"] = tensors["mrope_pos_advance"]
