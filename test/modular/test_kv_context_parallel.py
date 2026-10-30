@@ -766,9 +766,9 @@ def _fa_work_items(q_lens, kv_lens, heads) -> int:
     return tiles + min(132 // cluster, int(kv_lens.sum()) % (132 // cluster + 1))
 
 
-# under SP placement the one-token rows' zigzag chunks all fall to rank 0
-@pytest.mark.parametrize("over_sp, rows", [(False, PREFILL_ROWS), (True, ((0, 5), (1, 1), (5, 1), (6, 1)))],
-                         ids=["tp", "sp"])
+# under SP placement the long row's chunks plan on a smaller query tile than the step's, so a
+# partner's share can pass the bound on the context's queries
+@pytest.mark.parametrize("over_sp, rows", [(False, PREFILL_ROWS), (True, ((0, 2), (5, 52)))], ids=["tp", "sp"])
 def test_mla_ranks_refuse_the_same_steps_past_the_fa_planners_work_item_cap(monkeypatch, over_sp, rows):
     """FlashInfer's FA MLA planner counts the lengths each rank plans, which differ over a placed
     pool (its context slots, and under SP placement its zigzag share of the own tokens), so its own
