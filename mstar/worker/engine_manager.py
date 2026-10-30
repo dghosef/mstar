@@ -74,7 +74,7 @@ def _refuse_unroutable_withholds(submodules: dict, model: Model) -> None:
             if stop is None:
                 continue
             loopback = getattr(submodule, "device_loopback", None)
-            loopback_signal = loopback.signal if loopback is not None else None
+            loopback_signal = loopback.signal if loopback is not None and loopback.walk == walk else None
             for edge in node.outputs:
                 if edge.name in stop.withhold and (
                     not edge.is_streaming or edge.name == loopback_signal
