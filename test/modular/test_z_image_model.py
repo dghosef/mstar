@@ -220,7 +220,7 @@ def test_blank_prompts_are_rejected():
 def test_fused_qk_norm_rope_matches_the_eager_modules():
     """The compiled forward's fused q/k norm + rotary rounds where the eager modules do: at most a
     bf16 ulp on a handful of elements (fp32 sum order of the variance)."""
-    from mstar.model.z_image.components.qk_norm_rope import qk_norm_rope
+    from mstar.model.z_image.components.qk_norm_rope import fits, qk_norm_rope
     from mstar.model.z_image.components.transformer import ScaledRMSNorm, ZImageRoPE, apply_rotary_complex
 
     torch.manual_seed(0)
@@ -232,6 +232,7 @@ def test_fused_qk_norm_rope_matches_the_eager_modules():
         norm.weight.data = (1 + 0.2 * torch.randn(128)).to(device="cuda", dtype=torch.bfloat16)
     rope = ZImageRoPE(256.0, (32, 48, 48), (1024, 512, 512))
     freqs = rope(torch.stack([torch.arange(seq), torch.arange(seq) % 17, torch.arange(seq) // 17], -1)).cuda()
+    assert fits(q, k, norms[0].weight, freqs) and not fits(q, k, norms[0].weight, freqs[1:])
     got = qk_norm_rope(q, k, norms[0].weight, norms[1].weight, freqs, 1e-5)
     with torch.no_grad():
         for x, norm, out in zip((q, k), norms, got, strict=True):

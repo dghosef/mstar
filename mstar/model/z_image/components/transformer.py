@@ -104,7 +104,7 @@ class ZImageAttention(nn.Module):
         dtype = q.dtype
         # compile_exact_ops [norms] keeps the norms exact: no fusion then
         if (torch.compiler.is_compiling() and self.q_norm is not None and not kept_exact(self.q_norm)
-                and qk_norm_rope_fits(q, k, self.q_norm.weight) and self.k_norm.eps == self.q_norm.eps):
+                and qk_norm_rope_fits(q, k, self.q_norm.weight, freqs_cis) and self.k_norm.eps == self.q_norm.eps):
             q, k = qk_norm_rope(q, k, self.q_norm.weight, self.k_norm.weight, freqs_cis, self.q_norm.eps)
         else:
             if self.q_norm is not None:

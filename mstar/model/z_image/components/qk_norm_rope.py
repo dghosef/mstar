@@ -44,10 +44,11 @@ if triton is not None:
         tl.store(o_ptr + rows.to(tl.int64)[:, None] * 128 + cols[None, :], out.to(tl.bfloat16), mask=rmask)
 
 
-def fits(q: torch.Tensor, k: torch.Tensor, weight: torch.Tensor) -> bool:
+def fits(q: torch.Tensor, k: torch.Tensor, weight: torch.Tensor, freqs: torch.Tensor) -> bool:
     return (
         triton is not None and q.is_cuda and q.dim() == 4 and q.shape[-1] == 128 and q.dtype == torch.bfloat16
         and q.shape == k.shape and q.stride(-1) == 1 and k.stride(-1) == 1 and weight.dtype == torch.bfloat16
+        and freqs.dtype == torch.float32 and freqs.shape == (q.shape[1], 64, 2)
     )
 
 
