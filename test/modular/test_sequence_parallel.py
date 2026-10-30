@@ -17,7 +17,7 @@ import torch.multiprocessing as mp
 import torch.nn.functional as F
 
 from mstar.distributed.communication import CommGroup
-from mstar.engine.resources.context_parallel import gather_merge
+from mstar.engine.resources.context_parallel import gather_merge, merge
 from mstar.model.components.diffusion.attention import sdpa_attention
 from mstar.model.components.distributed.sequence_parallel import sp_seq_split, ulysses_attention
 
@@ -139,3 +139,16 @@ def _sharded_keys(rank, world, total):
 @pytest.mark.parametrize("world,total", [(1, 7), (2, 7), (3, 11)], ids=["1", "2-uneven", "3-uneven"])
 def test_gather_merge_of_sharded_keys_matches_one_rank(tmp_path, world, total):
     _run(_sharded_keys, world, tmp_path / "store", total)
+
+
+def _bf16_partials(rank, world):
+    # every rank's partial, built alike on each: a bf16 out (as LTX-2.5's kernels return) and fp32 lse
+    parts = [(_full(5, True, seed=2 * r).to(torch.bfloat16), _full(5, True, seed=2 * r + 1)[..., 0])
+             for r in range(world)]
+    want = merge(torch.stack([out.float() for out, _ in parts]), torch.stack([lse for _, lse in parts]))
+    assert torch.equal(gather_merge(_group(rank, world), *parts[rank]), want.to(torch.bfloat16))
+
+
+def test_gather_merge_of_bf16_partials_is_the_fp32_merge_bit_for_bit(tmp_path):
+    """The out travels at its own width and the lse in fp32, one byte tensor viewed back per dtype."""
+    _run(_bf16_partials, 2, tmp_path / "store")
