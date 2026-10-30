@@ -722,8 +722,12 @@ class VisionEncoderSubmodule(NodeSubmodule):
         return self.MAX_BATCH_SIZE
 
     def compile_regions(self) -> dict[str, list[tuple]]:
-        # compiled on the first image (configs warm it with `warmup_requests`)
-        return {"model.embed": [], "model.encode": [], "model.merger": []}
+        # compiled on the first image (configs warm it with `warmup_requests`).
+        # Each block on its own rather than the whole block loop: every block
+        # runs one code object, so Dynamo traces it once and the others reuse
+        # the graph, where tracing the unrolled loop took ~80 s of every start.
+        blocks = {f"model.blocks.{i}": [] for i in range(len(self.model.blocks))}
+        return {"model.embed": [], **blocks, "model.merger": []}
 
     def get_piecewise_accelerator_graph_configs(
         self, device: torch.device, autocast_dtype: torch.dtype,
