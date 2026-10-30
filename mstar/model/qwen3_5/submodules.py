@@ -718,8 +718,21 @@ class VisionEncoderSubmodule(NodeSubmodule):
         return self.MAX_BATCH_SIZE
 
     def compile_regions(self) -> dict[str, list[tuple]]:
-        # compiled on the first image (configs warm it with `warmup_requests`)
-        return {"model.embed": [], "model.merger": []}
+        """Warmed at start-up on the smallest image the processor makes (256 x
+        256 pixels), in the dtypes a step brings: float32 pixels out of
+        `_normalize`, merger rows in the tower's dtype. Dynamic in the patch
+        count from that call, so no image compiles them on a live request."""
+        device, merge = self.get_device(), self.config.spatial_merge_size
+        grid = [(1, 16, 16)]
+        indices, weights = vision_interpolation(grid, self.config.num_grid_per_side, merge, device)
+        patch = self.config.in_channels * self.config.temporal_patch_size * self.config.patch_size ** 2
+        pixels = torch.zeros(16 * 16, patch, device=device)
+        rows = torch.zeros(16 * 16, self.config.hidden_size, dtype=next(self.model.merger.parameters()).dtype,
+                           device=device)
+        return {
+            "model.embed": [(pixels, indices, weights, vision_grid_position_ids(grid, merge, device))],
+            "model.merger": [(rows,)],
+        }
 
     def get_piecewise_accelerator_graph_configs(
         self, device: torch.device, autocast_dtype: torch.dtype,

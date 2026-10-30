@@ -546,6 +546,25 @@ def _encoder(max_segments: int):
     return encoder
 
 
+def test_the_vision_compile_regions_take_their_start_up_examples():
+    """The engine compiles and warms `compile_regions` with these calls at
+    start-up, on an accelerator only. Run eagerly here: a call a region
+    refuses would first fail a GPU worker's boot, and a merger row unlike the
+    block loop's output would compile again on the first image."""
+    from mstar.model.qwen3_5.components.vision import Qwen3_5VisionModel
+    from mstar.model.qwen3_5.submodules import VisionEncoderSubmodule
+
+    config = _encoder(max_segments=4).config
+    encoder = VisionEncoderSubmodule(Qwen3_5VisionModel(config), config, (torch.zeros(1), torch.ones(1)))
+    regions = encoder.compile_regions()
+    assert set(regions) == {"model.embed", "model.merger"}
+    with torch.no_grad():
+        hidden, _, _ = encoder.model.embed(*regions["model.embed"][0])
+        (rows,) = regions["model.merger"][0]
+        assert rows.shape == hidden.shape and rows.dtype == hidden.dtype
+        encoder.model.merger(rows)
+
+
 def test_vision_block_loop_leases_only_what_a_replay_holds():
     """The captured block loop declares `can_lease`: a request whose
     segments exceed a replay's plan gets no slot."""

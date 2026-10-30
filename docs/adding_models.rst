@@ -1059,8 +1059,11 @@ methods are:
    whole-forward compile but wants parts of it compiled returns them from
    ``compile_regions()``: attribute paths (a module, or a method) mapped to example
    arguments to warm each with at start-up. The engine compiles them, with dynamic
-   shapes and before capture, on an accelerator only; don't call ``torch.compile`` in
-   model code. Qwen3.5's vision encoder and Omnilingual ASR are examples.
+   shapes and before capture, on an accelerator only; prefer it to calling
+   ``torch.compile`` in model code. Its options are fixed (dynamic shapes,
+   torch.compile's default mode), so a part that needs static shapes, a mode or
+   ``fullgraph`` still compiles in model code. Qwen3.5's vision encoder and
+   Omnilingual ASR are examples.
 
    Some submodules must run in their own parameter dtype. One example is an fp32 vocoder
    that is numerically sensitive. Such a submodule sets ``disable_autocast = True``. The
