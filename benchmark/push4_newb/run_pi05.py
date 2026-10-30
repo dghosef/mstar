@@ -66,7 +66,9 @@ def mstar_round(gpu: str, n: int, warm: int, out: Path, tag: str, profile: bool)
 
 def openpi_round(gpu: str, n: int, warm: int, out: Path, tag: str) -> dict:
     res = out / f"openpi_{tag}"
-    env = {**os.environ, "CUDA_VISIBLE_DEVICES": gpu, "HF_HOME": str(Path.home() / "hf")}
+    # openpi pins an older `datasets` that can't read the mstar venv's dataset cache, so it keeps its own
+    env = {**os.environ, "CUDA_VISIBLE_DEVICES": gpu, "HF_HOME": str(Path.home() / "hf"),
+           "HF_DATASETS_CACHE": str(Path.home() / "hf" / "datasets_openpi")}
     cmd = [OPENPI_PY, str(HERE.parents[0] / "openpi_pi05.py"), "--num-requests", str(n), "--num-warmup", str(warm),
            "--checkpoint", OPENPI_CKPT, "--device", "cuda:0", "--output-dir", str(res), "--local-cache", str(MEDIA)]
     with open(out / f"openpi_{tag}.log", "w") as f:
