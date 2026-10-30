@@ -515,13 +515,13 @@ class FlashInferMLAManager(AttentionManager):
         heads = self._wrapper_kwargs["num_qo_heads"]
         bound = fa_work_items_bound(qo_indptr, heads, self._fa_sm_count)
         if bound > _FA_MAX_WORK_ITEMS:
-            hint = " Batch fewer prompt tokens a step (max_concurrent_requests)" if self._placement.over_sp else (
+            hint = " Batch fewer prompt tokens a step (max_concurrent_requests)." if self._placement.over_sp else (
                 f" Under TP placement each rank plans every partner's query heads, so a step reaches "
                 f"it {self._placement.size}x sooner than unplaced: batch fewer prompt tokens a step "
-                "(max_concurrent_requests) or place positions over SP ranks"
+                "(max_concurrent_requests) or place positions over SP ranks."
             )
             raise ValueError(
-                f"{what} of a step of {int(qo_indptr[-1])} query tokens at {heads} heads can take FlashInfer's "
+                f"{what}, {int(qo_indptr[-1])} queries at {heads} heads, can take FlashInfer's "
                 f"FA MLA planner up to {bound} work items over context-parallel KV pool "
                 f"{self._kv_cache_name!r}, past its cap of {_FA_MAX_WORK_ITEMS}.{hint}"
             )
