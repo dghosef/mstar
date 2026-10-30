@@ -28,6 +28,13 @@ import torch.nn.functional as F
 from torch import nn
 
 from mstar.engine.resources.recurrent import RecurrentBlockConfig
+from mstar.model.components.streaming_codec import (
+    causal_conv,
+    overlap_tconv,
+    tail,
+    tconv_gemm,
+    to_channels_last,
+)
 from mstar.model.fish_s2_pro.components.dac import (
     CausalConvNet,
     CausalTransConvNet,
@@ -107,7 +114,7 @@ class IncrementalDACDecoder(nn.Module):
             with torch.no_grad():
                 for _, module in self.convs:
                     if isinstance(module, CausalConvNet):
-                        _to_channels_last(module.conv)
+                        to_channels_last(module.conv)
 
     def state_blocks(self) -> dict[str, RecurrentBlockConfig]:
         dtype = torch.float32
@@ -144,7 +151,7 @@ class IncrementalDACDecoder(nn.Module):
             y = F.scaled_dot_product_attention(q, keys, values, attn_mask=mask)
             h = h + layer.attention_layer_scale(attn.wo(y.transpose(1, 2).reshape(batch, width, size)))
             h = h + layer.ffn_layer_scale(layer.feed_forward(layer.ffn_norm(h)))
-            new[f"k{i}"], new[f"v{i}"] = _tail(keys, lengths, self.cache, 2), _tail(values, lengths, self.cache, 2)
+            new[f"k{i}"], new[f"v{i}"] = tail(keys, lengths, self.cache, 2), tail(values, lengths, self.cache, 2)
         return post.norm(h)
 
     def forward(
@@ -169,24 +176,16 @@ class IncrementalDACDecoder(nn.Module):
             name, module = next(convs)
             keep = state[name].shape[1]
             xs = torch.cat([state[name], x], 1)
-            new[name] = _tail(xs, lengths * rate[0], keep, 1)
-            c = module.conv
+            new[name] = tail(xs, lengths * rate[0], keep, 1)
             if isinstance(module, CausalTransConvNet):
-                # Kernel 2 * stride: input i writes outputs i*stride .. i*stride + 2*stride - 1, so
-                # each output block is its input's first half plus the previous input's second.
-                stride = module.stride
-                rate[0] *= stride
-                y = _tconv_gemm(xs, c).unflatten(2, (2, stride))       # [B, 1 + T, 2, stride, C]
-                y = y[:, 1:, 0] + y[:, :-1, 1]
-                return y.flatten(1, 2) + c.bias
-            x4 = xs.transpose(1, 2).unsqueeze(2)   # [B, C, 1, T], a channels-last view
-            y = F.conv2d(x4, c.weight.unsqueeze(2), c.bias, dilation=(1, c.dilation[0]), groups=c.groups)
-            return y.squeeze(2).transpose(1, 2)
+                rate[0] *= module.stride
+                return overlap_tconv(xs, module.conv)
+            return causal_conv(xs, module.conv)
 
         h = self._transformer(decoder.quantizer.embed(codes).transpose(1, 2), state, new, lengths)
         for tconv, convnext in decoder.quantizer.upsample:
             c = tconv.conv   # kernel == stride: each input writes its own output block
-            h = _tconv_gemm(h, c).flatten(1, 2) + c.bias
+            h = tconv_gemm(h, c).flatten(1, 2) + c.bias
             rate[0] *= tconv.stride
             y = convnext.pwconv2(convnext.act(convnext.pwconv1(convnext.norm(conv(h)))))
             h = h + convnext.gamma * y
@@ -209,27 +208,3 @@ def _snake(module: Snake1d, x: torch.Tensor) -> torch.Tensor:
     alpha = module.alpha.reshape(-1).to(dtype)
     x32 = x.to(dtype)
     return (x32 + (alpha + 1e-9).reciprocal() * torch.sin(x32 * alpha).pow(2)).to(x.dtype)
-
-
-def _tconv_gemm(x: torch.Tensor, conv: nn.Module) -> torch.Tensor:
-    """Every input sample's transposed-conv output, one GEMM: ``x [B, T, C_in]`` ->
-    ``[B, T, kernel, C_out]`` (no bias, no overlap-add)."""
-    weight = conv.weight   # [C_in, C_out, kernel]
-    y = x @ weight.permute(0, 2, 1).reshape(weight.shape[0], -1)
-    return y.unflatten(2, (weight.shape[2], weight.shape[1]))
-
-
-def _to_channels_last(conv: nn.Module) -> None:
-    w = conv.weight
-    w.data = w.data.unsqueeze(2).contiguous(memory_format=torch.channels_last).squeeze(2)
-
-
-def _tail(xs: torch.Tensor, valid: torch.Tensor, keep: int, dim: int) -> torch.Tensor:
-    """Per row, the ``keep`` entries of ``xs`` along ``dim`` that end ``valid[row]``
-    entries past its first ``keep`` (``xs`` is ``[keep of state | new]``)."""
-    shape = [1] * xs.dim()
-    shape[0], shape[dim] = -1, keep
-    index = valid.view(-1, *[1] * (xs.dim() - 1)) + torch.arange(keep, device=xs.device).view(shape)
-    size = list(xs.shape)
-    size[dim] = keep
-    return xs.gather(dim, index.expand(size))
