@@ -160,11 +160,7 @@ def image_output_format(request_kwargs: dict | None) -> str:
         raise ValueError(f"output_format must be one of {OUTPUT_FORMATS}, got {fmt!r}")
     for key, top in (("output_compression", 100), ("png_compress_level", 9)):
         value = kwargs.get(key)
-        try:
-            ok = value is None or 0 <= int(value) <= top
-        except (TypeError, ValueError):
-            ok = False
-        if not ok:
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= top):
             raise ValueError(f"{key} must be an integer from 0 to {top}, got {value!r}")
     return fmt
 
@@ -180,7 +176,8 @@ def encode_image(image: torch.Tensor, request_kwargs: dict | None = None) -> byt
     kwargs = request_kwargs or {}
     fmt = image_output_format(kwargs)
     if fmt == "png":
-        return uint8_to_png(image, compress_level=int(kwargs.get("png_compress_level", 1)))
+        level = kwargs.get("png_compress_level")
+        return uint8_to_png(image, compress_level=1 if level is None else int(level))
     from PIL import Image
 
     if image.ndim == 4:

@@ -147,6 +147,8 @@ def test_encode_image_honours_the_openai_output_knobs():
     image = torch.randint(0, 256, (3, 64, 64), dtype=torch.uint8)
     assert encode_image(image, None)[:8] == b"\x89PNG\r\n\x1a\n"
     torch.testing.assert_close(_decode(encode_image(image, {"png_compress_level": 0})), image, rtol=0, atol=0)
+    # an explicit null (JSON null in extra_body) is the default, as intake lets it through
+    torch.testing.assert_close(_decode(encode_image(image, {"png_compress_level": None})), image, rtol=0, atol=0)
     jpeg = encode_image(image, {"output_format": "jpeg", "output_compression": 90})
     assert jpeg[:3] == b"\xff\xd8\xff" and _decode(jpeg).shape == image.shape
     webp = encode_image(image, {"output_format": "webp"})
@@ -157,7 +159,7 @@ def test_encode_image_honours_the_openai_output_knobs():
 
 @pytest.mark.parametrize("knob, value", [
     ("output_compression", 101), ("output_compression", "high"), ("png_compress_level", 10),
-    ("png_compress_level", -1),
+    ("png_compress_level", -1), ("png_compress_level", True), ("output_compression", 50.9),
 ])
 def test_an_output_knob_encode_image_cannot_apply_fails_at_intake(knob, value):
     """Models check the request with image_output_format before generating, so it must
