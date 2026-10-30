@@ -32,9 +32,10 @@ CORES = os.environ.get("PUSH4_CORES", ",".join(str(c) for c in range(0, 207, 2))
 # mstar servers can get their own small CPU set: on push4c's schedutil host, mstar's blocking thread hand-offs
 # run on cores that never clock up when spread wide (q35small). Competitors and clients keep CORES.
 MSTAR_CORES = os.environ.get("PUSH4_MSTAR_CORES", CORES)
-PORT = 59200
+PORT = int(os.environ.get("PUSH4_PORT", "59200"))  # SGLang also takes PORT + 1
 
 DROID_HF = "nvidia/Cosmos3-Nano-Policy-DROID"
+SUPER_I2V_HF = "nvidia/Cosmos3-Super-Image2Video-4Step"
 DROID_MK = {"action_mode": "policy", "domain_name": "droid_lerobot", "raw_action_dim": 10, "action_chunk_size": 32,
             "num_frames": 33, "seed": 0, "num_inference_steps": 4, "guidance_scale": 3.0, "flow_shift": 5.0,
             "size": "832x480", "fps": 15}
@@ -58,6 +59,27 @@ MODELS = {
                        "response": "json", "extract": "data.0.action.values", "check": "json", "save": "json"}},
         comps={"sglang_b1": ("sglang", []), "sglang_b8": ("sglang", ["--batching-max-size", "8"])},
         sglang_model=DROID_HF,
+    ),
+    # Cosmos3-Super image-to-video, 4-step distilled, TP2: the model card's recipe (480p, 189 frames, fps 24,
+    # guidance 1.0; steps and sigmas are fixed by the checkpoint) on its own example frame and JSON prompt.
+    "super_i2v": dict(
+        mstar="cosmos3_super_i2v_4step", config="configs/cosmos3_super_i2v_4step_tp2.yaml", gpus="0,1",
+        units="frames", concs=[1, 2], nums={1: 6, 2: 8}, warm_conc=2, warm_n=4,
+        spec={
+            "mstar": {"path": "/v1/videos/generations", "encoding": "json",
+                      "body": {"prompt": "{prompt}", "image": "{image_data_uri}", "size": "832x480",
+                               "num_frames": 189, "fps": 24, "guidance_scale": 1.0, "seed": "{seed}"},
+                      "response": "json", "extract": "data.0.b64_json", "decode": "b64", "check": "video",
+                      "save": "mp4"},
+            "sglang": {"path": "/v1/videos", "encoding": "multipart",
+                       "body": {"model": SUPER_I2V_HF, "prompt": "{prompt}", "size": "832x480", "num_frames": "189",
+                                "fps": "24", "guidance_scale": "1.0", "seed": "{seed}"},
+                       "files": {"input_reference": "{image_path}"}, "response": "json",
+                       "poll": {"status_path": "/v1/videos/{id}", "content_path": "/v1/videos/{id}/content",
+                                "id_key": "id", "done": "completed"},
+                       "check": "video", "save": "mp4"}},
+        comps={"sglang": ("sglang", ["--tp-size", "2"])},
+        sglang_model=SUPER_I2V_HF,
     ),
 }
 
@@ -98,7 +120,7 @@ class Server:
             eng, extra = m["comps"][arm]
             env.update({"SGLANG_DISABLE_COSMOS3_GUARDRAILS": "1", "PATH": f"{ENG / 'sgld' / 'bin'}:{env['PATH']}"})
             cmd = [str(ENG / "sgld" / "bin" / "sglang"), "serve", "--model-path", m["sglang_model"], "--num-gpus",
-                   "1", "--host", "127.0.0.1", "--port", str(port), "--scheduler-port", str(port + 1), *extra]
+                   str(len(env["CUDA_VISIBLE_DEVICES"].split(","))), "--host", "127.0.0.1", "--port", str(port), "--scheduler-port", str(port + 1), *extra]
             cwd = str(NEWB)
         else:
             self.kind = "mstar"
@@ -179,6 +201,12 @@ def cmd_items(m: dict) -> None:
                "task": "Pick up the red cup and place it in the sink.", "model_kwargs": json.dumps(DROID_MK),
                "units": 1}
         (DATA / "droid.jsonl").write_text(json.dumps(row) + "\n")
+    elif m["name"] == "super_i2v":
+        img = hf_hub_download(SUPER_I2V_HF, "assets/example_first_frame.png")
+        prompt = json.loads(Path(hf_hub_download(SUPER_I2V_HF, "assets/example_prompt.json")).read_text())["prompt"]
+        row = {"image_path": img, "prompt": prompt, "units": 189,
+               "image_data_uri": "data:image/png;base64," + base64.b64encode(Path(img).read_bytes()).decode()}
+        (DATA / "super_i2v.jsonl").write_text(json.dumps(row) + "\n")
     log(f"items {m['name']} -> {DATA}")
 
 
@@ -229,7 +257,7 @@ def main() -> int:
     ap.add_argument("--arms", default="base,sglang_b1,sglang_b8,base2")
     ap.add_argument("--rounds", type=int, default=2)
     ap.add_argument("--out", default="")
-    ap.add_argument("--gpu", default="", help="physical GPU for a 1-GPU model (mstar --gpus / CUDA_VISIBLE_DEVICES)")
+    ap.add_argument("--gpu", default="", help="physical GPU(s), e.g. 2 or 2,3 (mstar --gpus / CUDA_VISIBLE_DEVICES)")
     ap.add_argument("--after-pid", type=int, action="append", default=[],
                     help="wait for these processes (jobs ahead on the same GPUs) to exit first")
     a = ap.parse_args()
