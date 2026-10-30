@@ -61,7 +61,9 @@ class OrpheusLLMSubmodule(ARNodeSubmodule):
         if config.stop_token_id < config.custom_token_base_id:
             raise ValueError("Orpheus's stop token must be a custom token")
 
-    PREFILL_TOKEN_BUCKETS = [32, 64, 128, 256, 512, 1024]
+    # A burst of new requests packs a prefill step with thousands of prompt
+    # tokens; past the top bucket it runs eagerly and recompiles while serving.
+    PREFILL_TOKEN_BUCKETS = [32, 64, 128, 256, 512, 1024, 2048, 4096]
     PREFILL_CAPTURE_BATCH_SIZES = [1, 4, 16, 64]
 
     def get_accelerator_graph_configs(
