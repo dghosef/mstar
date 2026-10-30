@@ -1621,9 +1621,10 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
    * The norms alone make the transformer bit-exact with eager (measured on klein-4B and
      9B while the q/k norms were graph breaks). Klein's per-head q/k norms (1-D
      ``RMSNorm``) run as an op the compiled graph keeps whole. On NVIDIA GPUs that op is
-     a Triton replica of torch's kernel with the same arithmetic order: bit-identical,
-     ~4x faster than torch's one-block-per-row launch, +5% klein-4B throughput at
-     concurrency >= 4 (H200, measured while the replica still sat behind a graph break).
+     a Triton replica of torch's kernel with the same arithmetic order: bit-identical and
+     ~4x faster than torch's one-block-per-row launch. With the blocks sharing one
+     compiled forward (no recompile-limit hits), klein-4B serves 3.328 / 3.751 / 3.800
+     img/s at concurrency 1 / 4 / 16, vs main's 2.941 / 3.487 / 3.531 (+8–13%).
      Before it the shipped ``[norms]`` cost klein-4B 4% of its B=1 latency (0.371 vs
      0.356 s). Keeping the activations too adds cost and nothing else.
    * Z-Image's 180 norms per step cost 45% (1.25 vs 0.86 s at B=1), so it ships ``false``
