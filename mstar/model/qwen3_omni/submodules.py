@@ -1708,7 +1708,7 @@ class TalkerSubmodule(ARNodeSubmodule):
             tokens = code_pred_sampler.sample(
                 request_ids, logits,
             )
-            embed = cp_embed_accumulate(
+            embed, _ = cp_embed_accumulate(
                 tokens, codec_embedding[group_idx - 1].weight, codec_emb_sum, all_codes, group_idx,
             )
 

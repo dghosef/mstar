@@ -176,20 +176,23 @@ def cp_embed_accumulate(
     tokens: torch.Tensor, weight: torch.Tensor, emb_sum: torch.Tensor,
     all_codes: torch.Tensor, group: int, inputs: torch.Tensor | None = None,
     init: bool = False, partials: torch.Tensor | None = None,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, int]:
     """For a depth step's sampled ``tokens (bs,)``: record them as ``all_codes[:, group]``,
     look up their embeddings in ``weight (V, H)`` and add those to ``emb_sum (bs, H)`` in
     its dtype (or, with ``init``, start the sum from them). Returns the next depth step's
     input: the embeddings, or their rows of ``inputs (V, H')`` when given (the embedding
-    table already projected to the predictor's width). One launch for what was an
-    index_select, a copy, a promoting add and the input projection. With
-    ``partials``, the input's row sums of squares go there in 256-wide chunks,
-    for ``cp_linear``'s norm (``EMBED_PARTIALS`` of them for a 1024-wide input)."""
+    table already projected to the predictor's width), and how many row partials it
+    left in ``partials`` for ``cp_linear``'s norm (one per 256-wide chunk of the
+    input; 0 without ``partials``). One launch for what was an index_select, a copy, a
+    promoting add and the input projection."""
     bs, hidden = tokens.shape[0], weight.shape[1]
     table = weight if inputs is None else inputs
     assert weight.stride(1) == 1 and table.stride(1) == 1 and emb_sum.stride(1) == 1
     block = EMBED_BLOCK
     assert hidden % block == 0 and table.shape[1] % block == 0
+    n_part = table.shape[1] // block if partials is not None else 0
+    if n_part and (bs > _MAX_ROWS or n_part > _MAX_PARTIALS):
+        raise ValueError(f"cp_embed_accumulate records partials for at most {_MAX_ROWS} rows, got {bs}")
     emb = torch.empty(bs, table.shape[1], dtype=table.dtype, device=weight.device)
     chunks = hidden // block + (table.shape[1] // block if inputs is not None else 0)
     _cp_embed_accumulate_kernel[(bs, chunks)](
@@ -198,7 +201,7 @@ def cp_embed_accumulate(
         H=hidden, BLOCK=block, PROJ=inputs is not None, INIT=init,
         PARTS=partials is not None, MAX_ROWS=_MAX_ROWS, num_warps=2,
     )
-    return emb
+    return emb, n_part
 
 
 class DepthKV:

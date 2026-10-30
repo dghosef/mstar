@@ -59,7 +59,7 @@ from mstar.engine.resources import AttentionStep, KVStep, PositionStep, SamplerS
 from mstar.engine.resources.recurrent import RecurrentStatePool, RecurrentStep
 from mstar.engine.resources.sampler.resource import SamplerResource
 from mstar.model.audio_watermark import AudioSealWatermarker, WatermarkStream
-from mstar.model.components.code_predictor_kernels import EMBED_BLOCK, cp_embed_accumulate, depth_partials
+from mstar.model.components.code_predictor_kernels import cp_embed_accumulate, depth_partials
 from mstar.model.qwen3_tts.components.incremental_codec import IncrementalDecoder, codec_state_blocks
 from mstar.model.qwen3_tts.components.snake import fuse_snake_activations
 from mstar.model.qwen3_tts.components.speaker_encoder import (
@@ -708,16 +708,15 @@ class TalkerSubmodule(ARNodeSubmodule):
         x, n_part = cp.depth_input(last_hidden, partials)
         cp.depth_step(x, partials, n_part)
         # group 0 starts the sum; its (projected) embedding is position 1's input
-        embed = cp_embed_accumulate(
+        embed, n_part = cp_embed_accumulate(
             layer0_codes, talker_table, codec_embed_sum, all_codes, 0,
             inputs=None if tables is None else tables[0], init=True, partials=partials,
         )
-        n_part = embed.shape[1] // EMBED_BLOCK
         for group_idx in range(1, self.num_codes):
             depth.bind_step(cp_cache, positions[group_idx, :batch_size], cache_pos=group_idx)
             codes = sample_codes(cp.depth_step(embed, partials, n_part=n_part, head=group_idx - 1))
             last = group_idx == self.num_codes - 1
-            embed = cp_embed_accumulate(
+            embed, n_part = cp_embed_accumulate(
                 codes, cp.model.codec_embedding[group_idx - 1].weight, codec_embed_sum,
                 all_codes, group_idx,
                 inputs=None if tables is None or last else tables[group_idx], partials=partials,
