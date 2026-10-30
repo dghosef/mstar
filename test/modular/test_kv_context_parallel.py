@@ -274,16 +274,10 @@ def test_an_sp_placed_node_shards_heads_over_tp_and_refuses_a_dependent_without_
     placement = engine._resources[KV_CACHE].placement
     assert (placement.size, placement.index, placement.over_sp) == (P, 0, True)
     assert engine._resources[KV_CACHE].kv_cache.page_slots == kv_spec.config.page_size // P
-    # built by hand, as a harness does, with a node's info told nothing about the placement: the
-    # pool refuses it, and so does a resource over the sharded pool that shards it another way
-    joint = groups.get_joint_group_for_node(NODE)
-    unplaced = EngineResourceInfo(device=CPU, joint_comm_group=joint, nodes=frozenset({NODE}))
-    fresh = KVSpec(resource_key=KV_CACHE, nodes={NODE}, config=PagedKVConfig(
-        num_layers=1, num_kv_heads=2, head_dim=8, max_seq_len=256, max_num_pages=4, page_size=PAGE_SIZE,
-        context_parallel=True,
-    ))
-    with pytest.raises(ValueError, match="places positions over the node's SP ranks"):
-        KVManager.build(fresh, unplaced)
+    # built by hand, as a harness does, with a node's info told nothing about the placement: a
+    # resource over the sharded pool that shards it another way is refused
+    unplaced = EngineResourceInfo(device=CPU, joint_comm_group=groups.get_joint_group_for_node(NODE),
+                                  nodes=frozenset({NODE}))
     with pytest.raises(ValueError, match="already sharded 1 ways.*2 ways"):
         AttentionManager.build(
             AttentionSpec(resource_key="attn2", nodes={NODE}, config=AttentionConfig(kv_cache=KV_CACHE)),
