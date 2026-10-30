@@ -187,11 +187,10 @@ def _load_heads(kind, tp=1, sp=2, shard_over_sp=True):
 
 @pytest.mark.parametrize("tp,sp,heads", [(1, 2, 2), (2, 1, 2), (2, 2, 1)])
 @pytest.mark.parametrize("kind", ["ragged", "recurrent"])
-def test_every_resource_kind_shards_heads_over_tp_and_sp(kind, tp, sp, heads):
-    """Every resource the engine builds for a multi-rank node holds one rank's
-    slice of the heads, split over all TP x SP ranks, whatever the resource
-    kind (a ragged resource declaring ``shard_over_sp=False`` is the exception,
-    tested below)."""
+def test_ragged_and_recurrent_resources_shard_heads_over_tp_and_sp(kind, tp, sp, heads):
+    """A ragged or recurrent resource the engine builds for a multi-rank node
+    holds one rank's slice of the heads, split over all TP x SP ranks (a ragged
+    resource declaring ``shard_over_sp=False`` is the exception, tested below)."""
     assert _load_heads(kind, tp=tp, sp=sp) == heads
 
 

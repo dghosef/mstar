@@ -615,14 +615,15 @@ The spec types are:
        ``workspace_mb``. ``DENSE`` runs FA3
        ``flash_attn_varlen`` (AITER on ROCm) and falls back to FlashInfer if that kernel is
        missing. By default the heads are split across all TP × SP ranks of the node;
-       ``shard_over_sp=False`` splits them across the TP ranks only, for an attention each sequence-parallel rank
-       runs whole over its own tokens (one over a replicated stream, or a cross-attention
-       from the rank's query shard). ``workspace_mb`` sizes each label's FlashInfer
-       workspace per slot (default ``MSTAR_WORKSPACE_BUFFER_MB``, 512); a node with many
-       labels can declare less, since a ragged prefill only uses it for split-KV partials.
-       ``compile_op``, ``shard_over_sp`` and ``workspace_mb`` are the model's declaration;
-       the serving config's ``resources:`` overrides take only the backends and the two
-       ceilings. See `Cacheless attention (encoder towers)`_ for ``compile_op``.
+       ``shard_over_sp=False`` splits them across the TP ranks only, for an attention
+       each sequence-parallel rank runs whole over its own tokens (one over a
+       replicated stream, or a cross-attention from the rank's query shard).
+       ``workspace_mb`` sizes each label's FlashInfer workspace per slot (default
+       ``MSTAR_WORKSPACE_BUFFER_MB``, 512); a node with many labels can declare less,
+       since a ragged prefill only uses it for split-KV partials. ``compile_op``,
+       ``shard_over_sp`` and ``workspace_mb`` are the model's declaration; the serving
+       config's ``resources:`` overrides take only the backends and the two ceilings.
+       See `Cacheless attention (encoder towers)`_ for ``compile_op``.
    * - ``RaggedCrossAttentionSpec(config=RaggedAttentionConfig(...))``
      - The cross-attention counterpart: one span of each request attends another
        (``RaggedCrossAttentionStep(pairs=...)``). Same config. See `Cross-attention
