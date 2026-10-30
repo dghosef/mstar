@@ -351,6 +351,9 @@ def test_startup_refuses_a_withheld_output_the_worker_cannot_leave_unrouted():
     ):
         with pytest.raises(ValueError, match="withholds"):
             _refuse_unroutable_withholds(talker, refused)
+    # the signal loops back only on its own walk; elsewhere it is routed
+    other = {NODE: SimpleNamespace(token_stop=stop, device_loopback=loopback._replace(walk="other"))}
+    _refuse_unroutable_withholds(other, graph(StreamingGraphEdge(next_node="Codec", name="token")))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="stages a CUDA span to pinned host memory")
