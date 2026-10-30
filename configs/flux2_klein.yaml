@@ -10,8 +10,8 @@ max_seq_len: 512
 # (height, width) shapes and batch sizes (other shapes run the eager batched path).
 #
 # Shipped with the plain compile (compile_exact_ops: false), which is not reference-exact, as the
-# other engines are not either. compile_exact_ops: [norms] restores reference-exact output at a
-# latency cost (see docs/models.rst).
+# other engines are not either. compile_exact_ops: [norms] makes the transformer exact at a latency
+# cost (with vae_compile: false too, served images are bit-exact; see docs/models.rst).
 model_kwargs:
   # sdpa (cuDNN on H100) is the reference kernel; flashinfer stays available
   attention_backend: sdpa

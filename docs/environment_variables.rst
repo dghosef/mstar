@@ -560,10 +560,11 @@ Worker scheduling
        more, pages change only where a row crossed a page boundary, and the
        five FlashInfer index arrays come from numpy instead of a per-row
        Python pass. Off by default; ``configs/qwen3_5_0.8b.yaml`` and
-       ``configs/qwen3_5_9b_tp2.yaml`` turn it on, measured only together
-       with ``gc_gen0_threshold`` (its own effect is unmeasured). ``0`` plans
-       every step from the streams. ``2`` runs both and logs a difference,
-       for checking a run. Read by ``knobs.kv_plan_cache``.
+       ``configs/qwen3_5_9b_tp2.yaml`` turn it on, measured only bundled
+       with ``gc_gen0_threshold`` (and, on 9B TP2, ``tp_async_sched``); its
+       own effect is unmeasured. ``0`` plans every step from the streams.
+       ``2`` runs both and logs a difference, for checking a run. Read by
+       ``knobs.kv_plan_cache``.
    * - ``MSTAR_DEVICE_LOOPBACK``
      - config's ``knobs: device_loopback``, else ``1``
      - Whether a decode node may keep its loop-back token on the device:

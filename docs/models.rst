@@ -1507,7 +1507,9 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
      and lands at a median 34 dB. ``[norms]`` turns it reference-faithful (at least
      55.9 dB on every prompt).
    * klein-4B and 9B ship ``false`` too, since the other engines are not bit-exact
-     either. ``[norms]`` restores the reference-exact path.
+     either. What it gains over ``[norms]`` on ``sdpa`` is not yet measured. ``[norms]``
+     makes the transformer exact; with ``vae_compile: false`` too, served images are
+     bit-exact.
    * Without it, the plain compile — even with eager rounding — lands at a median 35 to
      38 dB PSNR from eager over the 100 protocol prompts, because a 4- or 8-step
      distilled sampler amplifies the last bit of inductor's own reductions and activation
