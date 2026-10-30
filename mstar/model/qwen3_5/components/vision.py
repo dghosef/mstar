@@ -115,10 +115,10 @@ def vision_interpolation(
     shape and repeated over a video's frames: per patch, a 60 s video's maths
     took ~130 ms of the GPU thread's host time under a loaded server.
     """
-    frames = {
-        (h, w): _frame_interpolation(h, w, num_grid_per_side, spatial_merge_size)
-        for _, h, w in grid
-    }
+    frames: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor]] = {}
+    for _, h, w in grid:
+        if (h, w) not in frames:
+            frames[h, w] = _frame_interpolation(h, w, num_grid_per_side, spatial_merge_size)
     indices = _tile_frames([(frames[h, w][0], t) for t, h, w in grid])
     weights = _tile_frames([(frames[h, w][1], t) for t, h, w in grid])
     return indices, weights
