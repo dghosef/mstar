@@ -1510,12 +1510,14 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
      and lands at a median 34 dB. ``[norms]`` turns it reference-faithful (at least
      55.9 dB on every prompt).
    * klein-4B and 9B ship ``false`` too, since the other engines are not bit-exact
-     either. What the plain compile gains over ``[norms]`` on ``sdpa`` has not been
-     measured since the Triton RMSNorm replica.
+     either. On ``sdpa`` the plain compile serves klein-4B about 1 to 2% more images
+     per second than ``[norms]`` at concurrency 1 to 8 (H100, one round); 9B is not
+     measured.
    * Without ``[norms]``, the plain compile — even with eager rounding — lands at a
      median 37.6 dB (klein-4B) and 35.6 dB (9B) PSNR from eager over the 100 protocol
-     prompts, because a 4- or 8-step distilled sampler amplifies the last bit of
-     inductor's own reductions and activation decompositions.
+     prompts (measured at #287, before the compiled VAE decode changed), because a 4-
+     or 8-step distilled sampler amplifies the last bit of inductor's own reductions and
+     activation decompositions.
 
 ``cuda_graph``, ``capture_sizes``, ``capture_batch_sizes``
    The denoise step, Euler update included, is captured per listed ``[height, width]``
@@ -1560,10 +1562,10 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
 
 The shipped plain compile is not reference-exact (see ``compile_exact_ops``). For the
 exact path, set ``compile_exact_ops: [norms]``: every served klein image is then within
-53 dB of the eager path on all 100 protocol prompts, and with ``vae_compile: false`` too
-it is bit-exact. For scale, SGLang 0.5.22's images sit at a median 23.8 dB (minimum
-13.1) on klein-4B and 24.0 dB (14.5) on 9B from klein's ``[norms]`` output at the same
-seeds (H100, 2 x 32 prompts).
+53 dB of the eager path on all 100 protocol prompts (also measured at #287), and with
+``vae_compile: false`` too it is bit-exact. For scale, SGLang 0.5.22's images sit at a
+median 23.8 dB (minimum 13.1) on klein-4B and 24.0 dB (14.5) on 9B from klein's
+``[norms]`` output at the same seeds (H100).
 Requests at the same output size batch across users in every node, including the
 text encoder, whose input is always 512 tokens. ``lora`` lists adapters to fold into the
 transformer weights at load time (``[{path: ..., scale: ...}]``; diffusers/PEFT-format or
