@@ -26,10 +26,6 @@ from mstar.engine.resources.spec import CombinedSplit
 from mstar.engine.resources.step import SlotLease, StepContext
 from mstar.utils.profiler import PhaseLaps
 
-# The workspace of the ragged wrapper a context-parallel step attends its own tokens on: a
-# ragged prefill spends it only on split-KV partials (see `RaggedAttentionConfig.workspace_mb`)
-_NEW_TOKENS_WORKSPACE_MB = 128
-
 
 class FlashInferManager(AttentionManager):
     supports_context_parallel = True
@@ -99,7 +95,6 @@ class FlashInferManager(AttentionManager):
             num_qo_heads=cfg.num_qo_heads, num_kv_heads=cfg.num_kv_heads, head_dim=cfg.head_dim,
             device=self._device, backend=self._wrapper_kv_kwargs["backend"], q_data_type=self._dtype,
         )
-        self._new_workspaces = WorkspacePool(self._device, _NEW_TOKENS_WORKSPACE_MB)
 
     def _cg_wrapper(
         self, lease: SlotLease, label: str, num_rows: int, force_prefill: bool,
@@ -202,7 +197,7 @@ class FlashInferManager(AttentionManager):
         self, label: str, slot: int, decode: bool, kv_kwargs: dict, max_total_tokens: int | None = None,
     ) -> FlashInferContextParallelWrapper:
         """The wrappers a step attends a placed pool on: its context's on the label's workspace,
-        and for a step that isn't one token a row, its own tokens' on a small one of their own
+        and for a step that isn't one token a row, its own tokens' on a workspace of their own
         (both are planned for the one step)."""
         from mstar.engine.resources.attn.ragged.wrappers import FlashInferRaggedPrefillWrapper
 
@@ -218,7 +213,7 @@ class FlashInferManager(AttentionManager):
                 workspace_buffer=workspace, max_total_tokens=max_total_tokens, **kv_kwargs,
             )
             new = FlashInferRaggedPrefillWrapper(
-                self._new_workspaces.get(label, slot),
+                self._workspaces.get(f"{label}.own_tokens", slot),
                 max_num_segments=kv_kwargs.get("batch_size"), max_total_tokens=max_total_tokens,
                 accelerator_graph=kv_kwargs.get("accelerator_graph", False), **self._new_kwargs,
             )

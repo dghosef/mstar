@@ -23,7 +23,6 @@ from mstar.engine.resources.attn.base import (
     captured_page_capacity,
 )
 from mstar.engine.resources.attn.config import AttentionStep
-from mstar.engine.resources.attn.flashinfer import _NEW_TOKENS_WORKSPACE_MB
 from mstar.engine.resources.attn.wrappers import FlashInferContextParallelWrapper
 from mstar.engine.resources.base import CGSlotKey, Resource
 from mstar.engine.resources.kv.config import KVConfig, KVLayout
@@ -297,7 +296,6 @@ class FlashInferMLAManager(AttentionManager):
         cfg = self._kv_config
         self._wrapper_kwargs["page_size"] = cfg.page_size // placement.size
         self._wrapper_kwargs["num_qo_heads"] = cfg.num_qo_heads * (1 if placement.over_sp else placement.size)
-        self._new_workspaces = WorkspacePool(self._device, _NEW_TOKENS_WORKSPACE_MB)
 
     @property
     def uses_kernel(self) -> bool:
@@ -348,7 +346,7 @@ class FlashInferMLAManager(AttentionManager):
         self, label: str, slot: int, decode: bool, kwargs: dict, max_total_tokens: int | None = None,
     ) -> FlashInferContextParallelWrapper:
         """As ``FlashInferManager``'s: the context's MLA wrapper on the label's workspace and, for a
-        step that isn't one token a row, its own tokens' on a small one of their own."""
+        step that isn't one token a row, its own tokens' on a workspace of their own."""
         context = FlashInferMLAWrapper(workspace_buffer=self._workspaces.get(label, slot), **kwargs)
         new = None
         if not decode:
@@ -356,7 +354,7 @@ class FlashInferMLAManager(AttentionManager):
             del own["page_size"]
             if max_total_tokens is not None:
                 own["max_num_pages"] = max_total_tokens
-            new = FlashInferMLAOwnTokensWrapper(self._new_workspaces.get(label, slot), self._dtype, **own)
+            new = FlashInferMLAOwnTokensWrapper(self._workspaces.get(f"{label}.own_tokens", slot), self._dtype, **own)
         return FlashInferContextParallelWrapper(context, new, self._device, max_total_tokens or 0)
 
     @property
