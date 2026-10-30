@@ -31,7 +31,7 @@ from mstar.engine.resources.recurrent import RecurrentBlockConfig
 from mstar.model.components.streaming_codec import (
     causal_conv,
     overlap_tconv,
-    snake,
+    snake_time_major,
     tail,
     tconv_gemm,
     to_channels_last,
@@ -205,5 +205,5 @@ class IncrementalDACDecoder(nn.Module):
 
 def _snake(module: Snake1d, x: torch.Tensor) -> torch.Tensor:
     """``Snake1d`` over a time-major ``x [B, T, C]``."""
-    alpha = module.alpha.reshape(-1)
-    return snake(x, alpha, (alpha + 1e-9).reciprocal())
+    alpha = module.alpha.reshape(-1).to(torch.promote_types(x.dtype, torch.float32))
+    return snake_time_major(x, alpha, (alpha + 1e-9).reciprocal())
