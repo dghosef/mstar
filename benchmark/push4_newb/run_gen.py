@@ -78,7 +78,9 @@ MODELS = {
                        "poll": {"status_path": "/v1/videos/{id}", "content_path": "/v1/videos/{id}/content",
                                 "id_key": "id", "done": "completed"},
                        "check": "video", "save": "mp4"}},
-        comps={"sglang": ("sglang", ["--tp-size", "2"])},
+        # sglang: its auto memory policy (DiT CPU offload below 120 GiB free); sglang_res: DiT kept resident, as M* does
+        comps={"sglang": ("sglang", ["--tp-size", "2"]),
+               "sglang_res": ("sglang", ["--tp-size", "2", "--dit-cpu-offload", "false"])},
         sglang_model=SUPER_I2V_HF,
     ),
 }
