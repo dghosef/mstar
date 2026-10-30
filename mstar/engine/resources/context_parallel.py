@@ -107,10 +107,11 @@ class ContextParallel(NamedTuple):
         partial: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]] | None,
         new: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        """Attention over the whole pool for this rank's query parts (each ``[N, H, *]``), fp32.
-        ``partial`` gives ``(out, lse, valid)`` over this rank's slots; ``new`` is the step's own
-        tokens' ``(out, lse)``. Every rank runs the same collectives; none when ``partial`` is None
-        (no row has stored context), which every rank must agree on."""
+        """Attention over the whole pool for this rank's query parts (each ``[N, H, *]``), fp32
+        (``new``'s out as is when ``partial`` is None). ``partial`` gives ``(out, lse, valid)`` over
+        this rank's slots; ``new`` is the step's own tokens' ``(out, lse)``. Every rank runs the same
+        collectives; none when ``partial`` is None (no row has stored context), which every rank
+        must agree on."""
         if partial is None:
             return new[0]
         outs, lses = self.exchange_partials(*partial(*self.exchange_queries(queries)))
