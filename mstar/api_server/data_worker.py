@@ -1750,8 +1750,12 @@ class PreprocessWorkerThread:
 
     def _publish_waiting(self) -> None:
         """``waiting_inputs`` for ``queue_depth``; set before each hand-off too,
-        as an inline prepare holds this thread. A pool prepare's end wakes the
-        thread, so the next pass counts it."""
+        as an inline prepare holds this thread. Without a pool every input in
+        ``_preparing`` waits; with one, a prepare's end wakes the thread, so
+        the next pass counts it."""
+        if self._prep_pool is None:
+            self.waiting_inputs = len(self._preparing)
+            return
         self.waiting_inputs = sum(
             entry.prepared is None or entry.prepared.done() for entry in self._preparing
         )
