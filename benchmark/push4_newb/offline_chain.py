@@ -1,0 +1,123 @@
+"""push4-newb's unattended queue on push4c GPUs 0-3 (the user is offline; nothing on the Mac is needed).
+
+Jobs run in order, each under a hard timeout with its own log; a failed or timed-out job is logged and the next one
+starts. Jobs marked `all_gpus` first wait until GPUs 1-3 have no compute processes (they are lent out until ~12:40Z).
+
+  nohup setsid python offline_chain.py > ~/push4/results/newb/offline_chain.log 2>&1 &
+"""
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+PY = "/root/push4/newb/venv/bin/python"
+R = Path.home() / "push4" / "results" / "newb"
+LADDER = "benchmark/push4_newb/cfg/q27b_tp4_async_knobs_ladder.yaml"
+TREE = "/root/push4/newb/mstar"
+
+
+def evens(a: int, b: int) -> str:
+    return ",".join(str(c) for c in range(a, b + 1, 2))
+
+
+GEN = {"PUSH4_MSTAR_CORES": "0,2", "PUSH4_CORES": evens(4, 52), "HF_HOME": "/root/hf"}
+TP4 = {"PUSH4_CORES": evens(0, 206), "HF_HOME": "/root/hf",
+       "PATH": f"/usr/local/cuda/bin:{os.environ.get('PATH', '')}"}
+NSYS = [PY, "nsysrun.py", "--model", "qwen3_5_27b_tp4", "--gpus", "0,1,2,3", "--port", "59100",
+        "--cell", "random_1024_256:128", "--n", "256", "--out", str(R / "q27b_nsys")]
+BENCH27 = [PY, "run_27b.py", "--phases", "bench", "--arms", "ladder,vllm,sglang"]
+
+# (name, command, timeout s, env, needs GPUs 1-3)
+JOBS = [
+    # pi0.5 is mstar's losing cell (JCT p50 ~120 ms vs openpi 35 ms): is it host-bound? server unpacked vs packed
+    ("pi05_wide", [PY, "run_pi05.py", "--gpu", "0", "--rounds", "1", "--n", "50", "--out", str(R / "pi05_wide")],
+     2400, {**GEN, "PUSH4_MSTAR_CORES": evens(4, 52)}, False),
+    ("pi05_r3", [PY, "run_pi05.py", "--gpu", "0", "--rounds", "1", "--n", "50", "--out", str(R / "pi05_r3")],
+     2400, GEN, False),
+    # DROID third round through the compile-wide-then-repin launch (validates it against packed-from-start)
+    ("droid_r3", [PY, "run_gen.py", "bench", "--model", "droid", "--gpu", "0", "--arms", "base,sglang_b1",
+                  "--rounds", "1", "--out", str(R / "droid_r3")], 3600, GEN, False),
+    # 27B TP4: where the TTFT gap to vLLM comes from (prefill kernel cost), then a workload not yet measured
+    ("nsys_27b_ladder", NSYS[:2] + ["--arm", f"ladder={TREE}:OVN_CONFIG={LADDER}"] + NSYS[2:], 3600, TP4, True),
+    ("nsys_27b_vllm", NSYS[:2] + ["--arm", "vllm=vllm"] + NSYS[2:], 3600, TP4, True),
+    ("q27b_sharegpt", BENCH27 + ["--cells", "sharegpt:32,sharegpt:64,sharegpt:128", "--rounds", "2",
+                                 "--out", str(R / "q27b_sharegpt")], 4 * 3600, TP4, True),
+    ("q27b_random_r3", BENCH27 + ["--rounds", "1", "--out", str(R / "q27b_random_r3")], 2 * 3600, TP4, True),
+]
+
+
+def log(msg: str) -> None:
+    print(f"[chain {time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def gpus_1_3_free() -> bool:
+    r = subprocess.run(["nvidia-smi", "--query-compute-apps=gpu_bus_id", "--format=csv,noheader"],
+                       capture_output=True, text=True, check=False)
+    busy = {x.strip() for x in r.stdout.splitlines() if x.strip()}
+    q = subprocess.run(["nvidia-smi", "--query-gpu=index,pci.bus_id", "--format=csv,noheader"],
+                       capture_output=True, text=True, check=False)
+    ours = {b.strip() for i, b in (x.split(",") for x in q.stdout.splitlines()) if i.strip() in ("1", "2", "3")}
+    return not (busy & ours)
+
+
+def wait_gpus_1_3(deadline_s: float = 4 * 3600) -> bool:
+    t0, free_since = time.monotonic(), None
+    while time.monotonic() - t0 < deadline_s:
+        if gpus_1_3_free():
+            free_since = free_since or time.monotonic()
+            if time.monotonic() - free_since >= 60:  # a borrower's chain may restart a server between jobs
+                return True
+        else:
+            free_since = None
+        time.sleep(15)
+    return False
+
+
+def cleanup() -> None:
+    """Kill leftover servers of this slice (own sessions, so a job's killpg misses them): processes under
+    /root/push4/newb serving on one of push4-newb's ports. Other slices' processes never match."""
+    me = os.getsid(0)
+    r = subprocess.run(["ps", "-eo", "pid=,sid=,args="], capture_output=True, text=True, check=False)
+    sids = set()
+    for line in r.stdout.splitlines():
+        pid, sid, args = line.split(None, 2) if len(line.split(None, 2)) == 3 else (None, None, "")
+        if sid and int(sid) != me and "/root/push4/newb/" in args and any(
+                f"--port {pt}" in args for pt in ("59100", "59200", "59300", "59400", "59500")):
+            sids.add(int(sid))
+    for sid in sids:
+        log(f"cleanup: killing leftover server session {sid}")
+        try:
+            os.killpg(sid, 9)
+        except ProcessLookupError:
+            pass
+    if sids:
+        time.sleep(20)
+
+
+def main() -> int:
+    for name, cmd, timeout, env, all_gpus in JOBS:
+        if all_gpus and not wait_gpus_1_3():
+            log(f"{name}: SKIPPED, GPUs 1-3 still busy after 4 h")
+            continue
+        log(f"{name}: start (timeout {timeout} s)")
+        t0 = time.monotonic()
+        with open(R / f"offline_{name}.log", "w") as f:
+            try:
+                p = subprocess.Popen(cmd, cwd=str(HERE), env={**os.environ, **env}, stdout=f,
+                                     stderr=subprocess.STDOUT, start_new_session=True)
+                rc = p.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                os.killpg(p.pid, 9)
+                rc = "TIMEOUT"
+        log(f"{name}: end rc={rc} after {time.monotonic() - t0:.0f} s")
+        cleanup()
+    log("ALL DONE")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
