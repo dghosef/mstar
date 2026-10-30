@@ -796,6 +796,18 @@ def test_mla_ranks_refuse_the_same_steps_past_the_fa_planners_work_item_cap(monk
                         mla=True, flashinfer_backend="fa2")[0], case)
 
 
+def test_tp_mla_decode_plans_its_context_where_the_causal_tile_check_cannot_refuse_it(monkeypatch):
+    """A decode step's context is planned at every partner's heads, a count bind doesn't check, and
+    over each rank's own KV lengths, so FA's causal tile-bound check could refuse it on one rank
+    alone. Planned non-causal, it never meets the check."""
+    # the check refuses a causal row whose keys start before its query, at some head counts
+    _emulate_fa_planner(monkeypatch, lambda q, kv, heads, causal: causal and bool((kv > q).any()))
+    case = _Case.build(DECODE_ROWS, CPU, torch.float32, mla=True)
+    for rank in range(P):
+        joint = JointGroups(tp_group=_group(rank, P), sp_group=CommGroup.trivial())
+        _plan(_cp_attention(joint, CPU, torch.float32, mla=True, flashinfer_backend="fa2")[0], case)
+
+
 @pytest.mark.parametrize("version, heads, refused", [
     ("0.7.3", Q_HEADS, r"FlashInfer 0\.7\.3 is installed"),
     # a local build of the release
