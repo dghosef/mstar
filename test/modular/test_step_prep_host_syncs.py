@@ -443,7 +443,7 @@ def test_qwen3_omni_audio_encoder_prep_reads_no_tensor():
     for frames in (1234, 3000):
         with _HostReads() as reads:
             rows.append(sub.prepare_inputs("prefill_audio", _fwd("r", "prefill_audio"), {
-                "audio_features": [torch.zeros(128, frames)], "audio_seqlens": [torch.tensor([frames])],
+                "audio_features": [torch.zeros(128, frames)],
             }))
         assert reads.reads == []
         assert rows[-1].input_seq_len == int(_get_feat_extract_output_lengths(torch.tensor(frames), 50))
