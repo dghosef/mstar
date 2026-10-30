@@ -729,10 +729,12 @@ Qwen3-TTS notes
   and RoPE are computed in float32 from the bf16 weights and frequencies; the
   Talker is bf16 either way), about 1.9x a codec step's speed on an H200 once
   the captures keep cuDNN's searched conv plans (``capture_cudnn_benchmark``).
-  That config was gated on an H200 only. On a B300 with cuDNN's heuristic conv
-  picks, main's windowed codec ran bf16 slower, not faster (several of its
-  convs on a kernel without tensor cores), and this decoder has not been
-  measured there: serve ``codec_dtype: float32`` on other GPUs until it is.
+  That config was gated on an H200 and an H100 (on the H100, WER 1.73–2.09%
+  with Whisper large-v3 over 128 sentences; every H100 Qwen3-TTS run used
+  ``codec_dtype: bfloat16``). On a B300 with cuDNN's heuristic conv picks,
+  main's windowed codec ran bf16 slower, not faster (several of its convs on
+  a kernel without tensor cores), and this decoder has not been measured
+  there: serve ``codec_dtype: float32`` on other GPUs until it is.
   Its decode is compiled (Inductor) with dynamic shapes, so a few graphs
   serve every chunk width and batch bucket the captures use.
 - Opt-in AudioSeal watermark on the codec's output (off by default; install
