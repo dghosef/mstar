@@ -92,8 +92,6 @@ class AttentionManager(AttentionResource):
             flashinfer_backend = spec.config.flashinfer_backend
             unsupported = [name for name, refused in (
                 ("sliding_window", spec.config.sliding_window is not None),
-                # the mixed decode/prefill wrapper isn't used over a placed pool
-                ("splits", bool(spec.config.splits)),
                 # before it degrades to FlashInfer on some hosts, so a config loads on none
                 (f"backend {backend.value!r}", backend == AttnBackend.DENSE),
                 (f"flashinfer_backend {flashinfer_backend!r}", flashinfer_backend not in lse_known),

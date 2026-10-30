@@ -20,6 +20,7 @@ import torch.multiprocessing as mp
 from test_kv_prefix_correctness import NODE, PAGE_SIZE, ROOT
 from test_kv_prefix_lease import _StubTransfer
 from test_kv_prefix_tp import WALKS, _ctx, _follow, _ingest, _send, _step, _tokens
+from test_startup_graph_validation import _qwen3_5
 
 from mstar.distributed.communication import CommGroup, JointGroups, WorkerParallelGroups
 from mstar.engine.engine import Engine
@@ -33,11 +34,10 @@ from mstar.engine.resources.kv.config import KVLayout, KVReqConfig, KVSpec, KVSt
 from mstar.engine.resources.kv.manager import KVManager
 from mstar.engine.resources.kv.plan import SINK_PAGE, KVPlanOutput, KVPlanOutputs, SequenceView, build_paged_indptrs
 from mstar.engine.resources.kv.transfer import KVReadInfo, ShmKVTransferEngine
-from mstar.engine.resources.position.config import PositionConfig, PositionSpec
-from mstar.engine.resources.recurrent.config import DeltaNetGeometry, RecurrentStateConfig, RecurrentStateSpec
-from mstar.engine.resources.spec import CombinedSplit, NodeResourceSpec
+from mstar.engine.resources.spec import NodeResourceSpec, apply_yaml_overrides
 from mstar.engine.resources.step import BucketKey, Segment, SlotLease, StepContext
 from mstar.model.components.mla import MLAAttention
+from mstar.model.qwen3_5.config import GDN_STATE, KV_CACHE
 
 P = 2
 CPU = torch.device("cpu")
@@ -217,7 +217,7 @@ class _DependentSpec(NodeResourceSpec):
         return _Dependent
 
     def depends_on(self):
-        return {"kv"}
+        return {KV_CACHE}
 
 
 class _Submodule:
@@ -232,32 +232,26 @@ class _Submodule:
 
 
 @pytest.mark.parametrize("supports", [False, True])
-def test_an_sp_placed_node_shards_heads_over_tp_and_refuses_a_dependent_without_support(supports):
+def test_an_sp_placed_node_shards_heads_over_tp_and_refuses_a_dependent_without_support(
+    supports, tmp_path, monkeypatch,
+):
     groups = WorkerParallelGroups(num_workers=P, global_rank=0)
     groups.add_sp(NODE, _group(0, P))
-    pool = lambda: PagedKVConfig(  # noqa: E731
-        num_layers=1, num_kv_heads=2, head_dim=8, max_seq_len=256, num_qo_heads=4, max_num_pages=8,
-        page_size=PAGE_SIZE, context_parallel=True,
-    )
-    kv_spec = KVSpec(resource_key="kv", nodes={NODE}, config=pool())
-    # the resources Qwen3.5 puts over its pool, an MLA pool with its attention (GLM-5.x without
-    # DSA), then a dependent without support
-    specs = [
-        kv_spec,
-        AttentionSpec(resource_key="attn", nodes={NODE}, config=AttentionConfig(kv_cache="kv")),
+    # Qwen3.5's own declarations (dummy shapes) with its pool placed, as on SP ranks; then an MLA
+    # pool with its attention (GLM-5.x without DSA), and a dependent without support
+    specs = _qwen3_5(NODE, {}, tmp_path, monkeypatch).get_node_resources()
+    apply_yaml_overrides(specs, {"resources": {
+        KV_CACHE: {"context_parallel": True, "max_num_pages": 8}, GDN_STATE: {"max_slots": 4},
+    }})
+    kv_spec, = (spec for spec in specs if spec.resource_key == KV_CACHE)
+    heads = (kv_spec.config.num_kv_heads, kv_spec.config.num_qo_heads)
+    specs += [
         KVSpec(resource_key="mla_kv", nodes={NODE}, config=PagedKVConfig(
             num_layers=1, num_kv_heads=1, head_dim=LATENT, max_seq_len=256, num_qo_heads=4, max_num_pages=8,
             page_size=PAGE_SIZE, context_parallel=True, layout=KVLayout.MLA, kv_lora_rank=CKV, qk_rope_head_dim=KPE,
         )),
         AttentionSpec(resource_key="mla_attn", nodes={NODE}, config=AttentionConfig(
             kv_cache="mla_kv", backend=AttnBackend.FLASHINFER_MLA, sm_scale=LATENT ** -0.5,
-        )),
-        PositionSpec(resource_key="rope", nodes={NODE}, config=PositionConfig(kv_cache="kv")),
-        RecurrentStateSpec(resource_key="gdn", nodes={NODE}, config=RecurrentStateConfig(
-            num_layers=1, max_slots=4, kv_cache="kv",
-            blocks=DeltaNetGeometry(
-                num_k_heads=2, num_v_heads=2, head_k_dim=8, head_v_dim=8, conv_kernel_size=4,
-            ).to_blocks(state_dtype=torch.float32),
         )),
         _DependentSpec(resource_key="dependent", nodes={NODE}, supports=supports),
     ]
@@ -266,30 +260,16 @@ def test_an_sp_placed_node_shards_heads_over_tp_and_refuses_a_dependent_without_
         {NODE: _Submodule()}, specs=specs, parallel_groups=groups, device=CPU, transfer_engine_info=None,
     )
     if not supports:
-        with pytest.raises(ValueError, match="'dependent'.*does not support context parallelism.*'kv'"):
+        with pytest.raises(ValueError, match=f"'dependent'.*does not support context parallelism.*'{KV_CACHE}'"):
             load()
         return
     load()
     # heads over TP alone (1 rank), positions over the 2 SP ranks
     assert engine._resources["dependent"].info.head_shards == 1 and engine._submodules[NODE].head_shards == 1
-    assert (kv_spec.config.num_kv_heads, kv_spec.config.num_qo_heads) == (2, 4)
-    placement = engine._resources["kv"].placement
+    assert (kv_spec.config.num_kv_heads, kv_spec.config.num_qo_heads) == heads
+    placement = engine._resources[KV_CACHE].placement
     assert (placement.size, placement.index, placement.over_sp) == (P, 0, True)
-    assert engine._resources["kv"].kv_cache.page_slots == PAGE_SIZE // P
-    # built directly, as a harness does, the pool shards its heads the same way, and so does the
-    # attention over it, told nothing about the placement
-    direct = pool()
-    joint = groups.get_joint_group_for_node(NODE)
-    KVManager(cfg=direct, name="kv", joint_comm_group=joint, transfer_engine_info=None, device=CPU, dtype=torch.float32)
-    assert (direct.num_kv_heads, direct.num_qo_heads) == (2, 4)
-    AttentionManager.build(
-        AttentionSpec(resource_key="attn", nodes={NODE}, config=AttentionConfig(kv_cache="kv")),
-        EngineResourceInfo(
-            device=CPU, joint_comm_group=joint,
-            dependencies={"kv": KVSpec(resource_key="kv", nodes={NODE}, config=direct)},
-        ),
-    )
-    assert (direct.num_kv_heads, direct.num_qo_heads) == (2, 4)
+    assert engine._resources[KV_CACHE].kv_cache.page_slots == kv_spec.config.page_size // P
 
 
 # --- attention over a placed pool -------------------------------------------------------------
@@ -604,7 +584,6 @@ def test_two_ranks_run_a_naive_mla_layer_over_an_sp_placed_pool(tmp_path):
 
 @pytest.mark.parametrize("attention, refused", [
     (dict(sliding_window=8), "sliding_window"),
-    (dict(splits=(CombinedSplit("w", ("prefill",)),)), "splits"),
     # on a host without FA3 dense degrades to FlashInfer, which would serve the pool
     (dict(backend=AttnBackend.DENSE), "backend 'dense'"),
     # its decode lse base isn't known

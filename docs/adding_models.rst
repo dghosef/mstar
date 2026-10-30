@@ -1917,10 +1917,11 @@ tests are written but have not run. GLM-5.2 with ``dsa_long_context`` off (conte
 ``index_topk``) is an MLA model without DSA and loads under ``context_parallel``. Besides attention, the position resource (RoPE) and the recurrent
 state pool (GDN, KDA) support a placed pool; a recurrent pool on an SP-placed node holds the
 same state on every SP partner. The dense, flex and XPU backends, cross-attention, DSA (the
-GLM-5.x indexer), ``sliding_window`` attention, the mixed decode/prefill wrapper (``splits``)
+GLM-5.x indexer), ``sliding_window`` attention
 and a ``flashinfer_backend`` other than ``auto``, ``fa2``, ``fa3`` or (not for MLA) ``trtllm-gen``
 (the ones whose log-sum-exp base the merge is known to read right) are not supported and are
-refused at load.
+refused at load. A mixed decode/prefill split (``splits``, as Qwen3.5 declares) is ignored over
+a placed pool, whose wrappers take rows of any length.
 
 .. note::
 
