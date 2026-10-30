@@ -396,9 +396,9 @@ default, which lowers the token count of short clips. Notes:
   serves image and video traffic faster than ``configs/qwen3_5_9b_tp2.yaml``,
   whose lockstep LLM waits whenever a rank runs a vision encoder step: 9B on
   2xH200 with the encoder on rank 0 only, video_60s c32 1520 vs ~900-1000
-  output tok/s, MMMU c32 4457 vs ~3100. The TP2 config now places an encoder
-  replica beside each LLM rank, which splits those steps over both ranks
-  (H100: video +4%, MMMU c32 -1%).
+  output tok/s, MMMU c32 4457 vs ~3100. ``configs/qwen3_5_9b_tp2.yaml``
+  places an encoder replica beside each LLM rank, which splits those steps
+  over both ranks (H100: video +4%, MMMU c32 -1% vs one encoder on rank 0).
 - A long video is one wide prefill: one 1-3 minute video is ~11-12k tokens,
   beyond the largest captured ``prefill_vision`` bucket (4096), so it runs
   eagerly.
