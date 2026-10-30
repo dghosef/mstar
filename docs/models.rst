@@ -361,10 +361,12 @@ BAGEL notes
 
 - Text-to-image runs only the CFG branches a denoising step reads: two with
   image guidance off, and the main branch alone outside ``cfg_interval``, about
-  -37% latency at 1024² on an H200. Outside the interval the step returns the
-  main branch's velocity where it used to recombine all three and renormalize,
-  which is equal only up to rounding, so images move slightly (median 41 dB
-  PSNR against the previous output).
+  -37% latency at 1024² on an H200. A step then computes fewer rows and returns
+  the main branch's velocity outside the interval where it used to recombine all
+  three, which is equal only up to rounding, so images move: seeded
+  text-to-image at the default guidance is about 31 dB PSNR from the previous
+  output (about 60 dB between two cold boots of one version), and generation
+  without guidance about 41 dB. Edits stay within their boot-to-boot spread.
 - A guided request's steps inside ``cfg_interval`` run as a walk of their own,
   ``image_gen_guided2`` (``image_gen_guided3`` with image guidance), between
   ``image_gen_head`` and ``image_gen``. A config that places ``LLM`` per walk
