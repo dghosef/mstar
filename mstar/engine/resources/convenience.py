@@ -65,13 +65,13 @@ class AttentionCallable:
     @torch.compiler.disable
     def norm_rope_attend(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, q_norm: torch.nn.Module, k_norm: torch.nn.Module,
-        *, pos_ids: torch.Tensor | None = None, rope_theta: float = 0.0,
+        *, pos_ids: torch.Tensor | None = None, rope_theta: float | None = None,
         cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Per-head q/k RMSNorm (``q_norm``, ``k_norm``), RoPE and attention.
         For a backend that reads K/V from the paged cache, the step's KV write
         rides in the norm/RoPE kernel (``qk_norm_rope_kv_write``) rather than a
-        launch of its own. The rotation is plain RoPE at ``pos_ids`` and
+        launch of its own. The rotation is one of plain RoPE at ``pos_ids`` and
         ``rope_theta``, or each token's rotate-half ``cos_sin`` rows (both halves
         equal), for a multimodal RoPE whose position grids one position can't
         express.
@@ -82,6 +82,10 @@ class AttentionCallable:
         """
         from mstar.utils.attention import qk_norm_rope_inplace, qk_norm_rope_kv_write, qk_norm_rotary_kv_write
 
+        if (pos_ids is None) == (cos_sin is None):
+            raise ValueError("norm_rope_attend rotates by pos_ids or by cos_sin: pass exactly one")
+        if pos_ids is not None and rope_theta is None:
+            raise ValueError("norm_rope_attend: pos_ids needs rope_theta")
         eps = (float(q_norm.variance_epsilon), float(k_norm.variance_epsilon))
         if cos_sin is not None and not (q.is_cuda and self.attn.requires_kv_write):
             cos, sin = (t[: q.shape[0], None] for t in cos_sin)
