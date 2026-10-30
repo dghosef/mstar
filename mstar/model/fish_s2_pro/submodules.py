@@ -56,10 +56,12 @@ from mstar.model.submodule_base import (
     EMPTY_INPUT_METADATA,
     ARNodeInputs,
     ARNodeSubmodule,
+    BatchedModelOutput,
     InputMetadata,
     ModelInputsFromEngine,
     NodeInputs,
     NodeSubmodule,
+    TokenStop,
 )
 from mstar.streaming.stream_buffer import StreamChunkInfo
 from mstar.utils.h2d import PinnedStager
@@ -99,6 +101,13 @@ class ARSubmodule(ARNodeSubmodule):
         self.fast_ar = fast_ar
         self.config = config
         self.eos_code = config.eos_code
+        # The prefill frame counts toward max_new_tokens. <|im_end|> is not a
+        # codebook index: its frame is withheld, so the codec never sees it.
+        self.token_stop = TokenStop(
+            loop="ar_decode_loop", buffer="new_token", stop_ids=frozenset({config.eos_code}),
+            sampler=AR_SAMPLER, prefill_walks=frozenset({"ar_prefill", "ar_prefill_clone"}),
+            withhold=("codec_tokens",),
+        )
         self._fast_kv: torch.Tensor | None = None
         self._decode_last_token_indices: torch.Tensor | None = None
         self._flag_stager = PinnedStager(torch.bool, numel=self.MAX_BATCH_SIZE)
@@ -172,7 +181,6 @@ class ARSubmodule(ARNodeSubmodule):
                 int(ref_frames),
                 inputs["ref_codes"][0] if "ref_codes" in inputs else None,
             )
-            self.request_state(fwd_info.rid_handle).add("generated_frames", 0)
         elif graph_walk == "ar_decode":
             input_embeds = inputs["ar_input_embeds"][0].to(device=self.get_device()).reshape(1, -1)
         else:
@@ -253,11 +261,7 @@ class ARSubmodule(ARNodeSubmodule):
         semantic = torch.where(is_eos, torch.zeros_like(head_index), head_index)
         codes = self.fast_ar(last_hidden, semantic, self._get_fast_kv(semantic.shape[0]))
         next_embeds = self.next_input_embeds(head_index, codes)
-        # The codec stream carries the head index in codebook 0, so the frame
-        # that ends the stream (<|im_end|>) is recognizable and dropped.
-        stream = codes.clone()
-        stream[:, 0] = head_index
-        return {"ar_input_embeds": next_embeds, "codec_tokens": stream, "new_token": head_index}
+        return {"ar_input_embeds": next_embeds, "codec_tokens": codes, "new_token": head_index}
 
     def forward(
         self,
@@ -284,57 +288,11 @@ class ARSubmodule(ARNodeSubmodule):
         last_token_indices: torch.Tensor,
         suppress_eos: torch.Tensor,
         **kwargs: Any,
-    ) -> dict[str, NameToTensorList]:
+    ) -> BatchedModelOutput:
         del graph_walk, kwargs
         output = self._run_frame(engine_inputs, input_embeds, last_token_indices, suppress_eos)
-        return {
-            request_id: {
-                "ar_input_embeds": [output["ar_input_embeds"][i : i + 1]],
-                "codec_tokens": [output["codec_tokens"][i]],
-                "new_token": [output["new_token"][i]],
-            }
-            for i, request_id in enumerate(engine_inputs.request_ids)
-        }
-
-    def postprocess(
-        self,
-        request_id: str,
-        request_info: CurrentForwardPassInfo,
-        outputs: dict[str, list[torch.Tensor]],
-        **kwargs: Any,
-    ) -> None:
-        """Expose the sampled head index for ``check_stop`` without a GPU sync."""
-        del request_info, kwargs
-        if "new_token" in outputs:
-            outputs["head_index"] = outputs.pop("new_token")
-        elif "head_index" not in outputs and "codec_tokens" in outputs:
-            outputs["head_index"] = [outputs["codec_tokens"][-1].reshape(-1)[0]]
-
-    def check_stop(
-        self,
-        request_id: str,
-        request_info: CurrentForwardPassInfo,
-        outputs: dict[str, list[torch.Tensor]],
-    ) -> set[str]:
-        """Stop on ``<|im_end|>`` or the request's frame limit.
-
-        Frames are counted here, not in ``postprocess``: a speculative step's
-        ``postprocess`` can run before the previous step's stop check, and a
-        discarded speculative step never reaches this.
-        """
-        if "head_index" not in outputs:
-            return set()
-        head_index = int(outputs["head_index"][0].item())
-        state = self.request_state(request_id)
-        generated = int(state.get("generated_frames", 0)) + 1
-        state.add("generated_frames", generated)
-        max_tokens = request_info.max_tokens
-        sampling = request_info.resource_configs.get(AR_SAMPLER)
-        reached_eos = head_index == self.eos_code and not bool(getattr(sampling, "ignore_eos", False))
-        if reached_eos or generated >= max_tokens:
-            logger.debug("fish ar %s: stop after %d frames (eos=%s)", request_id, generated, reached_eos)
-            return {"ar_decode_loop"}
-        return set()
+        # one clone per output and one stop-check copy for the step, not one per request
+        return BatchedModelOutput(row_outputs=output, check_stop_buffers={"new_token": output["new_token"]})
 
     def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
         return (
@@ -456,13 +414,11 @@ class CodecSubmodule(ARNodeSubmodule):
         input_metadata: InputMetadata = EMPTY_INPUT_METADATA,
         **kwargs: Any,
     ) -> ARNodeInputs:
-        """Drop the end-of-stream frame and lay the window out as ``[10, frames]``."""
+        """Lay the window out as ``[10, frames]`` (the AR withholds the end-of-stream frame)."""
         del graph_walk, kwargs
         chunk = self._codec_chunk(input_metadata)
         codes = inputs["codec_tokens"][0].to(device=self.get_device(), dtype=torch.long)
         codes = codes.view(-1, self.config.num_codebooks)
-        # A sync: which window holds the end-of-stream frame is not known on the host.
-        codes = codes[codes[:, 0] < self.config.eos_code]
         frames = codes.shape[0]
         context = min(chunk.context_items if chunk is not None else 0, frames)
         start_offset = chunk.start_offset if chunk is not None else 0
