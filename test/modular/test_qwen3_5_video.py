@@ -784,7 +784,7 @@ def test_position_table_resample_matches_bilinear_interpolate():
     side, merge, dim = 6, 2, 3
     table = torch.randn(side, side, dim, dtype=torch.float64)
     grid = [(1, 4, 8), (3, 10, 6), (2, 4, 8)]
-    indices, weights = vision_interpolation(grid, side, merge, torch.device("cpu"))
+    indices, weights = vision_interpolation(grid, side, merge)
     got = (table.reshape(side * side, dim)[indices] * weights[..., None].double()).sum(1)
 
     expected = []
