@@ -30,7 +30,6 @@ from torch import nn
 
 from mstar.model.components.audio_features import sinusoid_positions
 from mstar.model.components.linear import FusedColumnLinear
-from mstar.model.components.masking import length_mask
 
 
 @dataclass
@@ -65,17 +64,15 @@ class AuTEncoderConfig:
     def chunk_frames(self) -> int:
         return 2 * self.n_window
 
-    @staticmethod
-    def tokens_for_frames(num_frames: int) -> int:
-        """Encoder tokens for ``num_frames`` mel frames: 13 per full 100-frame
-        chunk, plus three stride-2 convolutions' worth of the remainder."""
-        full, rem = divmod(num_frames, 100)
-        rem_tokens = (((rem - 1) // 2 + 1 - 1) // 2 + 1 - 1) // 2 + 1 if rem else 0
-        return full * 13 + rem_tokens
+    def tokens_for_frames(self, num_frames: int) -> int:
+        """Encoder tokens for ``num_frames`` mel frames: ``tokens_per_chunk`` per
+        full chunk, plus the convolutions' length of the remainder."""
+        full, rem = divmod(num_frames, self.chunk_frames)
+        return full * self.tokens_per_chunk + _conv_length(rem)
 
     @property
     def tokens_per_chunk(self) -> int:
-        return self.tokens_for_frames(self.chunk_frames)
+        return _conv_length(self.chunk_frames)
 
     @property
     def window_tokens(self) -> int:
@@ -89,10 +86,14 @@ class AuTEncoderConfig:
 
     @property
     def conv_out_features(self) -> int:
-        mel = self.num_mel_bins
-        for _ in range(3):
-            mel = (mel + 1) // 2
-        return self.downsample_hidden_size * mel
+        return self.downsample_hidden_size * _conv_length(self.num_mel_bins)
+
+
+def _conv_length(n: int) -> int:
+    """Length of an axis of ``n`` after the three stride-2 convolutions (kernel 3, padding 1)."""
+    for _ in range(3):
+        n = (n + 1) // 2
+    return n
 
 
 def _activation(name: str):
@@ -259,7 +260,8 @@ class AuTEncoder(nn.Module):
         Every request is cut into ``chunk_frames`` pieces; the last piece is
         zero-padded to a full chunk (as HF's ``pad_sequence`` does whenever a
         batch holds one full chunk), convolved, and trimmed back to its valid
-        tokens.
+        tokens. The trim gathers rows by indices built on the host, so nothing
+        here waits on the device.
         """
         cfg = self.config
         chunk = cfg.chunk_frames
@@ -267,12 +269,18 @@ class AuTEncoder(nn.Module):
         valid: list[int] = []
         for b, n_frames in enumerate(feature_lens):
             n_frames = int(n_frames)
-            n_chunks = -(-n_frames // chunk)
+            full, rem = divmod(n_frames, chunk)
+            n_chunks = full + (rem > 0)
             padded = F.pad(features[b, :, :n_frames], (0, n_chunks * chunk - n_frames))
             chunks.append(padded.view(cfg.num_mel_bins, n_chunks, chunk).permute(1, 0, 2))
-            widths = [chunk] * (n_chunks - 1) + [n_frames - chunk * (n_chunks - 1)]
-            valid.extend(cfg.tokens_for_frames(w) for w in widths)
-        x = torch.cat(chunks, dim=0).unsqueeze(1)  # (N, 1, mel, chunk)
+            valid += [cfg.tokens_per_chunk] * full + ([_conv_length(rem)] if rem else [])
+        x = torch.cat(chunks, dim=0).unsqueeze(1).to(self.conv2d1.weight.dtype)  # (N, 1, mel, chunk)
+        # Empty chunks up to a power of two: cuDNN builds a plan for each new conv
+        # shape (tens of ms of host time), and the chunk count of a step varies.
+        n = x.shape[0]
+        bucket = max(8, 1 << (n - 1).bit_length())
+        if bucket > n:
+            x = torch.cat([x, x.new_zeros((bucket - n, *x.shape[1:]))])
 
         embeds = []
         for piece in x.split(cfg.conv_chunksize, dim=0):
@@ -280,17 +288,21 @@ class AuTEncoder(nn.Module):
             piece = self.act(self.conv2d2(piece))
             piece = self.act(self.conv2d3(piece))
             embeds.append(piece)
-        x = torch.cat(embeds, dim=0)  # (N, C, mel', t)
-        n, c, f, t = x.shape
-        x = self.conv_out(x.permute(0, 3, 1, 2).reshape(n, t, c * f))
+        x = torch.cat(embeds, dim=0)  # (bucket, C, mel', t)
+        b, c, f, t = x.shape
+        x = self.conv_out(x.permute(0, 3, 1, 2).reshape(b, t, c * f))
         x = x + self.positional_embedding[:t].to(x.dtype)
-        keep = length_mask(torch.tensor(valid, device=x.device), t)
-        return x[keep]
+        # each real chunk's leading valid rows, as flat indices into (chunk, row)
+        keep = (torch.arange(t) < torch.tensor(valid).unsqueeze(1)).flatten().nonzero().squeeze(1)
+        if x.is_cuda:
+            keep = keep.pin_memory()
+        return x.reshape(b * t, -1).index_select(0, keep.to(x.device, non_blocking=True))
 
     def encode(self, hidden_states: torch.Tensor, cu_seqlens) -> torch.Tensor:
         """The transformer stack and projector over a packed sequence:
         ``(total_tokens, d_model)`` -> ``(total_tokens, output_dim)``. This is
-        the region a submodule captures."""
+        the region a submodule captures. ``cu_seqlens`` (the layout's host
+        list) is read only without a bound resource."""
         for layer in self.layers:
             hidden_states = layer(hidden_states, cu_seqlens)
         hidden_states = self.ln_post(hidden_states)
@@ -299,5 +311,4 @@ class AuTEncoder(nn.Module):
     def forward(self, features: torch.Tensor, feature_lens: list[int]) -> tuple[torch.Tensor, AuTLayout]:
         layout = self.layout(feature_lens)
         hidden = self.frontend(features, feature_lens)
-        cu = torch.tensor(layout.cu_seqlens, dtype=torch.int32, device=hidden.device)
-        return self.encode(hidden, cu), layout
+        return self.encode(hidden, layout.cu_seqlens), layout

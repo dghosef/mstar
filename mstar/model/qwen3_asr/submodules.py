@@ -240,8 +240,7 @@ class Qwen3ASREncoderSubmodule(NodeSubmodule):
         if engine_inputs is not None:
             embeds = self._replay_encode(engine_inputs, hidden, layout.window_lengths)
         if embeds is None:
-            cu = torch.tensor(layout.cu_seqlens, dtype=torch.int32, device=hidden.device)
-            embeds = enc.encode(hidden, cu)
+            embeds = enc.encode(hidden, layout.cu_seqlens)
         return list(embeds.split(layout.tokens_per_request, dim=0))
 
     def forward(

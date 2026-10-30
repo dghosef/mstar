@@ -314,7 +314,7 @@ class Qwen3OmniModel(Model):
                 config=RaggedAttentionConfig(
                     num_qo_heads=audio.encoder_attention_heads,
                     num_kv_heads=audio.encoder_attention_heads,
-                    head_dim=audio.d_model // audio.encoder_attention_heads,
+                    head_dim=audio.head_dim,
                     dtype=torch.bfloat16,
                     # a step's clips are one row of windows (see AudioEncoderSubmodule)
                     max_segments_per_request=AudioEncoderSubmodule.MAX_WINDOWS,
@@ -352,10 +352,8 @@ class Qwen3OmniModel(Model):
     def checkpoint_path(self) -> str:
         return self.local_dir
 
-    def _audio_frames(self, seqlens: torch.Tensor) -> torch.Tensor:
-        from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import _get_feat_extract_output_lengths
-
-        return _get_feat_extract_output_lengths(seqlens, n_window=self.config.audio_encoder.n_window)
+    def _audio_frames(self, seqlens: torch.Tensor) -> int:
+        return self.config.audio_encoder.tokens_for_frames(int(seqlens))
 
     def _get_max_talker_output_tokens(self, **model_kwargs):
         return model_kwargs.get("talker_max_output_tokens", MAX_OUTPUT_TOKENS)
@@ -1492,7 +1490,7 @@ class Qwen3OmniModel(Model):
         elif node_name == "Code2Wav":
             return self._create_code2wav_submodule(device)
         elif node_name == "audio_encoder":
-            return self._create_audio_encoder_submodule(device)
+            return self._create_audio_encoder_submodule(device, autocast_dtype)
         elif node_name == "vision_encoder":
             return self._create_vision_encoder_submodule(device)
         return None
@@ -1725,46 +1723,23 @@ class Qwen3OmniModel(Model):
             config=self.config,
         )
 
-    def _create_audio_encoder_submodule(self, device: str) -> NodeSubmodule:
-        """Load the audio encoder (AuT) from HF weights."""
-        # Reuse HF audio encoder directly (Whisper-style, not perf-critical)
-        from transformers import AutoConfig
-        from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
-            Qwen3OmniMoeAudioEncoder,
-        )
+    def _create_audio_encoder_submodule(self, device: str, autocast_dtype: torch.dtype | None) -> NodeSubmodule:
+        """The shared AuT encoder (Qwen3-ASR's too), loaded from ``thinker.audio_tower.*``."""
+        from mstar.model.components.aut_encoder import AuTEncoder
+        from mstar.model.loader.iterators import iter_safetensors_shards
 
-        from mstar.model.qwen3_omni.components.attention import patch_hf_fa2_int_maxlen
-        from mstar.model.utils import ModuleAndPrefix, load_weights_from_hf_shards
-
-        # Load config only (no weights)
-        config = AutoConfig.from_pretrained(
-            self.local_dir,
-            trust_remote_code=False,
-        )
-
-        # This should be a Qwen3OmniMoeConfig
-        audio_config = config.thinker_config.audio_config
-
-        # Build the audio encoder from config.
-        # IMPORTANT: pass attn_implementation="flash_attention_2" so the
-        # encoder uses the cu_seqlens FA2 path. With the HF default
-        # (which resolves to "sdpa"), Qwen3OmniMoeAudioAttention runs
-        # SDPA on the full packed sequence (no per-segment fusion),
-        # which is significantly slower than FA2's varlen path.
-        patch_hf_fa2_int_maxlen()
-        audio_encoder = Qwen3OmniMoeAudioEncoder._from_config(
-            audio_config, attn_implementation="flash_attention_2"
-        )
-
-        load_weights_from_hf_shards(
-            repo_dir=self.local_dir,
-            modules=[ModuleAndPrefix(audio_encoder, prefix="thinker.audio_tower")],
-            device=device,
-        )
+        with torch.device("meta"):
+            audio_encoder = AuTEncoder(self.config.audio_encoder, attn_key=AUDIO_ATTN)
+        if autocast_dtype is not None:
+            audio_encoder = audio_encoder.to(autocast_dtype)
+        audio_encoder.to_empty(device=device)
+        prefix = "thinker.audio_tower."
+        weights = iter_safetensors_shards(self.local_dir, device=device, prefix=prefix)
+        audio_encoder.load_weights((k.removeprefix(prefix), v) for k, v in weights)
         audio_encoder.eval()
 
         from mstar.model.qwen3_omni.submodules import AudioEncoderSubmodule
-        return AudioEncoderSubmodule(audio_encoder=audio_encoder, config=self.config)
+        return AudioEncoderSubmodule(audio_encoder, config=self.config)
 
     def _create_vision_encoder_submodule(self, device: str) -> NodeSubmodule:
         """Load the vision encoder (SigLIP2 ViT) from HF weights."""

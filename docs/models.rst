@@ -559,12 +559,16 @@ Qwen3-Omni notes
   (``cp_attention``), neither bit-exact with the unfused ops. Its 15 depth
   steps feed each sampled code into the next, so small differences can change
   later codes at near-ties.
-- The audio encoder takes the clips of up to 16 requests a step and packs
-  them along time in request order into one pass, with attention windowed
+- The audio encoder is the AuT encoder Qwen3-ASR also runs
+  (``mstar/model/components/aut_encoder.py``). It takes the clips of up to 16
+  requests a step and packs them into one pass, with attention windowed
   within each clip, while they fit its largest capture (8192 encoder rows,
   about 630 s of audio). A larger step runs its clips one at a time, each
   replaying the captured layers when it fits 8192 rows; only a clip over
-  8192 rows runs the layers eagerly. A
+  8192 rows runs the layers eagerly. A clip's last 1 s chunk is zero-padded
+  to a full chunk before the convolutions, as HF's encoder pads it whenever
+  its batch holds a full chunk, so a clip under 1 s encoded alone differs
+  from HF's in its last rows. A
   clip's embeddings can differ at the last bit with what it is batched
   beside, since the packed GEMMs' shapes change with the pass's total rows,
   and a prefix-cached audio prefix keeps the embeddings it was first computed

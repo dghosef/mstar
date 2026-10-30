@@ -16,11 +16,10 @@ import functools
 import logging
 from collections.abc import Mapping
 from dataclasses import replace
-from typing import Any, NamedTuple
+from typing import Any
 
 import torch
 from torch import nn
-from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import _get_feat_extract_output_lengths
 from transformers.vision_utils import (
     get_vision_cu_seqlens,
     get_vision_interpolation_indices_and_weights,
@@ -42,6 +41,7 @@ from mstar.engine.engine import ExecutingBatch
 from mstar.engine.resources import AttentionStep, KVStep, PositionStep, SamplerStep, Segment, SlotLease, SubmoduleStep
 from mstar.engine.resources.attn.flashinfer import FlashInferManager
 from mstar.engine.resources.sampler.resource import SamplerResource
+from mstar.model.components.aut_encoder import AuTEncoder
 from mstar.model.components.code_predictor_kernels import cp_embed_accumulate
 from mstar.model.components.mrope import mrope_position_ids
 from mstar.model.qwen3_omni.components.code2wav import Qwen3OmniMoeCode2Wav
@@ -109,23 +109,12 @@ def talker_text_mask(input_ids: torch.Tensor, config: Qwen3OmniModelConfig) -> t
 # ===================================================================
 
 
-class AudioLayout(NamedTuple):
-    """How the encoder lays a step's clips out, from their host-known frame counts:
-    the conv chunks, the frames the convs keep (flat indices into the padded
-    chunk grid), the attention windows per clip, and each clip's output rows."""
-
-    chunk_lengths: list[int]
-    valid: list[int]
-    windows: list[list[int]]
-    counts: list[int]
-
-
 class AudioEncoderSubmodule(NodeSubmodule):
-    """The HF Whisper-style audio encoder over a step's clips, packed.
+    """The shared AuT encoder (``components/aut_encoder.py``, Qwen3-ASR's too)
+    over a step's clips, packed.
 
-    The conv frontend runs eagerly over the clips' padded 1 s chunks; the
-    transformer layers run over the packed frames the convs keep, each clip's
-    attention windowed (``n_window_infer``) through the node's ragged attention
+    The conv frontend runs eagerly; the transformer layers run over the packed
+    rows, each clip's attention windowed through the node's ragged attention
     resource, as one captured replay a step when the step fits a token bucket.
     Eager, the layers are ~600 small launches, tens of ms of host time on the
     Thinker's worker.
@@ -141,11 +130,10 @@ class AudioEncoderSubmodule(NodeSubmodule):
     # clips per encoder step
     MAX_BATCH_SIZE = 16
 
-    def __init__(self, audio_encoder: nn.Module, config: Qwen3OmniModelConfig):
+    def __init__(self, encoder: AuTEncoder, config: Qwen3OmniModelConfig):
         super().__init__()
-        self.audio_encoder = audio_encoder
+        self.encoder = encoder
         self.config = config
-        self._attn_fns: dict[int, Any] = {}
 
     def prepare_inputs(
         self,
@@ -157,30 +145,10 @@ class AudioEncoderSubmodule(NodeSubmodule):
         # The features' width is the clip's frame count, so the layout comes
         # from shapes, never from device values.
         audio_features = inputs["audio_features"][0]
-        frames = audio_features.shape[-1]
         return NodeInputs(
             tensor_inputs={"audio_features": audio_features},
-            input_seq_len=_get_feat_extract_output_lengths(frames, self.audio_encoder.n_window),
+            input_seq_len=self.encoder.config.tokens_for_frames(audio_features.shape[-1]),
         )
-
-    def layout(self, frames: list[int]) -> AudioLayout:
-        """HF's chunking and attention windows for clips of ``frames`` mel frames,
-        which HF's encoder reads off ``feature_lens`` with host syncs."""
-        enc = self.audio_encoder
-        chunk = enc.n_window * 2
-        chunk_lengths = []
-        for n in frames:
-            full, rest = divmod(n, chunk)
-            chunk_lengths += [chunk] * full + ([rest] if rest else [])
-        after = [_get_feat_extract_output_lengths(n, enc.n_window) for n in chunk_lengths]
-        # no clips: a step whose rows all failed in prepare_inputs
-        width = max(after, default=0)
-        valid = [i * width + j for i, n in enumerate(after) for j in range(n)]
-        # windows span a fixed number of chunks of the batch's widest chunk
-        window = width * (enc.n_window_infer // chunk)
-        counts = [_get_feat_extract_output_lengths(n, enc.n_window) for n in frames]
-        windows = [[window] * (n // window) + ([n % window] if n % window else []) for n in counts]
-        return AudioLayout(chunk_lengths, valid, windows, counts)
 
     def declare_step(
         self,
@@ -194,11 +162,12 @@ class AudioEncoderSubmodule(NodeSubmodule):
         captured layers plan their own."""
         if (piecewise_leases or {}).get(self.AUDIO_LAYERS):
             return None
-        windows = self.layout([inp.tensor_inputs["audio_features"].shape[-1] for inp in inputs]).windows
+        cfg = self.encoder.config
         return SubmoduleStep(
             segments=[
                 Segment(request_id=rid, label="main", span=n)
-                for rid, spans in zip(request_ids, windows, strict=True) for n in spans
+                for rid, inp in zip(request_ids, inputs, strict=True)
+                for n in cfg.window_lengths(inp.input_seq_len)
             ],
             steps={AUDIO_ATTN: AttentionStep(causal=False)},
         )
@@ -208,24 +177,16 @@ class AudioEncoderSubmodule(NodeSubmodule):
     ) -> dict[str, PiecewiseAcceleratorGraphConfig]:
         """The layer stack, one replay a step: every clip's windows are segments
         of one row (`one_row_per_step`)."""
-        enc = self.audio_encoder
-        dtype = enc.conv_out.weight.dtype
+        d_model, dtype = self.encoder.config.d_model, self.encoder.conv_out.weight.dtype
 
         def make_static_inputs(shape: PiecewiseCaptureShape) -> dict[str, torch.Tensor]:
-            return {"hidden": torch.zeros(shape.total_tokens, enc.config.d_model, dtype=dtype, device=device)}
-
-        def declare_step(request_ids: list[str], seq_lens: list[int]) -> SubmoduleStep:
-            (rid,) = request_ids
-            return SubmoduleStep(
-                segments=[Segment(request_id=rid, label="main", span=n) for n in seq_lens],
-                steps={AUDIO_ATTN: AttentionStep(causal=False)},
-            )
+            return {"hidden": torch.zeros(shape.total_tokens, d_model, dtype=dtype, device=device)}
 
         return {
             self.AUDIO_LAYERS: PiecewisePackedConfig(
                 capture_fn=self._capture_layers,
                 make_static_inputs=make_static_inputs,
-                declare_step=declare_step,
+                attn_key=AUDIO_ATTN,
                 lease_before_step=True,
                 can_lease=self._fits_capture,
                 one_row_per_step=True,
@@ -236,68 +197,19 @@ class AudioEncoderSubmodule(NodeSubmodule):
 
     def _fits_capture(self, inputs: list[NodeInputs]) -> bool:
         """Whether a step fits the largest bucket, in rows and in attention windows."""
-        if sum(inp.input_seq_len for inp in inputs) > self.TOKEN_BUCKETS[-1]:
-            return False
-        windows = self.layout([inp.tensor_inputs["audio_features"].shape[-1] for inp in inputs]).windows
-        return sum(len(spans) for spans in windows) <= self.MAX_WINDOWS
-
-    def _attn_fn(self, resource) -> Any:
-        """The resource's attention over the step's windows, one callable per bound resource."""
-        fn = self._attn_fns.get(id(resource))
-        if fn is None:
-            fn = self._attn_fns[id(resource)] = functools.partial(resource.run, label="main")
-        return fn
+        window = self.encoder.config.window_tokens
+        rows = [inp.input_seq_len for inp in inputs]
+        return sum(rows) <= self.TOKEN_BUCKETS[-1] and sum(-(-n // window) for n in rows) <= self.MAX_WINDOWS
 
     def _capture_layers(self, inp: PiecewiseCallInputs) -> dict[str, torch.Tensor]:
         """The captured region: reads the runner's buffer, never rebinds."""
-        return {"out": self._layers(inp.static_inputs["hidden"], self._attn_fn(inp.resources[AUDIO_ATTN]))}
-
-    def _frontend(self, features: torch.Tensor, layout: AudioLayout) -> torch.Tensor:
-        """HF's conv frontend over the padded chunks, keeping the frames it maps to: ``(rows, d_model)``."""
-        enc = self.audio_encoder
-        padded = nn.utils.rnn.pad_sequence(
-            features.T.split(layout.chunk_lengths, dim=0), batch_first=True,
-        ).transpose(1, 2).unsqueeze(1).to(enc.conv2d1.weight.dtype)
-        # Zero chunks up to a power of two: cuDNN builds a plan for each new conv
-        # shape (tens of ms of host time), and the chunk count of a step varies.
-        # The kept frames index only the real chunks.
-        chunks = padded.shape[0]
-        bucket = max(8, 1 << (chunks - 1).bit_length())
-        if bucket > chunks:
-            padded = torch.cat([padded, padded.new_zeros((bucket - chunks, *padded.shape[1:]))])
-        embeds = []
-        for chunk in padded.split(enc.conv_chunksize, dim=0):
-            x = torch.nn.functional.gelu(enc.conv2d1(chunk))
-            x = torch.nn.functional.gelu(enc.conv2d2(x))
-            embeds.append(torch.nn.functional.gelu(enc.conv2d3(x)))
-        x = torch.cat(embeds, dim=0)
-        b, c, f, t = x.size()
-        x = enc.conv_out(x.permute(0, 3, 1, 2).contiguous().view(b, t, c * f))
-        x = x + enc.positional_embedding.positional_embedding[:t, :].unsqueeze(0).to(x.dtype)
-        valid = torch.tensor(layout.valid, dtype=torch.long, pin_memory=x.device.type == "cuda")
-        return x.reshape(-1, x.shape[-1]).index_select(0, valid.to(x.device, non_blocking=True))
-
-    def _layers(self, hidden: torch.Tensor, attn) -> torch.Tensor:
-        """HF's encoder layers, ``ln_post`` and output projection over packed rows,
-        attending through ``attn`` over the planned windows."""
-        enc = self.audio_encoder
-        rows = hidden.shape[0]
-        for layer in enc.layers:
-            sa = layer.self_attn
-            x = layer.self_attn_layer_norm(hidden)
-            q = sa.q_proj(x).view(rows, sa.num_heads, -1)
-            k = sa.k_proj(x).view(rows, sa.num_heads, -1)
-            v = sa.v_proj(x).view(rows, sa.num_heads, -1)
-            hidden = hidden + sa.out_proj(attn(q, k, v).reshape(rows, -1))
-            x = layer.fc2(layer.activation_fn(layer.fc1(layer.final_layer_norm(hidden))))
-            hidden = hidden + x
-        hidden = enc.ln_post(hidden)
-        return enc.proj2(enc.act(enc.proj1(hidden)))
+        return {"out": self.encoder.encode(inp.static_inputs["hidden"], None)}
 
     def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
         # A step's clips run as one pass only within the largest capture, which
-        # bounds its memory; a larger step runs each clip as its own pass, which
-        # still leases and replays the capture when the clip fits it.
+        # bounds its memory until the scheduler can budget a step's tokens; a
+        # larger step runs each clip as its own pass, which still leases and
+        # replays the capture when the clip fits it.
         return self._fits_capture(model_inputs)
 
     def max_batch_size(self, graph_walk: str) -> int:
@@ -309,11 +221,15 @@ class AudioEncoderSubmodule(NodeSubmodule):
         engine_inputs: ModelInputsFromEngine,
         inputs: list[NodeInputs],
     ) -> dict[str, torch.Tensor | Any]:
-        # Clips pack along time; the windows keep each clip's attention its own.
-        features = [inp.tensor_inputs["audio_features"] for inp in inputs]
+        # the clips zero-padded to the longest; the frontend packs their frames
+        lens = [inp.tensor_inputs["audio_features"].shape[-1] for inp in inputs]
+        longest = max(lens)
         return {
-            "audio_features": torch.cat(features, dim=-1),
-            "layout": self.layout([f.shape[-1] for f in features]),
+            "audio_features": torch.stack([
+                nn.functional.pad(inp.tensor_inputs["audio_features"], (0, longest - n))
+                for inp, n in zip(inputs, lens, strict=True)
+            ]),
+            "feature_lens": lens,
         }
 
     def forward(
@@ -321,39 +237,38 @@ class AudioEncoderSubmodule(NodeSubmodule):
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
         audio_features: torch.Tensor,
-        layout: AudioLayout,
+        feature_lens: list[int],
         **kwargs,
     ) -> NameToTensorList:
         rid = engine_inputs.request_ids[0]
-        return self.forward_batched(graph_walk, engine_inputs, audio_features, layout)[rid]
+        return self.forward_batched(graph_walk, engine_inputs, audio_features, feature_lens)[rid]
 
     def forward_batched(
         self,
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
         audio_features: torch.Tensor,
-        layout: AudioLayout,
+        feature_lens: list[int],
         **kwargs,
     ) -> dict[str, NameToTensorList]:
         """Encode the step's clips in one pass and split the rows back by clip."""
-        hidden = self._frontend(audio_features, layout)
-        rows = hidden.shape[0]
+        enc = self.encoder
+        layout = enc.layout(feature_lens)
+        hidden = enc.frontend(audio_features, feature_lens)
         # replay only under the step's lease; a step the region refused runs
         # eagerly under declare_step's own plan
         if self.AUDIO_LAYERS in engine_inputs.piecewise_leases:
-            runner = engine_inputs.piecewise_runners[self.AUDIO_LAYERS]
-            # a copy: the next step's replay overwrites the output buffer
-            out = runner.run(
+            # an owned copy: the next step's replay overwrites the output buffer
+            out = engine_inputs.piecewise_runners[self.AUDIO_LAYERS].run(
                 static_inputs={"hidden": hidden},
-                request_ids=[engine_inputs.request_ids[0]],
-                seq_lens=[n for spans in layout.windows for n in spans],
-                real_bs=1,
-            )["out"][:rows].clone()
+                request_ids=engine_inputs.request_ids,
+                seq_lens=layout.window_lengths,
+            )["out"]
         else:
-            out = self._layers(hidden, self._attn_fn(engine_inputs.resources[AUDIO_ATTN]))
+            out = enc.encode(hidden, layout.cu_seqlens)
         return {
             rid: {"audio_embeds": [part]}
-            for rid, part in zip(engine_inputs.request_ids, out.split(layout.counts), strict=True)
+            for rid, part in zip(engine_inputs.request_ids, out.split(layout.tokens_per_request), strict=True)
         }
 
 

@@ -23,6 +23,7 @@ from mstar.engine.resources.base import CachedPrefix
 from mstar.engine.resources.kv.plan import KVPlanOutputs
 from mstar.engine.resources.position.config import PositionConfig
 from mstar.engine.resources.position.manager import RopeManager
+from mstar.model.components.aut_encoder import AuTEncoder, AuTEncoderConfig
 from mstar.model.qwen3_omni.components.rope import get_rope_index_vision
 from mstar.model.qwen3_omni.config import AUDIO_ATTN, THINKER_KV, THINKER_MIXED, THINKER_POS, Qwen3OmniModelConfig
 from mstar.model.qwen3_omni.qwen3_omni_model import Qwen3OmniModel, image_span
@@ -298,22 +299,25 @@ def test_a_prompt_with_a_video_keys_only_its_leading_text(model):
         "a prompt with a video keyed other than its leading text"
     )
 
-def _audio(n_window: int) -> AudioEncoderSubmodule:
+def _audio(n_window: int) -> tuple[AudioEncoderSubmodule, Qwen3OmniMoeAudioEncoder]:
+    """The submodule over the shared AuT encoder, and HF's encoder with the same weights."""
     config = Qwen3OmniMoeAudioEncoderConfig(
         encoder_layers=1, d_model=32, encoder_attention_heads=2, encoder_ffn_dim=64, output_dim=16,
         downsample_hidden_size=8, n_window=n_window,
     )
-    encoder = Qwen3OmniMoeAudioEncoder._from_config(config, attn_implementation="sdpa").eval()
-    return AudioEncoderSubmodule(encoder, config=None)
+    hf = Qwen3OmniMoeAudioEncoder._from_config(config, attn_implementation="sdpa").eval()
+    encoder = AuTEncoder(AuTEncoderConfig.from_hf(config.to_dict()), attn_key=AUDIO_ATTN).eval()
+    encoder.load_weights(list(hf.state_dict().items()))
+    return AudioEncoderSubmodule(encoder, config=None), hf
 
 
 class _WindowedAttention:
-    """The ragged attention resource's eager answer: each planned window attends only to itself."""
+    """The ragged attention resource's eager answer: each declared window attends only to itself."""
 
-    def __init__(self, windows: list[list[int]]):
-        self.spans = [n for spans in windows for n in spans]
+    def __init__(self, step):
+        self.spans = [segment.span for segment in step.segments]
 
-    def run(self, q, k, v, label):
+    def run(self, q, k, v, label=None):
         return torch.cat([
             nn.functional.scaled_dot_product_attention(*(t.transpose(0, 1) for t in qkv)).transpose(0, 1)
             for qkv in zip(q.split(self.spans), k.split(self.spans), v.split(self.spans), strict=True)
@@ -334,21 +338,21 @@ def test_packed_clips_split_by_the_encoder_s_own_window():
     """A clip's embedding count is counted with the encoder's ``n_window``, as the
     prompt layout counts it; with the default window's count a 104-frame clip
     would claim 14 embeddings where a 52-frame window gives 13."""
-    audio = _audio(n_window=52)
+    audio, hf = _audio(n_window=52)
     clips = (torch.randn(128, 104), torch.randn(128, 60))
     prepared = [audio.prepare_inputs("prefill_audio", None, {"audio_features": [clip]}) for clip in clips]
-    tensors = audio.preprocess("prefill_audio", None, prepared)
+    # attention runs over the windows the step declared
+    step = audio.declare_step("prefill_audio", ["a", "b"], prepared)
+    audio.bind_node_resources({AUDIO_ATTN: _WindowedAttention(step)})
     engine_inputs = SimpleNamespace(
         request_ids=["a", "b"],
         # the step holds no lease, so the layers run eagerly even though a runner could
         piecewise_runners={AudioEncoderSubmodule.AUDIO_LAYERS: _UnleasedRunner()}, piecewise_leases={},
-        resources={AUDIO_ATTN: _WindowedAttention(tensors["layout"].windows)},
     )
+    tensors = audio.preprocess("prefill_audio", None, prepared)
     with torch.no_grad():
         packed = audio.forward_batched("prefill_audio", engine_inputs, **tensors)
-        alone = [
-            audio.audio_encoder(clip, feature_lens=torch.tensor([clip.shape[-1]])).last_hidden_state for clip in clips
-        ]
+        alone = [hf(clip, feature_lens=torch.tensor([clip.shape[-1]])).last_hidden_state for clip in clips]
 
     assert [packed[rid]["audio_embeds"][0].shape for rid in "ab"] == [a.shape for a in alone], (
         "a packed clip's embeddings were split at a window other than the encoder's"
@@ -360,7 +364,7 @@ def test_packed_clips_split_by_the_encoder_s_own_window():
 def test_clips_past_the_largest_capture_run_one_per_pass():
     """A step's clips pack into one encoder pass only while they fit the
     largest capture bucket, which bounds the pass's memory."""
-    audio = AudioEncoderSubmodule(SimpleNamespace(n_window=50, n_window_infer=400), config=None)
+    audio = AudioEncoderSubmodule(SimpleNamespace(config=AuTEncoderConfig(n_window_infer=400)), config=None)
     # 40k mel frames, ~5.2k encoder rows: one fits the 8192-row bucket, two don't
     clips = [audio.prepare_inputs("prefill_audio", None, {"audio_features": [torch.zeros(1, 40_000)]})] * 2
     assert audio.can_batch(None, clips[:1])

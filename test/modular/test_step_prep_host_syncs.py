@@ -434,10 +434,11 @@ def test_qwen3_omni_audio_encoder_prep_reads_no_tensor():
     shape, with no host read of a lengths tensor."""
     from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import _get_feat_extract_output_lengths
 
+    from mstar.model.components.aut_encoder import AuTEncoderConfig
     from mstar.model.qwen3_omni.submodules import AudioEncoderSubmodule
 
-    encoder = SimpleNamespace(n_window=50, n_window_infer=400)
-    sub = AudioEncoderSubmodule(encoder, SimpleNamespace())
+    config = AuTEncoderConfig(n_window_infer=400)
+    sub = AudioEncoderSubmodule(SimpleNamespace(config=config), SimpleNamespace())
     rows = []
     for frames in (1234, 3000):
         with _HostReads() as reads:
@@ -447,7 +448,7 @@ def test_qwen3_omni_audio_encoder_prep_reads_no_tensor():
         assert reads.reads == []
         assert rows[-1].input_seq_len == int(_get_feat_extract_output_lengths(torch.tensor(frames), 50))
     with _HostReads() as reads:
-        layout = sub.layout([1234, 3000])
+        step = sub.declare_step("prefill_audio", ["a", "b"], rows)
     assert reads.reads == []
-    assert layout.counts == [row.input_seq_len for row in rows]
+    assert [s.span for s in step.segments] == [w for row in rows for w in config.window_lengths(row.input_seq_len)]
     assert sub.max_batch_size("prefill_audio") == AudioEncoderSubmodule.MAX_BATCH_SIZE
