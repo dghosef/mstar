@@ -1938,9 +1938,9 @@ lengths alone passes the cap; in SP mode, where each rank plans its own zigzag s
 checks every partner's share. The bound copies FlashInfer 0.7.2's planner rules, so a placed MLA
 pool refuses any other FlashInfer at load. That planner's causal tile-bound check can also refuse
 a causal plan at a head count that doesn't divide its query tile, which is 64 on a plan averaging
-few queries a row (a captured share's empty rows make one), so a placed MLA pool is refused at
-load unless each rank's head count divides 64: in SP mode the refusal could come on one rank
-alone, and in TP mode it would fail steps mid-serving.
+few queries a row (a captured bucket's padding rows, or a zigzag share's empty ones, make one), so
+a placed MLA pool is refused at load unless each rank's head count divides 64: in SP mode the
+refusal could come on one rank alone, and in TP mode it would fail steps mid-serving.
 
 Besides attention, the position resource (RoPE) and the recurrent state pool (GDN, KDA) support
 a placed pool; a recurrent pool on an SP-placed node holds the same state on every SP partner.
