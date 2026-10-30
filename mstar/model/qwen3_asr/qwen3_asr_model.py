@@ -51,7 +51,7 @@ from mstar.graph.base import GraphEdge, GraphNode, GraphSection, Loop, Sequentia
 from mstar.graph.special_destinations import EMIT_TO_CLIENT
 from mstar.model.base import ForwardPassArgs, KVLabel, LabelLayout, Model, ProcessPromptOutput, Span, TensorAndMetadata
 from mstar.model.components.audio_features import LogMelSpectrogram, load_speech_file
-from mstar.model.components.aut_encoder_submodule import aut_attention_spec
+from mstar.model.components.aut_encoder_submodule import aut_attention_spec, load_aut_encoder_submodule
 from mstar.model.components.request_kwargs import checked_request_kwargs
 from mstar.model.qwen3_asr.config import (
     ASR_TEXT_TAG,
@@ -453,8 +453,6 @@ class Qwen3ASRModel(Model):
         return submodule
 
     def _create_encoder_submodule(self, device: str, autocast_dtype: torch.dtype | None) -> NodeSubmodule:
-        from mstar.model.components.aut_encoder_submodule import load_aut_encoder_submodule
-
         log_mel = LogMelSpectrogram(
             num_mel_bins=self.config.num_mel_bins,
             sampling_rate=self.config.sampling_rate,

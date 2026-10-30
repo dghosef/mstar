@@ -78,9 +78,10 @@ class AuTEncoderSubmodule(NodeSubmodule):
     turns it into unpadded log-mel features on the GPU (``prepare_inputs``)
     and emits ``audio_embeds`` of shape
     ``(num_audio_tokens, hidden)`` in LLM space. Requests are packed into
-    one forward; every 8 s attention window of every request is one
-    segment of the node's ragged-attention step, so the runner plans the
-    kernel's layout before the forward and nothing is recomputed inside.
+    one forward, up to the largest capture's tokens; every 8 s attention
+    window of every request is one segment of the node's ragged-attention
+    step, so the runner plans the kernel's layout before the forward and
+    nothing is recomputed inside.
 
     Built without a ``log_mel`` it takes each clip's log-mel features as
     given (``audio_features``): Qwen3-Omni's audio encoder is the same AuT,
@@ -177,7 +178,7 @@ class AuTEncoderSubmodule(NodeSubmodule):
         token count. At ASR clip lengths (13 tokens a second) its GEMMs are a
         few dozen rows, so eager it is launch-bound: a 7 s clip's stack is
         ~6.3 ms eager and ~1.9 ms replayed. The conv frontend before it runs
-        eagerly. Batches past the largest bucket run eagerly too."""
+        eagerly. A clip past the largest bucket runs eagerly, alone."""
         d_model = self.encoder.config.d_model
 
         def make_static_inputs(shape: PiecewiseCaptureShape) -> dict[str, torch.Tensor]:

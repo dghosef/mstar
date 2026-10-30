@@ -69,7 +69,7 @@ from mstar.model.base import (
     TensorAndMetadata,
 )
 from mstar.model.components import MoeParallelConfig
-from mstar.model.components.aut_encoder_submodule import aut_attention_spec
+from mstar.model.components.aut_encoder_submodule import aut_attention_spec, load_aut_encoder_submodule
 from mstar.model.components.code_predictor_kernels import ResidualCodePredictor
 from mstar.model.media_limits import VideoBudget, probe_video
 from mstar.model.multimodal import (
@@ -1699,8 +1699,6 @@ class Qwen3OmniModel(Model):
     def _create_audio_encoder_submodule(self, device: str, autocast_dtype: torch.dtype | None) -> NodeSubmodule:
         """The audio encoder: the shared AuT node (Qwen3-ASR's encoder is this
         checkpoint's, unchanged), fed the API server's log-mel features."""
-        from mstar.model.components.aut_encoder_submodule import load_aut_encoder_submodule
-
         return load_aut_encoder_submodule(self.local_dir, self.config.audio_encoder, device, autocast_dtype)
 
     def _create_vision_encoder_submodule(self, device: str) -> NodeSubmodule:
