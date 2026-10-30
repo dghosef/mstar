@@ -1903,10 +1903,13 @@ the ``k`` and ``v`` the layer passes to ``run``. A layer that calls ``attn.run``
 pass them (``AttentionCallable`` does); one that writes K/V in a fused kernel that leaves
 ``k`` unrotated (``Qwen3Attention`` in ``mstar/model/components/qwen3_lm.py``) rotates it in
 place first when ``kv.placement`` is set. The mixed decode/prefill wrapper (``splits``) is
-not used. Besides attention, the position resource (RoPE) and the recurrent state pool
-(GDN, KDA) support a placed pool; a recurrent pool on an SP-placed node holds the same state
-on every SP partner. The dense, flex, XPU and MLA backends, cross-attention, DSA (the GLM-5.x
-indexer) and ``sliding_window`` attention are not supported and are refused at load.
+not used. The MLA backend (``flashinfer_mla``) attends a placed pool the same way, its own
+tokens on a second MLA call over the latents the layer passes as ``k`` (``MLAAttention`` does),
+and refuses a ``context_only`` step; it is proven at the kernel level only, until an MLA model
+without DSA is servable. Besides attention, the position resource (RoPE) and the recurrent
+state pool (GDN, KDA) support a placed pool; a recurrent pool on an SP-placed node holds the
+same state on every SP partner. The dense, flex and XPU backends, cross-attention, DSA (the
+GLM-5.x indexer) and ``sliding_window`` attention are not supported and are refused at load.
 
 .. note::
 

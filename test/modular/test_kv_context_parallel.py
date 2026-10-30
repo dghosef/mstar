@@ -24,12 +24,12 @@ from test_kv_prefix_tp import WALKS, _ctx, _follow, _ingest, _send, _step, _toke
 from mstar.distributed.communication import CommGroup, JointGroups, WorkerParallelGroups
 from mstar.engine.engine import Engine
 from mstar.engine.resources.attn.base import AttentionManager
-from mstar.engine.resources.attn.config import AttentionConfig, AttentionSpec, AttentionStep
+from mstar.engine.resources.attn.config import AttentionConfig, AttentionSpec, AttentionStep, AttnBackend
 from mstar.engine.resources.base import EngineResourceInfo, Resource
 from mstar.engine.resources.context_parallel import merge
 from mstar.engine.resources.kv import manager as manager_mod
 from mstar.engine.resources.kv.cache import KVCache
-from mstar.engine.resources.kv.config import KVReqConfig, KVSpec, KVStep, PagedKVConfig
+from mstar.engine.resources.kv.config import KVLayout, KVReqConfig, KVSpec, KVStep, PagedKVConfig
 from mstar.engine.resources.kv.manager import KVManager
 from mstar.engine.resources.kv.plan import SINK_PAGE, KVPlanOutput, KVPlanOutputs, SequenceView, build_paged_indptrs
 from mstar.engine.resources.kv.transfer import KVReadInfo, ShmKVTransferEngine
@@ -245,10 +245,18 @@ def test_an_sp_placed_node_shards_heads_over_tp_and_refuses_a_dependent_without_
         page_size=PAGE_SIZE, context_parallel=True,
     )
     kv_spec = KVSpec(resource_key="kv", nodes={NODE}, config=pool())
-    # the resources Qwen3.5 puts over its pool, then a dependent without support
+    # the resources Qwen3.5 puts over its pool, an MLA pool with its attention (GLM-5.x without
+    # DSA), then a dependent without support
     specs = [
         kv_spec,
         AttentionSpec(resource_key="attn", nodes={NODE}, config=AttentionConfig(kv_cache="kv")),
+        KVSpec(resource_key="mla_kv", nodes={NODE}, config=PagedKVConfig(
+            num_layers=1, num_kv_heads=1, head_dim=LATENT, max_seq_len=256, num_qo_heads=4, max_num_pages=8,
+            page_size=PAGE_SIZE, context_parallel=True, layout=KVLayout.MLA, kv_lora_rank=CKV, qk_rope_head_dim=KPE,
+        )),
+        AttentionSpec(resource_key="mla_attn", nodes={NODE}, config=AttentionConfig(
+            kv_cache="mla_kv", backend=AttnBackend.FLASHINFER_MLA, sm_scale=LATENT ** -0.5,
+        )),
         PositionSpec(resource_key="rope", nodes={NODE}, config=PositionConfig(kv_cache="kv")),
         RecurrentStateSpec(resource_key="gdn", nodes={NODE}, config=RecurrentStateConfig(
             num_layers=1, max_slots=4, kv_cache="kv",
@@ -285,6 +293,9 @@ def test_an_sp_placed_node_shards_heads_over_tp_and_refuses_a_dependent_without_
 # --- attention over a placed pool -------------------------------------------------------------
 
 HEAD_DIM, Q_HEADS, CP_PAGE = 64, 4, 4
+# MLA: the latent [ckv | kpe], in the one shape FlashInfer's MLA kernel takes
+CKV, KPE = 512, 64
+LATENT = CKV + KPE
 # (stored context, new tokens) per row. Prefill: a row with no context, one whose 1-token
 # context only rank 0 holds, and contexts ending on a page whose one token rank 1 lacks.
 PREFILL_ROWS = ((0, 5), (1, 3), (5, 2), (6, 1))
@@ -368,59 +379,86 @@ def _reference_flashinfer() -> types.ModuleType:
 
 @dataclass
 class _Case:
-    """One step's KV plan, the logical keys of its rows, and its queries."""
+    """One step's KV plan, the logical keys of its rows, and its queries. Under MLA a key is the
+    latent, which is also its value (the output being the ``ckv`` part)."""
     plan: KVPlanOutputs
-    keys: list[torch.Tensor]       # per row [L, 2, 1, D], K and V of every position
-    q: torch.Tensor                # [N, Q_HEADS, D]
+    keys: list[torch.Tensor]       # per row, every position's [2, 1, D] K and V, or [LATENT]
+    q: torch.Tensor                # [N, Q_HEADS, D or LATENT]
     rows: tuple[tuple[int, int], ...]
+    mla: bool
 
     @classmethod
-    def build(cls, rows, device, dtype) -> _Case:
+    def build(cls, rows, device, dtype, mla=False) -> _Case:
         gen = torch.Generator().manual_seed(0)
         views, keys, page = [], [], 1
+        key_shape, width = ((LATENT,), LATENT) if mla else ((2, 1, HEAD_DIM), HEAD_DIM)
         for i, (context, new) in enumerate(rows):
             length = context + new
             pages = list(range(page, page + -(-length // CP_PAGE)))
             page += len(pages)
             views.append(SequenceView(f"r{i}", "main", pages, length, new))
-            keys.append(torch.randn(length, 2, 1, HEAD_DIM, generator=gen).to(device, dtype))
-        q = torch.randn(sum(new for _, new in rows), Q_HEADS, HEAD_DIM, generator=gen).to(device, dtype)
+            keys.append(torch.randn(length, *key_shape, generator=gen).to(device, dtype))
+        q = torch.randn(sum(new for _, new in rows), Q_HEADS, width, generator=gen).to(device, dtype)
         indptrs = build_paged_indptrs(views, CP_PAGE)
-        return cls(KVPlanOutputs({"main": KVPlanOutput(indptrs, views)}), keys, q, rows)
+        return cls(KVPlanOutputs({"main": KVPlanOutput(indptrs, views)}), keys, q, rows, mla)
 
     def cache(self, placement) -> torch.Tensor:
         """This rank's layer of the pool: each owned slot at its physical place, NaN elsewhere."""
         slots = CP_PAGE // placement.size
         pages = max(view.page_idxs[-1] for view in self.plan["main"].views) + 1
-        cache = torch.full((pages, 2, slots, 1, HEAD_DIM), math.nan, device=self.q.device, dtype=self.q.dtype)
+        shape = (pages, slots, LATENT) if self.mla else (pages, 2, slots, 1, HEAD_DIM)
+        cache = torch.full(shape, math.nan, device=self.q.device, dtype=self.q.dtype)
         for view, kv in zip(self.plan["main"].views, self.keys, strict=True):
             for pos in range(view.length):
                 offset = pos % CP_PAGE
                 if offset % placement.size == placement.index:
-                    cache[view.page_idxs[pos // CP_PAGE], :, offset // placement.size] = kv[pos]
+                    page, slot = view.page_idxs[pos // CP_PAGE], offset // placement.size
+                    (cache[page, slot] if self.mla else cache[page, :, slot]).copy_(kv[pos])
         return cache
 
-    def new_kv(self):
-        """The step's own tokens' K and V, ``[N, 1, D]`` each, as the layer passes them to ``run``."""
+    def queries(self, heads=slice(None)) -> tuple[torch.Tensor, ...]:
+        """The query ``run`` takes for ``heads``: ``(q,)``, or under MLA ``(q_nope, q_pe)``."""
+        q = self.q[:, heads]
+        return (q[..., :CKV].contiguous(), q[..., CKV:].contiguous()) if self.mla else (q.contiguous(),)
+
+    def new_keys(self) -> tuple[torch.Tensor, ...]:
+        """The step's own tokens' keys as the layer passes them to ``run``: K and V ``[N, 1, D]``,
+        or under MLA the latents ``[N, LATENT]``."""
         new = torch.cat([kv[context:] for kv, (context, _) in zip(self.keys, self.rows, strict=True)])
-        return new[:, 0], new[:, 1]
+        return (new,) if self.mla else (new[:, 0], new[:, 1])
+
+    def run(self, attn, placement, heads=slice(None), keys=True) -> torch.Tensor:
+        """``attn.run`` for ``heads`` over this rank's cache, passed the new keys when ``keys``."""
+        q, cache = self.queries(heads), self.cache(placement)
+        new = self.new_keys() if keys else (None, None)
+        if self.mla:
+            return attn.run(q[0], "main", kv_cache_layer=cache, k=new[0], q_pe=q[1])
+        return attn.run(q[0], "main", kv_cache_layer=cache, k=new[0], v=new[1])
 
     def want(self) -> torch.Tensor:
         outs = []
         qo = 0
         for kv, (_, new) in zip(self.keys, self.rows, strict=True):
-            outs.append(_reference(self.q[qo:qo + new], kv[:, 0], kv[:, 1])[0])
+            k, v = (kv[:, None], kv[:, None]) if self.mla else (kv[:, 0], kv[:, 1])
+            out = _reference(self.q[qo:qo + new], k, v)[0]
+            outs.append(out[..., :CKV] if self.mla else out)
             qo += new
         return torch.cat(outs)
 
 
 def _cp_attention(
-    joint: JointGroups, device: torch.device, dtype: torch.dtype, head_shards: int, num_kv_heads=1, **attention,
+    joint: JointGroups, device: torch.device, dtype: torch.dtype, head_shards: int, mla=False, num_kv_heads=1,
+    **attention,
 ):
-    """A ``FlashInferManager`` over a placed pool, and this rank's placement."""
+    """A ``FlashInferManager`` (``FlashInferMLAManager`` for ``mla``) over a placed pool, and this
+    rank's placement."""
+    layout = dict(head_dim=HEAD_DIM)
+    if mla:
+        layout = dict(head_dim=LATENT, layout=KVLayout.MLA, kv_lora_rank=CKV, qk_rope_head_dim=KPE)
+        attention.update(backend=AttnBackend.FLASHINFER_MLA, sm_scale=LATENT ** -0.5)
     kv = KVSpec(resource_key="kv", nodes={NODE}, config=PagedKVConfig(
-        num_layers=1, num_kv_heads=num_kv_heads, head_dim=HEAD_DIM, max_seq_len=64, num_qo_heads=Q_HEADS,
-        max_num_pages=16, page_size=CP_PAGE, context_parallel=True,
+        num_layers=1, num_kv_heads=num_kv_heads, max_seq_len=64, num_qo_heads=Q_HEADS,
+        max_num_pages=16, page_size=CP_PAGE, context_parallel=True, **layout,
     ))
     info = EngineResourceInfo(
         device=device, joint_comm_group=joint, kv_dtype=dtype, dependencies={"kv": kv}, head_shards=head_shards,
@@ -433,14 +471,14 @@ def _cp_attention(
     return attn, placement
 
 
-def _plan(attn, case: _Case, slot: int = 0, bucket: BucketKey | None = None) -> None:
+def _plan(attn, case: _Case, slot: int = 0, bucket: BucketKey | None = None, **step) -> None:
     ctx = StepContext(request_ids=tuple(v.request_id for v in case.plan["main"].views), graph_walk="w",
                       slot=slot, capture=False, slot_lease=None if bucket is None else SlotLease(slot, bucket))
     ctx.plan_results["kv"] = case.plan
-    attn.plan(AttentionStep(), ctx)
+    attn.plan(AttentionStep(**step), ctx)
 
 
-def _over_ranks(rank, world, backend, store, over_sp, rows):
+def _over_ranks(rank, world, backend, store, over_sp, rows, mla):
     """One rank of a ``world``-rank placement running ``rows`` through ``FlashInferManager.run``
     against one rank attending every key; every rank issues the same collectives, same shapes."""
     os.environ["MSTAR_WORKSPACE_BUFFER_MB"] = "1"
@@ -464,15 +502,16 @@ def _over_ranks(rank, world, backend, store, over_sp, rows):
         joint = (JointGroups(tp_group=CommGroup.trivial(), sp_group=group) if over_sp
                  else JointGroups(tp_group=group, sp_group=CommGroup.trivial()))
         dtype = torch.bfloat16 if cuda else torch.float32
-        attn, placement = _cp_attention(joint, device, dtype, head_shards=1 if over_sp else world)
-        case = _Case.build(rows, device, dtype)
+        attn, placement = _cp_attention(joint, device, dtype, head_shards=1 if over_sp else world, mla=mla)
+        case = _Case.build(rows, device, dtype, mla)
+        # the slot plans the other kind of step first
+        _plan(attn, _Case.build(DECODE_ROWS if rows == PREFILL_ROWS else PREFILL_ROWS, device, dtype, mla))
         _plan(attn, case)
         heads = slice(None) if over_sp else slice(rank * Q_HEADS // world, (rank + 1) * Q_HEADS // world)
-        k, v = case.new_kv()
         if rows == PREFILL_ROWS:
             with pytest.raises(ValueError, match="got none"):
-                attn.run(case.q[:, heads].contiguous(), "main", kv_cache_layer=case.cache(placement))
-        out = attn.run(case.q[:, heads].contiguous(), "main", kv_cache_layer=case.cache(placement), k=k, v=v)
+                case.run(attn, placement, heads, keys=False)
+        out = case.run(attn, placement, heads)
         torch.testing.assert_close(out.float(), case.want()[:, heads], **({"atol": 2e-2, "rtol": 2e-2} if cuda else {}))
         everyone = [None] * world
         dist.all_gather_object(everyone, calls)
@@ -540,35 +579,49 @@ def test_sliding_window_attention_over_a_placed_pool_is_refused():
         _cp_attention(joint, CPU, torch.float32, head_shards=P, sliding_window=8)
 
 
+# the MLA case on CPU runs the MLA wrapper's own torch fallback, which these rows check the same way
+LAYOUTS = pytest.mark.parametrize("mla", [False, True], ids=["gqa", "mla"])
+
+
+@LAYOUTS
 @pytest.mark.parametrize("rows", [PREFILL_ROWS, DECODE_ROWS], ids=["prefill", "decode"])
 @pytest.mark.parametrize("over_sp", [False, True], ids=["tp", "sp"])
-def test_two_ranks_attend_a_placed_pool_like_one_rank_with_the_same_collectives(tmp_path, over_sp, rows):
-    mp.spawn(_over_ranks, args=(P, "gloo", str(tmp_path / "store"), over_sp, rows), nprocs=P)
+def test_two_ranks_attend_a_placed_pool_like_one_rank_with_the_same_collectives(tmp_path, over_sp, rows, mla):
+    mp.spawn(_over_ranks, args=(P, "gloo", str(tmp_path / "store"), over_sp, rows, mla), nprocs=P)
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs 2 GPUs")
+@LAYOUTS
 @pytest.mark.parametrize("rows", [PREFILL_ROWS, DECODE_ROWS], ids=["prefill", "decode"])
 @pytest.mark.parametrize("over_sp", [False, True], ids=["tp", "sp"])
-def test_two_gpus_attend_a_placed_pool_like_one(tmp_path, over_sp, rows):
+def test_two_gpus_attend_a_placed_pool_like_one(tmp_path, over_sp, rows, mla):
     pytest.importorskip("flashinfer")
-    mp.spawn(_over_ranks, args=(P, "nccl", str(tmp_path / "store"), over_sp, rows), nprocs=P)
+    mp.spawn(_over_ranks, args=(P, "nccl", str(tmp_path / "store"), over_sp, rows, mla), nprocs=P)
+
+
+def test_mla_attention_refuses_a_context_only_step_over_a_placed_pool():
+    joint = JointGroups(tp_group=_group(0, P), sp_group=CommGroup.trivial())
+    attn, _ = _cp_attention(joint, CPU, torch.float32, head_shards=P, mla=True)
+    with pytest.raises(ValueError, match="context_only step over a context-parallel KV pool"):
+        _plan(attn, _Case.build(PREFILL_ROWS, CPU, torch.float32, mla=True), context_only=True)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@LAYOUTS
 @pytest.mark.parametrize("captured", [False, True], ids=["eager", "captured"])
 @pytest.mark.parametrize("rows", [PREFILL_ROWS, DECODE_ROWS], ids=["prefill", "decode"])
-def test_flashinfer_partials_over_simulated_ranks_merge_to_full_attention(rows, captured):
+def test_flashinfer_partials_over_simulated_ranks_merge_to_full_attention(rows, captured, mla):
     """FlashInfer itself, one process: each of P ranks' partials over its slots, masked and merged
     with the step's own tokens' attention, against attention over every key."""
     pytest.importorskip("flashinfer")
     device, dtype = torch.device("cuda"), torch.bfloat16
-    case = _Case.build(rows, device, dtype)
-    k, v = case.new_kv()
+    case = _Case.build(rows, device, dtype, mla)
+    queries, new_keys = case.queries(), case.new_keys()
     bucket = BucketKey("w", bs=len(rows), num_tokens=case.q.shape[0]) if captured else None
     outs, lses, new = [], [], None
     for rank in range(P):
         joint = JointGroups(tp_group=CommGroup.trivial(), sp_group=_group(rank, P))
-        attn, placement = _cp_attention(joint, device, dtype, head_shards=1)
+        attn, placement = _cp_attention(joint, device, dtype, head_shards=1, mla=mla)
         # this rank's side of the exchange alone: masked, through a gather over itself
         alone = placement._replace(group=CommGroup.trivial())
         _plan(attn, case, bucket=bucket)
@@ -576,8 +629,8 @@ def test_flashinfer_partials_over_simulated_ranks_merge_to_full_attention(rows, 
         cache = case.cache(placement)
 
         def partials(wrapper=wrapper, cache=cache, alone=alone):
-            return (*alone.exchange_partials(*wrapper.attend_context(case.q, cache)),
-                    *(wrapper.attend_new(case.q, k, v) if wrapper.new is not None else ()))
+            return (*alone.exchange_partials(*wrapper.attend_context(*queries, cache)),
+                    *(wrapper.attend_new(*queries, *new_keys) if wrapper.new is not None else ()))
 
         result = partials()
         if captured:
