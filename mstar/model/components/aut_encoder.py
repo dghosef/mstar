@@ -298,13 +298,13 @@ class AuTEncoder(nn.Module):
             chunks.append(padded.view(cfg.num_mel_bins, n_chunks, chunk).permute(1, 0, 2))
             valid += [cfg.tokens_per_chunk] * full + ([_conv_length(rem)] if rem else [])
         x = torch.cat(chunks, dim=0).unsqueeze(1).to(self.conv2d1.weight.dtype)  # (N, 1, mel, chunk)
-        # Empty chunks pad the last convolution launch up to a multiple of 32
-        # chunks (8 for a launch of at most 8; at most conv_chunksize): cuDNN
-        # builds a plan for each new conv shape (tens of ms of host time), and
-        # the chunk count of a step varies. Padding only the last launch, by at
-        # most 31 chunks, bounds the extra work on any step.
+        # Empty chunks pad the last convolution launch to the smaller of the
+        # next power of two and the next multiple of 32 chunks (at least 8, at
+        # most conv_chunksize): cuDNN builds a plan for each new conv shape
+        # (tens of ms of host time), and the chunk count of a step varies.
+        # Padding only the last launch, by at most 31 chunks, bounds the waste.
         last = (x.shape[0] - 1) % cfg.conv_chunksize + 1
-        size = 8 if last <= 8 else -(-last // 32) * 32
+        size = max(8, min(1 << (last - 1).bit_length(), -(-last // 32) * 32))
         pad = min(cfg.conv_chunksize, size) - last
         if pad > 0:
             x = torch.cat([x, x.new_zeros((pad, *x.shape[1:]))])
