@@ -7,8 +7,8 @@ verbatim even where it could be tidied — the log_softmax is applied twice on t
 CFG path because the reference applies it twice, and the mask id is driven to
 -inf after the combine rather than before.
 
-Nothing here touches the network or the engine; it is pure tensor math over one
-request's logits, so the parity test can drive it directly.
+Nothing here touches the network or the engine; it is pure tensor math over a
+step's packed logits, so the parity test can drive it directly.
 """
 
 import math
@@ -51,8 +51,8 @@ def build_reveal_schedule(
     the canvas is always fully revealed regardless of rounding drift.
 
     Cached, and returning a tuple so it stays immutable: the schedule depends
-    only on these four numbers, but ``postprocess`` needs it on every step of
-    every request, and recomputing it there means a linspace and a Python loop
+    only on these four numbers, but ``forward_batched`` needs it on every step
+    of every request, and recomputing it there means a linspace and a Python loop
     per step for a list that never changes within a request.
     """
     timesteps = get_time_steps(num_step=num_step, t_shift=t_shift).tolist()

@@ -268,7 +268,7 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
                 "audio_tokens": tokens,
                 "step_index": step_index,
             },
-            # the iteration, for postprocess: at iteration 0 the loop counter
+            # the iteration, for forward_batched: at iteration 0 the loop counter
             # is not there yet, and reading the step edge would sync
             kwargs={"item": item, "step": k},
             # The row's packed contribution: its conditional document plus,
