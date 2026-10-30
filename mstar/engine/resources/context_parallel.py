@@ -17,7 +17,7 @@ from typing import NamedTuple
 import numpy as np
 import torch
 
-from mstar.distributed.communication import CommGroup, _all_to_all_single
+from mstar.distributed.communication import CommGroup
 from mstar.engine.resources.kv.config import KVSpec, PagedKVConfig
 from mstar.engine.resources.kv.plan import SINK_PAGE, HostLens, PagedIndptrs
 from mstar.engine.resources.spec import NodeResourceSpec
@@ -133,7 +133,8 @@ class ContextParallel(NamedTuple):
         head, so each gets every partner's: ``[N, P * H, D]``, partner-major."""
         if self.over_sp:
             return q
-        return self._to_partners(q.unsqueeze(0).expand(self.size, *q.shape)).transpose(0, 1).flatten(1, 2)
+        blocks = q.unsqueeze(0).expand(self.size, *q.shape)
+        return self.group.to_partners(blocks, self.partners).transpose(0, 1).flatten(1, 2)
 
     def exchange_partials(
         self, out: torch.Tensor, lse: torch.Tensor, valid: torch.Tensor,
@@ -150,19 +151,8 @@ class ContextParallel(NamedTuple):
             gathered = self.group.all_gather(packed.unsqueeze(0), dim=0)
         else:
             heads = packed.shape[1] // self.size
-            gathered = self._to_partners(packed.unflatten(1, (self.size, heads)).transpose(0, 1))
+            gathered = self.group.to_partners(packed.unflatten(1, (self.size, heads)).transpose(0, 1), self.partners)
         return gathered[..., :-1], gathered[..., -1]
-
-    def _to_partners(self, blocks: torch.Tensor) -> torch.Tensor:
-        """``blocks[j]`` to partner ``j``, and back the block each partner sent this rank, in partner
-        order: one all-to-all over the whole group with nothing to the ranks outside the block."""
-        blocks = blocks.contiguous()
-        splits = [0] * self.group.world_size
-        for partner in self.partners:
-            splits[partner] = blocks[0].numel()
-        recv = torch.empty_like(blocks)
-        _all_to_all_single(self.group.device_group, blocks.view(-1), recv.view(-1), splits, splits)
-        return recv
 
 
 def merge(outs: torch.Tensor, lses: torch.Tensor) -> torch.Tensor:
