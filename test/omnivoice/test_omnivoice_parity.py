@@ -192,8 +192,10 @@ def test_reveal_schedule_covers_the_canvas():
             assert sum(schedule) == target_len * NUM_CODEBOOK
 
 
-def _reveal_all(item, canvas, logits, generator=None, class_temperature=0.0, count=None):
-    """One ``unmask_step`` over ``item`` alone, revealing ``count`` cells (all by default)."""
+def _reveal_all(canvas, logits, generator=None, class_temperature=0.0, count=None):
+    """One ``unmask_step`` over a one-item canvas, revealing ``count`` cells (all by default)."""
+    assert len(canvas.items) == 1
+    item = canvas.items[0]
     count = NUM_CODEBOOK * item.target_len if count is None else count
     return unmask_step(
         logits, [item.tokens[0]], canvas.uncond_rows(), [count], [generator],
@@ -206,7 +208,7 @@ def test_mask_class_is_never_predicted():
     canvas = build_packed_canvas([item], torch.device("cpu"))
     logits = torch.randn(1, NUM_CODEBOOK, 2 * canvas.flat_target_total, 1025)
     logits[..., MASK_ID] += 100.0  # the MASK class would win every cell's argmax
-    assert (_reveal_all(item, canvas, logits) != MASK_ID).all()
+    assert (_reveal_all(canvas, logits) != MASK_ID).all()
 
 
 def test_sampling_is_reproducible_under_a_seed():
@@ -217,7 +219,7 @@ def test_sampling_is_reproducible_under_a_seed():
     logits = torch.randn(1, NUM_CODEBOOK, 2 * canvas.flat_target_total, 1025)
 
     def draw(seed):
-        return _reveal_all(item, canvas, logits, torch.Generator().manual_seed(seed), class_temperature=1.0, count=5)
+        return _reveal_all(canvas, logits, torch.Generator().manual_seed(seed), class_temperature=1.0, count=5)
 
     assert torch.equal(draw(1234), draw(1234))
     assert not torch.equal(draw(1234), draw(5678))
