@@ -283,9 +283,11 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
 
     # Cap on how many concurrent requests share one batched denoise step.
     max_gen_batch_size = 8
-    # Vision tokens past which generation steps run request by request: a step
-    # this large already fills the GPU, and the batched forward ran two
-    # 832x480x189 videos (75k tokens each) at 2.4x one's step time.
+    # A generation step whose requests total more vision tokens than this runs
+    # request by request: batched, two 832x480 Nano clips of 189 frames (18.7k
+    # tokens each) took 2.4x one's step time, and two 121-frame Edge clips
+    # (12.1k each) were slower than serial too. Default-size image batches stay
+    # under it.
     max_batched_vision_tokens = 16384
 
     # t2i (num_frames=1) resolutions to capture a bs=1 denoise-step CUDA graph
