@@ -1913,19 +1913,15 @@ the attention resource's ``reads_step_kv()`` says the step attends them, so a de
 the fused kernel.
 
 In SP mode, where attending every own token would be the same work on every partner, rank ``r``
-attends only *zigzag* chunks ``r`` and ``2P - 1 - r`` of each row (``zigzag_rows``; a row of
-``T`` tokens cut into ``2P`` chunks of ``T // 2P``, the first ``T % 2P`` one longer), so the
-partners share the causal work about evenly on long rows (shorter rows' chunks, and every
-one-token row, fall to the low ranks). Each chunk's queries attend their row's tokens up to the
-chunk's end (all of them on a step that isn't causal), on the backend's paged prefill kernel
-over the step's keys viewed as pages of one slot (a chunk's keys are then a list of page
-indices); each rank merges that share, with lse ``-inf`` off its chunks, into its context
-partial before the one gather. Rows, and every layer but attention, stay replicated, so the
-model changes nothing. The saving, ``1 - 1/P`` of the own-token attention, is an estimate: it is
-unmeasured, as is the one-slot-page kernel's speed against the ragged one, and an eager first
-prefill makes one gather a layer. A captured bucket's padding queries attend one key each. The
-zigzag path has run only on CPU, with torch math in place of the kernel; its GPU tests are
-written but have not run.
+attends only *zigzag* chunks ``r`` and ``2P - 1 - r`` of each row (``zigzag_rows``; a row of ``T``
+tokens cut into ``2P`` chunks of ``T // 2P``, the first ``T % 2P`` one longer), so the partners
+share the causal work about evenly on long rows (shorter rows' chunks, and every one-token row,
+fall to the low ranks). Each chunk's queries attend their row's tokens up to the chunk's end (all
+of them on a step that isn't causal), on the backend's paged prefill kernel over the step's keys
+viewed as pages of one slot (a chunk's keys are then a list of page indices); each rank merges
+that share, with lse ``-inf`` off its chunks, into its context partial before the one gather.
+Rows, and every layer but attention, stay replicated, so the model changes nothing. An eager first
+prefill makes one gather a layer. A captured bucket's padding queries attend one key each.
 
 The MLA backend (``flashinfer_mla``) attends a placed pool the same way, its own tokens (in SP
 mode, its zigzag chunks of them) on a second MLA call over the latents the layer passes as ``k``
