@@ -49,6 +49,14 @@ class CGSlotKey:
     label: str
 
 
+def head_shards(group: JointGroups | None, positions_over_sp: bool) -> int:
+    """How many ways a node's ranks split its attention heads: its TP and SP ranks, or TP alone
+    when its KV pool places positions over the SP ranks (``positions_over_sp``)."""
+    if group is None:
+        return 1
+    return group.tp_group.world_size * (1 if positions_over_sp else group.sp_group.world_size)
+
+
 @dataclass(frozen=True)
 class EngineResourceInfo:
     """What the engine has to offer a resource at build time.
@@ -80,12 +88,8 @@ class EngineResourceInfo:
     @property
     def head_shards(self) -> int:
         """How many ways the node's ranks split its attention heads, which each builder sizes head
-        counts by: its TP and SP ranks, or TP alone when its KV pool places positions over the SP
-        ranks (``positions_over_sp``)."""
-        group = self.joint_comm_group
-        if group is None:
-            return 1
-        return group.tp_group.world_size * (1 if self.positions_over_sp else group.sp_group.world_size)
+        counts by (``head_shards``)."""
+        return head_shards(self.joint_comm_group, self.positions_over_sp)
 
     def dependency(self, key: str) -> NodeResourceSpec:
         spec = self.dependencies.get(key)

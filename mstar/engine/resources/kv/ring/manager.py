@@ -92,8 +92,7 @@ class RingKVManager(AttentionResource):
                 "KVSpec dispatches on the config, so this means the spec was "
                 "built by hand with the wrong one."
             )
-        if info.joint_comm_group is not None:
-            config.shard(config.head_shards(info.joint_comm_group))
+        config.shard(info.head_shards)
         return cls(
             config=config,
             name=spec.resource_key,

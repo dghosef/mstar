@@ -37,7 +37,7 @@ from mstar.engine.resources import (
     StepRunner,
     SubmoduleStep,
 )
-from mstar.engine.resources.base import EngineResourceInfo, KeyedWalks, build_resource
+from mstar.engine.resources.base import EngineResourceInfo, KeyedWalks, build_resource, head_shards
 from mstar.engine.resources.context_parallel import positions_over_sp
 from mstar.engine.resources.kv.keys import fingerprint
 from mstar.engine.resources.kv.transfer import TransferEngineInfo
@@ -615,10 +615,7 @@ class Engine:
                 node_dtype=resolve_node_dtype(submodule, self._autocast_dtype),
                 fp32_precision=node_fp32_precision(node_name, submodule),
                 # the count its resources shard heads by
-                head_shards=EngineResourceInfo(
-                    device=device, joint_comm_group=parallel_groups.get_joint_group_for_node(node_name),
-                    positions_over_sp=over_sp[node_name],
-                ).head_shards,
+                head_shards=head_shards(parallel_groups.get_joint_group_for_node(node_name), over_sp[node_name]),
             )
             submodule.bind_node_resources(resources)
             if getattr(submodule, "reads_device_loopback", False):

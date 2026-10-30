@@ -50,27 +50,23 @@ class KVConfig(ABC):
             self.num_qo_heads = self.num_kv_heads
         self._unsharded_kv_heads = self.num_kv_heads
         self._unsharded_qo_heads = self.num_qo_heads
-
-    def head_shards(self, joint: "JointGroups | None") -> int:
-        """How many ways ``joint``'s ranks split this cache's heads: its TP and SP ranks (Ulysses
-        all-to-alls heads), or TP alone for a pool placing its positions over the SP ranks
-        (``PagedKVConfig.place``). The KV resource and every resource over it shard by this, so
-        they agree with the pool however each was built."""
-        if joint is None:
-            return 1
-        # only a paged pool places positions
-        if getattr(self, "context_parallel", False) and joint.sp_group.world_size > 1:
-            return joint.tp_group.world_size
-        return joint.world_size
+        self._head_shards: int | None = None
 
     def shard(self, num_shards: int) -> None:
-        """Narrow the head counts to one rank's slice of ``num_shards`` (``head_shards``).
+        """Narrow the head counts to one rank's slice of ``num_shards`` (``EngineResourceInfo.head_shards``).
 
         Idempotent because one KVConfig is shared by the KV resource and the
-        attention resources planned against it, and each shards on construction.
+        attention resources planned against it, and each shards on construction;
+        a second count is an error, since the cache was sized by the first.
         """
         from mstar.distributed.utils import divide, kv_head_replicas
 
+        if self._head_shards not in (None, num_shards):
+            raise ValueError(
+                f"KV heads already sharded {self._head_shards} ways, and a resource over the pool "
+                f"shards them {num_shards} ways: its builders disagree on the node's head shards"
+            )
+        self._head_shards = num_shards
         self.num_kv_heads = kv_head_replicas(self._unsharded_kv_heads, num_shards)[0]
         self.num_qo_heads = divide(self._unsharded_qo_heads, num_shards)
 

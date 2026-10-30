@@ -82,9 +82,7 @@ class AttentionManager(AttentionResource):
                 f"attention backend {backend.value!r} ignores sm_scale; only "
                 f"{AttnBackend.FLASHINFER_MLA.value!r} reads it"
             )
-        # by the pool's own rule, so it matches the KV resource's
-        if info.joint_comm_group is not None:
-            kv_config.shard(kv_config.head_shards(info.joint_comm_group))
+        kv_config.shard(info.head_shards)
         if isinstance(kv_config, PagedKVConfig) and kv_config.context_parallel:
             # the backends whose partials' lse base the merge is known to read right; MLA's
             # trtllm-gen isn't

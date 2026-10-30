@@ -539,7 +539,6 @@ class KVManager(AttentionResource):
         # before the cache is allocated: it is sized off the head counts and the placement
         placement = cfg.place(joint_comm_group, name)
         if joint_comm_group is not None:
-            cfg.shard(cfg.head_shards(joint_comm_group))
             tp_cache = joint_comm_group.world_size > 1 and cfg.prefix_cache and cfg.prefix_cache_tp
             if tp_cache and cfg.cpu_offload_pages > 0:
                 raise ValueError(
@@ -696,7 +695,9 @@ class KVManager(AttentionResource):
 
     @classmethod
     def build(cls, spec: KVSpec, info: EngineResourceInfo):
-        return cls(
+        # before the cache is allocated: it is sized off the head counts
+        spec.config.shard(info.head_shards)
+        kv = cls(
             cfg=spec.config,
             name=spec.resource_key,
             device=info.device,
@@ -707,6 +708,14 @@ class KVManager(AttentionResource):
             leads=spec.leader is None or spec.leader in info.nodes,
             nodes=info.nodes,
         )
+        over_sp = kv.placement is not None and kv.placement.over_sp
+        if over_sp != info.positions_over_sp:
+            raise ValueError(
+                f"KV {spec.resource_key!r} {'places' if over_sp else 'does not place'} positions over the "
+                f"node's SP ranks, but its heads were sharded as if it {'did not' if over_sp else 'did'} "
+                "(EngineResourceInfo.positions_over_sp)"
+            )
+        return kv
 
     def build_accelerator_graph_buffers(
         self, slots: list[CGSlotSpec], max_bs: int, max_seq_len: int,
