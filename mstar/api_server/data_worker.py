@@ -185,6 +185,10 @@ def preprocess_workers(model: Model | None, model_config: dict | None) -> int:
     if model is None:
         return 1
     declared = model.PREPROCESS_WORKERS
+    if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
+        raise ValueError(
+            f"{type(model).__name__}.PREPROCESS_WORKERS must be a positive integer, got {declared!r}"
+        )
     workers = (model_config or {}).get("preprocess_workers", declared)
     if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
         raise ValueError(f"preprocess_workers must be a positive integer, got {workers!r}")
@@ -231,7 +235,7 @@ class PreprocessWorker:
         is_pending: Callable[[str], bool] | None = None,
     ):
         check_media_limits()
-        # here, not on the thread: a bad value must stop startup
+        # first, before any socket is made: a bad value must stop startup
         prep_workers = preprocess_workers(model, model_config)
         self.request_input_queue = queue.Queue()
         self.result_tensor_input_queue = queue.Queue()

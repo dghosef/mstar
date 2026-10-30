@@ -263,7 +263,7 @@ def test_pooled_preprocessing_overlaps_requests_and_keeps_arrival_order():
     assert not t.is_alive()
 
 
-@pytest.mark.parametrize(("declared", "workers"), [(2, 0), (2, "2"), (1, 2)])
+@pytest.mark.parametrize(("declared", "workers"), [(2, 0), (2, "2"), (1, 2), (0, 4)])
 def test_a_bad_preprocess_workers_fails_startup(declared, workers):
     """Not a dead data-worker thread under a server that comes up; nor a pool
     for a model class that does not declare its prepares thread-safe."""
@@ -272,7 +272,7 @@ def test_a_bad_preprocess_workers_fails_startup(declared, workers):
 
     model = _SlowModel()
     model.PREPROCESS_WORKERS = declared
-    with pytest.raises(ValueError, match="preprocess_workers"):
+    with pytest.raises(ValueError, match="(?i)preprocess_workers"):
         PreprocessWorker(
             model=model, model_config={"preprocess_workers": workers},
             tensor_comm_protocol=CommProtocol.SHM, socket_path_prefix=f"/tmp/mstar-pw{os.getpid()}",
