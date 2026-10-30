@@ -975,8 +975,9 @@ class BagelModel(Model):
             branch_labels = ["cfg_text", "cfg_img"]
             if self._has_cfg_parallel and not self._has_llm_disaggregation:
                 # The branch labels' only readers are the CFG walk's branch nodes, one
-                # label each. (A remote LLM, on a split deployment, runs single-node
-                # walks that read both.)
+                # label each. (A remote LLM, on a split deployment, may also run decode,
+                # which reads cfg_img, and its single-node denoise walks still name both
+                # labels per request, not per walk.)
                 cfg_walk = next(p.walk for p in request["image_gen_phases"] if p.walk in CFG_WALKS)
                 branch_labels = list(NODE_TO_CFG_LABEL.values())[1:CFG_WALKS[cfg_walk]]
             for (node, walk), labels in {
