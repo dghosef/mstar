@@ -1157,12 +1157,10 @@ class Qwen3TTSModel(Model):
         tp_group=None,
         autocast_dtype: torch.dtype | None = None,
         ) -> NodeSubmodule:
+        from mstar.model.components.code_predictor_kernels import ResidualCodePredictor
         from mstar.model.loader import LLAMA_STACKED_PARAMS, load_hf_weights
         from mstar.model.loader.iterators import iter_safetensors_shards
-        from mstar.model.qwen3_tts.components.talker import (
-            Qwen3TTSCodePredictor,
-            Qwen3TTSTalkerModel,
-        )
+        from mstar.model.qwen3_tts.components.talker import Qwen3TTSTalkerModel
         from mstar.model.qwen3_tts.submodules import TalkerSubmodule
 
         # Construct on meta first so worker startup never holds both a random
@@ -1198,7 +1196,9 @@ class Qwen3TTSModel(Model):
         # CodePredictor is small and depth-wise. It is loaded separately from
         # ``talker.code_predictor.*`` and remains replicated under Talker TP.
         with torch.device("meta"):
-            code_predictor = Qwen3TTSCodePredictor(self.config)
+            code_predictor = ResidualCodePredictor(
+                self.config.code_predictor, self.config.talker.hidden_size, TalkerSubmodule.MAX_BATCH_SIZE,
+            )
         if autocast_dtype is not None:
             code_predictor = code_predictor.to(autocast_dtype)
         code_predictor.to_empty(device=device)

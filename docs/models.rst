@@ -639,9 +639,14 @@ Qwen3-TTS notes
   ``code_predictor`` aux sampler, so custom values neither block batching nor
   fall off the graph. On the 1.7B checkpoints the CodePredictor projects the
   Talker-width inputs through ``small_to_mtp_projection`` before its depth loop.
-  Its depth loop runs the same Triton kernels as Qwen3-Omni's code predictor
-  (``mstar.model.components.code_predictor_kernels``): q/k norm, RoPE and the
-  KV write in one launch per layer, then ``cp_attention``.
+  It is the same component as Qwen3-Omni's code predictor
+  (``ResidualCodePredictor`` in ``mstar.model.components.code_predictor_kernels``):
+  the depth sequence opens with the Talker hidden state and the group-0
+  embedding in one two-token pass, each layer's q/k norm, RoPE and KV write
+  run in one launch and attention in ``cp_attention``, and the frame's 16 codec
+  embeddings are summed in fp32 and rounded once to the model dtype. Earlier
+  releases rounded the sum after every add, so greedy codes can differ at
+  near-ties.
 - ``configs/qwen3tts_1p7b_split.yaml`` (and ``configs/qwen3tts_split.yaml``
   for the 0.6B) runs the Codec on a second worker that
   shares GPU 0 (``rank_devices``) and caps the Talker KV pool so both fit.

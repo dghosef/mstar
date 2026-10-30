@@ -71,6 +71,7 @@ from mstar.model.base import (
     TensorAndMetadata,
 )
 from mstar.model.components import MoeParallelConfig
+from mstar.model.components.code_predictor_kernels import ResidualCodePredictor
 from mstar.model.media_limits import VideoBudget, probe_video
 from mstar.model.multimodal import (
     TEXT,
@@ -85,7 +86,6 @@ from mstar.model.multimodal import (
 )
 from mstar.model.qwen3_asr.config import AUT_ATTN
 from mstar.model.qwen3_omni.components.rope import get_rope_index_vision
-from mstar.model.qwen3_omni.components.talker import Qwen3OmniCodePredictor
 from mstar.model.qwen3_omni.config import (
     CODE_PRED_SAMPLER,
     TALKER_ATTN,
@@ -1661,8 +1661,13 @@ class Qwen3OmniModel(Model):
         )
         talker_model.eval()
 
+        from mstar.model.qwen3_omni.submodules import TalkerSubmodule
         with torch.device("meta"):
-            code_predictor = Qwen3OmniCodePredictor(self.config)
+            # its inputs and codec embeddings are in the Talker's width, which
+            # Qwen3-Omni's code predictor shares (it has no input projection)
+            code_predictor = ResidualCodePredictor(
+                self.config.code_predictor, self.config.code_predictor.hidden_size, TalkerSubmodule.MAX_BATCH_SIZE,
+            )
         # Cast on meta (no allocation) so to_empty allocates directly in the
         # target dtype instead of fp32-then-downcast.
         if autocast_dtype is not None:
@@ -1676,7 +1681,6 @@ class Qwen3OmniModel(Model):
         code_predictor.consolidate_stacked_weights()
         code_predictor.eval()
 
-        from mstar.model.qwen3_omni.submodules import TalkerSubmodule
         talker_sub = TalkerSubmodule(
             talker_model=talker_model,
             code_predictor=code_predictor,
