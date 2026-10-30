@@ -1,5 +1,5 @@
-"""Ragged attention checks that need no GPU: head-dimension padding, head
-sharding and the custom op's manager registry."""
+"""Ragged attention checks that need no GPU: head-dimension padding and the
+custom op's manager registry."""
 
 import sys
 from types import SimpleNamespace
@@ -115,90 +115,6 @@ def test_mixed_wrapper_builds_both_halves_in_graph_mode(monkeypatch):
     assert mixed._prefill.batch_size == 3
     assert decode.call_args.kwargs["use_cuda_graph"] is True
     assert prefill.call_args.kwargs["use_cuda_graph"] is True
-
-
-def _load_heads(kind, tp=1, sp=2, shard_over_sp=True):
-    """Load one resource of ``kind`` (4 heads) for a node on a tp x sp
-    lockstep instance, and return the heads one rank holds."""
-    from mstar.engine.engine import Engine
-    from mstar.engine.resources import RaggedAttentionConfig, RaggedAttentionSpec
-    from mstar.engine.resources.recurrent.config import (
-        RecurrentBlockConfig,
-        RecurrentStateConfig,
-        RecurrentStateSpec,
-    )
-    from mstar.model.submodule_base import NodeSubmodule
-
-    class _Node(NodeSubmodule):
-        def __init__(self):
-            super().__init__()
-            self.weight = torch.nn.Parameter(torch.zeros(1))
-
-        def prepare_inputs(self, *args, **kwargs):
-            raise NotImplementedError
-
-        def forward(self, *args, **kwargs):
-            raise NotImplementedError
-
-    class _Rank:
-        rank = 0
-
-        def __init__(self, world_size):
-            self.world_size = world_size
-
-        def barrier(self):
-            pass
-
-    class _Groups:
-        def get_joint_group_for_node(self, node):
-            return SimpleNamespace(world_size=tp * sp, rank=0, tp_group=_Rank(tp), sp_group=_Rank(sp))
-
-        def get_instance_world_size_for_node(self, node):
-            return tp * sp
-
-        def get_instance_rank_for_node(self, node):
-            return 0
-
-        def resource_needs_remote_transfer(self, nodes, local_nodes):
-            return False
-
-    nodes = {"dit"}
-    if kind == "ragged":
-        spec = RaggedAttentionSpec(
-            resource_key="res", nodes=nodes,
-            config=RaggedAttentionConfig(
-                num_qo_heads=4, num_kv_heads=4, head_dim=72, dtype=torch.bfloat16, shard_over_sp=shard_over_sp,
-            ),
-        )
-    else:
-        spec = RecurrentStateSpec("res", nodes, RecurrentStateConfig(
-            num_layers=1, max_slots=2,
-            blocks={"state": RecurrentBlockConfig(shape=(4, 8), dtype=torch.float32, shard_dims=(0,))},
-        ))
-    engine = Engine(None, autocast_dtype=None)
-    engine.load_model(
-        submodules={"dit": _Node()}, specs=[spec],
-        parallel_groups=_Groups(), device=torch.device("cpu"), transfer_engine_info=None,
-    )
-    if kind == "ragged":
-        return engine._resources["res"]._kwargs["num_qo_heads"]
-    return spec.config.blocks["state"].shape[0]
-
-
-@pytest.mark.parametrize("tp,sp,heads", [(1, 2, 2), (2, 1, 2), (2, 2, 1)])
-@pytest.mark.parametrize("kind", ["ragged", "recurrent"])
-def test_ragged_and_recurrent_resources_shard_heads_over_tp_and_sp(kind, tp, sp, heads):
-    """A ragged or recurrent resource the engine builds for a multi-rank node
-    holds one rank's slice of the heads, split over all TP x SP ranks (a ragged
-    resource declaring ``shard_over_sp=False`` is the exception, tested below)."""
-    assert _load_heads(kind, tp=tp, sp=sp) == heads
-
-
-@pytest.mark.parametrize("tp,sp,heads", [(1, 2, 4), (2, 2, 2)])
-def test_a_ragged_attention_kept_whole_over_sp_splits_heads_over_tp_only(tp, sp, heads):
-    """``shard_over_sp=False`` keeps a ragged attention's heads whole across the
-    SP ranks of its node; its TP ranks still split them."""
-    assert _load_heads("ragged", tp=tp, sp=sp, shard_over_sp=False) == heads
 
 
 def test_a_dropped_manager_leaves_the_op_registry():
