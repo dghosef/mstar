@@ -394,9 +394,11 @@ default, which lowers the token count of short clips. Notes:
   embeddings can differ at the last bit with what it is batched beside.
 - On two GPUs, ``configs/qwen3_5_9b_dp2.yaml`` (a whole replica per GPU)
   serves image and video traffic faster than ``configs/qwen3_5_9b_tp2.yaml``,
-  whose vision encoder runs on one rank while the other waits for it in the
-  lockstep LLM: 9B on 2xH200, video_60s c32 1520 vs ~900-1000 output tok/s,
-  MMMU c32 4457 vs ~3100.
+  whose lockstep LLM waits whenever a rank runs a vision encoder step: 9B on
+  2xH200 with the encoder on rank 0 only, video_60s c32 1520 vs ~900-1000
+  output tok/s, MMMU c32 4457 vs ~3100. The TP2 config now places an encoder
+  replica beside each LLM rank, which splits those steps over both ranks
+  (H100: video +4%, MMMU c32 -1%).
 - A long video is one wide prefill: one 1-3 minute video is ~11-12k tokens,
   beyond the largest captured ``prefill_vision`` bucket (4096), so it runs
   eagerly.
@@ -423,10 +425,11 @@ needs FlashInfer's fused bf16 decode kernel (K = V = 128).
 Text prefill and mixed steps replay captured graphs by total tokens, on the
 ladder ``32 ... 8192`` (powers of two); a step pads to its bucket and a longer
 one runs eagerly. ``model_kwargs: prefill_token_buckets: [...]`` sets a
-deployment's own ladder: ``configs/qwen3_5_9b*.yaml`` and
-``configs/qwen3_5_27b_tp4.yaml`` add 3072, 5120, 6144 and 7168, which cut the padding of compute-bound long prefills (+2% output tok/s
-on 9B, random 1024/256 at c=64/128, H200); the same ladder was not a win on
-0.8B, whose prefill is launch-bound. Each bucket adds captures and startup time.
+deployment's own ladder: ``configs/qwen3_5_2b.yaml``, ``configs/qwen3_5_9b*.yaml``
+and ``configs/qwen3_5_27b_tp4.yaml`` add 3072, 5120, 6144 and 7168, which cut
+the padding of compute-bound long prefills (+2% output tok/s on 9B, random
+1024/256 at c=64/128, H200; about +2% on 2B, H100); the same ladder was not a
+win on 0.8B, whose prefill is launch-bound. Each bucket adds captures and startup time.
 
 A captured decode step builds its rotary tables inside the graph from the
 planned positions, rather than staging tables built eagerly before the replay
