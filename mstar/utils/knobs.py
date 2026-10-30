@@ -113,7 +113,8 @@ def kv_plan_cache() -> int:
     row crossed a page boundary, and the five index arrays come from numpy
     instead of a per-row Python pass. ``0`` plans every step from the
     streams; ``2`` does both and logs any difference (a correctness check for
-    runs)."""
+    runs). The Qwen3.5 0.8B and 9B TP2 configs turn it on, measured only
+    together with ``gc_gen0_threshold``."""
     return int(_setting("kv_plan_cache", "0"))
 
 
