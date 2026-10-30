@@ -134,19 +134,28 @@ class EngineManager:
         # Checked by the conductor's get_sharding_config before spawn.
         moe_parallel = node_moe_parallel_configs(model_config["node_groups"])
         for name in sorted(node_names):
-            # Sequence parallelism is opt-in per node; only forward the SP
-            # group to a node that runs its own and is on SP ranks, so models
-            # that don't support SP keep their existing get_submodule call.
-            # A node on SP ranks whose KV pool places positions over them runs
-            # replicated across them instead (validate_deployment checks that
-            # this agrees with the model's sp_enabled_nodes); the engine shards
-            # its heads by the same predicate.
+            # A node on SP ranks either runs its own sequence parallelism (it is
+            # in sp_enabled_nodes, and gets the SP group) or places its KV
+            # pools' positions over them and runs replicated across them, its
+            # heads sharded by the same predicate in the engine.
+            # validate_deployment checks this before spawn; here it is loud
+            # where that was skipped. A node off SP ranks, or a model that
+            # doesn't support SP, keeps its existing get_submodule call.
             # Likewise ``moe_parallel``, only for a node group's ``ep_config``.
             extra = {}
             node_sp_group = parallel_groups.get_sp_config_for_node(name)
             sp = node_sp_group.world_size
-            if sp > 1 and not positions_over_sp(specs, name, sp):
-                extra["sp_group"] = node_sp_group
+            if sp > 1:
+                placed = positions_over_sp(specs, name, sp)
+                if placed == (name in model.get_default_sharding_config().sp_enabled_nodes):
+                    raise ValueError(
+                        f"node {name!r} is on {sp} SP ranks and "
+                        + ("runs its own sequence parallelism, but a paged KV pool over it sets "
+                           "context_parallel" if placed else "neither runs its own sequence parallelism "
+                           "(sp_enabled_nodes) nor sets context_parallel on its paged KV pools")
+                    )
+                if not placed:
+                    extra["sp_group"] = node_sp_group
             if name in moe_parallel:
                 extra["moe_parallel"] = moe_parallel[name]
             submodule = model.get_submodule(

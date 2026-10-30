@@ -5,7 +5,8 @@ import types
 import pytest
 import torch
 
-from mstar.distributed.communication import WorkerParallelGroups
+from mstar.distributed.base import ShardingConfig
+from mstar.distributed.communication import CommGroup, WorkerParallelGroups
 from mstar.engine.node_dtype import resolve_model_dtype, resolve_node_dtype
 from mstar.engine.resources.kv.transfer import TransferEngineInfo
 from mstar.model.submodule_base import NodeSubmodule
@@ -67,12 +68,12 @@ class _Model:
         return ""
 
 
-def _build(model) -> EngineManager:
+def _build(model, parallel_groups: WorkerParallelGroups | None = None) -> EngineManager:
     return EngineManager.build(
         node_names=set(_NODES),
         device=torch.device("cpu"),
         model_config={"node_groups": [{"node_names": sorted(_NODES), "ranks": [0]}]},
-        parallel_groups=WorkerParallelGroups(num_workers=1, global_rank=0),
+        parallel_groups=parallel_groups or WorkerParallelGroups(num_workers=1, global_rank=0),
         transfer_engine_info=TransferEngineInfo(
             my_entity_id="test", my_session_id="test", transfer_engine=None,
         ),
@@ -108,3 +109,14 @@ def test_runtime_scope_dtype_matches_load_cast():
             assert weight.dtype is (dtype or torch.float32), name
     finally:
         manager.shutdown()
+
+
+def test_a_node_on_sp_ranks_that_neither_runs_sp_nor_places_its_kv_is_refused_at_load():
+    """validate_deployment refuses it before spawn; where that was skipped, the load names it
+    rather than handing get_submodule an SP group it doesn't take."""
+    model = _Model(torch.bfloat16)
+    model.get_default_sharding_config = lambda: ShardingConfig(groups=[], tp_enabled_nodes=set(), shard_dim={})
+    groups = WorkerParallelGroups(num_workers=2, global_rank=0)
+    groups.add_sp("inherit", CommGroup(my_global_rank=0, my_group_rank=0, group_members=[0, 1]))
+    with pytest.raises(ValueError, match="'inherit' is on 2 SP ranks and neither"):
+        _build(model, groups)
