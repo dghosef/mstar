@@ -758,18 +758,43 @@ class S3GenSubmodule(NodeSubmodule):
         )
         return plan
 
-    def _emit_chunk(self, plan: _ChunkPlan, mel: torch.Tensor) -> torch.Tensor:
-        """Vocode the frames the flow solve added, continuing the vocoder's
-        held-back tail, and return the waveform to emit now."""
+    def _vocoder_input(self, plan: _ChunkPlan, mel: torch.Tensor) -> torch.Tensor:
+        """The mel the vocoder runs on for this plan: the frames the flow solve
+        added, behind the held-back tail when there is one."""
         state = plan.state
         new_mel = mel[:, :, (state.token_offset - plan.window_start) * self.frames_per_token:]
         state.token_offset = plan.usable
+        return new_mel if state.hift_mel is None else torch.cat([state.hift_mel, new_mel], dim=2)
 
-        first = state.hift_mel is None
-        mel_in = new_mel if first else torch.cat([state.hift_mel, new_mel], dim=2)
-        wav, source = self.s3gen.vocode(
-            mel_in, generator=plan.generator, cache_source=state.hift_source, fade_in=first,
-        )
+    def _emit_chunks(self, plans: list[_ChunkPlan], mels: list[torch.Tensor]) -> list[torch.Tensor]:
+        """Vocode the frames each flow solve added, continuing each request's
+        held-back tail, and return the waveforms to emit now.
+
+        Rows whose vocoder input has the same length and kind (a first chunk,
+        or a continuation behind a cache) run as one batch, each drawing its
+        excitation from its own generator, so a step costs one vocoder pass
+        per shape rather than one per request."""
+        inputs = [self._vocoder_input(plan, mel) for plan, mel in zip(plans, mels, strict=True)]
+        groups: dict[tuple[int, bool], list[int]] = {}
+        for i, (plan, mel_in) in enumerate(zip(plans, inputs, strict=True)):
+            groups.setdefault((mel_in.shape[-1], plan.state.hift_mel is None), []).append(i)
+        out: list[torch.Tensor | None] = [None] * len(plans)
+        for (_, first), rows in groups.items():
+            cache = None if first else torch.cat([plans[i].state.hift_source for i in rows])
+            wav, source = self.s3gen.vocode(
+                torch.cat([inputs[i] for i in rows]), generator=[plans[i].generator for i in rows],
+                cache_source=cache, fade_in=first,
+            )
+            for k, i in enumerate(rows):
+                out[i] = self._finish_chunk(plans[i], inputs[i], wav[k : k + 1], source[k : k + 1], first)
+        return out
+
+    def _finish_chunk(
+        self, plan: _ChunkPlan, mel_in: torch.Tensor, wav: torch.Tensor, source: torch.Tensor, first: bool,
+    ) -> torch.Tensor:
+        """Crossfade a row's re-synthesised tail, hold back the new one, and
+        return the waveform to emit now."""
+        state = plan.state
         if not first:
             n_fade = self.cache_samples
             wav[:, :n_fade] = (
@@ -799,8 +824,8 @@ class S3GenSubmodule(NodeSubmodule):
             mels = self.s3gen.tokens_to_mel_rows(
                 [plans[i].row for i in group], n_timesteps=steps, frame_bucket=self.frame_bucket,
             )
-            for i, mel in zip(group, mels, strict=True):
-                outputs[i] = self._emit_chunk(plans[i], mel)
+            for i, wav in zip(group, self._emit_chunks([plans[i] for i in group], mels), strict=True):
+                outputs[i] = wav
         return outputs
 
     @torch.no_grad()

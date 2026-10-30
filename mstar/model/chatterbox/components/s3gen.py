@@ -31,7 +31,7 @@ from mstar.model.chatterbox.components.audio import MelSpectrogram24k, kaldi_fba
 from mstar.model.chatterbox.components.s3gen_cfm import CausalConditionalCFM, ConditionalDecoder
 from mstar.model.chatterbox.components.s3gen_flow import FlowTokenEncoder
 from mstar.model.chatterbox.components.s3gen_graphs import EncoderGraphs, SolveGraphs, VocoderGraphs
-from mstar.model.chatterbox.components.s3gen_hift import HiFTGenerator
+from mstar.model.chatterbox.components.s3gen_hift import HiFTGenerator, HiFTNoise
 from mstar.model.chatterbox.components.s3gen_xvector import CAMPPlus
 from mstar.model.chatterbox.config import S3GenConfig
 from mstar.model.chatterbox.loader import fold_weight_norm, load_component
@@ -303,7 +303,7 @@ class S3Gen(nn.Module):
         self,
         mel: torch.Tensor,
         *,
-        generator: torch.Generator | None = None,
+        generator: torch.Generator | Sequence[torch.Generator] | None = None,
         cache_source: torch.Tensor | None = None,
         fade_in: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -313,9 +313,17 @@ class S3Gen(nn.Module):
         excitation so a chunk continues the previous chunk's harmonics
         (reference ``HiFTGenerator.inference(cache_source=...)``). ``fade_in``
         applies the utterance-head trim/fade and belongs on the first chunk only.
+        A sequence of generators, one per row, draws each row's excitation from
+        its own request's stream, as vocoding the rows one at a time would.
         """
         mel = mel.to(self.dtype)
-        noise = self.vocoder.draw_noise(mel, generator)
+        if isinstance(generator, Sequence):
+            draws = [self.vocoder.draw_noise(mel[i : i + 1], g) for i, g in enumerate(generator)]
+            noise = HiFTNoise(
+                phase=torch.cat([d.phase for d in draws]), harmonic=torch.cat([d.harmonic for d in draws]),
+            )
+        else:
+            noise = self.vocoder.draw_noise(mel, generator)
         if self.vocoder_graphs is not None:
             magnitude, phase, source = self.vocoder_graphs(mel, noise.phase, noise.harmonic, cache_source)
             wav = self.vocoder.waveform(magnitude, phase)

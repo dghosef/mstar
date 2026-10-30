@@ -131,16 +131,20 @@ def test_streaming_lookahead_and_tail_accounting(setup):
     assert first.numel() + last.numel() == 30 * 960 and state.done
 
 
-def test_batched_streams_match_their_single_runs(setup):
-    """Two streams with different chunkings advanced through ``forward_batched``
-    (one padded flow solve per step) emit, step by step, the audio each gets
-    from ``forward`` on its own."""
+@pytest.mark.parametrize("schedules", [
+    {"a": [18, 24, 18], "b": [15, 15, 15, 15]},
+    # equal chunks, so each step's rows share one vocoder pass (new rids: `sub` keeps per-rid state)
+    {"c": [15, 15, 15, 15], "d": [15, 15, 15, 15]},
+], ids=["ragged", "equal"])
+def test_batched_streams_match_their_single_runs(setup, schedules):
+    """Two streams advanced through ``forward_batched`` (one padded flow solve
+    per step, one vocoder pass per vocoder-input shape) emit, step by step,
+    the audio each gets from ``forward`` on its own."""
     from types import SimpleNamespace
 
     from mstar.model.chatterbox.submodules import SPEECH_TOKENS
 
     sub, ref, tokens = setup
-    schedules = {"a": [18, 24, 18], "b": [15, 15, 15, 15]}
     steps = max(len(s) for s in schedules.values())
 
     def chunk(rid, step):
