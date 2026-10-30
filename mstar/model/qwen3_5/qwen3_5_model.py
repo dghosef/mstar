@@ -416,25 +416,30 @@ class Qwen3_5DenseModel(Model):
 
     @property
     def video_processor(self):
-        """The checkpoint's ``video_preprocessor_config.json``, lazily."""
+        """The checkpoint's ``video_preprocessor_config.json``, lazily. Its
+        patches are normalized by the image processor's settings
+        (`pixel_normalizer`), so it must agree with them; checked here, on the
+        first video, so a deployment that never sees one never loads it."""
         if self._video_processor is None:
             from transformers import AutoVideoProcessor
 
-            self._video_processor = AutoVideoProcessor.from_pretrained(
+            video = AutoVideoProcessor.from_pretrained(
                 self.local_dir, cache_dir=self.cache_dir,
             )
+            image = self.image_processor
+            for name in ("rescale_factor", "image_mean", "image_std", "temporal_patch_size", "patch_size"):
+                if getattr(video, name) != getattr(image, name):
+                    raise ValueError(f"image and video processors disagree on {name}")
+            self._video_processor = video
         return self._video_processor
 
     def pixel_normalizer(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Per-column mean and std that turn `process_prompt`'s byte patches
         into the processors' normalized pixels: their fused rescale-and-
         normalize, ``(x - mean / rescale) / (std / rescale)``, element for
-        element. One for images and videos, whose processors share it."""
+        element. One for images and videos, whose processors share it
+        (`video_processor`)."""
         processor = self.image_processor
-        video = self.video_processor
-        for name in ("rescale_factor", "image_mean", "image_std", "temporal_patch_size", "patch_size"):
-            if getattr(video, name) != getattr(processor, name):
-                raise ValueError(f"image and video processors disagree on {name}")
         scale = 1.0 / processor.rescale_factor
         mean = torch.tensor(processor.image_mean) * scale
         std = torch.tensor(processor.image_std) * scale

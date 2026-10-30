@@ -682,6 +682,22 @@ def test_a_video_with_no_frame_size_is_refused(model, tmp_path, monkeypatch):
     assert decoded == []
 
 
+def test_the_vision_node_boots_on_an_image_processor_the_video_one_disagrees_with(tmp_path):
+    """Only a video needs the video processor: a checkpoint whose image
+    processor normalizes otherwise than its video processor (one with no video
+    config gets the class defaults) still builds the vision node's normalizer,
+    and refuses a video."""
+    from mstar.model.qwen3_5.qwen3_5_model import Qwen3_5DenseModel
+
+    root = write_synthetic_checkpoint(tmp_path)
+    (root / "preprocessor_config.json").write_text(json.dumps({**PREPROCESSOR_CONFIG, "image_mean": [0.4] * 3}))
+    model = Qwen3_5DenseModel(str(root))
+    mean, _ = model.pixel_normalizer()
+    assert torch.allclose(mean, torch.full_like(mean, 0.4 * 255))
+    with pytest.raises(ValueError, match="image_mean"):
+        model.video_processor
+
+
 def test_still_refuses_audio(model):
     with pytest.raises(ValueError, match="no audio path"):
         model.process_prompt(
