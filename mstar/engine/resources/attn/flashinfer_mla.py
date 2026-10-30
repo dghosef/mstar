@@ -47,8 +47,9 @@ def flashinfer_mla_supports(kv_lora_rank: int, qk_rope_head_dim: int) -> bool:
     return qk_rope_head_dim == 0 and _flashinfer_at_least("0.6.18")
 
 
-# the FlashInfer whose FA MLA planner (fa2, fa3) rules `fa_work_items_bound` copies: its cap on a
-# plan's work items, its SM cluster and query tile, and its KV split limit
+# the FlashInfer whose FA MLA planner (fa2, fa3) rules `fa_work_items_bound` and
+# `fa_causal_tile_refusable` copy: its cap on a plan's work items, its SM cluster and query tile,
+# its KV split limit, and its causal tile-bound check
 _FA_PLANNER_VERSION = "0.7.2"
 _FA_MAX_WORK_ITEMS = 16384
 
@@ -70,7 +71,7 @@ def fa_work_items_bound(qo_indptr: np.ndarray | torch.Tensor, num_heads: int, nu
 
 def fa_causal_tile_refusable(q_lens: np.ndarray, kv_lens: np.ndarray, num_heads: int) -> bool:
     """Whether FlashInfer's FA MLA planner may refuse a causal plan of these rows (its causal
-    tile-bound check, as of 0.7.2): where a query tile the head count doesn't divide ends inside a
+    tile-bound check): where a query tile the head count doesn't divide ends inside a
     query whose last visible key starts a KV tile. The KV tile is taken as 16, the smallest, whose
     multiples hold every larger tile's."""
     q_lens, kv_lens = np.asarray(q_lens, dtype=np.int64), np.asarray(kv_lens, dtype=np.int64)

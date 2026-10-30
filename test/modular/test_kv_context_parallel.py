@@ -850,9 +850,10 @@ def test_mla_attention_over_a_placed_pool_refuses_at_bind_a_flashinfer_or_head_c
         _cp_attention(joint, CPU, torch.float32, mla=True, num_qo_heads=heads, flashinfer_backend="fa2")
 
 
-def test_the_fa_work_item_bound_holds_flashinfers_own_count():
-    """The refusal above is rank-symmetric only while ``fa_work_items_bound`` is at least what the
-    installed FlashInfer's planner counts on any rank's KV lengths."""
+def test_the_fa_planner_checks_hold_flashinfers_own(monkeypatch):
+    """The refusals above are rank-symmetric only while ``fa_work_items_bound`` is at least what the
+    installed FlashInfer's planner counts on any rank's KV lengths, and ``fa_causal_tile_refusable``
+    holds wherever its causal tile-bound check refuses."""
     _flashinfer(mla=True)
     from flashinfer.mla._batch_mla._backends import _fa_common as fa
 
@@ -873,3 +874,16 @@ def test_the_fa_work_item_bound_holds_flashinfers_own_count():
                 assert bound > fa._FA_MAX_WORK_ITEMS
                 continue
             assert count <= bound, (q.tolist(), kv.tolist(), heads, sm, causal)
+    # fa2's smallest KV tile, 16, which the mirror takes for every tile
+    monkeypatch.setattr(fa, "_get_fa_shared_memory_limits", lambda device: (92672, 0))
+    for _ in range(3000):
+        rows = int(torch.randint(1, 4, (), generator=gen))
+        q = torch.randint(1, 40, (rows,), generator=gen)
+        kv = q + torch.randint(0, 100, (rows,), generator=gen)
+        heads = (20, 24, 40, 48, 60, 96)[int(torch.randint(6, (), generator=gen))]
+        for backend in ("fa2", "fa3"):
+            try:
+                fa._validate_fa_causal_tile_bound(q.tolist(), kv.tolist(), heads, backend, torch.bfloat16, None)
+            except fa._BackendPlanUnsupportedError:
+                assert fm.fa_causal_tile_refusable(q.numpy(), kv.numpy(), heads), (q.tolist(), kv.tolist(), heads)
+
