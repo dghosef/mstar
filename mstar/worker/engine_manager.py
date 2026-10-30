@@ -9,6 +9,7 @@ from mstar.distributed.communication import WorkerParallelGroups
 from mstar.engine.engine import Engine
 from mstar.engine.node_dtype import resolve_model_dtype, resolve_node_dtype
 from mstar.engine.resources import ResourceReqConfig, apply_yaml_overrides
+from mstar.engine.resources.context_parallel import positions_over_sp
 from mstar.engine.resources.kv.transfer import TransferEngineInfo
 from mstar.graph.runtime.base import GraphRuntime
 from mstar.model.base import Model, node_moe_parallel_configs
@@ -137,9 +138,11 @@ class EngineManager:
             # group when this node actually participates in one, so models
             # that don't support SP keep their existing get_submodule call.
             # Likewise ``moe_parallel``, only for a node group's ``ep_config``.
+            # A node whose KV pool places positions over its SP ranks runs replicated across
+            # them, so it loads as TP alone and never sees its SP group.
             extra = {}
             node_sp_group = parallel_groups.get_sp_config_for_node(name)
-            if node_sp_group.world_size > 1:
+            if node_sp_group.world_size > 1 and not positions_over_sp(specs, name, node_sp_group.world_size):
                 extra["sp_group"] = node_sp_group
             if name in moe_parallel:
                 extra["moe_parallel"] = moe_parallel[name]

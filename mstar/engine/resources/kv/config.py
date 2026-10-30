@@ -14,7 +14,9 @@ from mstar.engine.resources.spec import NodeResourceSpec, ResourceReqConfig
 from mstar.engine.resources.step import ResourceStep
 
 if TYPE_CHECKING:
+    from mstar.distributed.communication import JointGroups
     from mstar.engine.resources.base import Resource
+    from mstar.engine.resources.context_parallel import ContextParallel
 
 
 class KVLayout(Enum):
@@ -54,8 +56,9 @@ class KVConfig(ABC):
 
         Idempotent because one KVConfig is shared by the KV resource and the
         attention resources planned against it, and each shards on construction.
-        ``num_shards`` is the instance session size (tp * sp): Ulysses SP
-        all-to-alls heads, so attention runs at head-degree tp*sp.
+        ``num_shards`` is `EngineResourceInfo.head_shards`: tp * sp, since Ulysses
+        SP all-to-alls heads, or tp alone on a node whose pool places positions
+        over its SP ranks (see `place`).
         """
         from mstar.distributed.utils import divide
 
@@ -90,12 +93,16 @@ class PagedKVConfig(KVConfig):
     prefix_cache_salt: str = ""
     prefix_cache: bool = True
     prefix_cache_tp: bool = False
+    # place token positions over the ranks that would otherwise hold the same KV heads; see `place`
+    context_parallel: bool = False
     # MLA only: the latent is ``[ckv (kv_lora_rank) | kpe (qk_rope_head_dim)]``
     kv_lora_rank: int | None = None
     qk_rope_head_dim: int | None = None
     # MLA: whether num_qo_heads was given. Unset it defaults to the one latent KV head, which
     # the attention backend would plan; a cache only stored (index keys) needs no query heads
     qo_heads_given: bool = field(default=False, init=False, repr=False, compare=False)
+    # resolved from `context_parallel` by `place`; None when it is off
+    placement: "ContextParallel | None" = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self):
         if self.layout == KVLayout.MLA:
@@ -107,6 +114,49 @@ class PagedKVConfig(KVConfig):
             self.num_kv_heads = 1
             self.head_dim = self.kv_lora_rank + self.qk_rope_head_dim
         super().__post_init__()
+
+    def place(self, joint: "JointGroups | None", pool: str) -> None:
+        """Resolve ``context_parallel`` into this rank's ``placement``.
+
+        Idempotent, like ``shard``: the KV resource and every attention resource over it call
+        it on the one shared config. Positions go over the node's SP ranks when it has more
+        than one, and otherwise over the contiguous blocks of TP ranks that ``QKVParallelLinear``
+        gives one KV head (``kv_head_idx = tp_rank // replicas``).
+        """
+        from mstar.distributed.utils import divide
+        from mstar.engine.resources.context_parallel import ContextParallel
+
+        if not self.context_parallel:
+            self.placement = None
+            return
+        sp = joint.sp_group if joint is not None else None
+        if sp is not None and sp.world_size > 1:
+            placement = ContextParallel(
+                size=sp.world_size, index=sp.rank, group=sp, over_sp=True,
+                partners=tuple(range(sp.world_size)),
+            )
+        else:
+            tp = joint.tp_group.world_size if joint is not None else 1
+            if self._unsharded_kv_heads >= tp:
+                raise ValueError(
+                    f"KV {pool!r}: context_parallel places positions over the TP ranks that share a "
+                    f"KV head, and {self._unsharded_kv_heads} KV head(s) over {tp} TP rank(s) leave "
+                    "none sharing one. Raise TP past the KV heads, give the node SP ranks, or turn "
+                    "context_parallel off."
+                )
+            size = divide(tp, self._unsharded_kv_heads)
+            rank = joint.tp_group.rank
+            first = rank - rank % size
+            placement = ContextParallel(
+                size=size, index=rank % size, group=joint.tp_group, over_sp=False,
+                partners=tuple(range(first, first + size)),
+            )
+        if self.page_size % placement.size:
+            raise ValueError(
+                f"KV {pool!r}: context_parallel stripes each page over {placement.size} ranks, "
+                f"which doesn't divide page_size {self.page_size}"
+            )
+        self.placement = placement
 
     @property
     def request_pages(self) -> int:
@@ -128,6 +178,7 @@ class PagedKVConfig(KVConfig):
         prefix_cache_salt: str | None = None,
         prefix_cache: bool | None = None,
         prefix_cache_tp: bool | None = None,
+        context_parallel: bool | None = None,
     ) -> None:
         """How much cache this deployment gets, and how it is cut up."""
         for name, value in (
@@ -138,6 +189,7 @@ class PagedKVConfig(KVConfig):
             ("prefix_cache_salt", prefix_cache_salt),
             ("prefix_cache", prefix_cache),
             ("prefix_cache_tp", prefix_cache_tp),
+            ("context_parallel", context_parallel),
         ):
             if value is not None:
                 setattr(self, name, value)
@@ -435,6 +487,11 @@ class KVSpec(NodeResourceSpec):
     def apply_yaml_overrides(self, **kwargs):
         """Forwarded to the config: which keys are legal is a property of the
         storage strategy, so the config answers for them."""
+        if kwargs.get("context_parallel") and not isinstance(self.config, PagedKVConfig):
+            raise ValueError(
+                f"KV {self.resource_key!r}: context_parallel needs a paged pool, and this one "
+                f"holds a {type(self.config).__name__}"
+            )
         self.config.apply_yaml_overrides(**kwargs)
 
 

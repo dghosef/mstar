@@ -38,6 +38,8 @@ from mstar.engine.resources import (
     SubmoduleStep,
 )
 from mstar.engine.resources.base import EngineResourceInfo, KeyedWalks, build_resource
+from mstar.engine.resources.context_parallel import positions_over_sp
+from mstar.engine.resources.kv.config import KVSpec, PagedKVConfig
 from mstar.engine.resources.kv.keys import fingerprint
 from mstar.engine.resources.kv.transfer import TransferEngineInfo
 from mstar.engine.resources.spec import resolve_spec_dependencies
@@ -141,6 +143,8 @@ class SubmoduleManagement:
     capture_runner: AcceleratorGraphRunner | None = None
     # the submodule's declared float32 settings; None keeps the process default
     fp32_precision: Fp32Precision | None = None
+    # see `EngineResourceInfo.head_shards`; None takes the joint group's size
+    head_shards: int | None = None
 
     # Rotated globally, not per runner: slot-keyed buffers are shared across
     # buckets and regions, so per-runner counters let consecutive steps collide
@@ -160,6 +164,9 @@ class SubmoduleManagement:
     )
 
     def __post_init__(self):
+        if self.head_shards is None:
+            joint = self.joint_comm_group
+            self.head_shards = joint.world_size if joint is not None else 1
         # Two hazards want a second slot, both of them the host running ahead of
         # the GPU: pre-plan needs plan(N+1) to write buffers replay(N) isn't
         # reading, and ``force_double_buffer`` is the same for a resource
@@ -528,6 +535,12 @@ class Engine:
         specs_by_key = resolve_spec_dependencies(specs)
 
         self._classify_tp_roles(node_names, parallel_groups)
+        # node -> how many ways its attention heads shard (see `EngineResourceInfo.head_shards`)
+        head_shards: dict[str, int] = {}
+        for node in node_names:
+            joint = parallel_groups.get_joint_group_for_node(node)
+            over_sp = positions_over_sp(specs, node, joint.sp_group.world_size)
+            head_shards[node] = joint.tp_group.world_size if over_sp else joint.world_size
 
         for spec in specs:
             relevant_nodes = spec.nodes & node_names
@@ -538,10 +551,9 @@ class Engine:
             # different workers (for example BAGEL's three CFG branches).
             # This Engine constructs only the local instance, whose consumers
             # validate_deployment checked share one parallel group.
-            joint_comm_group = parallel_groups.get_joint_group_for_node(
-                next(iter(relevant_nodes))
-            )
-            self._resources[spec.resource_key] = build_resource(
+            first_node = next(iter(relevant_nodes))
+            joint_comm_group = parallel_groups.get_joint_group_for_node(first_node)
+            resource = self._resources[spec.resource_key] = build_resource(
                 spec,
                 EngineResourceInfo(
                     device=device,
@@ -560,8 +572,19 @@ class Engine:
                     max_rows_in_combined=self._max_rows_in_combined(
                         spec.resource_key, relevant_nodes, submodules, model,
                     ),
+                    head_shards=head_shards[first_node],
                 ),
             )
+            for key in spec.depends_on():
+                pool = specs_by_key[key]
+                if (
+                    isinstance(pool, KVSpec) and isinstance(pool.config, PagedKVConfig)
+                    and pool.config.context_parallel and not resource.supports_context_parallel
+                ):
+                    raise ValueError(
+                        f"resource {spec.resource_key!r} ({type(resource).__name__}) does not support "
+                        f"context parallelism, and KV pool {key!r} sets context_parallel"
+                    )
 
             for node in relevant_nodes:
                 node_to_resources.setdefault(node, []).append(spec.resource_key)
@@ -600,6 +623,7 @@ class Engine:
                 # the dtype the engine manager cast this node to
                 node_dtype=resolve_node_dtype(submodule, self._autocast_dtype),
                 fp32_precision=node_fp32_precision(node_name, submodule),
+                head_shards=head_shards[node_name],
             )
             submodule.bind_node_resources(resources)
             if getattr(submodule, "reads_device_loopback", False):
@@ -685,6 +709,7 @@ class Engine:
                 num_slots=submodule_mgmt.num_slots,
                 enable_nvtx=self._enable_nvtx,
                 device_capability=self.device_capability,
+                head_shards=submodule_mgmt.head_shards,
             )
             piecewise[node_name] = self._build_piecewise_runners(
                 node_name, submodule_mgmt
@@ -849,7 +874,7 @@ class Engine:
             self._device,
             # the dtype the region runs in; an opted-out node keeps its params'
             node_dtype or torch.float32,
-            submodule_mgmt.joint_comm_group.world_size,
+            submodule_mgmt.head_shards,
         )
         runners: dict[str, PiecewiseAcceleratorGraphRunner] = {}
         # One graph memory pool for all of the node's regions (see

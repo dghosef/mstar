@@ -124,7 +124,11 @@ def _kv_scatter_nhd_eager(
 
 class KVCache:
     """Owns the KV storage and all layout-dependent addressing, so that
-    consumers (KV transfer, attention) stay layout-agnostic."""
+    consumers (KV transfer, attention) stay layout-agnostic.
+
+    Token ranges and ``page_size`` are logical. Under context parallelism
+    (``cfg.placement``) a page stores only this rank's ``page_slots`` slots, and
+    every range method maps its logical range to them."""
 
     def __init__(
         self,
@@ -133,10 +137,12 @@ class KVCache:
         dtype=torch.bfloat16
     ):
         self.config = cfg
+        self._placement = cfg.placement
+        slots = self.page_slots
         if cfg.layout == KVLayout.NHD:
             self.tensor = torch.zeros(
                 cfg.num_layers, cfg.max_num_pages, 2,
-                cfg.page_size, cfg.num_kv_heads, cfg.head_dim,
+                slots, cfg.num_kv_heads, cfg.head_dim,
                 dtype=dtype, device=device,
             ).contiguous()
         elif cfg.layout == KVLayout.MLA:
@@ -144,7 +150,7 @@ class KVCache:
             # column slices as strided views (page/token strides are explicit
             # kernel params, only the last dim must be contiguous)
             self.tensor = torch.zeros(
-                cfg.num_layers, cfg.max_num_pages, cfg.page_size, cfg.latent_dim,
+                cfg.num_layers, cfg.max_num_pages, slots, cfg.latent_dim,
                 dtype=dtype, device=device,
             ).contiguous()
         else:
@@ -163,6 +169,16 @@ class KVCache:
     @property
     def page_size(self) -> int:
         return self.config.page_size
+
+    @property
+    def page_slots(self) -> int:
+        """Slots a page stores on this rank: ``page_size``, or this rank's share of it."""
+        cp = self._placement
+        return self.config.page_size if cp is None else self.config.page_size // cp.size
+
+    def _slots(self, token_start: int, token_end: int) -> tuple[int, int]:
+        cp = self._placement
+        return (token_start, token_end) if cp is None else cp.slot_range(token_start, token_end)
 
     @property
     def device(self) -> torch.device:
@@ -191,6 +207,7 @@ class KVCache:
         ``base_ptr`` addresses a remote cache with this same layout/config;
         it defaults to this cache's own storage.
         """
+        token_start, token_end = self._slots(token_start, token_end)
         if self.layout == KVLayout.MLA:
             layer_stride, page_stride, token_stride = self.tensor.stride()[:3]
             element_size = self.tensor.element_size()
@@ -293,10 +310,11 @@ class KVCache:
             )
         if tensor is None:
             tensor = self.tensor
+        token_start, token_end = self._slots(token_start, token_end)
         page = tensor[layer_start:layer_end, page_idx]
         if self.layout == KVLayout.MLA:
             return [page[:, token_start:token_end]]
-        if token_start == 0 and token_end == self.page_size:
+        if token_start == 0 and token_end == self.page_slots:
             return [page]
         return [page[:, kv, token_start:token_end] for kv in range(2)]
 
@@ -325,6 +343,7 @@ class KVCache:
         """Copy tokens [0, end) of one page onto another, every layer, both K and V."""
         # Index with slices rather than tensors. Slices need no copy from the host,
         # so the copy doesn't wait on the stream.
+        _, end = self._slots(0, end)
         self.tensor[:, dst_page, :, :end] = self.tensor[:, src_page, :, :end]
 
     def chunk_view(
@@ -338,6 +357,7 @@ class KVCache:
         """
         if tensor is None:
             tensor = self.tensor
+        token_start, token_end = self._slots(token_start, token_end)
         if self.layout == KVLayout.MLA:
             return tensor[layer_idx, page_idx, token_start:token_end]
         if self.layout != KVLayout.NHD:

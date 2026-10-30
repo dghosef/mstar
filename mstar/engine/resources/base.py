@@ -73,6 +73,14 @@ class EngineResourceInfo:
     max_rows_in_combined: "Mapping[str, int | None]" = field(
         default_factory=dict
     )
+    # how many ways attention heads shard: tp * sp, or tp alone on a node whose KV pool places
+    # positions over its SP ranks (`positions_over_sp`). None takes the joint group's size.
+    head_shards: int | None = None
+
+    def __post_init__(self):
+        if self.head_shards is None:
+            joint = self.joint_comm_group
+            object.__setattr__(self, "head_shards", joint.world_size if joint is not None else 1)
 
     def dependency(self, key: str) -> NodeResourceSpec:
         spec = self.dependencies.get(key)
@@ -118,6 +126,9 @@ class Resource(ABC):
 
     # stays correct when a hit skips the front of a request; required of every resource on a keyed node
     prefix_skip_safe: bool = False
+    # stays correct when a KV pool it depends on places positions over ranks
+    # (`PagedKVConfig.context_parallel`); the engine refuses to load one that depends on such a pool otherwise
+    supports_context_parallel: bool = False
 
     def enable_prefix_cache(self, root: bytes, walks: dict[str, KeyedWalks] | None = None) -> bool:
         """Open whatever this resource keeps across requests, under ``root``;

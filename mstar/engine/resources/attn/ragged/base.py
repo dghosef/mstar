@@ -40,7 +40,7 @@ def _build_ragged(spec, info: EngineResourceInfo, manager_cls, **kwargs):
     config = spec.config
     joint = info.joint_comm_group
     if joint is not None:
-        config.shard(joint.world_size if config.shard_over_sp else joint.tp_group.world_size)
+        config.shard(info.head_shards if config.shard_over_sp else joint.tp_group.world_size)
     dtype = config.dtype if config.dtype is not None else info.kv_dtype
     if dtype is None:
         raise ValueError(
