@@ -487,8 +487,8 @@ def compile_node_regions(
     autocast_dtype: torch.dtype | None,
     device_type: str,
 ) -> None:
-    """Compile and warm one node's ``compile_regions`` with dynamic=True (a
-    whole-forward compile uses dynamic=None) in torch.compile's default mode:
+    """Compile and warm one node's ``compile_regions`` with dynamic=True in
+    torch.compile's default mode:
     the compile level (``MSTAR_COMPILE_LEVEL``) tunes captured forwards, whose
     shapes are fixed per bucket. A standalone harness calls this to run a
     node's regions as the engine does."""
