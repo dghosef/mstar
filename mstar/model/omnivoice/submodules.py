@@ -549,6 +549,12 @@ class OmniVoiceCode2WavSubmodule(_SingleRequestMixin, NodeSubmodule):
         self.codec = codec
         self.config = config
 
+    def compile_regions(self) -> dict[str, list[tuple]]:
+        """The codec's acoustic decoder, compiled once for every canvas length:
+        Inductor fuses each Snake activation and residual add between its convs,
+        which eagerly are ~300 of a decode's ~430 kernels."""
+        return {"codec.acoustic_decoder": []}
+
     def prepare_inputs(
         self,
         graph_walk: str,
