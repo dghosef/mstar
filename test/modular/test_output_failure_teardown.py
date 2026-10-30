@@ -26,6 +26,7 @@ from test_teardown_barrier import PREPROCESS, _conductor, _remove_targets, _requ
 from mstar.api_server import entrypoint
 from mstar.api_server.data_worker import InlineToken, PreprocessWorkerThread, RequestOutputState
 from mstar.api_server.request_types import PreprocessInput, ResultChunk, ResultTensors
+from mstar.model.base import Model
 from mstar.streaming.topology import PartitionTopology
 from mstar.utils.ipc_format import ConductorMessageType, FailRequests, ReadsDone
 
@@ -102,6 +103,8 @@ class _Model:
         if self.postprocess_raises:
             raise RuntimeError("decode failed")
         return b"ok"
+
+    postprocess_token_ids = Model.postprocess_token_ids
 
 
 def _thread(model, tensor_manager):

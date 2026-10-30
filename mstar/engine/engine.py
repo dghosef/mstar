@@ -98,18 +98,21 @@ _LAZY_PUBLISH = os.environ.get("MSTAR_LAZY_PUBLISH", "1") == "1"
 
 
 @contextmanager
-def _cudnn_benchmark(enabled: bool) -> Iterator[None]:
-    """``torch.backends.cudnn.benchmark`` on for the block when ``enabled``
-    (``NodeSubmodule.capture_cudnn_benchmark``), restored after."""
-    if not enabled:
-        yield
-        return
-    previous = torch.backends.cudnn.benchmark
-    torch.backends.cudnn.benchmark = True
-    try:
-        yield
-    finally:
-        torch.backends.cudnn.benchmark = previous
+def _capture_scope(submodule_mgmt) -> Iterator[None]:
+    """The node's fp32 precision, and ``torch.backends.cudnn.benchmark`` on
+    when it asks (``NodeSubmodule.capture_cudnn_benchmark``), restored after:
+    the kernels a capture (and the compile inside it) picks are what every
+    replay runs."""
+    with fp32_precision_scope(submodule_mgmt.fp32_precision):
+        if not submodule_mgmt.submodule.capture_cudnn_benchmark:
+            yield
+            return
+        previous = torch.backends.cudnn.benchmark
+        torch.backends.cudnn.benchmark = True
+        try:
+            yield
+        finally:
+            torch.backends.cudnn.benchmark = previous
 
 
 def checkpoint_identity(path: str | Path) -> bytes:
@@ -565,6 +568,7 @@ class Engine:
                             spec.nodes, relevant_nodes
                         )
                     ),
+                    nodes=frozenset(relevant_nodes),
                     dependencies={
                         key: specs_by_key[key] for key in spec.depends_on()
                     },
@@ -747,11 +751,7 @@ class Engine:
 
         for node_name, submodule_mgmt in self._submodules.items():
             runner = ag_runners[node_name]
-            benchmark = submodule_mgmt.submodule.capture_cudnn_benchmark
-            # the kernels a capture (and the compile inside it) picks are what
-            # every replay runs, so it happens under the node's precision
-            with self._capture_into(plan, node_name) as planned, \
-                    fp32_precision_scope(submodule_mgmt.fp32_precision), _cudnn_benchmark(benchmark):
+            with self._capture_into(plan, node_name) as planned, _capture_scope(submodule_mgmt):
                 runner.warmup_and_capture(planned)
             if plan is not None or runner.any_graphs:
                 submodule_mgmt.capture_runner = runner
@@ -761,7 +761,7 @@ class Engine:
             captured: dict[str, PiecewiseAcceleratorGraphRunner] = {}
             with self._capture_into(plan, f"{node_name} piecewise") as planned:
                 for label, pw_runner in piecewise[node_name].items():
-                    with fp32_precision_scope(submodule_mgmt.fp32_precision), _cudnn_benchmark(benchmark):
+                    with _capture_scope(submodule_mgmt):
                         pw_runner.warmup_and_capture(
                             None if planned is None else {bucket for region, bucket in planned if region == label}
                         )
@@ -791,6 +791,9 @@ class Engine:
         # torch.compile applied after CUDA graph capture because the cuda
         # graph runner compiles internally
         self._compile_submodules()
+        for submodule_mgmt in self._submodules.values():
+            with fp32_precision_scope(submodule_mgmt.fp32_precision):
+                submodule_mgmt.submodule.warmup_compiles()
 
         for resource in self._resources.values():
             resource.post_warmup_validate()
@@ -813,8 +816,7 @@ class Engine:
             for node_name, submodule_mgmt in self._submodules.items():
                 # sizing runs the forwards and captures (a sized capture runs none of its own),
                 # so under the node's precision and cuDNN search too
-                with fp32_precision_scope(submodule_mgmt.fp32_precision), \
-                        _cudnn_benchmark(submodule_mgmt.submodule.capture_cudnn_benchmark):
+                with _capture_scope(submodule_mgmt):
                     pools[node_name] = size(ag_runners[node_name])
                     # one pool for all of a node's regions (see `_build_piecewise_runners`)
                     pools[f"{node_name} piecewise"] = {
@@ -942,6 +944,11 @@ class Engine:
             key for key in declared
             if key not in self._resources and specs_by_key[key].config.prefix_cache
         }
+        # resources that aren't keyed but opened, such as a recurrent pool's snapshots
+        restoring: set[str] = set()
+        for key, spec in specs_by_key.items():
+            if key in self._resources and spec.depends_on() <= self._resources.keys():
+                self._resources[key].bind_dependencies({dep: self._resources[dep] for dep in spec.depends_on()})
         for key, resource in self._resources.items():
             if checkpoint is None and declared.get(key):
                 config = specs_by_key[key].config
@@ -968,9 +975,11 @@ class Engine:
                 )
                 for label, kv_label in declared.get(key, {}).items()
             })
-            if not opened or not declared.get(key):
-                continue
-            opened_keys.add(key)
+            if opened:
+                (opened_keys if declared.get(key) else restoring).add(key)
+        self._close_unservable_nodes(specs_by_key, opened_keys, restoring)
+        for key in sorted(opened_keys & self._resources.keys()):
+            resource = self._resources[key]
             nodes = ", ".join(sorted(specs_by_key[key].nodes))
             for label in declared[key]:
                 logger.info("KV %s: prefix cache open for %s on %s", key, label, nodes)
@@ -994,6 +1003,36 @@ class Engine:
                 for walk in label.keys.walks:
                     nodes = model.get_graph_walk_graphs()[walk].get_nodes()
                     self._item_encoders.update(set(nodes) - specs_by_key[key].nodes)
+
+    def _close_unservable_nodes(
+        self, specs_by_key: dict[str, NodeResourceSpec], opened_keys: set[str], restoring: set[str],
+    ) -> None:
+        """Close every prefix cache on a keyed node with a resource that can't
+        serve a cached prefix.
+
+        A resource that opened but isn't keyed serves a hit only when every cache
+        it depends on opened, and so does a resource that depends only on such
+        resources.
+        """
+        restorers = {key for key in restoring if specs_by_key[key].depends_on() <= opened_keys}
+        serving = opened_keys | restorers | {
+            key for key, resource in self._resources.items() if resource.prefix_skip_safe
+        } | {
+            key for key, spec in specs_by_key.items()
+            if spec.depends_on() and spec.depends_on() <= restorers
+        }
+        for node in sorted(self._keyed_walks):
+            on_node = {key for key, spec in specs_by_key.items() if node in spec.nodes and key in self._resources}
+            if on_node <= serving:
+                continue
+            del self._keyed_walks[node]
+            for key in sorted(on_node - serving):
+                logger.info("%s on %s can't serve a cached prefix: the prefix caches on %s stay off",
+                            key, node, node)
+            for key in sorted(on_node & (opened_keys | restoring)):
+                self._resources[key].close_prefix_cache()
+                opened_keys.discard(key)
+                restoring.discard(key)
 
     def prepare_inputs(self, batch: ExecutingBatch) -> None:
         """Per-rid ``submodule.prepare_inputs``, onto ``batch.inputs``.
@@ -1140,7 +1179,7 @@ class Engine:
         return mgmt.submodule.device_loopback_signals(graph_walk)
 
     def extend_prefix_chains(
-        self, batch: ExecutingBatch, outputs: dict[str, NameToTensorList],
+        self, batch: ExecutingBatch, outputs: Mapping[str, Mapping[str, list[torch.Tensor]]],
         host_rows: HostRows | None = None,
     ) -> None:
         """Key what this step generated, from the stop check's host copy."""
@@ -1891,7 +1930,7 @@ class Engine:
         return outputs
 
     def check_stop_for_batch(
-        self, batch: ExecutingBatch, outputs: dict[str, NameToTensorList],
+        self, batch: ExecutingBatch, outputs: Mapping[str, Mapping[str, list[torch.Tensor]]],
         host_rows: HostRows | None = None,
     ) -> dict[str, set[str]]:
         """Each rid's ``submodule.check_stop``, as rid -> loops that should stop.
@@ -2388,6 +2427,13 @@ class Engine:
             graph_walk=request_info.graph_walk,
             published=request_info.resource_publish_info,
         )
+
+    def admit_waiting(
+        self, published_of: Callable[[str, str], Mapping[str, PublishedInfo] | None],
+    ) -> list[tuple[str, str]]:
+        """The (node, rid) pairs admitted since `check_ready` answered them ``queued``; see
+        `Admission.admit_waiting`."""
+        return self._runner.admit_waiting(published_of)
 
     def reserve_replay_slot(self, batch: ExecutingBatch) -> SlotLease | None:
         """Lease the slot this batch will replay on, before it is dispatched.

@@ -20,7 +20,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from api_server_helpers import make_test_api_server  # noqa: E402
+from api_server_helpers import idle_poll, make_test_api_server  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -141,7 +141,6 @@ def _thread(model=None, is_pending=None, model_config=None):
             send=lambda entity, msg: sent.append((entity, msg)),
             codec=SimpleNamespace(encode=lambda msg: msg),  # sends arrive as objects
             try_send_bytes=lambda entity, msg: sent.append((entity, msg)) or True,
-            poll_for_messages=lambda timeout_ms=1: False,
             get_all_new_messages=lambda: [],
         ),
         tensor_manager=tm, model=model or _ListeningModel(), is_pending=is_pending,
@@ -759,7 +758,7 @@ def test_an_append_after_the_model_ended_the_call_is_late_not_rejected(monkeypat
             return [messages.pop()] if messages else []
 
         server.communicator = SimpleNamespace(
-            poll_for_messages=lambda timeout_ms=1: False, get_all_new_messages=one_pass,
+            poll_for_messages=idle_poll, get_all_new_messages=one_pass,
         )
         server.conductor_proc = None
         server._liveness_interval_s = 0.5
@@ -1056,7 +1055,7 @@ def test_a_second_socket_cannot_take_over_a_live_call(monkeypatch, tmp_path):
 
 
 class _FailingOutputModel(_ListeningModel):
-    def postprocess(self, output, modality, request_kwargs=None):
+    def postprocess_token_ids(self, ids, modality, request_kwargs=None):
         raise RuntimeError("boom")
 
 
@@ -1135,7 +1134,7 @@ def test_a_rejected_call_completing_meanwhile_leaves_delivery_running():
     ))] for rid in (call, other)]
 
     server.communicator = SimpleNamespace(
-        poll_for_messages=lambda timeout_ms=1: False,
+        poll_for_messages=idle_poll,
         get_all_new_messages=lambda: batches.pop(0) if batches else [],
     )
     server.conductor_proc = None

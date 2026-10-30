@@ -3,6 +3,7 @@ and is woken by a producer's signal, a finished tensor read or shutdown,
 instead of sleeping 1 ms and sweeping its queues."""
 from __future__ import annotations
 
+import os
 import queue
 import select
 import threading
@@ -11,9 +12,12 @@ from collections import deque
 from concurrent.futures import Future
 from types import SimpleNamespace
 
+import pytest
+
 from mstar.api_server.data_worker import InlineToken, PreprocessWorkerThread
 from mstar.communication.event import EventWakeup
 from mstar.graph.loop_indices import NestedLoopIndices
+from mstar.model.base import Model
 
 
 class _Model:
@@ -23,6 +27,8 @@ class _Model:
 
     def postprocess(self, output, modality, request_kwargs=None):
         return f"<{int(output[0])}>".encode()
+
+    postprocess_token_ids = Model.postprocess_token_ids
 
 
 class _PollingComm:
@@ -237,7 +243,7 @@ def test_pooled_preprocessing_overlaps_requests_and_keeps_arrival_order():
         profile_queue=queue.Queue(), cleanup_request_queue=queue.Queue(),
         abort_request_queue=queue.Queue(), reads_done_queue=queue.Queue(),
         discard_tensor_queue=queue.Queue(), stop_event=stop, communicator=comm,
-        tensor_manager=_StoreTM(), model=model, wakeup=wakeup,
+        tensor_manager=_StoreTM(), model=model, wakeup=wakeup, preprocess_workers=2,
     )
     t = threading.Thread(target=worker.run, daemon=True)
     t.start()
@@ -257,9 +263,33 @@ def test_pooled_preprocessing_overlaps_requests_and_keeps_arrival_order():
     assert not t.is_alive()
 
 
+@pytest.mark.parametrize(("declared", "workers"), [(2, 0), (2, "2"), (1, 2), (0, 4)])
+def test_a_bad_preprocess_workers_fails_startup(declared, workers):
+    """Not a dead data-worker thread under a server that comes up; nor a pool
+    for a model class that does not declare its prepares thread-safe."""
+    from mstar.api_server.data_worker import PreprocessWorker
+    from mstar.communication.communicator import CommProtocol
+
+    model = _SlowModel()
+    model.PREPROCESS_WORKERS = declared
+    with pytest.raises(ValueError, match="(?i)preprocess_workers"):
+        PreprocessWorker(
+            model=model, model_config={"preprocess_workers": workers},
+            tensor_comm_protocol=CommProtocol.SHM, socket_path_prefix=f"/tmp/mstar-pw{os.getpid()}",
+        )
+
+
+def test_a_deployment_may_size_a_thread_safe_pool_past_the_class_value():
+    from mstar.api_server.data_worker import preprocess_workers
+
+    assert preprocess_workers(_SlowModel(), {"preprocess_workers": 16}) == 16
+
+
 def test_a_prepared_request_waits_while_a_peer_cannot_take_more():
     """As on the inline path, nothing is handed on to the conductor while
-    earlier sends are still queued for a peer that is backed up."""
+    earlier sends are still queued for a peer that is backed up, including a
+    send made by the hand-off just before it. The queue gauge, read during a
+    hand-off, counts only the inputs behind it."""
     from mstar.api_server.data_worker import PreparingInput
     from mstar.api_server.request_types import PreprocessInput
 
@@ -267,11 +297,44 @@ def test_a_prepared_request_waits_while_a_peer_cannot_take_more():
     worker._prep_workers, worker.in_queue = 2, queue.Queue()
     done = Future()
     done.set_result(({}, {}, {}))
-    worker._preparing = deque([PreparingInput(PreprocessInput("r", "r", None, [], ["text"], {}), None, done)])
-    taken = []
-    worker._take_input = lambda *entry: taken.append(entry[0].request_id)
+    worker._preparing = deque(
+        PreparingInput(PreprocessInput(rid, rid, None, [], ["text"], {}), None, done) for rid in ("r", "s")
+    )
+    taken, waiting = [], []
 
-    PreprocessWorkerThread._pump_preprocess_pool(worker, sends_pending=True)
+    def take_input(pre_input, profile=None, prepared=None):
+        taken.append(pre_input.request_id)
+        waiting.append(worker.waiting_inputs)
+
+    worker._take_input = take_input
+    # each hand-off's send fills the peer until the next pass
+    worker.communicator = SimpleNamespace(flush=lambda: bool(taken))
+
+    PreprocessWorkerThread._take_new_input(worker, sends_pending=True)
     assert taken == [], "a prepared request was sent to a peer that can't take what it was already sent"
-    PreprocessWorkerThread._pump_preprocess_pool(worker, sends_pending=False)
-    assert taken == ["r"]
+    PreprocessWorkerThread._take_new_input(worker, sends_pending=False)
+    assert taken == ["r"], "handed on behind a send the peer had not taken"
+    PreprocessWorkerThread._take_new_input(worker, sends_pending=False)
+    assert taken == ["r", "s"]
+    assert waiting == [1, 0], "counted the input being handed on as waiting"
+
+
+def test_the_pool_skips_the_prepare_of_a_request_the_api_server_let_go_of():
+    """A request aborted while queued costs no media load or process_prompt;
+    it is dropped as it is handed on, as on the inline path."""
+    from mstar.api_server.request_types import PreprocessInput
+
+    worker = PreprocessWorkerThread.__new__(PreprocessWorkerThread)
+    worker._prep_workers, worker.in_queue, worker._preparing = 2, queue.Queue(), deque()
+    submitted = []
+    worker._prep_pool = SimpleNamespace(submit=lambda fn, pre_input: submitted.append(pre_input.request_id))
+    worker._is_pending = lambda rid: False
+    worker.timing_requested, worker.wakeup = threading.Event(), None
+    worker.communicator = SimpleNamespace(flush=lambda: False)
+    taken = []
+    worker._take_input = lambda pre_input, profile=None, prepared=None: taken.append((pre_input.request_id, prepared))
+    worker.in_queue.put(PreprocessInput("gone", "gone", None, [], ["text"], {}))
+
+    PreprocessWorkerThread._take_new_input(worker, sends_pending=False)
+    assert submitted == [], "prepared a request nothing will read"
+    assert taken == [("gone", None)]
