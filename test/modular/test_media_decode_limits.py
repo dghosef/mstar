@@ -278,6 +278,15 @@ def test_vjepa2_refuses_sampled_frames_over_the_budget_before_decoding(monkeypat
     assert pulled == []
 
 
+def test_vjepa2_refuses_a_video_without_load_video_metadata():
+    """A video tensor it can't decode is an error, not a request without a video."""
+    from mstar.model.vjepa2.vjepa2_model import VJepa2Model
+
+    model = VJepa2Model("unused", skip_weight_loading=True)
+    with pytest.raises(ValueError, match="load_video"):
+        model.process_prompt(None, ["video"], ["video"], tensors={"video_inputs": [torch.zeros(8, 3, 64, 64)]})
+
+
 @pytest.mark.parametrize("rollout_horizon, decoded", [(0, 64), (4, 8)])
 def test_vjepa2_ac_decodes_only_the_frames_its_walk_encodes(monkeypatch, rollout_horizon, decoded):
     from mstar.model.vjepa2.vjepa2_model import VJepa2Model

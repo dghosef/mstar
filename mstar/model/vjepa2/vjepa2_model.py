@@ -688,10 +688,11 @@ class VJepa2Model(Model):
         """
         out: NameToTensorList = {}
 
-        video_meta = (kwargs.get("input_metadata") or {}).get("video_inputs") or []
-        if tensors and "video_inputs" in tensors and len(tensors["video_inputs"]) > 0 and video_meta:
-            meta = video_meta[0]
-            sampled = meta["sampled_indices"]
+        if tensors and "video_inputs" in tensors and len(tensors["video_inputs"]) > 0:
+            meta = ((kwargs.get("input_metadata") or {}).get("video_inputs") or [{}])[0]
+            sampled = meta.get("sampled_indices")
+            if sampled is None or _VIDEO_PATH not in meta:
+                raise ValueError("V-JEPA 2 decodes the frames its load_video sampled; this video has no such metadata")
             # Per-request override of the frame budget (e.g. to experiment
             # with longer clips on larger GPUs); defaults to the model's
             # pretraining frames_per_clip. Clamped to whatever frames were
