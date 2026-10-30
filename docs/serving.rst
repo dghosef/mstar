@@ -341,8 +341,8 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
    * - ``preprocess_workers``
      - *(optional)* Requests whose media load and ``process_prompt`` the API server
        runs at once, on a thread pool: a positive integer, default
-       ``Model.PREPROCESS_WORKERS`` (8 for V-JEPA2, 4 for V-JEPA2-AC, 1 otherwise),
-       which this setting may raise or lower. A model class sets that above 1 only
+       ``Model.PREPROCESS_WORKERS`` (8 for V-JEPA2 and 4 for V-JEPA2-AC, which this
+       setting may raise or lower; 1 otherwise). A model class sets that above 1 only
        when its ``load_*`` and ``process_prompt`` are thread-safe, so a value above 1 for a
        class that leaves it at 1 fails at startup, as does a value that is not a
        positive integer. 1 prepares one request at a time on the data-worker thread.
