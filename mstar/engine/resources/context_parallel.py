@@ -107,14 +107,10 @@ class ContextParallel(NamedTuple):
         partial: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]] | None,
         new: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        """Attention over the whole pool for this rank's query, fp32 (``new``'s out when ``partial`` is
-        None): ``queries`` its parts, each
-        ``[N, H, *]`` (one, or a backend's several, such as MLA's ``q_nope`` and ``q_pe``).
-        ``partial`` attends this rank's slots for the parts ``exchange_queries`` returns and gives
-        ``(out, lse, valid)`` as ``exchange_partials`` takes them; ``new`` is the step's own
-        tokens' ``(out, lse)`` for this rank's heads, when it attends them apart from the pool.
-        Runs the same collectives on every rank; none when ``partial`` is None, which every rank
-        must agree on: no row has stored context, so ``new`` is the whole attention."""
+        """Attention over the whole pool for this rank's query parts (each ``[N, H, *]``), fp32.
+        ``partial`` gives ``(out, lse, valid)`` over this rank's slots; ``new`` is the step's own
+        tokens' ``(out, lse)``. Every rank runs the same collectives; none when ``partial`` is None
+        (no row has stored context), which every rank must agree on."""
         if partial is None:
             return new[0]
         outs, lses = self.exchange_partials(*partial(*self.exchange_queries(queries)))
@@ -171,19 +167,11 @@ def _gather_partials(group: CommGroup, out: torch.Tensor, lse: torch.Tensor) -> 
 
 
 class ContextParallelWrapper:
-    """A step's attention over a pool whose positions are placed over ranks
-    (``PagedKVConfig.context_parallel``), from a backend's two wrappers: ``attend`` gets this
-    rank's partials over its own slots, and ``ContextParallel.attend`` exchanges and merges them.
-
-    A step whose rows each query one token attends the pages after its write (``context`` a
-    decode-kind wrapper, ``new`` None). Any other step is two attentions: the stored context, not
-    causal, planned on its context-only indptrs; and the step's own tokens, over the keys the layer
-    passes to ``run``, on ``new``, which needs no exchange. ``context`` is planned with
-    ``page_size`` the pool's slots per page on this rank (``page_size`` here is the logical one).
-    Each wrapper takes whatever its backend's ``run`` does; ``new`` plans as
-    ``plan(qo_indptr, causal)``. A captured wrapper is built with its ``batch_size`` and
-    ``max_total_tokens``.
-    """
+    """A step's attention over a placed pool from a backend's two wrappers, exchanged and merged
+    by ``ContextParallel.attend``. A one-token-a-row step attends the pages after its write
+    (``new`` None); any other step attends its stored context (not causal) on ``context`` and its
+    own tokens, from the keys the layer passes to ``run``, on ``new``. ``page_size`` is the
+    logical one."""
 
     def __init__(
         self,
