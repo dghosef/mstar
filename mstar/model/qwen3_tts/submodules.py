@@ -1115,7 +1115,7 @@ class CodecSubmodule(ARNodeSubmodule):
             raise ValueError(f"Expected codec tokens with shape (frames, groups), got {codes.shape}")
         codes = codes.reshape(-1, self.config.num_code_groups)[:, :self.config.codec.num_quantizers]
         frames = codes.shape[0]
-        context = min(chunk.context_items if chunk is not None else 0, frames)
+        context = chunk.context_items if chunk is not None else 0
         bucket = self._bucket(max(frames, 1))
         state.add("codec_bucket", bucket)   # graph-key fallback when a caller has no stream chunk info
         # The chunk's geometry rides with this pass: under speculative
