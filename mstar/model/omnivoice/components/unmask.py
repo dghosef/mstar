@@ -2,10 +2,10 @@
 
 An exact port of OmniVoice's ``_predict_tokens_with_scoring`` and the schedule
 arithmetic inside ``_generate_iterative`` (``omnivoice/models/omnivoice.py``).
-Parity against the reference is decided here, so the operation order is kept
-verbatim even where it could be tidied — the log_softmax is applied twice on the
-CFG path because the reference applies it twice, and the mask id is driven to
--inf after the combine rather than before.
+Parity against the reference is decided here, so the arithmetic is kept to the
+bit even where it could be tidied — the log_softmax is applied twice on the CFG
+path because the reference applies it twice, and the mask id is driven to -inf
+after the combine rather than before.
 
 Nothing here touches the network or the engine; it is pure tensor math over a
 step's packed logits, so the parity test can drive it directly.

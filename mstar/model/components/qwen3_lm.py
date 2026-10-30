@@ -31,10 +31,11 @@ from mstar.model.components.norm import RMSNorm
 
 class Qwen3Attention(ParallelAttention):
     """``ParallelAttention`` with Qwen3's per-head q/k RMSNorm, its 1D RoPE and
-    the step's KV write in one Triton kernel (``AttentionCallable.norm_rope_attend``).
-    At decode width a step is a few small kernels per layer, and the separate
-    norm, RoPE and KV-write kernels were a sizeable share of it. Falls back to
-    the unfused path off CUDA or without planned positions."""
+    the step's KV write in one Triton kernel, through
+    ``AttentionCallable.norm_rope_attend``. At decode width a step is a few
+    small kernels per layer, and the separate norm, RoPE and KV-write kernels
+    were a sizeable share of it. Falls back to the unfused path off CUDA or
+    without planned positions."""
 
     _fuse_qk = False
 

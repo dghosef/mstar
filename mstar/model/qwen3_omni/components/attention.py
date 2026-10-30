@@ -4,10 +4,10 @@ Reuses ``ParallelAttention`` (which already supports per-head QK-norm,
 fused QKV projection, and TP-sharded o_proj). The Qwen3-specific piece
 is the 3D MRoPE path used by the Thinker — for ``use_mrope=True`` q/k
 norm, the rotation by externally provided ``cos_sin_3d`` and the KV
-write run in one kernel (``AttentionCallable.norm_rope_attend``). Talker uses
-standard 1D RoPE (``use_mrope=False``) through the step surface's
-``apply_rope``. Every rope and attention call names its layer and plan
-key explicitly.
+write run in one Triton kernel, through
+``AttentionCallable.norm_rope_attend``. Talker uses standard 1D RoPE
+(``use_mrope=False``) through the step surface's ``apply_rope``. Every
+rope and attention call names its layer and plan key explicitly.
 
 Follows the same shape conventions as the shared attention:
   q: [tokens, num_heads, head_dim]
