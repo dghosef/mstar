@@ -144,7 +144,8 @@ class Server:
             cwd = str(NEWB)
         else:
             self.kind = "mstar"
-            env.update({"PYTHONPATH": str(TREE), "PATH": f"{NEWB / 'venv' / 'bin'}:{env['PATH']}",
+            tree = Path(env_extra.get("OVN_TREE", TREE))  # an arm can serve another copy of the tree
+            env.update({"PYTHONPATH": str(tree), "PATH": f"{NEWB / 'venv' / 'bin'}:{env['PATH']}",
                         "MSTAR_SHM_ARENA": "1", "MSTAR_REQUIRE_ACCELERATOR_GRAPHS": "1",
                         "TORCHINDUCTOR_CACHE_DIR": str(HOME / "push4" / "cache" / m["name"] / "inductor"),
                         "TRITON_CACHE_DIR": str(HOME / "push4" / "cache" / m["name"] / "triton"),
@@ -153,11 +154,11 @@ class Server:
             env.update({k: v for k, v in env_extra.items() if not k.startswith("OVN_")})
             cfg = env_extra.get("OVN_CONFIG", m["config"])
             cmd = [PY, "-m", "mstar.cli.main", "serve", m["mstar"], "--config",
-                   cfg if cfg.startswith("/") else str(TREE / cfg), "--gpus", m.get("visible", m["gpus"]),
+                   cfg if cfg.startswith("/") else str(tree / cfg), "--gpus", m.get("visible", m["gpus"]),
                    "--port", str(port),
                    "--socket-path-prefix", f"/tmp/p4g_{port}_{int(time.time())}/"]
             cmd += env_extra.get("OVN_SERVE_EXTRA", "").split()
-            cwd = str(TREE)
+            cwd = str(tree)
         self.logf = open(logpath, "w")
         self.logf.write(f"# arm={arm} env={env_extra} cmd={' '.join(cmd)}\n")
         self.logf.flush()
@@ -166,7 +167,10 @@ class Server:
         # the whole slice and is moved onto its CPUs once healthy (push4c BRIEF: within 1.5% of packed-from-start).
         wide = ",".join(sorted({*CORES.split(","), *MSTAR_CORES.split(",")}, key=int))
         repin = self.kind == "mstar" and self.cores != CORES
-        self.p = subprocess.Popen(pin(cmd, wide if repin else self.cores), cwd=cwd, env=env, stdout=self.logf,
+        cmd = pin(cmd, wide if repin else self.cores)
+        if env_extra.get("OVN_WRAP"):  # a command prefix, e.g. `py-spy record ... --`
+            cmd = env_extra["OVN_WRAP"].split() + cmd
+        self.p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=self.logf,
                                   stderr=subprocess.STDOUT, start_new_session=True)
         t0 = time.monotonic()
         while time.monotonic() - t0 < 3600:

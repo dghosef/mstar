@@ -28,10 +28,13 @@ import run_gen  # noqa: E402  (Server, pin, NEWB/TREE paths)
 OPENPI_PY = str(Path.home() / "push4" / "engines" / "openpi" / ".venv" / "bin" / "python")
 OPENPI_CKPT = str(Path.home() / ".cache" / "openpi" / "openpi-assets" / "checkpoints" / "pi05_droid_pytorch")
 MEDIA = run_gen.DATA / "droid100_media"
-PORT = 59300
-WS_PORT = 59310
+PORT = int(os.environ.get("PUSH4_PI05_PORT", "59300"))
+WS_PORT = PORT + 10
+U8_TREE = "/root/push4/newb/mstar_u8"  # the tree with Pi05Model.load_image shipping uint8 cameras
 OPENPI_DIR = Path.home() / "push4" / "engines" / "openpi"
 ROUNDS = {"mstar": lambda a, out, tag: mstar_round(a.gpu, a.n, a.warm, out, tag, False),
+          "mstar_u8": lambda a, out, tag: mstar_round(a.gpu, a.n, a.warm, out, f"u8_{tag}", False,
+                                                      {"OVN_TREE": U8_TREE}),
           "openpi": lambda a, out, tag: openpi_round(a.gpu, a.n, a.warm, out, tag),
           "openpi_ws": lambda a, out, tag: openpi_ws_round(a.gpu, a.n, a.warm, out, tag)}
 ACTION_DIM = 32  # mstar returns the full 32-dim flow-matching chunk as float32; openpi slices it to 8 dims
