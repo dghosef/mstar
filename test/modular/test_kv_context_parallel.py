@@ -351,12 +351,14 @@ def _reference_flashinfer() -> types.ModuleType:
             parts = [_reference(q[a:b], k[a:b], v[a:b], self.causal) for a, b in itertools.pairwise(self.qo)]
             o, got = torch.cat([p[0] for p in parts]).to(q.dtype), torch.cat([p[1] for p in parts])
             got = got if lse_base == "ln" else got / math.log(2)
-            # into the caller's buffers, when given, the planned rows alone
-            for buf, rows in ((out, o), (lse, got)):
-                if buf is not None:
-                    buf[:len(rows)] = rows
-            o, got = (rows if buf is None else buf for buf, rows in ((out, o), (lse, got)))
-            return (o, got) if return_lse else o
+            # the planned rows alone, into the caller's buffers or q-sized ones of its own (FlashInfer's
+            # torch.empty; NaN here)
+            if out is None:
+                out = torch.full((q.shape[0], *o.shape[1:]), math.nan, dtype=o.dtype)
+            if lse is None:
+                lse = torch.full((q.shape[0], *got.shape[1:]), math.nan)
+            out[:len(o)], lse[:len(got)] = o, got
+            return (out, lse) if return_lse else out
 
     fi.BatchPrefillWithPagedKVCacheWrapper = Paged
     fi.BatchDecodeWithPagedKVCacheWrapper = Decode
@@ -506,8 +508,8 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False)
         bucket = BucketKey("w", bs=len(rows), num_tokens=n + pad) if captured else None
         _plan(attn, case, bucket=bucket)
         if pad:
-            # what another graph's freed pool block can leave in the own-token part's buffers: only
-            # plan's reset of the padding keeps it finite through the merge (and the next layer)
+            # whatever the own-token part's buffers hold past this plan (an earlier, longer step's
+            # rows; NaN here): only plan's reset keeps the padding 0 through the merge
             own = next(iter(attn._cg_plan_states.values())).new
             own._out_buf.fill_(math.nan)
             own._lse_buf.fill_(math.nan)
@@ -530,6 +532,11 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False)
             out.fill_(math.nan)
             graph.replay()
             torch.cuda.synchronize()
+            if pad:
+                # the kernel wrote the real rows into the part's own buffers (NaN before plan), and
+                # plan reset the padding to out 0, lse -inf
+                assert torch.isfinite(own._out_buf[: n + pad]).all() and torch.isfinite(own._lse_buf[: n + pad]).all()
+                assert not own._out_buf[n : n + pad].any() and (own._lse_buf[n : n + pad] == -math.inf).all()
         assert torch.isfinite(out).all()
         torch.testing.assert_close(out[:n].float(), case.want()[:, heads], **tol)
         if rows == PREFILL_ROWS and not captured:
