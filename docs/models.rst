@@ -508,7 +508,7 @@ Kokoro notes
   concurrency 32-64 on an H200, Whisper WER unchanged, with the harmonic source and the
   iSTFT kept in fp32; the parity test covers fp32 only; ``configs/kokoro_bf16.yaml``).
   Each BiLSTM's two directions run as one block-diagonal recurrence, and cuDNN times
-  the frame half's conv algorithms once per captured bucket
+  the conv algorithms of both captured halves once per bucket, at capture
   (``NodeSubmodule.capture_cudnn_benchmark``).
 - Text is cut at sentence boundaries into chunks of at most 510 phonemes (the
   PL-BERT window); each chunk is emitted to the client as soon as it is
