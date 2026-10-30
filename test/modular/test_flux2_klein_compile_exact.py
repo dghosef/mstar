@@ -53,6 +53,47 @@ def test_a_kept_torch_rms_norm_compiles_without_a_graph_break():
         assert torch.equal(torch.compile(model, backend="eager", fullgraph=True)(x), model(x))
 
 
+def test_blocks_sharing_a_compiled_frame_compile_it_once():
+    """klein's blocks run one compiled block frame, each block with its own kept norms: a kept
+    module's forward is its class's, so the frame's guards hold for every block. A forward set per
+    instance failed them once per block, until dynamo's recompile limit sent the rest eager."""
+
+    class Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = nn.Linear(128, 128)
+            self.norm = nn.LayerNorm(128)  # a graph break, as klein's modulation norms are
+            self.q_norm = nn.RMSNorm(128, eps=1e-6)
+            self.k_norm = nn.RMSNorm(128, eps=1e-6)
+
+        def forward(self, x):
+            h = self.norm(self.proj(x))
+            return self.q_norm(h) + self.k_norm(h)
+
+    torch.manual_seed(0)
+    blocks = [Block() for _ in range(3)]
+    for block in blocks:
+        assert exclude_from_compile(block, exact_op_types(["norms"])) == 3
+    graphs = []
+
+    def backend(gm, example_inputs):
+        graphs.append(gm)
+        return gm.forward
+
+    x = torch.randn(2, 5, 128)
+    torch._dynamo.reset()
+    try:
+        compiled = torch.compile(Block.forward, backend=backend, dynamic=False)
+        with torch.no_grad():
+            assert torch.equal(compiled(blocks[0], x), blocks[0](x))
+            first = len(graphs)
+            for block in blocks[1:]:
+                assert torch.equal(compiled(block, x), block(x))
+    finally:
+        torch._dynamo.reset()
+    assert first and len(graphs) == first
+
+
 def test_excluded_modules_compute_the_same_values():
     torch.manual_seed(0)
     dit = Flux2DiT(TINY)

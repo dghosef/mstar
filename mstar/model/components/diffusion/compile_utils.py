@@ -58,11 +58,9 @@ def exclude_from_compile(transformer: nn.Module, types: Sequence[type] = EXACT_O
     count = 0
     for module in transformer.modules():
         if isinstance(module, types) or (with_marked and getattr(module, "compile_exact_op", False)):
-            if type(module) is nn.RMSNorm and len(module.normalized_shape) == 1:
-                module.forward = functools.partial(_exact_rms_norm_forward, module)
-            else:
-                module.forward = torch._dynamo.disable(module.forward)
-            module.compile_kept_exact = True
+            if not kept_exact(module):
+                exact_rms = type(module) is nn.RMSNorm and len(module.normalized_shape) == 1
+                module.__class__ = _kept_class(type(module), exact_rms)
             count += 1
     return count
 
@@ -70,6 +68,15 @@ def exclude_from_compile(transformer: nn.Module, types: Sequence[type] = EXACT_O
 def kept_exact(module: nn.Module | None) -> bool:
     """Whether :func:`exclude_from_compile` keeps ``module`` on the eager result."""
     return getattr(module, "compile_kept_exact", False)
+
+
+@functools.cache
+def _kept_class(cls: type[nn.Module], exact_rms: bool) -> type[nn.Module]:
+    """The subclass a kept module of class ``cls`` becomes, made once, so every kept module of a
+    class shares one ``forward``. Dynamo guards on the identity of a forward set on an instance,
+    which recompiles a frame the blocks share once per block."""
+    forward = _exact_rms_norm_forward if exact_rms else torch.compiler.disable(cls.forward)
+    return type(cls.__name__, (cls,), {"forward": forward, "compile_kept_exact": True})
 
 
 def _exact_rms_norm_forward(module: nn.RMSNorm, x: torch.Tensor) -> torch.Tensor:
