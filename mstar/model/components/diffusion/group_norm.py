@@ -26,16 +26,19 @@ if triton is not None:
         x_ptr, mean_ptr, m2_ptr, sb, sp, sc,
         C: tl.constexpr, G: tl.constexpr, BP: tl.constexpr,
     ):
-        b = tl.program_id(0)
-        blk = tl.program_id(1)
+        # pixel tiles on grid axis 0, which holds 2^31 - 1 programs; axis 1 holds 65,535
+        blk = tl.program_id(0)
+        b = tl.program_id(1)
         pix = blk * BP + tl.arange(0, BP)
         ch = tl.arange(0, C)
-        x = tl.load(x_ptr + b.to(tl.int64) * sb + pix.to(tl.int64)[:, None] * sp + ch[None, :] * sc).to(tl.float32)
+        x = tl.load(
+            x_ptr + b.to(tl.int64) * sb + pix.to(tl.int64)[:, None] * sp + ch.to(tl.int64)[None, :] * sc
+        ).to(tl.float32)
         x = tl.reshape(x, [BP, G, C // G])
         mean = tl.sum(tl.sum(x, axis=2), axis=0) / (BP * (C // G))  # [G]
         d = x - mean[None, :, None]
         m2 = tl.sum(tl.sum(d * d, axis=2), axis=0)
-        out = (b * tl.num_programs(1) + blk) * G + tl.arange(0, G)
+        out = (b * tl.num_programs(0) + blk) * G + tl.arange(0, G)
         tl.store(mean_ptr + out, mean)
         tl.store(m2_ptr + out, m2)
 
@@ -44,10 +47,10 @@ if triton is not None:
         x_ptr, y_ptr, w_ptr, bias_ptr, mean_ptr, rstd_ptr, sb, sp, sc,
         C: tl.constexpr, G: tl.constexpr, BP: tl.constexpr, SILU: tl.constexpr,
     ):
-        b = tl.program_id(0)
-        pix = tl.program_id(1) * BP + tl.arange(0, BP)
+        b = tl.program_id(1)
+        pix = tl.program_id(0) * BP + tl.arange(0, BP)
         ch = tl.arange(0, C)
-        offs = b.to(tl.int64) * sb + pix.to(tl.int64)[:, None] * sp + ch[None, :] * sc
+        offs = b.to(tl.int64) * sb + pix.to(tl.int64)[:, None] * sp + ch.to(tl.int64)[None, :] * sc
         x = tl.load(x_ptr + offs).to(tl.float32)
         grp = ch // (C // G)
         mean = tl.load(mean_ptr + b * G + grp)
@@ -67,9 +70,11 @@ def _fits(x: torch.Tensor, weight, bias, num_groups: int) -> bool:
     if triton is None or not x.is_cuda or x.dim() != 4 or weight is None or bias is None:
         return False
     _, c, h, w = x.shape
-    # Below 256^2 pixels inductor's own GroupNorm is as fast. H and W must merge into one
-    # pixel index (true for NCHW- and NHWC-contiguous tensors), and every tile is full.
-    return ((c & (c - 1)) == 0 and 32 <= c <= 1024 and c % num_groups == 0 and h * w >= 1 << 16
+    # Below 256^2 pixels inductor's own GroupNorm is as fast. The kernels write y with x's
+    # strides, which y = empty_like(x) shares only for a dense x (NCHW or NHWC), and merge H and
+    # W into one pixel index; every tile is full.
+    dense = x.is_contiguous() or x.is_contiguous(memory_format=torch.channels_last)
+    return (dense and (c & (c - 1)) == 0 and 32 <= c <= 1024 and c % num_groups == 0 and h * w >= 1 << 16
             and (h * w) % _tile(c) == 0 and x.stride(2) == w * x.stride(3))
 
 
@@ -90,12 +95,12 @@ def group_norm_silu(
     sb, sc, sp = x.stride(0), x.stride(1), x.stride(3)
     mean = torch.empty(bsz, nblk, num_groups, device=x.device, dtype=torch.float32)
     m2 = torch.empty_like(mean)
-    _gn_stats_kernel[(bsz, nblk)](x, mean, m2, sb, sp, sc, C=c, G=num_groups, BP=bp, num_warps=8)
+    _gn_stats_kernel[(nblk, bsz)](x, mean, m2, sb, sp, sc, C=c, G=num_groups, BP=bp, num_warps=8)
     # Chan's combine of the per-tile (mean, M2), all tiles holding bp * C / G elements
     gmean = mean.mean(1)
     var = (m2.sum(1) + (bp * (c // num_groups)) * (mean - gmean[:, None]).pow(2).sum(1)) / (p * (c // num_groups))
     rstd = torch.rsqrt(var + eps)
-    _gn_apply_kernel[(bsz, nblk)](
+    _gn_apply_kernel[(nblk, bsz)](
         x, y, weight, bias, gmean.contiguous(), rstd.contiguous(), sb, sp, sc,
         C=c, G=num_groups, BP=bp, SILU=silu, num_warps=8,
     )

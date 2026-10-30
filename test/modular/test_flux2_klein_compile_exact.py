@@ -73,18 +73,25 @@ def test_folded_upsample_equals_nearest_upsample_then_conv():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
-@pytest.mark.parametrize("channels_last", [True, False])
-def test_split_group_norm_silu_matches_fp32_group_norm(channels_last):
+@pytest.mark.parametrize("shape, layout", [
+    ((2, 128, 256, 256), "nchw"),
+    ((2, 128, 256, 256), "channels_last"),
+    ((2, 128, 256, 256), "channel_slice"),  # not dense: F.group_norm, not the kernel
+    ((1, 32, 2048, 2048), "nchw"),  # 65,536 pixel tiles, more than a grid's y axis holds
+])
+def test_split_group_norm_silu_matches_fp32_group_norm(shape, layout):
     from mstar.model.components.diffusion.group_norm import group_norm_silu
 
     torch.manual_seed(0)
-    x = (torch.randn(2, 128, 256, 256, device="cuda") * 3 + 1).to(torch.bfloat16)
-    if channels_last:
+    x = (torch.randn(*shape, device="cuda") * 3 + 1).to(torch.bfloat16)
+    if layout == "channels_last":
         x = x.contiguous(memory_format=torch.channels_last)
-    w, b = (torch.randn(128, device="cuda").to(torch.bfloat16) for _ in range(2))
+    elif layout == "channel_slice":
+        x = torch.cat([x, x], dim=1)[:, : shape[1]]
+    w, b = (torch.randn(shape[1], device="cuda").to(torch.bfloat16) for _ in range(2))
     ref = torch.nn.functional.silu(torch.nn.functional.group_norm(x.float(), 32, w.float(), b.float(), 1e-6))
     got = group_norm_silu(x, w, b, 32, 1e-6, True)
-    assert got.stride() == x.stride()
+    assert layout == "channel_slice" or got.stride() == x.stride()
     torch.testing.assert_close(got.float(), ref, rtol=2 ** -7, atol=2 ** -6)  # bf16 output rounding
 
 
