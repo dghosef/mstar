@@ -111,6 +111,8 @@ def wait_port_free(port: int, timeout: float = 120.0) -> None:
     t0 = time.monotonic()
     while True:
         with socket.socket() as sk:
+            # as the servers bind: TIME_WAIT sockets of the previous arm's connections don't count, a listener does
+            sk.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 sk.bind(("0.0.0.0", port))
                 return
@@ -154,6 +156,7 @@ class Server:
                    cfg if cfg.startswith("/") else str(TREE / cfg), "--gpus", m.get("visible", m["gpus"]),
                    "--port", str(port),
                    "--socket-path-prefix", f"/tmp/p4g_{port}_{int(time.time())}/"]
+            cmd += env_extra.get("OVN_SERVE_EXTRA", "").split()
             cwd = str(TREE)
         self.logf = open(logpath, "w")
         self.logf.write(f"# arm={arm} env={env_extra} cmd={' '.join(cmd)}\n")

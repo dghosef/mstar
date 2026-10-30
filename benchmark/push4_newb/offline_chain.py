@@ -3,7 +3,8 @@
 Jobs run in order, each under a hard timeout with its own log; a failed or timed-out job is logged and the next one
 starts. Jobs marked `all_gpus` first wait until GPUs 1-3 have no compute processes (they are lent out until ~12:40Z).
 
-  nohup setsid python offline_chain.py > ~/push4/results/newb/offline_chain.log 2>&1 &
+  nohup setsid python offline_chain.py [PID ...] >> ~/push4/results/newb/offline_chain.log 2>&1 &
+  (PIDs: jobs already on GPU 0 to wait for first)
 """
 from __future__ import annotations
 
@@ -33,11 +34,15 @@ BENCH27 = [PY, "run_27b.py", "--phases", "bench", "--arms", "ladder,vllm,sglang"
 
 # (name, command, timeout s, env, needs GPUs 1-3)
 JOBS = [
-    # pi0.5 is mstar's losing cell (JCT p50 ~120 ms vs openpi 35 ms): is it host-bound? server unpacked vs packed
-    ("pi05_wide", [PY, "run_pi05.py", "--gpu", "0", "--rounds", "1", "--n", "50", "--out", str(R / "pi05_wide")],
-     2400, {**GEN, "PUSH4_MSTAR_CORES": evens(4, 52)}, False),
-    ("pi05_r3", [PY, "run_pi05.py", "--gpu", "0", "--rounds", "1", "--n", "50", "--out", str(R / "pi05_r3")],
+    # pi0.5 is mstar's losing cell (JCT p50 ~120 ms vs openpi 35 ms in-process; mstar's worker is ~16 ms of it):
+    # where the rest of mstar's request goes, then openpi's own websocket server so both arms pay for serving,
+    # then the mstar server unpacked (is the host path CPU-starved on 2 CPUs?)
+    ("pi05_timeline", [PY, "run_pi05.py", "--gpu", "0", "--n", "50", "--timeline", "--out", str(R / "pi05_timeline")],
      2400, GEN, False),
+    ("pi05_ws", [PY, "run_pi05.py", "--gpu", "0", "--arms", "mstar,openpi_ws", "--rounds", "2", "--n", "50",
+                 "--out", str(R / "pi05_ws")], 2 * 3600, GEN, False),
+    ("pi05_wide", [PY, "run_pi05.py", "--gpu", "0", "--arms", "mstar", "--rounds", "1", "--n", "50",
+                   "--out", str(R / "pi05_wide")], 2400, {**GEN, "PUSH4_MSTAR_CORES": evens(4, 52)}, False),
     # DROID third round through the compile-wide-then-repin launch (validates it against packed-from-start)
     ("droid_r3", [PY, "run_gen.py", "bench", "--model", "droid", "--gpu", "0", "--arms", "base,sglang_b1",
                   "--rounds", "1", "--out", str(R / "droid_r3")], 3600, GEN, False),
@@ -99,6 +104,15 @@ def cleanup() -> None:
 
 
 def main() -> int:
+    for pid in (int(x) for x in sys.argv[1:]):  # jobs already running on GPU 0
+        log(f"waiting for pid {pid}")
+        while True:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(15)
+        cleanup()
     for name, cmd, timeout, env, all_gpus in JOBS:
         if all_gpus and not wait_gpus_1_3():
             log(f"{name}: SKIPPED, GPUs 1-3 still busy after 4 h")
