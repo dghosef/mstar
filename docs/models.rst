@@ -244,9 +244,10 @@ OmniVoice notes
   runs the same layer loop eagerly.
 - ``configs/omnivoice_split.yaml`` runs code2wav (codec decode and the
   host-side silence trim) on a second worker sharing GPU 0, so the unmask loop
-  no longer stops for each finished request. With a CUDA MPS daemon it raised
-  concurrency-32 throughput on an H200 from ~153 to 176-184 audio-s/s and cut
-  TTFA p95 from ~9 s to ~3 s; concurrency 1 is ~10% slower.
+  no longer stops for each finished request, and sets ``mps: true`` (see
+  :doc:`serving`) so the two workers' kernels overlap. On an H200 it raised
+  concurrency-32 throughput from ~153 to 176-184 audio-s/s and cut TTFA p95
+  from ~9 s to ~3 s; concurrency 1 is ~10% slower.
 
 Higgs Audio notes
 ~~~~~~~~~~~~~~~~~
@@ -645,8 +646,9 @@ Qwen3-TTS notes
   for the 0.6B) runs the Codec on a second worker that
   shares GPU 0 (``rank_devices``) and caps the Talker KV pool so both fit.
   On its own it lowers first-audio latency at high concurrency; with
-  ``mps: true`` in the YAML (see :doc:`serving`) the two workers' kernels also
-  overlap, which raised c=32 throughput by about a fifth on an H100.
+  ``mps: true`` in the YAML (see :doc:`serving`; ``qwen3tts_split.yaml`` sets
+  it) the two workers' kernels also overlap, which raised c=32 throughput by
+  about a fifth on an H100.
 - The codec decoder runs in float32 by default, reproducing the reference
   decoder bit for bit. ``model_kwargs: {codec_dtype: bfloat16}`` in the
   deployment YAML selects a bf16 codec (the Talker is bf16 either way). On a
@@ -990,9 +992,9 @@ Chatterbox notes
 - ``configs/chatterbox_split.yaml`` (and ``chatterbox_turbo_split.yaml``,
   ``chatterbox_multilingual_split.yaml``) runs S3Gen on a second worker that
   shares GPU 0 (``rank_devices``), so T3's decode steps stop alternating with
-  S3Gen's flow solves on one worker loop. It only pays with a user-level CUDA
-  MPS daemon (``nvidia-cuda-mps-control -d`` before ``mstar serve``), which
-  lets the two workers' kernels overlap: on an H200 at concurrency 32 Chatterbox
+  S3Gen's flow solves on one worker loop. It only pays under CUDA MPS, which
+  lets the two workers' kernels overlap, so the configs set ``mps: true`` (see
+  :doc:`serving`): on an H200 at concurrency 32 Chatterbox
   went from 36-38 to 58-61 audio-s/s and Turbo from 69 to 94, at the cost of a
   later first chunk (TTFA p50 1.6-1.8 s -> 1.9-2.1 s; Turbo 0.36 s -> 1.0 s);
   concurrency 1 is unchanged, and WER held (1.22% -> 1.08%). Without MPS the
