@@ -21,6 +21,7 @@ import numpy as np
 import torch
 
 from mstar.engine.resources.kv.plan import build_paged_indptrs, context_only_views
+from mstar.utils.h2d import PinnedStager
 
 logger = logging.getLogger(__name__)
 
@@ -653,23 +654,19 @@ class FlashInferContextParallelWrapper:
         context: "FlashInferPrefillWrapper | FlashInferDecodeWrapper",
         new,
         device: torch.device,
-        max_total_tokens: int = 0,
+        captured_tokens: int = 0,
     ):
         self.context = context
         # a FlashInferRaggedPrefillWrapper, or None for a one-token-a-row step
         self.new = new
         self._device = device
         self._qo_indptr_buf = None
-        # per query row, whether it holds any of this rank's slots; a captured wrapper's is sized
-        # to its bucket up front, so a replay reads the address it was captured with
-        self._valid = self._valid_host = None
-        self._done = None
-        if max_total_tokens:
-            self._alloc_valid(max_total_tokens)
-
-    def _alloc_valid(self, n: int) -> None:
-        self._valid = torch.zeros(n, dtype=torch.bool, device=self._device)
-        self._valid_host = torch.zeros(n, dtype=torch.bool, pin_memory=self._device.type == "cuda")
+        # per query token, whether its row holds any of this rank's slots. A captured wrapper's
+        # holds its bucket's every token (``captured_tokens``) and is never reallocated, so a
+        # replay reads the address it was captured with
+        self._captured = captured_tokens > 0
+        self._valid = torch.zeros(captured_tokens, dtype=torch.bool, device=device) if self._captured else None
+        self._stager = PinnedStager(torch.bool)
 
     @torch.compiler.disable
     def plan(self, placement, page_size: int, kv_out, causal: bool = True, dtype: torch.dtype = torch.bfloat16):
@@ -691,17 +688,12 @@ class FlashInferContextParallelWrapper:
         self._qo_indptr_buf = getattr(self.context, "_qo_indptr_buf", None)
         valid = np.repeat(valid_rows, np.diff(context.qo_indptr.numpy()))
         n = len(valid)
-        if self._valid is None or self._valid.shape[0] < n:
-            self._alloc_valid(max(n, 256))
-        if self._done is not None:
-            # the previous plan's copy out of the host buffer, a step or more back
-            self._done.synchronize()
-        elif self._device.type == "cuda":
-            self._done = torch.cuda.Event()
-        self._valid_host[:n].numpy()[:] = valid
-        self._valid[:n].copy_(self._valid_host[:n], non_blocking=True)
-        if self._done is not None:
-            self._done.record()
+        if self._captured:
+            assert n <= self._valid.shape[0], f"{n} query tokens on a wrapper captured for {self._valid.shape[0]}"
+        elif self._valid is None or self._valid.shape[0] < n:
+            self._valid = torch.zeros(max(n, 256), dtype=torch.bool, device=self._device)
+        # the whole buffer: a captured bucket's padding tokens read False rather than a stale flag
+        self._stager.copy_(self._valid, valid, pad_value=False)
 
     def attend_context(self, *query_and_kv: torch.Tensor):
         """``(out, lse, valid)`` over this rank's slots, from ``context.run``'s query and KV arguments;

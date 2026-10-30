@@ -355,7 +355,9 @@ class FlashInferMLAManager(AttentionManager):
             if max_total_tokens is not None:
                 own["max_num_pages"] = max_total_tokens
             new = FlashInferMLAOwnTokensWrapper(self._workspaces.get(f"{label}.own_tokens", slot), self._dtype, **own)
-        return FlashInferContextParallelWrapper(context, new, self._device, max_total_tokens or 0)
+        # a captured wrapper's every query token: a row's at least, and the bucket's
+        captured_tokens = max(kwargs.get("batch_size") or 0, max_total_tokens or 0)
+        return FlashInferContextParallelWrapper(context, new, self._device, captured_tokens)
 
     @property
     def supports_preplan(self):

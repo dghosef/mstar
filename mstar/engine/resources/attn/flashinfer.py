@@ -217,7 +217,9 @@ class FlashInferManager(AttentionManager):
                 max_num_segments=kv_kwargs.get("batch_size"), max_total_tokens=max_total_tokens,
                 accelerator_graph=kv_kwargs.get("accelerator_graph", False), **self._new_kwargs,
             )
-        return FlashInferContextParallelWrapper(context, new, self._device, max_total_tokens or 0)
+        # a captured wrapper's every query token: a row's at least, and the bucket's
+        captured_tokens = max(kv_kwargs.get("batch_size") or 0, max_total_tokens or 0)
+        return FlashInferContextParallelWrapper(context, new, self._device, captured_tokens)
 
     @property
     def supports_preplan(self):
