@@ -452,7 +452,8 @@ class _Case:
 
 
 def _cp_attention(
-    joint: JointGroups, device: torch.device, dtype: torch.dtype, mla=False, num_kv_heads=1, **attention,
+    joint: JointGroups, device: torch.device, dtype: torch.dtype, mla=False, num_kv_heads=1, num_qo_heads=Q_HEADS,
+    **attention,
 ):
     """A ``FlashInferManager`` (``FlashInferMLAManager`` for ``mla``) over a placed pool, and this
     rank's placement."""
@@ -461,7 +462,7 @@ def _cp_attention(
         layout = dict(head_dim=LATENT, layout=KVLayout.MLA, kv_lora_rank=CKV, qk_rope_head_dim=KPE)
         attention.update(backend=AttnBackend.FLASHINFER_MLA, sm_scale=LATENT ** -0.5)
     kv = KVSpec(resource_key="kv", nodes={NODE}, config=PagedKVConfig(
-        num_layers=1, num_kv_heads=num_kv_heads, max_seq_len=64, num_qo_heads=Q_HEADS,
+        num_layers=1, num_kv_heads=num_kv_heads, max_seq_len=64, num_qo_heads=num_qo_heads,
         max_num_pages=16, page_size=CP_PAGE, context_parallel=True, **layout,
     ))
     info = EngineResourceInfo(
@@ -704,21 +705,24 @@ def test_mla_ranks_refuse_the_same_steps_past_the_fa_planners_work_item_cap(monk
                         mla=True, flashinfer_backend="fa2")[0], case)
 
 
-@pytest.mark.parametrize("version, refused", [
-    ("0.7.3", r"FlashInfer 0\.7\.3 is installed"),
+@pytest.mark.parametrize("version, heads, refused", [
+    ("0.7.3", Q_HEADS, r"FlashInfer 0\.7\.3 is installed"),
     # a local build of the release
-    (f"{fm._FA_PLANNER_VERSION}+cu130", None),
+    (f"{fm._FA_PLANNER_VERSION}+cu130", Q_HEADS, None),
+    # TP 2 shards the heads: 20 a rank
+    (fm._FA_PLANNER_VERSION, 40, "causal tile-bound check can refuse a step at 20 query heads"),
+    (fm._FA_PLANNER_VERSION, 128, None),
 ])
-def test_mla_attention_over_a_placed_pool_refuses_a_flashinfer_whose_planner_it_did_not_copy(
-    monkeypatch, version, refused,
+def test_mla_attention_over_a_placed_pool_refuses_at_bind_a_flashinfer_or_head_count_its_fa_planner_may_refuse(
+    monkeypatch, version, heads, refused,
 ):
     _fa_kernel(monkeypatch, version)
     joint = JointGroups(tp_group=_group(0, P), sp_group=CommGroup.trivial())
     if refused is None:
-        _cp_attention(joint, CPU, torch.float32, mla=True, flashinfer_backend="fa2")
+        _cp_attention(joint, CPU, torch.float32, mla=True, num_qo_heads=heads, flashinfer_backend="fa2")
         return
     with pytest.raises(ValueError, match=refused):
-        _cp_attention(joint, CPU, torch.float32, mla=True, flashinfer_backend="fa2")
+        _cp_attention(joint, CPU, torch.float32, mla=True, num_qo_heads=heads, flashinfer_backend="fa2")
 
 
 def test_the_fa_work_item_bound_holds_flashinfers_own_count():

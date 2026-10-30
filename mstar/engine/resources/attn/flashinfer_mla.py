@@ -342,6 +342,15 @@ class FlashInferMLAManager(AttentionManager):
                     f"rank alone, from a copy of that planner's rules; FlashInfer {flashinfer.__version__} "
                     f"is installed. Install flashinfer-python=={_FA_PLANNER_VERSION}"
                 )
+            # FA's causal tile-bound check can refuse a causal plan at a head count that doesn't divide
+            # its query tile (64 or 128); the backend is pinned, so the refusal can't fall through
+            heads = self._kv_config.num_qo_heads
+            if 64 % heads:
+                raise ValueError(
+                    f"MLA attention over context-parallel KV pool {self._kv_cache_name!r} plans on FlashInfer's "
+                    f"FA planner, whose causal tile-bound check can refuse a step at {heads} query heads a rank: "
+                    "use a TP size that gives each rank a head count dividing 64, or turn context_parallel off"
+                )
             self._fa_sm_count = _sm_count(self._device)
 
     @property
