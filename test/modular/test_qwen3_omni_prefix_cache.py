@@ -313,10 +313,10 @@ def _audio(n_window: int) -> tuple[AudioEncoderSubmodule, Qwen3OmniMoeAudioEncod
 
 
 class _WindowedAttention:
-    """The ragged attention resource's eager answer: each declared window attends only to itself."""
+    """The ragged attention resource's answer: each planned window attends only to itself."""
 
-    def __init__(self, step):
-        self.spans = [segment.span for segment in step.segments]
+    def __init__(self, spans: list[int]):
+        self.spans = spans
 
     def run(self, q, k, v, label=None):
         return torch.cat([
@@ -335,30 +335,52 @@ class _UnleasedRunner:
         raise AssertionError("replayed the captured layers for a step that leased no slot")
 
 
-def test_packed_clips_split_by_the_encoder_s_own_window():
-    """A clip's embedding count is counted with the encoder's ``n_window``, as the
-    prompt layout counts it; with the default window's count a 104-frame clip
-    would claim 14 embeddings where a 52-frame window gives 13."""
+class _Replay:
+    """The captured layers' answer: the stack over the windows the replay was handed."""
+
+    def __init__(self, audio: AudioEncoderSubmodule):
+        self.audio = audio
+
+    def run(self, static_inputs, request_ids, seq_lens):
+        self.seq_lens = seq_lens
+        self.audio.bind_node_resources({AUDIO_ATTN: _WindowedAttention(seq_lens)})
+        return {"out": self.audio.encoder.encode(static_inputs["hidden"], None)}
+
+
+@pytest.mark.parametrize("leased", [False, True], ids=["eager", "replayed"])
+def test_packed_clips_split_by_the_encoder_s_own_window(leased):
+    """Each clip of a packed step, over several conv chunks and attention
+    windows, comes back as HF's encoder gives it alone, whether the step
+    replays the captured layers or runs them under its own plan. A clip's rows
+    are counted with the encoder's ``n_window``, as the prompt layout counts
+    them: with the default window's count a 104-frame clip would claim 14
+    embeddings where a 52-frame window gives 13."""
     audio, hf = _audio(n_window=52)
-    clips = (torch.randn(128, 104), torch.randn(128, 60))
+    rids = ["a", "b", "c"]
+    # one chunk; under one chunk; ten chunks over two attention windows
+    clips = (torch.randn(128, 104), torch.randn(128, 60), torch.randn(128, 1000))
     prepared = [audio.prepare_inputs("prefill_audio", None, {"audio_features": [clip]}) for clip in clips]
-    # attention runs over the windows the step declared
-    step = audio.declare_step("prefill_audio", ["a", "b"], prepared)
-    audio.bind_node_resources({AUDIO_ATTN: _WindowedAttention(step)})
+    windows = [segment.span for segment in audio.declare_step("prefill_audio", rids, prepared).segments]
+    audio.bind_node_resources({AUDIO_ATTN: _WindowedAttention(windows)})
+    runner = _Replay(audio) if leased else _UnleasedRunner()
     engine_inputs = SimpleNamespace(
-        request_ids=["a", "b"],
-        # the step holds no lease, so the layers run eagerly even though a runner could
-        piecewise_runners={AudioEncoderSubmodule.AUDIO_LAYERS: _UnleasedRunner()}, piecewise_leases={},
+        request_ids=rids,
+        # unleased, the layers run eagerly even though a runner could replay them
+        piecewise_runners={AudioEncoderSubmodule.AUDIO_LAYERS: runner},
+        piecewise_leases={AudioEncoderSubmodule.AUDIO_LAYERS: object()} if leased else {},
     )
     tensors = audio.preprocess("prefill_audio", None, prepared)
     with torch.no_grad():
         packed = audio.forward_batched("prefill_audio", engine_inputs, **tensors)
         alone = [hf(clip, feature_lens=torch.tensor([clip.shape[-1]])).last_hidden_state for clip in clips]
 
-    assert [packed[rid]["audio_embeds"][0].shape for rid in "ab"] == [a.shape for a in alone], (
+    assert len(windows) == 4, "the long clip was not split over two attention windows"
+    if leased:
+        assert runner.seq_lens == windows, "the replay attended over windows other than the step's"
+    assert [packed[rid]["audio_embeds"][0].shape for rid in rids] == [a.shape for a in alone], (
         "a packed clip's embeddings were split at a window other than the encoder's"
     )
-    for rid, ref in zip("ab", alone, strict=True):
+    for rid, ref in zip(rids, alone, strict=True):
         torch.testing.assert_close(packed[rid]["audio_embeds"][0], ref, rtol=1e-4, atol=1e-4)
 
 
