@@ -74,14 +74,18 @@ class EngineResourceInfo:
     max_rows_in_combined: "Mapping[str, int | None]" = field(
         default_factory=dict
     )
-    # how many ways attention heads shard: tp * sp, or tp alone on a node whose KV pool places
-    # positions over its SP ranks (`positions_over_sp`). None takes the joint group's size.
-    head_shards: int | None = None
+    # the node's KV pool places positions over its SP ranks (`context_parallel.positions_over_sp`)
+    positions_over_sp: bool = False
 
-    def __post_init__(self):
-        if self.head_shards is None:
-            joint = self.joint_comm_group
-            object.__setattr__(self, "head_shards", joint.world_size if joint is not None else 1)
+    @property
+    def head_shards(self) -> int:
+        """How many ways the node's ranks split its attention heads, which each builder sizes head
+        counts by: its TP and SP ranks, or TP alone when its KV pool places positions over the SP
+        ranks (``positions_over_sp``)."""
+        group = self.joint_comm_group
+        if group is None:
+            return 1
+        return group.tp_group.world_size * (1 if self.positions_over_sp else group.sp_group.world_size)
 
     def dependency(self, key: str) -> NodeResourceSpec:
         spec = self.dependencies.get(key)

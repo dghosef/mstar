@@ -451,8 +451,7 @@ class _Case:
 
 
 def _cp_attention(
-    joint: JointGroups, device: torch.device, dtype: torch.dtype, head_shards: int, mla=False, num_kv_heads=1,
-    **attention,
+    joint: JointGroups, device: torch.device, dtype: torch.dtype, mla=False, num_kv_heads=1, **attention,
 ):
     """A ``FlashInferManager`` (``FlashInferMLAManager`` for ``mla``) over a placed pool, and this
     rank's placement."""
@@ -465,7 +464,8 @@ def _cp_attention(
         max_num_pages=16, page_size=CP_PAGE, context_parallel=True, **layout,
     ))
     info = EngineResourceInfo(
-        device=device, joint_comm_group=joint, kv_dtype=dtype, dependencies={"kv": kv}, head_shards=head_shards,
+        device=device, joint_comm_group=joint, kv_dtype=dtype, dependencies={"kv": kv},
+        positions_over_sp=joint.sp_group.world_size > 1,
     )
     spec = AttentionSpec(resource_key="attn", nodes={NODE}, config=AttentionConfig(kv_cache="kv", **attention))
     attn = AttentionManager.build(spec, info)
@@ -508,7 +508,7 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False)
         joint = (JointGroups(tp_group=CommGroup.trivial(), sp_group=group) if over_sp
                  else JointGroups(tp_group=group, sp_group=CommGroup.trivial()))
         dtype = torch.bfloat16 if cuda else torch.float32
-        attn, placement = _cp_attention(joint, device, dtype, head_shards=1 if over_sp else world, mla=mla)
+        attn, placement = _cp_attention(joint, device, dtype, mla=mla)
         case = _Case.build(rows, device, dtype, mla)
         # the slot plans the other kind of step first
         _plan(attn, _Case.build(DECODE_ROWS if rows == PREFILL_ROWS else PREFILL_ROWS, device, dtype, mla))
@@ -568,7 +568,7 @@ def _naive_mla_over_ranks(rank, world, store):
         group = CommGroup(rank, rank, list(range(world)))
         group.device_group, group.initialized = dist.group.WORLD, True
         joint = JointGroups(tp_group=CommGroup.trivial(), sp_group=group)
-        attn, placement = _cp_attention(joint, CPU, torch.float32, head_shards=1, num_kv_heads=Q_HEADS)
+        attn, placement = _cp_attention(joint, CPU, torch.float32, num_kv_heads=Q_HEADS)
         case = _Case.build(((0, 5), (0, 3)), CPU, torch.float32)
         _plan(attn, case)
         config = types.SimpleNamespace(
@@ -611,7 +611,7 @@ def test_two_ranks_run_a_naive_mla_layer_over_an_sp_placed_pool(tmp_path):
 def test_attention_a_placed_pool_cannot_serve_is_refused_at_build(attention, refused):
     joint = JointGroups(tp_group=_group(0, P), sp_group=CommGroup.trivial())
     with pytest.raises(ValueError, match=f"'attn': {refused} is unsupported over KV pool 'kv'"):
-        _cp_attention(joint, CPU, torch.float32, head_shards=P, **attention)
+        _cp_attention(joint, CPU, torch.float32, **attention)
 
 
 # the MLA case on CPU runs the MLA wrapper's own torch fallback, which these rows check the same way
@@ -641,14 +641,14 @@ def test_tp_placed_decode_runs_on_tensor_cores_whatever_decode_tensor_cores_says
     monkeypatch.setenv("MSTAR_WORKSPACE_BUFFER_MB", "1")
     monkeypatch.setitem(sys.modules, "flashinfer", _reference_flashinfer())
     joint = JointGroups(tp_group=_group(0, P), sp_group=CommGroup.trivial())
-    attn, _ = _cp_attention(joint, CPU, torch.float32, head_shards=P, decode_tensor_cores=False)
+    attn, _ = _cp_attention(joint, CPU, torch.float32, decode_tensor_cores=False)
     _plan(attn, _Case.build(DECODE_ROWS, CPU, torch.float32))
     assert attn._current_plan_states["main"].context.attn_wrapper.use_tensor_cores
 
 
 def test_mla_attention_refuses_a_context_only_step_over_a_placed_pool():
     joint = JointGroups(tp_group=_group(0, P), sp_group=CommGroup.trivial())
-    attn, _ = _cp_attention(joint, CPU, torch.float32, head_shards=P, mla=True)
+    attn, _ = _cp_attention(joint, CPU, torch.float32, mla=True)
     with pytest.raises(ValueError, match="context_only step over a context-parallel KV pool"):
         _plan(attn, _Case.build(PREFILL_ROWS, CPU, torch.float32, mla=True), context_only=True)
 
@@ -668,7 +668,7 @@ def test_flashinfer_partials_over_simulated_ranks_merge_to_full_attention(rows, 
     outs, lses, new = [], [], None
     for rank in range(P):
         joint = JointGroups(tp_group=CommGroup.trivial(), sp_group=_group(rank, P))
-        attn, placement = _cp_attention(joint, device, dtype, head_shards=1, mla=mla)
+        attn, placement = _cp_attention(joint, device, dtype, mla=mla)
         # this rank's side of the exchange alone: masked, through a gather over itself
         alone = placement._replace(group=CommGroup.trivial())
         _plan(attn, case, bucket=bucket)
