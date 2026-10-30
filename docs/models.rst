@@ -561,6 +561,12 @@ Qwen3-Omni notes
   config's 512 pages (64k tokens) leave room for all of them. It also runs the
   audio and vision encoders on the Talker's GPU, so an encoder step doesn't wait
   behind a Thinker step.
+- When every attachment is audio, a clip is prefilled in one Thinker walk with the
+  text after it (and the text before it, if under a 128-token page), so the clip's
+  prefix-cache key includes that text: a later turn of an audio chat, or the same
+  clip with a different question, re-prefills the clip. On 4-turn chats with short
+  histories this measured neutral at concurrency 1 and faster at 16; long histories
+  (thousands of tokens) were not measured.
 - Streamed audio starts after 12 codec frames (0.96 s of audio), then 13, then
   25-frame chunks behind 25 frames of left context. Playback stays gapless
   while the Talker produces frames at about 1.5x real time over the first 50
