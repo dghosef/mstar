@@ -85,10 +85,20 @@ class AttentionManager(AttentionResource):
         # `shard` lives on the KVConfig base, so this is unchanged for both.
         if info.joint_comm_group is not None:
             kv_config.shard(info.head_shards)
-        if isinstance(kv_config, PagedKVConfig):
-            if kv_config.context_parallel and spec.config.sliding_window is not None:
+        if isinstance(kv_config, PagedKVConfig) and kv_config.context_parallel:
+            unsupported = [name for name, refused in (
+                ("sliding_window", spec.config.sliding_window is not None),
+                # the mixed decode/prefill wrapper isn't used over a placed pool
+                ("splits", bool(spec.config.splits)),
+                # before it degrades to FlashInfer on some hosts, so a config loads on none
+                (f"backend {backend.value!r}", backend == AttnBackend.DENSE),
+                # the partials' lse bases these are known to report (`merge`)
+                (f"flashinfer_backend {spec.config.flashinfer_backend!r}",
+                 spec.config.flashinfer_backend not in ("auto", "fa2", "fa3", "trtllm-gen")),
+            ) if refused]
+            if unsupported:
                 raise ValueError(
-                    f"attention {spec.resource_key!r}: sliding_window is unsupported over KV pool "
+                    f"attention {spec.resource_key!r}: {', '.join(unsupported)} is unsupported over KV pool "
                     f"{spec.config.kv_cache!r}, which sets context_parallel"
                 )
         if backend == AttnBackend.DENSE:

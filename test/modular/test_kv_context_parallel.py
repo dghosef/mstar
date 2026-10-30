@@ -35,7 +35,7 @@ from mstar.engine.resources.kv.plan import SINK_PAGE, KVPlanOutput, KVPlanOutput
 from mstar.engine.resources.kv.transfer import KVReadInfo, ShmKVTransferEngine
 from mstar.engine.resources.position.config import PositionConfig, PositionSpec
 from mstar.engine.resources.recurrent.config import DeltaNetGeometry, RecurrentStateConfig, RecurrentStateSpec
-from mstar.engine.resources.spec import NodeResourceSpec
+from mstar.engine.resources.spec import CombinedSplit, NodeResourceSpec
 from mstar.engine.resources.step import BucketKey, Segment, SlotLease, StepContext
 from mstar.model.components.mla import MLAAttention
 
@@ -578,10 +578,18 @@ def test_two_ranks_run_a_naive_mla_layer_over_an_sp_placed_pool(tmp_path):
     mp.spawn(_naive_mla_over_ranks, args=(P, str(tmp_path / "store")), nprocs=P)
 
 
-def test_sliding_window_attention_over_a_placed_pool_is_refused():
+@pytest.mark.parametrize("attention, refused", [
+    (dict(sliding_window=8), "sliding_window"),
+    (dict(splits=(CombinedSplit("w", ("prefill",)),)), "splits"),
+    # on a host without FA3 dense degrades to FlashInfer, which would serve the pool
+    (dict(backend=AttnBackend.DENSE), "backend 'dense'"),
+    # its decode lse base isn't known
+    (dict(flashinfer_backend="cudnn"), "flashinfer_backend 'cudnn'"),
+])
+def test_attention_a_placed_pool_cannot_serve_is_refused_at_build(attention, refused):
     joint = JointGroups(tp_group=_group(0, P), sp_group=CommGroup.trivial())
-    with pytest.raises(ValueError, match="'attn': sliding_window is unsupported over KV pool 'kv'"):
-        _cp_attention(joint, CPU, torch.float32, head_shards=P, sliding_window=8)
+    with pytest.raises(ValueError, match=f"'attn': {refused} is unsupported over KV pool 'kv'"):
+        _cp_attention(joint, CPU, torch.float32, head_shards=P, **attention)
 
 
 # the MLA case on CPU runs the MLA wrapper's own torch fallback, which these rows check the same way
