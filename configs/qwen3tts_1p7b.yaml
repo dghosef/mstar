@@ -1,6 +1,6 @@
 # Qwen3-TTS-12Hz-1.7B-CustomVoice: built-in speakers, optional style instruction (instruct=...)
 # Same graph, pools and single-GPU placement as the 0.6B deployment
-# (configs/qwen3tts.yaml), with a bf16 codec and a 4-frame first chunk. KV
+# (configs/qwen3tts.yaml), with a bf16 codec and a 2-frame first chunk. KV
 # geometry is identical across sizes (28 layers, 8 KV heads, head_dim 128).
 model: "qwen3_tts_1p7b"
 max_seq_len: 32768
@@ -15,8 +15,9 @@ model_kwargs:
   # chunk still arrives before the client has played it (a 1-frame first
   # chunk is 80 ms, and its successor came late for a few streams near
   # capacity), and the first audio leaves two Talker steps earlier than with
-  # a 4-frame start. On an H100, c=64: TTFA p50 63-78 ms vs 84-95 with
-  # [4, 8, 16], no stalls either way, same throughput and SLO capacity.
+  # a 4-frame start. On an H100, c=64 (measured before the codec compiled
+  # through compile_regions): TTFA p50 63-78 ms vs 84-95 with [4, 8, 16], no
+  # stalls either way, same throughput and SLO capacity.
   # Opt-in for lower latency: [1, 2, 5, 16] gives TTFA p50 ~43-53 ms at
   # c=64 with ~1-2% of streams pausing briefly (<10 ms total) at that load.
   codec_chunk_schedule: [2, 4, 8, 16]
