@@ -1896,33 +1896,39 @@ different query heads of one KV head: each sends its queries to its partners, at
 partner's heads over its own slots, and sends the partials back to their heads' owners, two
 all-to-alls over the TP group. The collectives run on every layer of every step, so a request
 attends at one rank's speed over ``1/P`` of its context, plus the exchange. An eager step whose
-rows hold no stored context yet (a first prefill) skips both. A step whose rows each query one
-token makes one paged call after its KV write; in TP mode it runs on tensor cores whatever
-``decode_tensor_cores`` says, since a rank's query heads over its one KV head can form a group
-the CUDA-core decode kernel doesn't take. Any other step (prefill, chunked prefill, a prefix
-hit, speculative verify) attends its stored context on the paged kernel and its own tokens on
-FlashInfer's ragged prefill, over the ``k`` and ``v`` the layer passes to ``run``. A layer that
-calls ``attn.run`` itself must pass them (``AttentionCallable`` does); one that writes K/V in a
-fused kernel that leaves ``k`` unrotated (``Qwen3Attention`` in
+rows hold no stored context yet (a first prefill) skips both.
+
+A step whose rows each query one token makes one paged call after its KV write; in TP mode it
+runs on tensor cores whatever ``decode_tensor_cores`` says, since a rank's query heads over its
+one KV head can form a group the CUDA-core decode kernel doesn't take. Any other step (prefill,
+chunked prefill, a prefix hit, speculative verify) attends its stored context on the paged
+kernel and its own tokens on FlashInfer's ragged prefill, over the ``k`` and ``v`` the layer
+passes to ``run``. A layer that calls ``attn.run`` itself must pass them (``AttentionCallable``
+does); one that writes K/V in a fused kernel that leaves ``k`` unrotated (``Qwen3Attention`` in
 ``mstar/model/components/qwen3_lm.py``) rotates it in place first when the attention resource's
-``reads_step_kv()`` says the step attends them, so a decode step keeps the fused kernel. The
-MLA backend (``flashinfer_mla``) attends a placed pool the same way, its own tokens on a second
-MLA call over the latents the layer passes as ``k`` (``MLAAttention`` does), and refuses a
-``context_only`` step. It plans on FA3 (Hopper) or FA2 rather than ``auto``'s other fallbacks.
-That planner caps a plan's work items, which TP mode's widened heads reach ``P`` times sooner,
-and counts each rank's own KV lengths, so a step whose query lengths alone could pass the cap
-is refused before it plans, on every rank alike. An MLA pool's one latent is every TP rank's,
-so in TP mode ``P = tp``, and a multi-token step exchanges every head's queries and partials
-over the whole TP group each layer; that prefill cost is unmeasured. The MLA path is tested on
-CPU through its torch fallback; its GPU tests are written but have not run. GLM-5.2 with
-``dsa_long_context`` off (context capped at ``index_topk``) is an MLA model without DSA and
-loads under ``context_parallel``. Besides attention, the position resource (RoPE) and the
-recurrent state pool (GDN, KDA) support a placed pool; a recurrent pool on an SP-placed node
-holds the same state on every SP partner. The dense, flex and XPU backends, cross-attention,
-DSA (the GLM-5.x indexer), ``sliding_window`` attention and a ``flashinfer_backend`` other than
-``auto``, ``fa2`` or ``fa3`` (the ones whose log-sum-exp base the merge is known to read right)
-are not supported and are refused at load. A mixed decode/prefill split (``splits``, as Qwen3.5
-declares) is ignored over a placed pool, whose wrappers take rows of any length.
+``reads_step_kv()`` says the step attends them, so a decode step keeps the fused kernel.
+
+The MLA backend (``flashinfer_mla``) attends a placed pool the same way, its own tokens on a
+second MLA call over the latents the layer passes as ``k`` (``MLAAttention`` does), and refuses
+a ``context_only`` step. An MLA pool's one latent is every TP rank's, so in TP mode ``P = tp``,
+and a multi-token step exchanges every head's queries and partials over the whole TP group each
+layer; that prefill cost is unmeasured. It plans on FA3 (Hopper) or FA2 rather than ``auto``'s
+other fallbacks. That planner caps a plan's work items, which TP mode's widened heads reach
+``P`` times sooner, and counts each rank's own KV lengths, so its own refusal could come on one
+rank alone. Instead a step is refused before it plans, on every rank alike, when a bound on its
+work items from its query lengths alone passes the cap. The bound copies FlashInfer 0.7.2's
+planner rules, so a placed MLA pool refuses any other FlashInfer at load (the ``glm`` extra pins
+0.7.2). The MLA path is tested on CPU through its torch fallback; its GPU tests are written but
+have not run. GLM-5.2 with ``dsa_long_context`` off (context capped at ``index_topk``) is an MLA
+model without DSA and loads under ``context_parallel``.
+
+Besides attention, the position resource (RoPE) and the recurrent state pool (GDN, KDA) support
+a placed pool; a recurrent pool on an SP-placed node holds the same state on every SP partner.
+The dense, flex and XPU backends, cross-attention, DSA (the GLM-5.x indexer),
+``sliding_window`` attention and a ``flashinfer_backend`` other than ``auto``, ``fa2`` or
+``fa3`` (the ones whose log-sum-exp base the merge is known to read right) are not supported
+and are refused at load. A mixed decode/prefill split (``splits``, as Qwen3.5 declares) is
+ignored over a placed pool, whose wrappers take rows of any length.
 
 .. note::
 
