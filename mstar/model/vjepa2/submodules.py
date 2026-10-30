@@ -102,15 +102,11 @@ def _shape_key(tensor: torch.Tensor | None) -> tuple | None:
 class VJepa2EncoderSubmodule(NodeSubmodule):
     """ViT 3D-patch video encoder.
 
-    Supports cross-request batching: requests with identical
-    ``video_frames`` shapes are stacked on dim 0 and run in a single
-    encoder forward.  Shape-heterogeneous batches fall through to the
-    engine's sequential path (one forward per request).
-
-    Because ``VJepa2Model.process_prompt`` always resizes + center-crops to
-    ``(crop_size, crop_size)`` and uniformly samples to ``frames_per_clip``,
-    concurrent requests hitting the same serving config are shape-homogeneous
-    by construction.  Cross-config deployments (rare) naturally fall back.
+    Batches across requests only for V-JEPA 2-AC: requests with identical
+    ``video_frames`` shapes are stacked on dim 0 and run in a single encoder
+    forward, and a shape-heterogeneous batch falls through to the engine's
+    sequential path. A masked-model clip runs one request per step (see
+    :meth:`can_batch`).
     """
 
     def __init__(self, encoder: VJEPA2Encoder, config: VJepa2Config):
