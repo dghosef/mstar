@@ -1,7 +1,8 @@
 """Qwen3Attention's fused q/k RMSNorm + RoPE (``mstar::qk_norm_rope_inplace``) matches an fp64 reference, is no
 less accurate in bf16 than the unfused path it replaces (RMSNorm, then FlashInfer's non-interleaved RoPE from
 position ids), and works in place on q/k sliced out of one qkv projection, eagerly, under torch.compile and in a
-CUDA graph, on the shapes Qwen3-ASR's language model runs."""
+CUDA graph, on the shapes Qwen3-ASR's language model runs; and the table-driven variant Qwen3-Omni's Thinker uses
+for its multimodal RoPE."""
 import pytest
 import torch
 
@@ -151,3 +152,44 @@ def test_kv_write_variant_matches_and_writes_the_planned_slots(num_tokens, n_wri
     expect[page_idx[:n_write], 0, slot_idx[:n_write]] = rk[:n_write]
     expect[page_idx[:n_write], 1, slot_idx[:n_write]] = v[:n_write]
     assert torch.equal(cache, expect)
+
+
+@pytest.mark.parametrize("num_tokens,n_write", [(1, 1), (9, 6)])
+def test_rotary_table_variant_applies_the_multimodal_rotation(num_tokens, n_write):
+    """``qk_norm_rotary_kv_write`` rotates by per-token cos/sin rows, here Qwen3-Omni's interleaved 3D MRoPE for
+    an image span (its three position grids differ, so no 1D position reproduces it), and writes K/V as
+    ``qk_norm_rope_kv_write`` does: k normed and rotated plus v at the planned slots of the first ``n_write``
+    tokens, every other slot and the k input untouched."""
+    from mstar.model.qwen3_omni.components.rope import compute_3d_cos_sin, compute_rope_freqs
+    from mstar.utils.attention import qk_norm_rotary_kv_write
+
+    qkv, wq, wk, _ = _inputs(num_tokens, torch.bfloat16)
+    q, k, v = _split(qkv)
+    t = torch.arange(num_tokens, device="cuda", dtype=torch.float)
+    grids = torch.stack([torch.full_like(t, 700.0), t % 5 + 700, t % 3 + 700])
+    cos, sin = compute_3d_cos_sin(grids, compute_rope_freqs(D, THETA, device="cuda"), (24, 20, 20),
+                                  target_dtype=torch.bfloat16)
+
+    def reference(x, w):
+        x = x.double()
+        x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + EPS) * w.double()
+        c, s = cos.double()[:, None], sin.double()[:, None]
+        return x * c + torch.cat([-x[..., D // 2:], x[..., : D // 2]], dim=-1) * s
+
+    ref_q, ref_k = reference(q, wq), reference(k, wk)
+    pages, page_size = 6, 4
+    cache = torch.randn(pages, 2, page_size, HKV, D, device="cuda", dtype=torch.bfloat16)
+    before = cache.clone()
+    flat = torch.randperm(pages * page_size, device="cuda")[:num_tokens]
+    page_idx, slot_idx = flat // page_size, flat % page_size
+    k_before = k.clone()
+    qk_norm_rotary_kv_write(q, k, v, wq, wk, cos, sin, cache, page_idx, slot_idx, n_write, EPS, EPS)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(q.double(), ref_q, atol=2e-2, rtol=2e-2)
+    assert torch.equal(k, k_before)
+    w = slice(None, n_write)
+    torch.testing.assert_close(cache[page_idx[w], 0, slot_idx[w]].double(), ref_k[w], atol=2e-2, rtol=2e-2)
+    assert torch.equal(cache[page_idx[w], 1, slot_idx[w]], v[w])
+    untouched = torch.ones(pages, page_size, dtype=torch.bool, device="cuda")
+    untouched[page_idx[w], slot_idx[w]] = False
+    assert torch.equal(cache.transpose(1, 2)[untouched], before.transpose(1, 2)[untouched])
