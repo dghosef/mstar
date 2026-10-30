@@ -156,7 +156,8 @@ def main() -> int:
     ap.add_argument("--rounds", type=int, default=2)
     ap.add_argument("--n", type=int, default=50)
     ap.add_argument("--warm", type=int, default=5)
-    ap.add_argument("--arms", default="mstar,openpi", help=f"from {sorted(ROUNDS)}; rounds rotate the order")
+    ap.add_argument("--arms", default="mstar,openpi",
+                    help=f"from {sorted(ROUNDS)} or label=/tree (mstar from that tree); rounds rotate the order")
     ap.add_argument("--timeline", action="store_true",
                     help="instead of a bench: one mstar pass with --log-stats-file, then benchmark.request_timeline")
     ap.add_argument("--after-pid", type=int, action="append", default=[],
@@ -188,7 +189,12 @@ def main() -> int:
     for r in range(1, a.rounds + 1):
         for arm in (arms if r % 2 else arms[::-1]):
             tag = f"r{r}"
-            d = ROUNDS[arm](a, out, tag)
+            if "=" in arm:  # label=/path/to/tree: an mstar arm served from that tree
+                label, tree = arm.split("=", 1)
+                d = mstar_round(a.gpu, a.n, a.warm, out, f"{label}_{tag}", False, {"OVN_TREE": tree})
+                arm = label
+            else:
+                d = ROUNDS[arm](a, out, tag)
             row = summary(arm, r, d)
             with open(rows, "a") as f:
                 f.write(json.dumps(row) + "\n")
