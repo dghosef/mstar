@@ -545,7 +545,7 @@ class FlashInferMLAManager(AttentionManager):
         heads = self._wrapper_kwargs["num_qo_heads"]
         bound = fa_work_items_bound(qo_indptr, heads, self._fa_sm_count)
         if bound > _FA_MAX_WORK_ITEMS:
-            hint = "" if self._placement.over_sp else (
+            hint = " Batch fewer prompt tokens a step (max_concurrent_requests)" if self._placement.over_sp else (
                 f" Under TP placement each rank plans every partner's query heads, so a step reaches "
                 f"it {self._placement.size}x sooner than unplaced: batch fewer prompt tokens a step "
                 "(max_concurrent_requests) or place positions over SP ranks"
@@ -558,7 +558,8 @@ class FlashInferMLAManager(AttentionManager):
         if causal and kv_lens is not None and fa_causal_tile_refusable(np.diff(qo_indptr), kv_lens, heads):
             raise ValueError(
                 f"{what} of a step over context-parallel KV pool {self._kv_cache_name!r} can meet "
-                f"FlashInfer's FA MLA causal tile-bound check: {heads} heads don't divide its query tile"
+                f"FlashInfer's FA MLA causal tile-bound check: {heads} heads don't divide its query tile. "
+                "Choose a TP size that gives each rank a head count dividing 64"
             )
 
     def clear_preplan(self):

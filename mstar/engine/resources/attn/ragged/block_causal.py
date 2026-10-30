@@ -17,15 +17,7 @@ import numpy as np
 import torch
 
 from mstar.engine.resources.attn.ragged.wrappers import padded_head_dim
-
-
-def token_runs(starts: np.ndarray, lens: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """``(indptr, ids)`` for runs of consecutive token ids, ``arange(start, start + len)`` each,
-    end to end: each query block's keys as pages of one token, the page lists the paged kernel
-    takes."""
-    indptr = np.zeros(len(lens) + 1, dtype=np.int64)
-    np.cumsum(lens, out=indptr[1:])
-    return indptr, np.repeat(starts - indptr[:-1], lens) + np.arange(indptr[-1])
+from mstar.engine.resources.kv.plan import token_runs
 
 
 def block_causal_layout(

@@ -18,9 +18,8 @@ import numpy as np
 import torch
 
 from mstar.distributed.communication import CommGroup
-from mstar.engine.resources.attn.ragged.block_causal import token_runs
 from mstar.engine.resources.kv.config import KVSpec, PagedKVConfig
-from mstar.engine.resources.kv.plan import SINK_PAGE, HostLens, PagedIndptrs
+from mstar.engine.resources.kv.plan import SINK_PAGE, HostLens, PagedIndptrs, token_runs
 from mstar.engine.resources.spec import NodeResourceSpec
 from mstar.utils.h2d import PinnedStager
 
