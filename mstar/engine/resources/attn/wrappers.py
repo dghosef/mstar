@@ -20,8 +20,6 @@ import math
 import numpy as np
 import torch
 
-from mstar.utils.h2d import PinnedStager
-
 logger = logging.getLogger(__name__)
 
 
@@ -632,74 +630,3 @@ class FlashInferMixedWrapper:
         out.index_copy_(0, self._perm[:n], out_front[:n])
         out.index_copy_(0, self._dec_dst[: self._num_rows], out_rows.to(out_front.dtype))
         return out[:n]
-
-
-class FlashInferContextParallelWrapper:
-    """Paged attention over a pool whose positions are placed over ranks
-    (``PagedKVConfig.context_parallel``), as this rank's partials over its own slots;
-    ``FlashInferManager.run`` exchanges and merges them.
-
-    A step whose rows each query one token attends the pages after its write (``context`` is a
-    decode wrapper, ``new`` None). Any other step is two attentions: the stored context, not
-    causal, on a prefill wrapper planned on the context-only views; and the step's own tokens,
-    over the keys the layer passes, on a ragged wrapper (``new``) that needs no exchange.
-    ``context`` is planned with ``page_size`` the pool's slots per page on this rank. Another
-    backend may pass its own two; ``attend_context`` and ``attend_new`` take whatever their
-    ``run`` does.
-    """
-
-    def __init__(
-        self,
-        context: "FlashInferPrefillWrapper | FlashInferDecodeWrapper",
-        new,
-        device: torch.device,
-        captured_tokens: int = 0,
-    ):
-        self.context = context
-        # a FlashInferRaggedPrefillWrapper, or None for a one-token-a-row step
-        self.new = new
-        self._device = device
-        self._qo_indptr_buf = None
-        # per query token, whether its row holds any of this rank's slots. A captured wrapper's
-        # holds its bucket's every token (``captured_tokens``) and is never reallocated, so a
-        # replay reads the address it was captured with
-        self._captured = captured_tokens > 0
-        self._valid = torch.zeros(captured_tokens, dtype=torch.bool, device=device) if self._captured else None
-        self._stager = PinnedStager(torch.bool)
-        # an eager step with no stored context on any row (from the logical plan, so the same on
-        # every rank): it attends its own tokens alone, with no context call or exchange
-        self.context_empty = False
-
-    @torch.compiler.disable
-    def plan(self, placement, page_size: int, kv_out, causal: bool = True, dtype: torch.dtype = torch.bfloat16):
-        """``kv_out``: the step's logical ``KVPlanOutput`` for this label; ``page_size`` the logical one.
-        The context attention reads its indptrs for a one-token-a-row step, its stored context
-        alone otherwise."""
-        context = kv_out.cpu_indptrs
-        local, valid_rows = placement.local_indptrs(context, page_size, context_only=self.new is not None)
-        self.context_empty = (
-            not self._captured and self.new is not None and not (context.stored_lens(page_size) > 0).any()
-        )
-        if self.new is None:
-            self.context.plan(dtype=dtype, **local.to_kwargs_dict())
-        else:
-            self.context.plan(causal=False, dtype=dtype, **local.to_kwargs_dict())
-            self.new.plan(context.qo_indptr, causal=causal)
-        self._qo_indptr_buf = getattr(self.context, "_qo_indptr_buf", None)
-        valid = np.repeat(valid_rows, np.diff(context.qo_indptr.numpy()))
-        n = len(valid)
-        if self._captured:
-            assert n <= self._valid.shape[0], f"{n} query tokens on a wrapper captured for {self._valid.shape[0]}"
-        elif self._valid is None or self._valid.shape[0] < n:
-            self._valid = torch.zeros(max(n, 256), dtype=torch.bool, device=self._device)
-        # the whole buffer: a captured bucket's padding tokens read False rather than a stale flag
-        self._stager.copy_(self._valid, valid, pad_value=False)
-
-    def attend_context(self, *query_and_kv: torch.Tensor):
-        """``(out, lse, valid)`` over this rank's slots, from ``context.run``'s query and KV arguments;
-        ``valid`` as ``exchange_partials`` takes it."""
-        out, lse = self.context.run(*query_and_kv, return_lse=True)
-        return out, lse, self._valid[: query_and_kv[0].shape[0]]
-
-    def attend_new(self, *query_and_kv: torch.Tensor):
-        return self.new.run(*query_and_kv, return_lse=True)

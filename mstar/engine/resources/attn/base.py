@@ -256,6 +256,12 @@ def captured_page_capacity(num_rows: int, num_tokens: int, kv_config: KVConfig) 
     )
 
 
+def one_token_rows(rows: int, tokens: int, force_prefill: bool) -> bool:
+    """Whether a step is the decode kernel's kind, every row querying one token: from a captured
+    bucket's shape (fixed for its graph) or an eager plan's."""
+    return not force_prefill and rows == tokens
+
+
 def workspace_bytes() -> int:
     """Size of one FlashInfer workspace buffer (``MSTAR_WORKSPACE_BUFFER_MB``)."""
     return int(os.environ.get("MSTAR_WORKSPACE_BUFFER_MB", "512")) * 1024 * 1024

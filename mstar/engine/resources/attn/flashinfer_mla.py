@@ -6,7 +6,7 @@ it through the KV resource and attends with the *absorbed* query
 output is in the latent space (``[tokens, heads, kv_lora_rank]``); the layer applies
 ``W_UV``. One wrapper class serves prefill and decode (query lengths come from
 ``qo_indptr``), so the slot/label bookkeeping is the same as ``FlashInferManager``'s, and so is
-attention over a context-parallel pool (``FlashInferContextParallelWrapper``).
+attention over a context-parallel pool (``ContextParallelWrapper``).
 """
 from __future__ import annotations
 
@@ -21,10 +21,11 @@ from mstar.engine.resources.attn.base import (
     EagerSlotKey,
     WorkspacePool,
     captured_page_capacity,
+    one_token_rows,
 )
 from mstar.engine.resources.attn.config import AttentionStep
-from mstar.engine.resources.attn.wrappers import FlashInferContextParallelWrapper
 from mstar.engine.resources.base import CGSlotKey, Resource
+from mstar.engine.resources.context_parallel import ContextParallelWrapper
 from mstar.engine.resources.kv.config import KVConfig, KVLayout
 from mstar.engine.resources.kv.plan import KVPlanOutputs, build_paged_indptrs, context_only_views
 from mstar.engine.resources.step import SlotLease, StepContext
@@ -287,7 +288,7 @@ class FlashInferMLAManager(AttentionManager):
         return {self._kv_cache_name}
 
     def bind_dependencies(self, resources: Mapping[str, Resource]) -> None:
-        placement = getattr(resources.get(self._kv_cache_name), "placement", None)
+        placement = resources[self._kv_cache_name].placement
         self._placement = placement
         if placement is None:
             return
@@ -317,7 +318,7 @@ class FlashInferMLAManager(AttentionManager):
                 num_rows, bucket.num_tokens, self._kv_config), "batch_size": num_rows, "use_cuda_graph": True}
             if self._placement is not None:
                 wrapper = self._context_parallel_wrapper(
-                    label, lease.slot, bucket.bs == bucket.num_tokens and not force_prefill, kwargs,
+                    label, lease.slot, one_token_rows(bucket.bs, bucket.num_tokens, force_prefill), kwargs,
                     bucket.num_tokens,
                 )
             else:
@@ -342,7 +343,7 @@ class FlashInferMLAManager(AttentionManager):
 
     def _context_parallel_wrapper(
         self, label: str, slot: int, decode: bool, kwargs: dict, max_total_tokens: int | None = None,
-    ) -> FlashInferContextParallelWrapper:
+    ) -> ContextParallelWrapper:
         """As ``FlashInferManager``'s: the context's MLA wrapper on the label's workspace and, for a
         step that isn't one token a row, its own tokens' on a workspace of their own."""
         context = FlashInferMLAWrapper(workspace_buffer=self._workspaces.get(label, slot), **kwargs)
@@ -355,7 +356,7 @@ class FlashInferMLAManager(AttentionManager):
             new = FlashInferMLAOwnTokensWrapper(self._workspaces.get(f"{label}.own_tokens", slot), self._dtype, **own)
         # a captured wrapper's every query token: a row's at least, and the bucket's
         captured_tokens = max(kwargs.get("batch_size") or 0, max_total_tokens or 0)
-        return FlashInferContextParallelWrapper(context, new, self._device, captured_tokens)
+        return ContextParallelWrapper(context, new, self._device, captured_tokens)
 
     @property
     def supports_preplan(self):
@@ -402,8 +403,8 @@ class FlashInferMLAManager(AttentionManager):
                 wrapper = self._cg_wrapper(lease, label, rows, ctx.force_prefill)
             else:
                 # one wrapper takes either kind of step, but over a placed pool they differ
-                is_decode = self._placement is not None and not ctx.force_prefill and bool(
-                    indptrs.qo_indptr[-1] == rows
+                is_decode = self._placement is not None and one_token_rows(
+                    rows, int(indptrs.qo_indptr[-1]), ctx.force_prefill,
                 )
                 wrapper = self._eager_wrapper(label, ctx.slot, is_decode)
             if self._placement is not None:
@@ -427,13 +428,6 @@ class FlashInferMLAManager(AttentionManager):
     def qo_indptr_buf(self, label: str = "main") -> torch.Tensor | None:
         wrapper = self._current_plan_states.get(label)
         return None if wrapper is None else wrapper._qo_indptr_buf
-
-    @torch.compiler.disable
-    def kv_len_buf(self, label: str = "main") -> torch.Tensor:
-        """The rows' planned kv lengths, int32 on device (static under a lease): for a
-        ``context_only`` plan the length of each row's stored context, which is where the row's
-        queries (and the entries the step appends) start."""
-        return self._current_plan_states[label]._kv_len_buf
 
     def select_last_hidden(self, hidden: torch.Tensor, label: str = "main") -> torch.Tensor:
         last = (self.qo_indptr_buf(label)[1:] - 1).long()
@@ -463,21 +457,10 @@ class FlashInferMLAManager(AttentionManager):
 
     @torch.compiler.disable
     def _attend_placed(self, q_nope, q_pe, label, kv_cache_layer, latent):
-        """As ``FlashInferManager._attend_placed``: the two query parts go through
-        ``ContextParallel.attend`` as one tensor, and the step's own keys are its latents."""
-        wrapper: FlashInferContextParallelWrapper = self._current_plan_states[label]
-        if wrapper.new is not None and latent is None:
-            raise ValueError(
-                "FlashInferMLAManager over a context-parallel KV pool attends a step's own tokens from "
-                "the latents run is passed as k; this step has more than one token a row and got none"
-            )
-        widths = [q_nope.shape[-1], q_pe.shape[-1]]
-        return self._placement.attend(
-            torch.cat([q_nope, q_pe], dim=-1),
-            None if wrapper.context_empty
-            else lambda queries: wrapper.attend_context(*queries.split(widths, dim=-1), kv_cache_layer),
-            None if wrapper.new is None else wrapper.attend_new(q_nope, q_pe, latent),
-        ).to(q_nope.dtype)
+        """As ``FlashInferManager._attend_placed``, with the query in two parts and the step's own
+        keys its latents."""
+        wrapper: ContextParallelWrapper = self._current_plan_states[label]
+        return wrapper.attend(self._placement, (q_nope, q_pe), kv_cache_layer, (latent,))
 
     @torch.compiler.disable
     def _attend(self, q_nope, q_pe, label, kv_cache_layer, return_lse=False):

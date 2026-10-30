@@ -21,6 +21,7 @@ from mstar.distributed.communication import CommGroup
 from mstar.engine.resources.kv.config import KVSpec, PagedKVConfig
 from mstar.engine.resources.kv.plan import SINK_PAGE, HostLens, PagedIndptrs
 from mstar.engine.resources.spec import NodeResourceSpec
+from mstar.utils.h2d import PinnedStager
 
 
 class ContextParallel(NamedTuple):
@@ -118,32 +119,36 @@ class ContextParallel(NamedTuple):
 
     def attend(
         self,
-        q: torch.Tensor,
-        partial: Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor, torch.Tensor]] | None,
+        queries: tuple[torch.Tensor, ...],
+        partial: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]] | None,
         new: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        """Attention over the whole pool for this rank's query ``q`` ``[N, H, D]``, fp32: ``partial``
-        attends this rank's slots for the queries ``exchange_queries`` returns and gives
+        """Attention over the whole pool for this rank's query, fp32: ``queries`` its parts, each
+        ``[N, H, *]`` (one, or a backend's several, such as MLA's ``q_nope`` and ``q_pe``).
+        ``partial`` attends this rank's slots for the parts ``exchange_queries`` returns and gives
         ``(out, lse, valid)`` as ``exchange_partials`` takes them; ``new`` is the step's own
-        tokens' ``(out, lse)`` for ``q``'s heads, when it attends them apart from the pool. Runs
-        the same collectives on every rank; none when ``partial`` is None, which every rank must
-        agree on: no row has stored context, so ``new`` is the whole attention."""
+        tokens' ``(out, lse)`` for this rank's heads, when it attends them apart from the pool.
+        Runs the same collectives on every rank; none when ``partial`` is None, which every rank
+        must agree on: no row has stored context, so ``new`` is the whole attention."""
         if partial is None:
             return new[0].float()
-        outs, lses = self.exchange_partials(*partial(self.exchange_queries(q)))
+        outs, lses = self.exchange_partials(*partial(*self.exchange_queries(queries)))
         if new is not None:
             outs = torch.cat([outs, new[0].to(outs.dtype).unsqueeze(0)])
             lses = torch.cat([lses, new[1].float().unsqueeze(0)])
         return merge(outs, lses)
 
-    def exchange_queries(self, q: torch.Tensor) -> torch.Tensor:
-        """The queries this rank attends its slots for, from its own ``q`` ``[N, H, D]``. SP partners
-        hold the same heads, so that is ``q``; TP partners hold different query heads of one KV
-        head, so each gets every partner's: ``[N, P * H, D]``, partner-major."""
+    def exchange_queries(self, queries: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
+        """The query parts this rank attends its slots for, from its own (each ``[N, H, *]``). SP
+        partners hold the same heads, so they are its own; TP partners hold different query heads
+        of one KV head, so each gets every partner's, ``[N, P * H, *]`` partner-major, the parts
+        sent as one tensor."""
         if self.over_sp:
-            return q
+            return queries
+        q = queries[0] if len(queries) == 1 else torch.cat(queries, dim=-1)
         blocks = q.unsqueeze(0).expand(self.size, *q.shape)
-        return self.group.to_partners(blocks, self.partners).transpose(0, 1).flatten(1, 2)
+        q = self.group.to_partners(blocks, self.partners).transpose(0, 1).flatten(1, 2)
+        return q.split([part.shape[-1] for part in queries], dim=-1)
 
     def exchange_partials(
         self, out: torch.Tensor, lse: torch.Tensor, valid: torch.Tensor,
@@ -177,6 +182,94 @@ def _unpack(packed: torch.Tensor, dtype: torch.dtype) -> tuple[torch.Tensor, tor
 def _gather_partials(group: CommGroup, out: torch.Tensor, lse: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Every rank of ``group``'s ``(out, lse)`` for the same queries, stacked on a new first dim."""
     return _unpack(group.all_gather(_pack(out, lse).unsqueeze(0), dim=0), out.dtype)
+
+
+
+class ContextParallelWrapper:
+    """A step's attention over a pool whose positions are placed over ranks
+    (``PagedKVConfig.context_parallel``), from a backend's two wrappers: ``attend`` gets this
+    rank's partials over its own slots, and ``ContextParallel.attend`` exchanges and merges them.
+
+    A step whose rows each query one token attends the pages after its write (``context`` a
+    decode-kind wrapper, ``new`` None). Any other step is two attentions: the stored context, not
+    causal, planned on its context-only indptrs; and the step's own tokens, over the keys the layer
+    passes to ``run``, on ``new``, which needs no exchange. ``context`` is planned with
+    ``page_size`` the pool's slots per page on this rank. Each wrapper takes whatever its backend's
+    ``run`` does (``attend_context``, ``attend_new``); ``new`` plans as ``plan(qo_indptr, causal)``.
+    """
+
+    def __init__(
+        self,
+        context,
+        new,
+        device: torch.device,
+        captured_tokens: int = 0,
+    ):
+        self.context = context
+        # None for a one-token-a-row step
+        self.new = new
+        self._device = device
+        self._qo_indptr_buf = None
+        # per query token, whether its row holds any of this rank's slots. A captured wrapper's
+        # holds its bucket's every token (``captured_tokens``) and is never reallocated, so a
+        # replay reads the address it was captured with
+        self._captured = captured_tokens > 0
+        self._valid = torch.zeros(captured_tokens, dtype=torch.bool, device=device) if self._captured else None
+        self._stager = PinnedStager(torch.bool)
+        # an eager step with no stored context on any row (from the logical plan, so the same on
+        # every rank): it attends its own tokens alone, with no context call or exchange
+        self.context_empty = False
+
+    @torch.compiler.disable
+    def plan(self, placement, page_size: int, kv_out, causal: bool = True, dtype: torch.dtype = torch.bfloat16):
+        """``kv_out``: the step's logical ``KVPlanOutput`` for this label; ``page_size`` the logical one.
+        The context attention reads its indptrs for a one-token-a-row step, its stored context
+        alone otherwise."""
+        context = kv_out.cpu_indptrs
+        local, valid_rows = placement.local_indptrs(context, page_size, context_only=self.new is not None)
+        self.context_empty = (
+            not self._captured and self.new is not None and not (context.stored_lens(page_size) > 0).any()
+        )
+        if self.new is None:
+            self.context.plan(dtype=dtype, **local.to_kwargs_dict())
+        else:
+            self.context.plan(causal=False, dtype=dtype, **local.to_kwargs_dict())
+            self.new.plan(context.qo_indptr, causal=causal)
+        self._qo_indptr_buf = getattr(self.context, "_qo_indptr_buf", None)
+        valid = np.repeat(valid_rows, np.diff(context.qo_indptr.numpy()))
+        n = len(valid)
+        if self._captured:
+            assert n <= self._valid.shape[0], f"{n} query tokens on a wrapper captured for {self._valid.shape[0]}"
+        elif self._valid is None or self._valid.shape[0] < n:
+            self._valid = torch.zeros(max(n, 256), dtype=torch.bool, device=self._device)
+        # the whole buffer: a captured bucket's padding tokens read False rather than a stale flag
+        self._stager.copy_(self._valid, valid, pad_value=False)
+
+    def attend(
+        self, placement, queries: tuple[torch.Tensor, ...], kv_cache_layer: torch.Tensor,
+        new_keys: tuple[torch.Tensor | None, ...],
+    ) -> torch.Tensor:
+        """Attention over the whole placed pool (``ContextParallel.attend``), in the query's dtype:
+        ``queries`` and ``new_keys`` are the query parts and the step's own keys as this backend's
+        ``run`` takes them (``new_keys`` read only on a step that isn't one token a row)."""
+        if self.new is not None and any(key is None for key in new_keys):
+            raise ValueError(
+                "attention over a context-parallel KV pool attends a step's own tokens from the keys "
+                "run is passed (k and v, or MLA's latents as k); this step has more than one token "
+                "a row and got none"
+            )
+        context = None if self.context_empty else lambda *parts: self.attend_context(*parts, kv_cache_layer)
+        new = None if self.new is None else self.attend_new(*queries, *new_keys)
+        return placement.attend(queries, context, new).to(queries[0].dtype)
+
+    def attend_context(self, *query_and_kv: torch.Tensor):
+        """``(out, lse, valid)`` over this rank's slots, from ``context.run``'s query and KV arguments;
+        ``valid`` as ``exchange_partials`` takes it."""
+        out, lse = self.context.run(*query_and_kv, return_lse=True)
+        return out, lse, self._valid[: query_and_kv[0].shape[0]]
+
+    def attend_new(self, *query_and_kv: torch.Tensor):
+        return self.new.run(*query_and_kv, return_lse=True)
 
 
 def merge(outs: torch.Tensor, lses: torch.Tensor) -> torch.Tensor:
