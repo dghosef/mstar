@@ -262,7 +262,11 @@ class Qwen3ASREncoderSubmodule(NodeSubmodule):
         return {"audio_embeds": [self._encode(audio_features, feature_lens, engine_inputs)[0]]}
 
     def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
-        return True
+        # A packed step holds at most the largest capture's tokens. Past it the
+        # clips run one by one, each replayed if it fits a bucket, so an eager
+        # step's activations are one clip's rather than the whole batch's.
+        tokens = sum(inp.input_seq_len for inp in model_inputs)
+        return len(model_inputs) <= 1 or tokens <= self.ENCODE_TOKEN_BUCKETS[-1]
 
     def max_batch_size(self, graph_walk: str) -> int | None:
         del graph_walk

@@ -33,7 +33,7 @@ from mstar.model.qwen3_asr.config import (  # noqa: E402
 from mstar.model.qwen3_asr.qwen3_asr_model import Qwen3ASRModel  # noqa: E402
 from mstar.model.qwen3_asr.submodules import Qwen3ASREncoderSubmodule, Qwen3ASRLLMSubmodule  # noqa: E402
 from mstar.model.registry import HF_MODELS, get_model_class  # noqa: E402
-from mstar.model.submodule_base import HostRows, ModelInputsFromEngine, StopCheck  # noqa: E402
+from mstar.model.submodule_base import HostRows, ModelInputsFromEngine, NodeInputs, StopCheck  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -290,6 +290,20 @@ def test_encoder_submodule_declares_windows_and_packs_requests():
     assert out["a"]["audio_embeds"][0].shape[1] == cfg.audio.output_dim
     assert torch.allclose(out["b"]["audio_embeds"][0], single["audio_embeds"][0], atol=1e-5)
     assert sub.max_batch_size(PREFILL_WALK) == sub.MAX_BATCH_SIZE and sub.can_batch(None, [])
+
+
+def test_encoder_packs_a_step_only_up_to_its_largest_capture():
+    """Past the largest captured token count a step runs its clips one by one,
+    so an eager step's activations are one clip's, not the whole batch's."""
+    sub = _encoder_submodule(_tiny_config())
+    top = sub.ENCODE_TOKEN_BUCKETS[-1]
+
+    def rows(*lens):
+        return [NodeInputs(input_seq_len=n) for n in lens]
+
+    assert sub.can_batch(None, rows(top - 100, 100))
+    assert not sub.can_batch(None, rows(top - 100, 101))
+    assert sub.can_batch(None, rows(5 * top))
 
 
 def _llm_submodule(cfg):
