@@ -546,6 +546,11 @@ Kokoro notes
 Qwen3-Omni notes
 ----------------
 
+- On 80 GB GPUs such as the H100, serve with ``configs/qwen3omni_2gpu_h100.yaml``.
+  The Thinker's GPU also holds the audio and vision encoders and every prefill
+  capture, and beside the default config's 1,024-page KV pool the prefill
+  captures of 4096 tokens and more don't fit there. The H100 config's 512 pages
+  (64k tokens) leave room for all of them.
 - Streamed audio starts after 12 codec frames (0.96 s of audio), then 13, then
   25-frame chunks behind 25 frames of left context. Playback stays gapless
   while the Talker produces frames at about 1.5x real time over the first 50
