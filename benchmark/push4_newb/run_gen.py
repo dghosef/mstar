@@ -29,6 +29,9 @@ ENG = NEWB / "engines"
 DATA = NEWB / "data"
 HERE = Path(__file__).resolve().parent
 CORES = os.environ.get("PUSH4_CORES", ",".join(str(c) for c in range(0, 207, 2)))
+# mstar servers can get their own small CPU set: on push4c's schedutil host, mstar's blocking thread hand-offs
+# run on cores that never clock up when spread wide (q35small). Competitors and clients keep CORES.
+MSTAR_CORES = os.environ.get("PUSH4_MSTAR_CORES", CORES)
 PORT = 59200
 
 DROID_HF = "nvidia/Cosmos3-Nano-Policy-DROID"
@@ -63,8 +66,8 @@ def log(msg: str) -> None:
     print(f"[gen {time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def pin(cmd: list[str]) -> list[str]:
-    return ["numactl", f"--physcpubind={CORES}"] + cmd
+def pin(cmd: list[str], cores: str = CORES) -> list[str]:
+    return ["numactl", f"--physcpubind={cores}"] + cmd
 
 
 def healthy(port: int) -> bool:
@@ -112,7 +115,8 @@ class Server:
         self.logf = open(logpath, "w")
         self.logf.write(f"# arm={arm} env={env_extra} cmd={' '.join(cmd)}\n")
         self.logf.flush()
-        self.p = subprocess.Popen(pin(cmd), cwd=cwd, env=env, stdout=self.logf, stderr=subprocess.STDOUT,
+        self.cores = CORES if self.kind == "comp" else MSTAR_CORES
+        self.p = subprocess.Popen(pin(cmd, self.cores), cwd=cwd, env=env, stdout=self.logf, stderr=subprocess.STDOUT,
                                   start_new_session=True)
         t0 = time.monotonic()
         while time.monotonic() - t0 < 3600:
@@ -187,7 +191,7 @@ def run_arm(m, arm, env, out, r, rows_path, profile=False):
         for c in m["concs"]:
             row = cell(m, kind, PORT, c, m["nums"][c], 1, out / "cells" / f"{tag}_c{c}")
             row.update({"arm": arm, "round": r, "model": m["name"], "profile": profile, "ts": time.time(),
-                        "startup_s": round(s.startup_s)})
+                        "startup_s": round(s.startup_s), "server_cores": s.cores, "client_cores": CORES})
             with open(rows_path, "a") as f:
                 f.write(json.dumps(row) + "\n")
             log(f"{tag} c={c}: {row.get('units_per_s')} {m['units']}/s p50 {row.get('lat_p50')} "

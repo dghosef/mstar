@@ -5,7 +5,7 @@ mstar is served (configs/pi05_droid.yaml) and timed per HTTP request with the re
 upload in it. Both use the same lerobot/droid_100 episodes. Rounds rotate the arm order, each mstar round is a
 fresh server, and a final mstar pass with MSTAR_PHASE_TIMING=100 is the profile (untimed).
 
-  PUSH4_CORES=52,54,... run_pi05.py --gpu 3 --out ~/push4/results/newb/pi05 [--rounds 2] [--n 50] [--after-pid PID]
+  PUSH4_CORES=<openpi + client> PUSH4_MSTAR_CORES=<mstar server> run_pi05.py --gpu 3 --out ~/push4/results/newb/pi05 [--rounds 2] [--n 50] [--after-pid PID]
 """
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def mstar_round(gpu: str, n: int, warm: int, out: Path, tag: str, profile: bool)
             lat.append(sec * 1000.0)
     finally:
         s.stop()
-    return {"jct_ms": lat, "failed": bad, "out_floats": sorted(sizes)}
+    return {"jct_ms": lat, "failed": bad, "out_floats": sorted(sizes), "cores": s.cores}
 
 
 def openpi_round(gpu: str, n: int, warm: int, out: Path, tag: str) -> dict:
@@ -69,12 +69,13 @@ def openpi_round(gpu: str, n: int, warm: int, out: Path, tag: str) -> dict:
     j = json.loads((res / "results.json").read_text())
     per = j["per_request"]
     return {"jct_ms": [p["jct_ms"] for p in per if p["finite"]],
-            "failed": j["failed"] + sum(1 for p in per if not p["finite"])}
+            "failed": j["failed"] + sum(1 for p in per if not p["finite"]), "cores": run_gen.CORES}
 
 
 def summary(arm: str, rnd: int, d: dict) -> dict:
     x = sorted(d["jct_ms"])
     row = {"arm": arm, "round": rnd, "n": len(x), "failed": d["failed"], "out_floats": d.get("out_floats"),
+           "cores": d["cores"],
            "ts": time.time()}
     if x:
         row.update({"mean_ms": statistics.fmean(x), "p50_ms": x[len(x) // 2], "p90_ms": x[int(len(x) * 0.9)],
