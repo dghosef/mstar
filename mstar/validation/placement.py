@@ -92,7 +92,7 @@ def check_worker_graphs(
         *_loop_successors(walk_to_wgs),
         *_sharding_groups(worker_graphs, sharding_config),
         *_worker_parallelism(worker_graphs, specs or ()),
-        *_sequence_parallel(model, worker_graphs, specs or ()),
+        *_sequence_parallel(model, worker_graphs, specs),
     ]
 
 
@@ -390,21 +390,22 @@ def _worker_parallelism(
 
 
 def _sequence_parallel(
-    model: Model, worker_graphs: Sequence[WorkerGraph], specs: Sequence[NodeResourceSpec],
+    model: Model, worker_graphs: Sequence[WorkerGraph], specs: Sequence[NodeResourceSpec] | None,
 ) -> Iterator[str]:
     """What a node group's SP ranks do, and whether each KV pool placed over a group's ranks can
     stripe over them. A node on SP ranks runs the model's own sequence parallelism (it is in
     ``sp_enabled_nodes``) or places its paged KV pools' positions over them
     (``context_parallel``, `positions_over_sp`): not neither, and not both, since the
-    placement would load the node without its SP group."""
+    placement would load the node without its SP group. Without ``specs`` (the model's resources
+    failed to resolve, which is reported apart) there is nothing to check this against."""
     enabled = model.get_default_sharding_config().sp_enabled_nodes
+    if specs is None:
+        return
     groups: dict[int, tuple[int, int, set[str]]] = {}
     for wg in worker_graphs:
         groups.setdefault(wg._group_id, (wg._tp_comm_size, wg.sp_size, set()))[2].update(wg.section.get_nodes())
-    placed_pools = [
-        spec for spec in specs
-        if isinstance(spec, KVSpec) and isinstance(spec.config, PagedKVConfig) and spec.config.context_parallel
-    ]
+    paged_pools = [spec for spec in specs if isinstance(spec, KVSpec) and isinstance(spec.config, PagedKVConfig)]
+    placed_pools = [spec for spec in paged_pools if spec.config.context_parallel]
     for i, (tp, sp, nodes) in sorted(groups.items()):
         for spec in placed_pools:
             if spec.nodes & nodes:
@@ -414,7 +415,7 @@ def _sequence_parallel(
                     yield f"node_groups[{i}]: {e}"
         if sp == 1:
             continue
-        unplaced, both = [], []
+        unplaced, poolless, both = [], [], []
         for node in sorted(nodes):
             try:
                 placed = positions_over_sp(specs, node, sp)
@@ -424,12 +425,18 @@ def _sequence_parallel(
             if placed and node in enabled:
                 both.append(node)
             elif not placed and node not in enabled:
-                unplaced.append(node)
+                (unplaced if any(node in spec.nodes for spec in paged_pools) else poolless).append(node)
         if unplaced:
             yield (
                 f"node_groups[{i}] has sp_size {sp} and contains nodes not in sp_enabled_nodes "
                 f"{sorted(enabled)}: {unplaced}. Set context_parallel on their paged KV pools to "
                 "place positions over the SP ranks instead."
+            )
+        if poolless:
+            yield (
+                f"node_groups[{i}] has sp_size {sp} and contains nodes not in sp_enabled_nodes "
+                f"{sorted(enabled)} that hold no paged KV pool to place over the SP ranks: {poolless}. "
+                "Put them in a node group of their own with sp_size 1."
             )
         if both:
             yield (
