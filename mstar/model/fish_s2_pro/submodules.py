@@ -375,6 +375,8 @@ class CodecSubmodule(ARNodeSubmodule):
 
     disable_torch_compile = True
     disable_autocast = True
+    # cuDNN's heuristic conv picks are ~12% slower than the timed ones here
+    capture_cudnn_benchmark = True
     CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16, 32]
     MAX_BATCH_SIZE = CAPTURE_BATCH_SIZES[-1]
 
@@ -406,11 +408,6 @@ class CodecSubmodule(ARNodeSubmodule):
                 self.codec.left_context_frames,
                 self.codec.transformer_context_frames + self.conv_context,
             )
-
-    def compile_regions(self) -> dict[str, list[tuple]]:
-        """The conv stack, compiled once for every bucket: Inductor fuses the
-        padding, Snake activations and residual adds between its convs."""
-        return {"decoder.run_conv_stack": []}
 
     def _bucket(self, frames: int) -> int:
         """Smallest captured window width that holds ``frames``."""
