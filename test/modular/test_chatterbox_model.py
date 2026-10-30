@@ -49,7 +49,7 @@ from mstar.model.chatterbox.submodules import (
     VoiceCache,
 )
 from mstar.model.registry import HF_MODELS, get_model_class, model_init_kwargs
-from mstar.model.submodule_base import ModelInputsFromEngine
+from mstar.model.submodule_base import ModelInputsFromEngine, StopCheck
 
 CONFIGS = Path(__file__).resolve().parents[2] / "configs"
 
@@ -912,6 +912,7 @@ def test_t3_stop_on_eos():
     sub = _t3_submodule()
     info = _fwd_info("a", max_new=3)
     sub.prepare_inputs("prefill", info, {TEXT_INPUTS: [torch.tensor([255, 0])]})
+    info.graph_walk = "decode"
     out = {SPEECH_TOKENS: [torch.tensor([12])]}
     sub.postprocess("a", info, out)
     assert torch.equal(out[PREV_TOKEN][0], out[SPEECH_TOKENS][0])
@@ -925,6 +926,11 @@ def test_t3_stop_on_eos():
     # 3 generated of max_new 3: the budget is the loop cap's to end
     assert sub.check_stop("a", info, out) == set()
     sub.cleanup_request("a")
+    # a stop token at prefill ends the reply at the loop's first step, which streams nothing
+    walk = {name: SimpleNamespace(**{**vars(_fwd_info("b")), "graph_walk": name}) for name in ("prefill", "decode")}
+    assert sub.check_stop("b", walk["prefill"], eos) == set()
+    assert sub.check_stop("b", walk["decode"], out) == StopCheck({"decode_loop"}, withheld=(SPEECH_TOKENS,))
+    sub.cleanup_request("b")
     assert not sub.request_states
 
 

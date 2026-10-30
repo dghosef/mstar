@@ -276,9 +276,10 @@ class HiggsAudioLLMSubmodule(ARNodeSubmodule):
         super().__init__()
         self.model = llm
         self.config = config
+        # the prefill samples the reply's first token
         self.token_stop = TokenStop(
             loop="decode_loop", buffer="new_token", stop_ids=frozenset(config.stop_token_ids),
-            sampler=SAMPLER, walk="decode",
+            sampler=SAMPLER, walk="decode", prefill_walks=frozenset({"prefill_audio"}),
         )
         # decode reads its input ids off the sampler's slot masters
         self.device_loopback = DeviceLoopback(

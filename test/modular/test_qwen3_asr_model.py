@@ -33,7 +33,7 @@ from mstar.model.qwen3_asr.config import (  # noqa: E402
 from mstar.model.qwen3_asr.qwen3_asr_model import Qwen3ASRModel  # noqa: E402
 from mstar.model.qwen3_asr.submodules import Qwen3ASREncoderSubmodule, Qwen3ASRLLMSubmodule  # noqa: E402
 from mstar.model.registry import HF_MODELS, get_model_class  # noqa: E402
-from mstar.model.submodule_base import HostRows, ModelInputsFromEngine  # noqa: E402
+from mstar.model.submodule_base import HostRows, ModelInputsFromEngine, StopCheck  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -339,7 +339,11 @@ def test_llm_check_stop():
                               "dynamic_loop_iter_counts": {"decode_loop": decoded}})()
 
     word, im_end, eot = ({"new_token": [torch.tensor([t])]} for t in (1234, IM_END, EOT))
-    assert sub.check_stop("r", info(PREFILL_WALK, 0), im_end) == set()
+    # a stop token at prefill ends the reply at the loop's first step, which sends nothing
+    assert sub.check_stop("p", info(PREFILL_WALK, 0), im_end) == set()
+    assert sub.check_stop("p", info(DECODE_WALK, 0), word) == StopCheck(
+        {"decode_loop"}, withheld=("new_token", "text_inputs"),
+    )
     assert sub.check_stop("r", info(DECODE_WALK, 0), im_end) == {"decode_loop"}
     assert sub.check_stop("r", info(DECODE_WALK, 0), eot) == {"decode_loop"}
     assert sub.check_stop("r", info(DECODE_WALK, 0), word) == set()
@@ -370,9 +374,11 @@ def test_llm_check_stop_batched_agrees_with_per_request():
     check = list(reversed(row_rids))  # not forward order
     host_rows = HostRows(row_rids, {"new_token": tokens})
     batched = sub.check_stop_batched(check, infos, host_rows)
+    # a submodule of its own: the prefill row's stop token marks its request
+    alone = _llm_submodule(cfg)
     per_request = {}
     for i, rid in enumerate(row_rids):
-        got = sub.check_stop(rid, infos[rid], {"new_token": [tokens[i:i + 1]]})
+        got = alone.check_stop(rid, infos[rid], {"new_token": [tokens[i:i + 1]]})
         if got:
             per_request[rid] = got
     assert batched == per_request == {"im_end": {"decode_loop"}, "eot": {"decode_loop"}}
