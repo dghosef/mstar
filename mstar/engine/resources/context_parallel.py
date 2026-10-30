@@ -134,16 +134,21 @@ class ContextParallel(NamedTuple):
         its slots' partial merged with its share of the step's own tokens. Each own token's keys
         are attended by one rank, so merging every rank's share is the whole attention. The merge
         here rounds back to the partial's dtype for the gather, one rounding more than merging
-        every part at once in fp32."""
+        every part at once in fp32; it is written out for two parts so that it holds one fp32
+        ``[N, H, D]`` at a time."""
         parts = [] if partial is None else [_masked(*partial(*queries))]
         if new is not None:
             parts.append(new)
         if len(parts) == 1:
             return parts[0][0], parts[0][1].float()
-        out, lse = _merge_with_lse(
-            torch.stack([part[0].float() for part in parts]), torch.stack([part[1].float() for part in parts]),
-        )
-        return out.to(parts[0][0].dtype), lse
+        (a, lse_a), (b, lse_b) = parts
+        lse_a, lse_b = lse_a.float(), lse_b.float()
+        lse = torch.logaddexp(lse_a, lse_b)
+        # a query neither part has a key for (a captured bucket's padding) comes out 0, -inf
+        base = lse.masked_fill(lse == -math.inf, 0)
+        out = torch.exp(lse_a - base).unsqueeze(-1) * a
+        out.addcmul_(torch.exp(lse_b - base).unsqueeze(-1), b)
+        return out.to(a.dtype), lse
 
     def exchange_queries(self, queries: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
         """Under TP placement, the query parts this rank attends its slots for, from its own (each
