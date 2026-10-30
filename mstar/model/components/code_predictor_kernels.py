@@ -450,9 +450,14 @@ def cp_linear(
     block_m, block_n = tile.block_m, tile.block_n
     # one or two rows (block_m < 16) take the norm from x and record no partials
     norm = 0 if norm_eps is None else (2 if n_part and block_m >= 16 else 1)
-    assert rows <= _MAX_ROWS and n % block_n == 0 and k % tile.block_k == 0 and w.stride(1) == 1 and x.stride(1) == 1
-    if epi in (1, 3) and block_m >= 16:
-        assert n // block_n <= _MAX_PARTIALS and partials is not None
+    if rows > _MAX_ROWS or n % block_n or k % tile.block_k:
+        raise ValueError(
+            f"cp_linear takes up to {_MAX_ROWS} rows, N a multiple of {block_n} and K of {tile.block_k}; "
+            f"got {rows} x {k} by {n}"
+        )
+    if epi in (1, 3) and block_m >= 16 and (n // block_n > _MAX_PARTIALS or partials is None):
+        raise ValueError(f"a residual or biased cp_linear records partials: N <= {_MAX_PARTIALS * block_n}, got {n}")
+    assert w.stride(1) == 1 and x.stride(1) == 1
     _cp_linear_kernel[(n // block_n,)](
         x, w, up if up is not None else w, out, bias if bias is not None else w,
         partials if partials is not None else out,
