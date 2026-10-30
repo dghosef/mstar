@@ -9,7 +9,7 @@ from mstar.graph.special_destinations import EMIT_TO_CLIENT
 from mstar.model.higgs_audio.config import SAMPLER, HiggsAudioModelConfig
 from mstar.model.higgs_audio.higgs_audio_model import HiggsAudioModel
 from mstar.model.higgs_audio.submodules import HiggsAudioLLMSubmodule
-from mstar.model.submodule_base import HostRows
+from mstar.model.submodule_base import BatchedStopCheck, HostRows
 
 
 def _submodule(slot_masters=True):
@@ -59,7 +59,7 @@ def test_batched_stop_check_agrees_with_the_per_request_one():
     infos = {
         "a": _info(),
         "b": _info(),                      # stop token
-        "c": _info(decoded=7),             # out of budget
+        "c": _info(decoded=7),             # at its budget: the loop's cap ends it
         "d": _info(ignore_eos=True),       # stop token ignored
     }
     tokens = torch.tensor([[11], [eos], [11], [eos], [11]])  # a padded replay's extra row last
@@ -67,11 +67,14 @@ def test_batched_stop_check_agrees_with_the_per_request_one():
         rid: stops for i, rid in enumerate(infos)
         if (stops := sub.check_stop(rid, infos[rid], {"new_token": [tokens[i]]}))
     }
-    assert want == {"b": {"decode_loop"}, "c": {"decode_loop"}}
+    assert want == {"b": {"decode_loop"}}
     rows = HostRows(("a", "b", "c", "d"), {"new_token": tokens})
     assert sub.check_stop_batched(["d", "c", "b", "a"], infos, rows) == want
-    # only decode rows end the loop: not on a prefill step, stop token or budget alike
-    prefill_step = {rid: _info(walk="prefill_audio", decoded=7) for rid in infos}
+    # A prefill row's stop token has no loop to end yet: the reply ends at the
+    # loop's first step, which sends the client nothing.
+    prefill_step = {rid: _info(walk="prefill_audio") for rid in infos}
     assert sub.check_stop_batched(list(prefill_step), prefill_step, rows) == {}
-    prefill = {**infos, "b": _info(walk="prefill_audio")}
-    assert sub.check_stop_batched(list(prefill), prefill, rows) == {"c": {"decode_loop"}}
+    first = HostRows(("a", "b"), {"new_token": torch.tensor([[11], [11]])})
+    assert sub.check_stop_batched(["a", "b"], infos, first) == BatchedStopCheck(
+        {"b": {"decode_loop"}}, {"b": ("new_token", "text_inputs")},
+    )

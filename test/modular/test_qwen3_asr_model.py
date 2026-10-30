@@ -19,10 +19,10 @@ sys.path.insert(0, ".")
 from mstar.engine.resources import KVSpec, RaggedAttentionSpec  # noqa: E402
 from mstar.model.components.audio_features import LogMelSpectrogram  # noqa: E402
 from mstar.model.components.aut_encoder import AuTEncoder, AuTEncoderConfig  # noqa: E402
+from mstar.model.components.aut_encoder_submodule import AUT_ATTN, AuTEncoderSubmodule  # noqa: E402
 from mstar.model.components.qwen3_lm import Qwen3LMConfig  # noqa: E402
 from mstar.model.qwen3_asr.config import (  # noqa: E402
     ASR_TEXT_TAG,
-    AUT_ATTN,
     DECODE_WALK,
     ENCODER_NODE,
     KV_CACHE,
@@ -31,9 +31,9 @@ from mstar.model.qwen3_asr.config import (  # noqa: E402
     Qwen3ASRModelConfig,
 )
 from mstar.model.qwen3_asr.qwen3_asr_model import Qwen3ASRModel  # noqa: E402
-from mstar.model.qwen3_asr.submodules import Qwen3ASREncoderSubmodule, Qwen3ASRLLMSubmodule  # noqa: E402
+from mstar.model.qwen3_asr.submodules import Qwen3ASRLLMSubmodule  # noqa: E402
 from mstar.model.registry import HF_MODELS, get_model_class  # noqa: E402
-from mstar.model.submodule_base import HostRows, ModelInputsFromEngine  # noqa: E402
+from mstar.model.submodule_base import HostRows, ModelInputsFromEngine, NodeInputs, StopCheck  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -188,29 +188,15 @@ def test_prompt_layout_matches_reference_template():
 
 
 @pytest.mark.parametrize("max_tokens", [1, 64, 8192])
-def test_decode_ends_at_the_cap_and_the_loop_holds_any_cap_the_context_does(max_tokens):
-    """The request's cap is the iteration check_stop ends decode on, and the graph's
-    decode loop runs to the context, so a length past the default cap is served
-    rather than refused at intake."""
-    from types import SimpleNamespace
-
-    from mstar.engine.resources import SamplingReqConfig
-    from mstar.model.qwen3_asr.config import DECODE_LOOP, SAMPLER
+def test_the_decode_loop_holds_any_cap_the_context_does(max_tokens):
+    """The request's cap ends decode, and the graph's decode loop runs to the
+    context, so a length past the default cap is served rather than refused at
+    intake."""
+    from mstar.model.qwen3_asr.config import DECODE_LOOP
 
     model = _make_model()
     cap = model.get_loop_caps(max_output_tokens=max_tokens)[DECODE_LOOP]
     assert cap <= model.get_graph_walk_graphs()[DECODE_WALK].max_iters
-
-    llm = Qwen3ASRLLMSubmodule(None, model.config)
-    word = {"new_token": [torch.tensor([1234])]}
-    stopped = next(
-        k + 1 for k in range(cap + 1)
-        if llm.check_stop("r", SimpleNamespace(
-            graph_walk=DECODE_WALK, max_tokens=cap, dynamic_loop_iter_counts={DECODE_LOOP: k},
-            resource_configs={SAMPLER: SamplingReqConfig(ignore_eos=True)},
-        ), word)
-    )
-    assert stopped == cap, "the cap and the stop check end decode on different iterations"
 
 def test_process_prompt_builds_features_and_prompt():
     model = _make_model()
@@ -258,8 +244,6 @@ def test_postprocess_keeps_asr_text_tag_and_drops_specials():
     ids = model.tokenizer.encode("language English<asr_text> hello world") + [IM_END]
     text = model.postprocess(torch.tensor(ids), "text").decode("utf-8")
     assert text == "language English<asr_text> hello world"
-    # a decode token sent inline arrives as a list (`Model.postprocess_token_ids`)
-    assert b"".join(model.postprocess_token_ids([i], "text") for i in ids).decode("utf-8") == text
 
 
 # --------------------------------------------------------------------------
@@ -278,7 +262,10 @@ def _encoder_submodule(cfg):
     # attention unbound -> SDPA per window (the CPU path)
     for layer in encoder.layers:
         layer.self_attn.ragged = None
-    return Qwen3ASREncoderSubmodule(encoder, cfg).eval()
+    log_mel = LogMelSpectrogram(
+        num_mel_bins=cfg.num_mel_bins, sampling_rate=cfg.sampling_rate, n_fft=cfg.n_fft, hop_length=cfg.hop_length,
+    )
+    return AuTEncoderSubmodule(encoder, log_mel).eval()
 
 
 def test_encoder_submodule_declares_windows_and_packs_requests():
@@ -307,38 +294,18 @@ def test_encoder_submodule_declares_windows_and_packs_requests():
     assert sub.max_batch_size(PREFILL_WALK) == sub.MAX_BATCH_SIZE and sub.can_batch(None, [])
 
 
-def test_encoder_replays_exactly_when_leased():
-    """A leased step declares nothing of its own, so the forward replays
-    then and runs eagerly otherwise, whatever the runner's buckets allow."""
-    from types import SimpleNamespace
+def test_encoder_packs_a_step_only_up_to_its_largest_capture():
+    """Past the largest captured token count a step runs its clips one by one,
+    so an eager step's activations are one clip's, not the whole batch's."""
+    sub = _encoder_submodule(_tiny_config())
+    top = sub.ENCODE_TOKEN_BUCKETS[-1]
 
-    from mstar.model.qwen3_asr.submodules import AUT_ENCODE
+    def rows(*lens):
+        return [NodeInputs(input_seq_len=n) for n in lens]
 
-    class Runner:
-        has_bucket = True
-
-        def can_run(self, batch_size, total_tokens):
-            return self.has_bucket
-
-        def run(self, **kwargs):
-            self.ran = kwargs
-            return {"embeds": "replayed"}
-
-    sub, runner = object.__new__(Qwen3ASREncoderSubmodule), Runner()
-
-    def replay(step):
-        engine_inputs = SimpleNamespace(piecewise_runners={AUT_ENCODE: runner}, request_ids=["a", "b"], step=step)
-        return sub._replay_encode(engine_inputs, torch.zeros(12, 8), [4, 8])
-
-    assert replay(step=object()) is None
-    assert not hasattr(runner, "ran")
-    # no declaration but no bucket either (a forward driven outside the engine)
-    runner.has_bucket = False
-    assert replay(step=None) is None
-    assert not hasattr(runner, "ran")
-    runner.has_bucket = True
-    assert replay(step=None) == "replayed"
-    assert runner.ran["seq_lens"] == [4, 8] and runner.ran["real_bs"] == 2
+    assert sub.can_batch(None, rows(top - 100, 100))
+    assert not sub.can_batch(None, rows(top - 100, 101))
+    assert sub.can_batch(None, rows(5 * top))
 
 
 def _llm_submodule(cfg):
@@ -388,11 +355,16 @@ def test_llm_check_stop():
                               "dynamic_loop_iter_counts": {"decode_loop": decoded}})()
 
     word, im_end, eot = ({"new_token": [torch.tensor([t])]} for t in (1234, IM_END, EOT))
-    assert sub.check_stop("r", info(PREFILL_WALK, 0), im_end) == set()
+    # a stop token at prefill ends the reply at the loop's first step, which sends nothing
+    assert sub.check_stop("p", info(PREFILL_WALK, 0), im_end) == set()
+    assert sub.check_stop("p", info(DECODE_WALK, 0), word) == StopCheck(
+        {"decode_loop"}, withheld=("new_token", "text_inputs"),
+    )
     assert sub.check_stop("r", info(DECODE_WALK, 0), im_end) == {"decode_loop"}
     assert sub.check_stop("r", info(DECODE_WALK, 0), eot) == {"decode_loop"}
     assert sub.check_stop("r", info(DECODE_WALK, 0), word) == set()
-    assert sub.check_stop("r", info(DECODE_WALK, 9, max_tokens=10), word) == {"decode_loop"}
+    # the budget is the loop cap's to end
+    assert sub.check_stop("r", info(DECODE_WALK, 9, max_tokens=10), word) == set()
 
 
 def test_llm_check_stop_batched_agrees_with_per_request():
@@ -418,14 +390,14 @@ def test_llm_check_stop_batched_agrees_with_per_request():
     check = list(reversed(row_rids))  # not forward order
     host_rows = HostRows(row_rids, {"new_token": tokens})
     batched = sub.check_stop_batched(check, infos, host_rows)
+    # a submodule of its own: the prefill row's stop token marks its request
+    alone = _llm_submodule(cfg)
     per_request = {}
     for i, rid in enumerate(row_rids):
-        got = sub.check_stop(rid, infos[rid], {"new_token": [tokens[i:i + 1]]})
+        got = alone.check_stop(rid, infos[rid], {"new_token": [tokens[i:i + 1]]})
         if got:
             per_request[rid] = got
-    assert batched == per_request == {
-        "im_end": {"decode_loop"}, "eot": {"decode_loop"}, "budget": {"decode_loop"},
-    }
+    assert batched == per_request == {"im_end": {"decode_loop"}, "eot": {"decode_loop"}}
     assert sub.check_stop_batched(["word"], infos, HostRows(("word",), {})) is None
 
 
@@ -478,7 +450,7 @@ def test_graph_resources_and_state_machine():
     cfg = model.config
     frames = cfg.max_audio_samples // cfg.hop_length
     expected = -(-frames // cfg.audio.n_window_infer)  # windows, rounded up
-    assert ragged.config.max_segments_per_request == model.max_windows_per_request == expected
+    assert ragged.config.max_segments_per_request == expected
     kv = next(s for s in specs if isinstance(s, KVSpec))
     assert kv.nodes == {LLM_NODE} and kv.config.num_kv_heads == 2 and kv.config.max_num_pages == model.KV_PAGES
     (attn,) = [s for s in specs if hasattr(getattr(s, "config", None), "decode_tensor_cores")]

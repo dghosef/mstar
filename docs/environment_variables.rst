@@ -94,10 +94,16 @@ Communication
    * - ``MSTAR_KV_SHM_DIR``
      - ``/dev/shm`` (or ``/tmp`` if unavailable)
      - Base directory for host-staged KV snapshots when remote KV transfer
-       uses SHM. Each deployment creates a private child directory here;
-       request cleanup removes snapshots, and startup removes directories
-       left by dead deployments. All workers sharing KV snapshots must see
-       the same filesystem.
+       uses SHM (``make_deployment_kv_shm_dir``). Each deployment creates a
+       private child directory here, named under its tensor-file namespace
+       (see ``MSTAR_DEPLOYMENT_TOKEN``), and holds that namespace's lock
+       file here while it runs; request cleanup removes snapshots, and
+       startup removes this user's directories whose lock no live process
+       holds. All workers sharing KV snapshots must see the same
+       filesystem. The lock is ``flock``, which some cluster filesystems
+       (GPFS, for one) keep per node, so do not point deployments on
+       different nodes at one shared directory there: each would sweep the
+       other's live directories.
    * - ``MSTAR_SHM_ARENA_SEGMENT_MB``
      - ``256``
      - Size of each arena segment. The arena grows segment by segment;
@@ -520,6 +526,15 @@ Worker scheduling
        ``threading.TIMEOUT_MAX`` seconds is ignored with a warning when the
        worker starts and ``5`` is used; a negative value is raised to ``0``
        with a warning.
+   * - ``MSTAR_PY_SWITCH_INTERVAL_SEC``
+     - unset
+     - GIL switch interval, in seconds, of each worker process
+       (``sys.setswitchinterval``, set at the top of ``Worker.run`` in
+       ``mstar/worker/worker.py``). Unset keeps Python's 5 ms. A value
+       ``float()`` cannot parse, or 0 or below, is ignored with a warning
+       (``nan`` and ``inf`` are not). Workers only: the API server's
+       interval is the serving config's ``api_switch_interval_s``, else the
+       model's ``Model.API_SWITCH_INTERVAL_S``.
    * - ``MSTAR_KV_CHAIN_LAZY_STEPS``
      - config's ``knobs: kv_chain_lazy_steps``, else ``1``
      - How many decode steps of sampled ids the KV manager holds back before
@@ -571,11 +586,11 @@ Worker scheduling
        master and the next step reads its input ids from it, so the worker
        routes the signal with no tensor (no per-request store, hold or
        cleanup per step). Only nodes that declare the read
-       (``TokenStop.loopback_signal``: the decode walks of Qwen3.5, Higgs
-       Audio, Qwen3-ASR and Whisper, which also keeps its timestamp rule state
-       in the sampler's declared loop-back state) and only when the sampler
-       has graph buffers; the sampler keeps the masters for those nodes alone,
-       so a node that takes its tokens on the host does not pay the eager-step
+       (``DeviceLoopback``: the decode walks of Qwen3.5, Higgs Audio, Qwen3-ASR and
+       Whisper, which also keeps its timestamp rule state in the sampler's
+       declared loop-back state) and only when the sampler has graph
+       buffers; the sampler keeps the masters for those nodes alone, so a
+       node that takes its tokens on the host does not pay the eager-step
        master write. ``0`` keeps every node on the per-request tensor path.
    * - ``MSTAR_SAMPLER_INGRAPH_SCATTER``
      - config's ``knobs: sampler_ingraph_scatter``, else ``0``
