@@ -159,7 +159,9 @@ def test_rotary_table_variant_applies_the_multimodal_rotation(num_tokens, n_writ
     """``qk_norm_rotary_kv_write`` rotates by per-token cos/sin rows, here Qwen3-Omni's interleaved 3D MRoPE for
     an image span (its three position grids differ, so no 1D position reproduces it), and writes K/V as
     ``qk_norm_rope_kv_write`` does: k normed and rotated plus v at the planned slots of the first ``n_write``
-    tokens, every other slot and the k input untouched."""
+    tokens, every other slot and the k input untouched; and no less accurate in bf16 than the unfused path (RMSNorm,
+    then the rotate-half arithmetic in bf16)."""
+    from mstar.model.components.norm import RMSNorm
     from mstar.model.qwen3_omni.components.rope import compute_3d_cos_sin, compute_rope_freqs
     from mstar.utils.attention import qk_norm_rotary_kv_write
 
@@ -176,7 +178,15 @@ def test_rotary_table_variant_applies_the_multimodal_rotation(num_tokens, n_writ
         c, s = cos.double()[:, None], sin.double()[:, None]
         return x * c + torch.cat([-x[..., D // 2:], x[..., : D // 2]], dim=-1) * s
 
+    def unfused(x, w):
+        m = RMSNorm(D, eps=EPS).cuda().to(torch.bfloat16)
+        with torch.no_grad():
+            m.weight.copy_(w)
+        x = m(x.reshape(-1, D)).view(x.shape)
+        return x * cos[:, None] + torch.cat([-x[..., D // 2:], x[..., : D // 2]], dim=-1) * sin[:, None]
+
     ref_q, ref_k = reference(q, wq), reference(k, wk)
+    unfused_q, unfused_k = unfused(q, wq), unfused(k, wk)  # before the op rotates q in place
     pages, page_size = 6, 4
     cache = torch.randn(pages, 2, page_size, HKV, D, device="cuda", dtype=torch.bfloat16)
     before = cache.clone()
@@ -193,3 +203,8 @@ def test_rotary_table_variant_applies_the_multimodal_rotation(num_tokens, n_writ
     untouched = torch.ones(pages, page_size, dtype=torch.bool, device="cuda")
     untouched[page_idx[w], slot_idx[w]] = False
     assert torch.equal(cache.transpose(1, 2)[untouched], before.transpose(1, 2)[untouched])
+    written_k = cache[page_idx[w], 0, slot_idx[w]]
+    for fused, unfused_x, ref in ((q, unfused_q, ref_q), (written_k, unfused_k[w], ref_k[w])):
+        err_fused = (fused.double() - ref).abs().mean()
+        err_unfused = (unfused_x.double() - ref).abs().mean()
+        assert err_fused <= err_unfused * 1.1, (err_fused, err_unfused)

@@ -560,8 +560,12 @@ Qwen3-Omni notes
   ``codec_chunk_schedule: []`` under the deployment YAML's ``model_kwargs`` to
   start with a 25-frame chunk instead: first audio comes later, and the
   Talker needs only about 1.0 to 1.3x real time.
-- Numerics: the code predictor's residual adds fold into the next RMSNorm
-  (FlashInfer's fused add + norm) and its attention is one Triton kernel
+- Numerics: the Thinker's q/k RMSNorm and multimodal RoPE run in one kernel
+  with the KV write, in fp32 throughout and rounded once, where the unfused ops
+  (and Hugging Face) round to bf16 after the norm and after each step of the
+  rotation: no less accurate, but not bit-exact. The code predictor's residual
+  adds fold into the next RMSNorm (FlashInfer's fused add + norm) and its
+  attention is one Triton kernel
   (``cp_attend``, shared with Qwen3-TTS), neither bit-exact with the unfused ops. Its 15 depth
   steps feed each sampled code into the next, so small differences can change
   later codes at near-ties.
