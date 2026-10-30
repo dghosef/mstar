@@ -127,8 +127,9 @@ def cp_attend(
     ``(tokens, Hq * D)``. One launch, one warp per (token, head): the depth
     sequence is at most 16 long, so a warp holds its whole key range. The
     depth loop passes one token a step; ``seq_len > 1`` (causal within the
-    step) is kept for a multi-token opening pass, which needs ``cp_linear``
-    to take 2x the decode bucket's rows first."""
+    step) is kept for a multi-token opening pass, which needs ``cp_linear``'s
+    row cap (``_MAX_ROWS``, 64) raised first: Qwen3-TTS decodes up to 64
+    rows, two tokens each."""
     tokens = qkv.shape[0]
     assert qkv.stride(1) == 1 and kv_layer.stride(-1) == 1 and tokens % seq_len == 0
     out = torch.empty(tokens, n_q_heads * head_dim, device=qkv.device, dtype=qkv.dtype)
