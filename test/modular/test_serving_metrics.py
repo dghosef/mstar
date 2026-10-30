@@ -296,9 +296,6 @@ class _BridgeSocket:
     def __init__(self, bridge, script):
         self.bridge, self.script = bridge, list(script)
 
-    def poll_for_messages(self, timeout_ms=1):
-        return False
-
     def get_all_new_messages(self, blocking=True, timeout_s=None):
         if not self.script:
             self.bridge.running = False
@@ -420,14 +417,14 @@ def _in_flight_id(served, client):
                          headers={**_KEY, "content-type": "application/json"}), 413, "/v1/chat/completions"),
     (lambda s, c: c.post("/generate", content=_chunked(2**21),
                          headers={**_KEY, "content-type": "multipart/form-data; boundary=b"}), 413, "/generate"),
-    (lambda s, c: c.post("/v1/chat/completions", json={"messages": "hi"}, headers=_KEY), 422, "/v1/chat/completions"),
+    (lambda s, c: c.post("/v1/chat/completions", json={"messages": "hi"}, headers=_KEY), 400, "/v1/chat/completions"),
     (lambda s, c: c.post("/generate", data={"text": "hi", "model_kwargs": "{"}, headers=_KEY), 400, "/generate"),
     (_in_flight_id, 409, "/generate"),
     (lambda s, c: c.get("/no/such/route", headers=_KEY), 404, "unmatched"),
     # The served model has no OpenAI adapter.
     (lambda s, c: c.post("/v1/chat/completions", json=_CHAT, headers=_KEY), 404, "/v1/chat/completions"),
     (lambda s, c: c.get("/generate", headers=_KEY), 405, "/generate"),
-], ids=["401", "401-unmatched", "413-declared", "413-chunked", "422", "400", "409", "404-unmatched",
+], ids=["401", "401-unmatched", "413-declared", "413-chunked", "400-schema", "400", "409", "404-unmatched",
         "404-no-adapter", "405"])
 def test_a_request_refused_before_the_api_server_counts_by_route_template_and_status(
         served, refusing, send, status, route):
@@ -734,7 +731,6 @@ def test_the_data_worker_reports_preprocess_finish_once_asked(tmp_path):
         discard_tensor_queue=queue.Queue(), stop_event=stop,
         # codec / try_send_bytes: the thread's outbox sends through them
         communicator=types.SimpleNamespace(
-            poll_for_messages=lambda timeout_ms=1: False,
             get_all_new_messages=lambda: [],
             codec=types.SimpleNamespace(encode=lambda msg: msg),
             try_send_bytes=lambda entity, msg: sent.append(msg) or True,
@@ -1059,7 +1055,7 @@ class _RealDataWorker:
     """The API server on the real data worker: its facade and its thread, a
     stand-in transport and conductor, and the API server's message thread."""
 
-    def __init__(self, tmp_path, *, metrics, enable_prof=False):
+    def __init__(self, tmp_path, *, metrics, enable_prof=False, preprocess_workers=1):
         from mstar.api_server.data_worker import PreprocessWorker, PreprocessWorkerThread
 
         self.model, self.sent, self.tmp_path = _MediaModel(), [], tmp_path
@@ -1081,7 +1077,6 @@ class _RealDataWorker:
             discard_tensor_queue=facade.discard_tensor_queue, stop_event=facade.stop_event,
             # codec / try_send_bytes: the thread's outbox sends through them
             communicator=types.SimpleNamespace(
-                poll_for_messages=lambda timeout_ms=1: False,
                 get_all_new_messages=lambda: [],
                 codec=types.SimpleNamespace(encode=lambda msg: msg),
                 try_send_bytes=lambda entity, msg: self.sent.append(msg) or True,
@@ -1089,7 +1084,9 @@ class _RealDataWorker:
             tensor_manager=facade.tensor_manager, model=self.model, enable_prof=enable_prof,
             timing_requested=facade.timing_requested,
             worker_metrics_requested=facade.worker_metrics_requested,
+            preprocess_workers=preprocess_workers,
         )
+        facade.data_worker = worker
         facade.thread = threading.Thread(target=worker.run, daemon=True)
         facade.thread.start()
         self.server = make_test_api_server(
@@ -1229,10 +1226,14 @@ def test_the_data_worker_times_preprocessing_and_counts_failures_by_input_modali
     assert not _upload_buckets(s, "text")
 
 
-def test_queue_depth_counts_requests_waiting_for_the_data_worker(real_data_worker, tmp_path):
-    """Read at scrape time: requests queued behind the one the data worker is
-    working on. Its preprocess time leaves their wait in the queue out."""
-    served = real_data_worker(metrics=True)
+@pytest.mark.parametrize("preprocess_workers", [1, 2], ids=["inline", "pool"])
+def test_queue_depth_counts_requests_waiting_for_the_data_worker(
+    real_data_worker, tmp_path, preprocess_workers,
+):
+    """Read at scrape time: the requests waiting behind the one being prepared,
+    the same with or without a pool (one the pool has prepared still waits its
+    turn). Its preprocess time leaves their wait in the queue out."""
+    served = real_data_worker(metrics=True, preprocess_workers=preprocess_workers)
     clip = _wav(tmp_path / "clip.wav", 0.5)
     assert served.scrape()[("mstar_data_worker_queue_depth", _labels())] == 0
 
@@ -1241,14 +1242,19 @@ def test_queue_depth_counts_requests_waiting_for_the_data_worker(real_data_worke
     queued_at = time.perf_counter()
     served.submit("transcribe", [("audio", clip)], ("audio", "text"))
     served.submit("transcribe", [("audio", clip)], ("audio", "text"))
-    assert served.scrape()[("mstar_data_worker_queue_depth", _labels())] == 2
+    # _wait: the pool's prepare can signal before the data worker records it
+    _wait(lambda: served.scrape()[("mstar_data_worker_queue_depth", _labels())] == 2)
     time.sleep(0.2)
     waited = time.perf_counter() - queued_at
+    # settled too: on the pool, #1 is prepared and waits its turn behind "hold"
+    assert served.scrape()[("mstar_data_worker_queue_depth", _labels())] == 2
     served.model.release.set()
     _wait(lambda: _preprocessed(served.scrape()) == 3)
 
     s = served.scrape()
     assert s[("mstar_data_worker_queue_depth", _labels())] == 0
+    if preprocess_workers > 1:
+        return  # a pooled request's time runs from its prepare to its hand-off
     held_n, held_s = _data_worker_hist(s, "text")
     assert held_n == 1 and held_s >= waited
     queued_n, queued_s = _data_worker_hist(s, "audio,text")

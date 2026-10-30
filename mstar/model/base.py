@@ -445,6 +445,8 @@ class Model(ABC):
     # Request keys that set an output length. A request that sets one is refused when it
     # doesn't fit the context, instead of having its length cut to fit.
     LENGTH_KWARGS: tuple[str, ...] = ("max_output_tokens",)
+    # Request keys the conductor reads for every model, never logged as ignored.
+    ENGINE_KWARGS: tuple[str, ...] = ("seed", "prefix_cache")
 
     # Intra-op threads for the API server's preprocessing of this model's
     # inputs (``load_image``, ``process_prompt``, ...). None takes a default
@@ -459,7 +461,9 @@ class Model(ABC):
 
     # Requests whose media load and ``process_prompt`` the API server runs at
     # once, on a thread pool. 1 runs them inline on the data worker thread, one
-    # at a time. Above 1, ``load_*`` and ``process_prompt`` must be thread-safe.
+    # at a time. Above 1, ``load_*`` and ``process_prompt`` must be thread-safe,
+    # and ``preprocess_workers`` in the serving config may resize the pool; at 1
+    # the config cannot add one.
     PREPROCESS_WORKERS: int = 1
 
     def _get_worker_graphs_for_graph_walk(
@@ -793,16 +797,13 @@ class Model(ABC):
     @abstractmethod
     def postprocess(
         self,
-        output: torch.Tensor | list[int],
+        output: torch.Tensor,
         modality: str,  # text | image | video | video_frame | audio
         request_kwargs: dict | None = None,
     ) -> bytes:
         """
         Given an output of a certain modality, encode and return as bytes.
         This will likely need to overridden with model-specific behavior.
-        A value sent inline (``NodeSubmodule.inline_client_signals``) arrives
-        as a list of ints rather than a tensor; ``mstar.model.utils.token_ids``
-        reads either.
         ``request_kwargs`` is the request's model_kwargs, so encoders can honor
         per-request parameters (e.g. writing a video container at the request's
         frame rate).
@@ -816,6 +817,15 @@ class Model(ABC):
         - image: png
         """
         return output.cpu().numpy().tobytes()
+
+    def postprocess_token_ids(
+        self, ids: list[int], modality: str, request_kwargs: dict | None = None,
+    ) -> bytes:
+        """``postprocess`` for a value sent inline (``NodeSubmodule.inline_client_signals``),
+        which arrives as a list of ints. A model whose inline outputs are token ids
+        overrides it to skip the tensor: each torch call on the data-worker thread
+        hands the GIL off."""
+        return self.postprocess(torch.tensor(ids), modality, request_kwargs=request_kwargs)
 
     @abstractmethod
     def get_submodule(
@@ -867,8 +877,8 @@ class Model(ABC):
     def request_kwargs(self) -> frozenset[str] | None:
         """Every ``model_kwargs`` key this model reads, including the ones an
         OpenAI adapter maps onto it. A request carrying any other key is served,
-        and the key named in the ``X-MStar-Ignored-Params`` response header.
-        None (the default) declares nothing, so nothing is reported.
+        and the key logged as ignored. None (the default) declares nothing, so
+        nothing is logged.
         """
         return None
 

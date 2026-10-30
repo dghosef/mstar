@@ -67,7 +67,7 @@ from mstar.model.base import ForwardPassArgs, KVLabel, LabelLayout, Model, Proce
 from mstar.model.components.audio_features import LogMelSpectrogram, load_speech_file
 from mstar.model.components.request_kwargs import checked_request_kwargs
 from mstar.model.submodule_base import NodeSubmodule
-from mstar.model.utils import ByteLevelDetokenizer, check_kv_pools_fit, kv_pages, token_ids
+from mstar.model.utils import ByteLevelDetokenizer, check_kv_pools_fit, kv_pages
 from mstar.model.whisper.components import alignment
 from mstar.model.whisper.components.timestamps import inactive_state
 from mstar.model.whisper.config import (
@@ -663,16 +663,19 @@ class WhisperModel(Model):
 
     def postprocess(
         self,
-        output: torch.Tensor | list[int],
+        output: torch.Tensor,
         modality: str,
         **kwargs,
     ) -> bytes:
-        if modality != "text":
-            raise ValueError(f"Unsupported modality for Whisper: {modality!r}")
-        if isinstance(output, torch.Tensor) and output.is_floating_point():
+        if modality == "text" and output.is_floating_point():
             # the align walk's alignment; every other text output is token ids
             return self._word_timings_text(output)
-        return self._detokenizer.to_bytes(token_ids(output))
+        return self.postprocess_token_ids(output.reshape(-1).tolist(), modality)
+
+    def postprocess_token_ids(self, ids: list[int], modality: str, request_kwargs: dict | None = None) -> bytes:
+        if modality != "text":
+            raise ValueError(f"Unsupported modality for Whisper: {modality!r}")
+        return self._detokenizer.to_bytes(ids)
 
     def warmup_preprocess(self) -> None:
         # postprocess runs the word timestamps' DTW in this process

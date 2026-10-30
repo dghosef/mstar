@@ -70,7 +70,7 @@ from mstar.model.qwen3_asr.config import (
     Qwen3ASRModelConfig,
 )
 from mstar.model.submodule_base import NodeSubmodule
-from mstar.model.utils import ByteLevelDetokenizer, token_ids
+from mstar.model.utils import ByteLevelDetokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -437,9 +437,12 @@ class Qwen3ASRModel(Model):
     # Model ABC: postprocess
     # -------------------------------------------------------------------
 
-    def postprocess(self, output: torch.Tensor | list[int], modality: str, **kwargs) -> bytes:
+    def postprocess(self, output: torch.Tensor, modality: str, **kwargs) -> bytes:
+        return self.postprocess_token_ids(output.reshape(-1).tolist(), modality)
+
+    def postprocess_token_ids(self, ids: list[int], modality: str, request_kwargs: dict | None = None) -> bytes:
         if modality == "text":
-            return self._detokenizer.to_bytes(token_ids(output))
+            return self._detokenizer.to_bytes(ids)
         raise ValueError(f"Unsupported modality for Qwen3-ASR: {modality!r}")
 
     # -------------------------------------------------------------------

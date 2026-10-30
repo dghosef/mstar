@@ -67,9 +67,6 @@ def pretty_print_profile(prof: RequestProfile, filename=None):
         ("recv", t.recv_time),
         ("preprocess done", t.preprocess_finish_time),
         ("conductor ingest", t.conductor_ingest_time),
-        ("worker start", min(starts) if starts else None),
-        ("worker end", max(ends) if ends else None),
-        ("last output read", t.last_output_read_time),
         ("first chunk", t.first_chunk_time),
         ("last chunk", t.last_chunk_time),
         ("conductor done", t.conductor_finish_time),
@@ -89,6 +86,14 @@ def pretty_print_profile(prof: RequestProfile, filename=None):
             lines.append(f"   {a_label + ' → ' + b_label:<40} {_ms(a_ts, b_ts)}")
         # Total spans the first to last recorded checkpoint.
         lines.append(f"   {'total':<40} {_ms(present[0][1], present[-1][1])}")
+        # Beside the chain, not in it: the worker's steps can straddle the
+        # chunks, and its perf_counter compares only on one host.
+        if starts and ends:
+            lines.append(f"   {'worker span (same-host clocks)':<40} {_ms(min(starts), max(ends))}")
+        if t.last_output_read_time is not None and t.last_chunk_time is not None:
+            lines.append(
+                f"   {'last chunk after last output read':<40} {_ms(t.last_output_read_time, t.last_chunk_time)}"
+            )
         if t.output_postprocess_s:
             lines.append(f"   {'output postprocess (sum)':<40} {t.output_postprocess_s * 1e3:8.1f} ms")
     else:

@@ -28,7 +28,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from api_server_helpers import make_test_api_server
+from api_server_helpers import idle_poll, make_test_api_server
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from test_teardown_barrier import PREPROCESS, _conductor, _remove_targets, _request_data
@@ -37,6 +37,7 @@ from mstar.api_server import entrypoint
 from mstar.api_server.data_worker import PreprocessWorker, PreprocessWorkerThread
 from mstar.api_server.entrypoint import request_id_in_use
 from mstar.api_server.request_types import APIServerMessage, RequestFailed, ResultChunk
+from mstar.model.base import Model
 from mstar.streaming.topology import PartitionTopology
 from mstar.utils.ipc_format import (
     ConductorMessageType,
@@ -60,6 +61,8 @@ class _Model:
     def postprocess(self, output, modality, request_kwargs=None):
         return f"<{int(output[0])}>".encode()
 
+    postprocess_token_ids = Model.postprocess_token_ids
+
 
 class _Socket:
     """The data worker's socket to the conductor; each loop pass polls it once."""
@@ -69,11 +72,6 @@ class _Socket:
         self.sent = []
         self.polls = 0
         self.cond = threading.Condition()
-
-    def poll_for_messages(self, timeout_ms=1):
-
-        return False
-
 
     def get_all_new_messages(self):
         msgs = []
@@ -394,8 +392,8 @@ def _run_message_thread(s, pw, chunks=(), messages=(), until=lambda: True):
     pw.get_profile_updates = lambda: []
     pw.finished_reading = lambda rid, drained: None
     s.communicator = SimpleNamespace(
-        poll_for_messages=lambda timeout_ms=1: False,
-            get_all_new_messages=lambda: [messages.pop(0)] if messages else [],
+        poll_for_messages=idle_poll,
+        get_all_new_messages=lambda: [messages.pop(0)] if messages else [],
     )
     s.conductor_proc = None
     s._liveness_interval_s = 0.5
@@ -737,14 +735,14 @@ def test_a_stream_is_bound_to_its_submission_before_it_is_iterated():
 def test_an_openai_chat_stream_is_bound_before_it_is_iterated():
     """The chat stream is bound when it is made: Starlette first iterates it
     after the id is reused, and it still reads its own request's result."""
-    from mstar.api_server.openai.serving_chat import _stream
+    from mstar.api_server.openai.serving_chat import _stream_events
 
     pw = _PreprocessWorker()
     s = _api_server(pw)
     s.submit_request(text="first", request_id="X", **TEXT)
 
     async def run():
-        body = _stream(s, "m", "X", 24000)
+        body = _stream_events(s.iter_result_chunk_batches("X"), "m", "X", 24000)
         _complete(s, pw.inputs[0].request_id, b"first")
         s.submit_request(text="second", request_id="X", **TEXT)
         _complete(s, pw.inputs[1].request_id, b"second")

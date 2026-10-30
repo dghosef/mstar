@@ -54,8 +54,8 @@ class GraphTiming:
     preprocess_time: float # preprocess + prepare_inputs
     postprocess_time: float # CPU-level postprocess (minus async overlap)
     # perf_counter (CLOCK_MONOTONIC, so comparable across this host's
-    # processes) of the first step's start and the last step's end, which place
-    # the worker's span on the request's timeline
+    # processes) of the first step's start and the last step's end: the
+    # worker's span over the request
     first_start: float | None = None
     last_end: float | None = None
 

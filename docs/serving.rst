@@ -340,13 +340,12 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
        rendezvouses. Default 512.
    * - ``preprocess_workers``
      - *(optional)* Requests whose media load and ``process_prompt`` the API server
-       runs at once, on a thread pool, a positive integer (anything else fails at
-       startup); unset keeps the model's ``Model.PREPROCESS_WORKERS`` (8 for
-       V-JEPA2, 4 for V-JEPA2-AC, 1 otherwise). 1 prepares one request at a time
-       on the data-worker thread. Above 1 the model's ``load_*`` and
-       ``process_prompt`` must be thread-safe, so raise it only for a model
-       whose class sets more than 1. Requests are still handed to the conductor
-       in arrival order.
+       runs at once, on a thread pool: a positive integer, default
+       ``Model.PREPROCESS_WORKERS``. A model class sets that above 1 only when its
+       ``load_*`` and ``process_prompt`` are thread-safe, so a value above 1 for a
+       class that leaves it at 1 fails at startup, as does a value that is not a
+       positive integer. 1 prepares one request at a time on the data-worker thread.
+       Requests are still handed to the conductor in arrival order.
    * - ``api_switch_interval_s``
      - *(optional)* GIL switch interval of the API server process, in seconds
        (``sys.setswitchinterval``), a positive number (anything else fails at
@@ -409,9 +408,14 @@ ranks adopt it. ``prefix_cache_tp`` can't be combined with ``cpu_offload_pages``
 cache's nodes must run on one TP group, with no replicas and no walks placed on other
 ranks. Loading fails otherwise.
 
-A cached prompt no longer reserves its pages, so the pool no longer limits how many
-requests are admitted. It has to hold the decode of every request allowed to run at once,
-and a decode step that finds no free page holds its requests until they time out.
+On a single rank, a request waits at the head of its pool's queue until its prompt fits
+beside the prompts already admitted, and no request behind it starts first. A cache hit on
+a page only the prefix index holds counts as a page the request takes. A request that
+can't fit in its pool at its full output length gets a 400 if it asked for that length,
+and otherwise has the model's default length cut until it fits. The pool
+reserves only prompts, so it still has to hold the decode of every request allowed to run
+at once, and a decode step that finds no page outside the admitted prompts holds its
+requests until they time out.
 ``max_concurrent_requests`` prevents that. It caps how many requests run at once, and the
 pool's pages divided by the pages one request needs, prompt and output together, is a
 safe value. ``cpu_offload_pages`` lets a full pool move a request to the host. An offload
@@ -800,8 +804,9 @@ or ``increase()``.
   ``mstar_prefix_cache_hit_tokens_total{model_name, component}``: counters, prompt
   tokens looked up in the prefix cache (once per request, its whole keyed prompt) and
   tokens found there. Only models that key their prompts for prefix reuse (BAGEL,
-  Orpheus and Qwen3-Omni's Thinker) count, and above one rank only with
-  ``prefix_cache_tp`` set.
+  Orpheus, Qwen3.5 and Qwen3-Omni's Thinker) count, and above one rank only with
+  ``prefix_cache_tp`` set. Qwen3.5's hit counts the KV cache's tokens before its
+  recurrent pool cuts the hit to a snapshot.
 - ``mstar_component_pending_steps{model_name, component}``: gauge, requests whose next
   step on the node is ready (its inputs arrived) and not running: waiting for room in a
   step or for the worker to pick the node.
@@ -890,10 +895,10 @@ work.
   route and long transcriptions send WAV files they write from the decoded audio, so
   those count the WAV sizes. Requests refused before they were submitted (an oversized
   body, a bad form) are not counted.
-- ``mstar_data_worker_queue_depth{model_name}``: gauge, read at scrape time, requests
-  submitted and not yet taken up by the data worker (the one it is working on is not
-  counted). A request whose client went away still counts until the data worker takes
-  it up.
+- ``mstar_data_worker_queue_depth{model_name}``: gauge, read at scrape time, inputs
+  (requests and client-stream appends) waiting in the data worker: submitted, and
+  neither being prepared nor handed on to the conductor yet. One whose client went away
+  still counts until its turn comes and it is dropped.
 
 .. code-block:: bash
 
