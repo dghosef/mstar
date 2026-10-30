@@ -31,8 +31,6 @@ THINKER_POS = "thinker_pos"
 TALKER_POS = "talker_pos"
 
 THINKER_SAMPLER = "thinker_sampler"
-# the audio encoder's windowed attention over a step's packed clips
-AUDIO_ATTN = "audio_attn"
 # combined walk of the Thinker's text/audio prefill and decode
 THINKER_MIXED = "thinker_mixed"
 TALKER_SAMPLER = "talker_sampler"
@@ -423,7 +421,6 @@ class Qwen3OmniModelConfig:
     thinker_text: ThinkerTextConfig = field(default_factory=ThinkerTextConfig)
     thinker: ThinkerConfig = field(default_factory=ThinkerConfig)
     vision: VisionEncoderConfig = field(default_factory=VisionEncoderConfig)
-    # the shared AuT encoder's (``components/aut_encoder.py``), from the checkpoint's audio_config
     audio_encoder: AuTEncoderConfig = field(default_factory=AuTEncoderConfig)
     talker_text: TalkerTextConfig = field(default_factory=TalkerTextConfig)
     talker: TalkerConfig = field(default_factory=TalkerConfig)

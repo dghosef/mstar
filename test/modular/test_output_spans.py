@@ -331,12 +331,13 @@ def test_startup_refuses_a_withheld_output_the_worker_cannot_leave_unrouted():
     """Withholding leaves the route a row's item short: only a streaming edge
     takes that, only if no speculated step read the output first, and the
     loop-back signal (sent inline) is not routed at all."""
-    from mstar.model.submodule_base import TokenStop
+    from mstar.model.submodule_base import DeviceLoopback, TokenStop
     from mstar.streaming.topology import StreamingGraphEdge
 
     stop = TokenStop(loop="loop", buffer="token", stop_ids=frozenset({0}), sampler="s",
-                     loopback_signal="token", withhold=("audio", "token"))
-    talker = {NODE: SimpleNamespace(token_stop=stop)}
+                     withhold=("audio", "token"))
+    loopback = DeviceLoopback(walk=WALK, signal="token", sampler="s", buffer="token")
+    talker = {NODE: SimpleNamespace(token_stop=stop, device_loopback=loopback)}
 
     def graph(edge, async_scheduling=False):
         node = GraphNode(name=NODE, input_names=["x"], outputs=[edge], enable_async_scheduling=async_scheduling)
@@ -350,6 +351,9 @@ def test_startup_refuses_a_withheld_output_the_worker_cannot_leave_unrouted():
     ):
         with pytest.raises(ValueError, match="withholds"):
             _refuse_unroutable_withholds(talker, refused)
+    # the signal loops back only on its own walk; elsewhere it is routed
+    other = {NODE: SimpleNamespace(token_stop=stop, device_loopback=loopback._replace(walk="other"))}
+    _refuse_unroutable_withholds(other, graph(StreamingGraphEdge(next_node="Codec", name="token")))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="stages a CUDA span to pinned host memory")

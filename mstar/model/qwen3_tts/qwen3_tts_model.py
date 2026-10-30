@@ -481,8 +481,8 @@ class Qwen3TTSModel(Model):
         """Talker paged KV + attention/position/sampler resources, and the
         Codec's per-stream decoder state.
 
-        The CodePredictor's frame-local KV scratch is not a resource; the
-        Talker submodule owns it (overwritten every step)."""
+        The CodePredictor's frame-local KV scratch is not a resource; its
+        ``DepthKV`` owns it (overwritten every step)."""
         from mstar.model.qwen3_tts.components.incremental_codec import codec_state_blocks
 
         talker = self.config.talker
@@ -1133,7 +1133,7 @@ class Qwen3TTSModel(Model):
         )
 
     def get_loop_caps(self, **model_kwargs: Any) -> dict[str, int]:
-        # the stop check counts the prefill's frame, so decode runs one iteration fewer than max tokens
+        # the prefill samples the first frame, so decode runs one iteration fewer than max tokens
         return {"talker_decode_loop": max(1, self.get_max_output_tokens(**model_kwargs) - 1)}
 
     def kv_labels(self) -> dict[str, dict[str, KVLabel]]:
@@ -1202,12 +1202,10 @@ class Qwen3TTSModel(Model):
         tp_group=None,
         autocast_dtype: torch.dtype | None = None,
         ) -> NodeSubmodule:
+        from mstar.model.components.code_predictor_kernels import ResidualCodePredictor
         from mstar.model.loader import LLAMA_STACKED_PARAMS, load_hf_weights
         from mstar.model.loader.iterators import iter_safetensors_shards
-        from mstar.model.qwen3_tts.components.talker import (
-            Qwen3TTSCodePredictor,
-            Qwen3TTSTalkerModel,
-        )
+        from mstar.model.qwen3_tts.components.talker import Qwen3TTSTalkerModel
         from mstar.model.qwen3_tts.submodules import TalkerSubmodule
 
         # Construct on meta first so worker startup never holds both a random
@@ -1243,7 +1241,9 @@ class Qwen3TTSModel(Model):
         # CodePredictor is small and depth-wise. It is loaded separately from
         # ``talker.code_predictor.*`` and remains replicated under Talker TP.
         with torch.device("meta"):
-            code_predictor = Qwen3TTSCodePredictor(self.config)
+            code_predictor = ResidualCodePredictor(
+                self.config.code_predictor, self.config.talker.hidden_size, TalkerSubmodule.MAX_BATCH_SIZE,
+            )
         if autocast_dtype is not None:
             code_predictor = code_predictor.to(autocast_dtype)
         code_predictor.to_empty(device=device)
@@ -1264,8 +1264,7 @@ class Qwen3TTSModel(Model):
             _checkpoint_keys(self.local_dir, cp_prefix),
             "Qwen3-TTS CodePredictor",
         )
-        # The captured depth loop indexes all residual LM heads as one tensor;
-        # consolidate after the individual checkpoint heads are loaded.
+        # the depth loop runs on weights folded from the loaded layers and heads
         code_predictor.consolidate_stacked_weights(talker.model.codec_embedding.weight)
         code_predictor.eval()
         return TalkerSubmodule(talker, code_predictor, self.config)

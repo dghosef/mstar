@@ -59,6 +59,7 @@ from mstar.model.higgs_audio.config import (
     HiggsAudioModelConfig,
 )
 from mstar.model.submodule_base import NodeSubmodule
+from mstar.model.utils import ByteLevelDetokenizer, TextOutput
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +114,6 @@ class HiggsAudioModel(Model):
             whisper_dir, cache_dir=cache_dir,
         )
 
-        from mstar.model.utils import ByteLevelDetokenizer
         self._detokenizer = ByteLevelDetokenizer(self.tokenizer)
 
         self._submodule_cache: dict[str, NodeSubmodule | None] = {}
@@ -183,7 +183,8 @@ class HiggsAudioModel(Model):
         return model_kwargs.get("max_output_tokens", 1024)
 
     def get_loop_caps(self, **model_kwargs) -> dict[str, int]:
-        return {"decode_loop": self.get_max_output_tokens(**model_kwargs)}
+        # the prefill samples the first of max_output_tokens
+        return {"decode_loop": max(1, self.get_max_output_tokens(**model_kwargs) - 1)}
 
     def kv_labels(self) -> dict[str, dict[str, KVLabel]]:
         return {KV_CACHE: {"main": KVLabel(
@@ -411,17 +412,17 @@ class HiggsAudioModel(Model):
     # Model ABC: postprocess
     # -------------------------------------------------------------------
 
+    def text_output(self) -> TextOutput:
+        return TextOutput(self._detokenizer)
+
     def postprocess(
         self,
         output: torch.Tensor,
         modality: str,
         **kwargs,
     ) -> bytes:
-        return self.postprocess_token_ids(output.reshape(-1).tolist(), modality)
-
-    def postprocess_token_ids(self, ids: list[int], modality: str, request_kwargs: dict | None = None) -> bytes:
         if modality == "text":
-            return self._detokenizer.to_bytes(ids)
+            return super().postprocess(output, modality, **kwargs)
         raise ValueError(f"Unsupported modality for Higgs-Audio: {modality!r}")
 
     # -------------------------------------------------------------------

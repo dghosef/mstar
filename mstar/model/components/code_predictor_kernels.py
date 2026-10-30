@@ -1,30 +1,35 @@
-"""Kernels of a residual code predictor's depth loop (Qwen3-Omni's and
-Qwen3-TTS's): a few layers walked once per codec group, 16 x 5 times per Talker
-step, over a dense frame-local KV cache.
+"""A Talker's residual code predictor (Qwen3-Omni's and Qwen3-TTS's) and the
+kernels of its depth loop: a few layers walked once per codec group, 16 x 5
+times per Talker step, over a dense frame-local KV cache.
 
 ``cp_attend`` is a layer's attention between its projections in one launch:
 q/k norm, RoPE, the cache write and attention over the depth positions so far,
 each a few microseconds around a ~1 us job when launched apart.
 ``cp_embed_accumulate`` records a depth step's codes and sums their embeddings.
 ``DepthAttention`` is a code predictor layer's attention built on ``cp_attend``,
-over the frame-local KV cache its ``DepthKV`` holds.
+over the frame-local KV cache its ``DepthKV`` holds. ``cp_linear`` is a
+layer's projection with its RMSNorm and residual add or SwiGLU folded in, and
+``ResidualCodePredictor`` is the predictor: its layers, heads and depth loop.
 
 A captured forward compiles with static ints, so any compiled frame that holds a
 depth step's ``cache_pos`` or a layer index recompiles at every depth position
 or layer. Both live on the ``DepthKV``, which the depth loop binds per step and
-``run_layers`` moves per layer, and are read only in its eager methods: the
-layers' frames, the projections included, compile once per shape.
+``run_depth_layers`` moves per layer, and are read only in its eager methods.
 """
 from __future__ import annotations
 
 import functools
-from typing import NamedTuple
+from typing import Any, Callable, NamedTuple
 
 import torch
 import triton
 import triton.language as tl
+from torch import nn
 
+from mstar.model.components.decoder_layer import DecoderLayer
+from mstar.model.components.distributed import ParallelGatedMLP
 from mstar.model.components.distributed.attention import ParallelAttention
+from mstar.model.components.norm import RMSNorm
 from mstar.utils.attention import rms_norm_rope
 
 # Row stats of a residual stream are kept as one partial sum of squares per
@@ -40,7 +45,7 @@ EMBED_BLOCK = 256
 
 @triton.jit(do_not_specialize=["cache_pos"])
 def _cp_attend_kernel(
-    QKV, Wq, Wk, Pos, KV, O,
+    QKV, Wq, Wk, KV, O,
     eps_q, eps_k, rope_theta, sm_scale, cache_pos,
     s_qkv, s_o,
     s_kv_b, s_kv_c, s_kv_n, s_kv_h,
@@ -52,7 +57,8 @@ def _cp_attend_kernel(
     from registers, so no program waits on another's cache write), the
     earlier positions from the cache, and attention over all of them. The
     first q head of each kv head also writes its token's k and v into the
-    cache for later steps."""
+    cache for later steps. A token's depth position is its cache slot, which
+    is also its RoPE position: a frame's depth sequence starts at 0."""
     m = tl.program_id(0)
     h = tl.program_id(1)
     hk = h // (H_Q // H_KV)
@@ -62,7 +68,7 @@ def _cp_attend_kernel(
     offs = tl.arange(0, HALF_D)
     d = tl.arange(0, D)
     row = QKV + m * s_qkv
-    pos = tl.load(Pos + m).to(tl.float32)
+    pos = (cache_pos + s).to(tl.float32)
     q1, q2 = rms_norm_rope(
         tl.load(row + h * D + offs).to(tl.float32), tl.load(row + h * D + HALF_D + offs).to(tl.float32),
         Wq, pos, eps_q, rope_theta, D, HALF_D,
@@ -81,7 +87,7 @@ def _cp_attend_kernel(
     for j in tl.static_range(SEQ):
         if j <= s:
             rj = QKV + (b * SEQ + j) * s_qkv
-            pj = tl.load(Pos + b * SEQ + j).to(tl.float32)
+            pj = (cache_pos + j).to(tl.float32)
             kj1, kj2 = rms_norm_rope(
                 tl.load(rj + (H_Q + hk) * D + offs).to(tl.float32),
                 tl.load(rj + (H_Q + hk) * D + HALF_D + offs).to(tl.float32),
@@ -109,13 +115,13 @@ def _cp_attend_kernel(
 
 @torch.compiler.disable
 def cp_attend(
-    qkv: torch.Tensor, q_norm_w: torch.Tensor, k_norm_w: torch.Tensor, pos: torch.Tensor,
+    qkv: torch.Tensor, q_norm_w: torch.Tensor, k_norm_w: torch.Tensor,
     kv_layer: torch.Tensor, cache_pos: int, seq_len: int, eps_q: float, eps_k: float,
     rope_theta: float, n_q_heads: int, n_kv_heads: int, head_dim: int,
 ) -> torch.Tensor:
     """A code predictor layer's attention between its projections, for
     ``qkv (tokens, (Hq + 2 Hkv) * D)``, token ``b * seq_len + s`` at depth
-    position ``cache_pos + s`` (``pos`` holds its RoPE position): q/k RMSNorm,
+    position ``cache_pos + s``, also its RoPE position: q/k RMSNorm,
     RoPE, the new k and v written into ``kv_layer (bs, 2, S, Hkv, D)``, and
     causal attention over the depth positions so far. Returns
     ``(tokens, Hq * D)``. One launch, one warp per (token, head): the depth
@@ -124,7 +130,7 @@ def cp_attend(
     assert qkv.stride(1) == 1 and kv_layer.stride(-1) == 1 and tokens % seq_len == 0
     out = torch.empty(tokens, n_q_heads * head_dim, device=qkv.device, dtype=qkv.dtype)
     _cp_attend_kernel[(tokens, n_q_heads)](
-        qkv, q_norm_w, k_norm_w, pos, kv_layer, out,
+        qkv, q_norm_w, k_norm_w, kv_layer, out,
         eps_q, eps_k, rope_theta, head_dim ** -0.5, cache_pos,
         qkv.stride(0), out.stride(0),
         kv_layer.stride(0), kv_layer.stride(1), kv_layer.stride(2), kv_layer.stride(3),
@@ -187,7 +193,7 @@ def cp_embed_accumulate(
     promoting add and the input projection."""
     bs, hidden = tokens.shape[0], weight.shape[1]
     table = weight if inputs is None else inputs
-    assert weight.stride(1) == 1 and table.stride(1) == 1 and emb_sum.stride(1) == 1
+    assert tokens.is_contiguous() and weight.stride(1) == 1 and table.stride(1) == 1 and emb_sum.stride(1) == 1
     block = EMBED_BLOCK
     assert hidden % block == 0 and table.shape[1] % block == 0
     n_part = table.shape[1] // block if partials is not None else 0
@@ -210,30 +216,29 @@ def cp_embed_accumulate(
 class DepthKV:
     """A code predictor's frame-local KV cache and the depth step attending
     over it, as its layers' attention cursor: the depth loop calls
-    ``bind_step`` per step, and ``run_layers`` calls ``set_layer_idx`` per
-    layer. Its methods are all eager, so the ints stay out of compiled frames
-    (and none is ``recursive=False``; see ``run_layers``). A binding serves
-    one pass over the layers: the pass's first layer consumes it, so a step
-    that was not bound fails instead of reusing the previous step's slots."""
+    ``bind_step`` per step, and ``run_depth_layers`` calls ``set_layer_idx``
+    per layer. Its methods are all eager, so the ints stay out of compiled
+    frames. A binding serves one pass over the layers: the pass's first layer
+    consumes it, so a step that was not bound fails instead of reusing the
+    previous step's slots.
 
-    def __init__(self) -> None:
+    The cache, ``[layers, max_batch_size, 2, max_depth, kv_heads, head_dim]``,
+    is small model-held scratch rather than an engine resource. It is made at
+    the first step, in the activations' dtype and device, and sliced to each
+    batch, so every captured step reads the same buffer. Nothing clears it:
+    every position a step reads was written earlier in the same frame.
+    """
+
+    def __init__(self, shape: tuple[int, ...]) -> None:
+        self.shape = shape
+        self.kv_cache: torch.Tensor | None = None
         self._fresh = False
 
     @torch.compiler.disable
-    def bind_step(self, kv_cache: torch.Tensor, pos: torch.Tensor, cache_pos: int) -> None:
-        """Bind the next pass over the layers.
-
-        Args:
-            kv_cache: ``[n_layers, bs, 2, max_seq_len, n_kv_heads, head_dim]``
-                dense tensor preallocated by the submodule. It is not cleared between
-                frames: every position a depth step reads was written earlier in the
-                same frame.
-            pos: ``[bs, seq_len]`` int tensor with the absolute position of each
-                input token within the depth sequence.
-            cache_pos: write offset into ``kv_cache``'s seq-len axis. The new
-                K/V tokens land at ``[cache_pos : cache_pos + seq_len]``.
-        """
-        self.kv_cache, self.pos, self.cache_pos = kv_cache, pos.reshape(-1), cache_pos
+    def bind_step(self, cache_pos: int) -> None:
+        """Bind the next pass over the layers, whose tokens sit at depth
+        positions ``cache_pos, cache_pos + 1, ...``: their cache slots."""
+        self.cache_pos = cache_pos
         self._fresh = True
 
     @torch.compiler.disable
@@ -250,9 +255,11 @@ class DepthKV:
         k and v written at the step's depth positions, each token attending
         over the positions so far. Returns ``(bs, S, Hq * D)``."""
         bs, seq_len, _ = qkv.shape
+        if self.kv_cache is None:
+            self.kv_cache = torch.zeros(self.shape, dtype=qkv.dtype, device=qkv.device)
         return cp_attend(
             qkv.view(bs * seq_len, -1), attn.q_norm.weight, attn.k_norm.weight,
-            self.pos, self.kv_cache[self.layer_idx], self.cache_pos, seq_len,
+            self.kv_cache[self.layer_idx, :bs], self.cache_pos, seq_len,
             attn.q_norm.variance_epsilon, attn.k_norm.variance_epsilon,
             float(attn.rope_theta), attn.num_heads, attn.num_kv_heads, attn.head_dim,
         ).view(bs, seq_len, -1)
@@ -260,9 +267,9 @@ class DepthKV:
 
 class DepthAttention(ParallelAttention):
     """A code predictor layer's attention, ``(bs, S, hidden)`` in and out:
-    the qkv and o projections around its ``DepthKV``. The projections compile
-    (at -O1 a one-row GEMM becomes a fused Triton reduction); the kernels
-    between them run eager."""
+    the qkv and o projections around its ``DepthKV``. The depth loop reads
+    its weights and runs ``cp_linear`` instead (``run_depth_layers``); this
+    forward is the unfused layer, kept as the reference."""
 
     def __init__(self, depth: DepthKV, **kwargs):
         super().__init__(qk_norm=True, **kwargs)
@@ -494,6 +501,7 @@ def depth_partials(device: torch.device) -> torch.Tensor:
     return torch.zeros(_MAX_PARTIALS, _MAX_ROWS, dtype=torch.float32, device=device)
 
 
+@torch.compiler.disable
 def run_depth_layers(
     x: torch.Tensor, w: DepthWeights, depth: DepthKV, attn_modules, partials: torch.Tensor,
     n_part: int = 0, head: int | None = None,
@@ -502,7 +510,10 @@ def run_depth_layers(
     residual stream, updated in place, through ``cp_linear`` and ``cp_attend``:
     five launches a layer. ``n_part`` says whether ``partials`` already holds
     ``x``'s row sums of squares (0: the first projection takes them from ``x``).
-    Returns the logits of LM head ``head`` (an index into ``w.heads``), or None."""
+    Returns the logits of LM head ``head`` (an index into ``w.heads``), or None.
+
+    Eager: every launch in it is a kernel compiling cannot fuse, and a compiled
+    frame would guard on ``head`` and ``n_part``, once per depth position."""
     bs = x.shape[0]
     for i, attn in enumerate(attn_modules):
         depth.set_layer_idx(i)
@@ -515,3 +526,159 @@ def run_depth_layers(
     if head is None:
         return None
     return cp_linear(x, w.heads[head], norm_eps=w.eps, partials=partials, n_part=n_part)
+
+
+class ResidualCodePredictor(nn.Module):
+    """A Talker's residual code predictor: once the Talker samples a frame's
+    group-0 code, a few decoder layers walk the frame's codec groups 1..G-1,
+    attending over the frame-local cache of their ``DepthKV``.
+
+    ``cp`` is the checkpoint's code predictor config (layer sizes, heads,
+    ``num_code_groups``). Inputs and codec embeddings are in the Talker's
+    width, ``talker_width``; ``small_to_mtp_projection`` maps them into the
+    predictor's, and is the identity where the two match. Parameters follow
+    the checkpoint's ``talker.code_predictor.*``: ``model.layers``,
+    ``model.norm``, ``model.codec_embedding.{g - 1}`` (group ``g``'s table),
+    ``lm_head.{g - 1}`` and the projection. ``max_batch_size`` sizes the depth
+    cache: the most rows a depth loop runs at once.
+
+    The layers are parameter containers (checkpoint names, loading): the depth
+    loop runs them through ``run_depth_layers``, five launches a layer, on
+    weights ``consolidate_stacked_weights`` folds once they are loaded.
+    """
+
+    def __init__(self, cp: Any, talker_width: int, max_batch_size: int) -> None:
+        super().__init__()
+        self.num_code_groups = cp.num_code_groups
+        residual = cp.num_code_groups - 1
+        self.depth = DepthKV((
+            cp.num_hidden_layers, max_batch_size, 2, cp.num_code_groups, cp.num_key_value_heads, cp.head_dim,
+        ))
+        layers = nn.ModuleList(
+            DecoderLayer(
+                self_attn=DepthAttention(
+                    self.depth, hidden_size=cp.hidden_size, num_heads=cp.num_attention_heads,
+                    num_kv_heads=cp.num_key_value_heads, head_dim=cp.head_dim,
+                    rope_theta=cp.rope_theta, rms_norm_eps=cp.rms_norm_eps,
+                ),
+                mlp=ParallelGatedMLP(
+                    hidden_size=cp.hidden_size, intermediate_size=cp.intermediate_size, activation="silu",
+                ),
+                input_layernorm=RMSNorm(cp.hidden_size, cp.rms_norm_eps),
+                post_attention_layernorm=RMSNorm(cp.hidden_size, cp.rms_norm_eps),
+            )
+            for _ in range(cp.num_hidden_layers)
+        )
+        self.model = nn.ModuleDict({
+            "layers": layers,
+            "norm": RMSNorm(cp.hidden_size, cp.rms_norm_eps),
+            "codec_embedding": nn.ModuleList(nn.Embedding(cp.vocab_size, talker_width) for _ in range(residual)),
+        })
+        self.small_to_mtp_projection: nn.Module = (
+            nn.Linear(talker_width, cp.hidden_size, bias=True) if talker_width != cp.hidden_size else nn.Identity()
+        )
+        self.lm_head = nn.ModuleList(nn.Linear(cp.hidden_size, cp.vocab_size, bias=False) for _ in range(residual))
+        # built by consolidate_stacked_weights
+        self.fused: DepthWeights | None = None
+        self.input_tables: list[torch.Tensor] | None = None
+        self._partials: torch.Tensor | None = None
+
+    def consolidate_stacked_weights(self, talker_codec_embedding: torch.Tensor) -> None:
+        """Fold the loaded layers and LM heads into the depth loop's weights
+        (``fused``) and, where the inputs are projected, keep every embedding
+        table the depth loop reads already projected (``input_tables``): a
+        step's input is then a row lookup, not a GEMM over the looked-up row.
+        ``talker_codec_embedding`` is the Talker's group-0 table, whose
+        embedding is the depth sequence's second input."""
+        heads = torch.stack([head.weight.data for head in self.lm_head])
+        self.fused = fold_depth_weights(self.model.layers, self.model.norm, heads)
+        self.input_tables = None
+        if isinstance(self.small_to_mtp_projection, nn.Linear):
+            with torch.no_grad():
+                self.input_tables = [
+                    self.small_to_mtp_projection(table).contiguous()
+                    for table in [talker_codec_embedding] + [emb.weight for emb in self.model.codec_embedding[:-1]]
+                ]
+
+    def depth_input(self, last_hidden: torch.Tensor, partials: torch.Tensor) -> tuple[torch.Tensor, int]:
+        """The depth sequence's first input, ``last_hidden (bs, talker_width)``
+        projected to the predictor width (a new tensor, so the step may
+        overwrite it), and how many row partials it left in ``partials`` for
+        ``depth_step``."""
+        proj = self.small_to_mtp_projection
+        if isinstance(proj, nn.Linear):
+            x = cp_linear(last_hidden, proj.weight, bias=proj.bias, partials=partials)
+            return x, proj.weight.shape[0] // STREAM_TILE
+        return last_hidden.clone(), 0
+
+    def depth_step(
+        self, x: torch.Tensor, partials: torch.Tensor, n_part: int = 0, head: int | None = None,
+    ) -> torch.Tensor | None:
+        """One depth step over ``x (bs, hidden)``, bound first with
+        ``depth.bind_step``, once per call. ``x`` holds the residual stream and
+        is overwritten; ``n_part`` says how many of its row sums of squares a
+        producer left in ``partials`` (0: none). Returns the logits of LM head
+        ``head`` (residual group ``head + 1``), or None."""
+        return run_depth_layers(
+            x, self.fused, self.depth, [layer.self_attn for layer in self.model.layers], partials,
+            n_part=n_part, head=head,
+        )
+
+    @torch.compiler.disable
+    def _get_partials(self, device: torch.device) -> torch.Tensor:
+        """``cp_linear``'s row sums of squares scratch, made at the first step."""
+        if self._partials is None:
+            self._partials = depth_partials(device)
+        return self._partials
+
+    def depth_loop(
+        self,
+        last_hidden: torch.Tensor,
+        layer0_codes: torch.Tensor,
+        talker_codec_embedding: torch.Tensor,
+        sample: Callable[[torch.Tensor], torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Groups 1..G-1 of the frames whose group-0 codes the Talker sampled.
+
+        Position 0 conditions the depth sequence on the Talker's hidden state;
+        each later position takes the previous group's embedding, the
+        reference's code-predictor prefill (its first two positions) in one
+        token a step, so a step never exceeds the batch's rows. Every op is
+        graph-safe, so a capture records the loop as is.
+
+        Args:
+            last_hidden: ``[bs, talker_width]``, the Talker's hidden state.
+            layer0_codes: ``[bs]``, the frames' group-0 codes.
+            talker_codec_embedding: ``[V, talker_width]``, the Talker's own
+                codec embedding table, which embeds group 0.
+            sample: one group's logits ``[bs, vocab]`` -> its codes ``[bs]``.
+
+        Returns:
+            The frames' codes ``[bs, G]``, and the sum of their G embeddings,
+            the Talker's next input: accumulated in fp32 and returned in the
+            table's dtype.
+        """
+        bs = layer0_codes.shape[0]
+        tables = self.input_tables
+        partials = self._get_partials(layer0_codes.device)
+        codes = torch.empty(bs, self.num_code_groups, dtype=torch.long, device=layer0_codes.device)
+        embed_sum = torch.empty(
+            bs, talker_codec_embedding.shape[1], dtype=torch.float32, device=layer0_codes.device,
+        )
+        self.depth.bind_step(0)
+        x, n_part = self.depth_input(last_hidden, partials)
+        self.depth_step(x, partials, n_part)
+        # group 0 starts the sum; its (projected) embedding is position 1's input
+        embed, n_part = cp_embed_accumulate(
+            layer0_codes, talker_codec_embedding, embed_sum, codes, 0,
+            inputs=None if tables is None else tables[0], init=True, partials=partials,
+        )
+        for group in range(1, self.num_code_groups):
+            self.depth.bind_step(group)
+            group_codes = sample(self.depth_step(embed, partials, n_part=n_part, head=group - 1))
+            last = group == self.num_code_groups - 1
+            embed, n_part = cp_embed_accumulate(
+                group_codes, self.model.codec_embedding[group - 1].weight, embed_sum, codes, group,
+                inputs=None if tables is None or last else tables[group], partials=partials,
+            )
+        return codes, embed_sum.to(talker_codec_embedding.dtype)

@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 #
 # Five submodules covering the full Thinker-Talker dual-AR pipeline:
-#   1. AudioEncoderSubmodule
+#   1. the audio encoder: the shared AuT node (mstar.model.components.aut_encoder_submodule)
 #   2. VisionEncoderSubmodule
 #   3. ThinkerSubmodule        (3D MRoPE, MoE, layer captures)
 #   4. TalkerSubmodule         (streaming decode, Code Predictor)
@@ -32,17 +32,12 @@ from mstar.engine.accelerator_graph_config import (
     AcceleratorGraphConfig,
     BatchedAcceleratorGraphConfig,
     PackedAcceleratorGraphConfig,
-    PiecewiseAcceleratorGraphConfig,
-    PiecewiseCallInputs,
-    PiecewiseCaptureShape,
-    PiecewisePackedConfig,
 )
 from mstar.engine.engine import ExecutingBatch
 from mstar.engine.resources import AttentionStep, KVStep, PositionStep, SamplerStep, Segment, SlotLease, SubmoduleStep
 from mstar.engine.resources.attn.flashinfer import FlashInferManager
 from mstar.engine.resources.sampler.resource import SamplerResource
-from mstar.model.components.aut_encoder import AuTEncoder, AuTEncoderConfig
-from mstar.model.components.code_predictor_kernels import cp_embed_accumulate
+from mstar.model.components.code_predictor_kernels import ResidualCodePredictor
 from mstar.model.components.mrope import mrope_position_ids
 from mstar.model.qwen3_omni.components.code2wav import Qwen3OmniMoeCode2Wav
 from mstar.model.qwen3_omni.components.rope import (
@@ -52,9 +47,8 @@ from mstar.model.qwen3_omni.components.rope import (
     get_rope_index_text,
     get_rope_index_vision,
 )
-from mstar.model.qwen3_omni.components.talker import Qwen3OmniCodePredictor, Qwen3OmniTalkerModel
+from mstar.model.qwen3_omni.components.talker import Qwen3OmniTalkerModel
 from mstar.model.qwen3_omni.config import (
-    AUDIO_ATTN,
     CODE_PRED_SAMPLER,
     TALKER_ATTN,
     TALKER_KV,
@@ -103,171 +97,6 @@ def talker_text_mask(input_ids: torch.Tensor, config: Qwen3OmniModelConfig) -> t
     role = roles[turn]
     cut = (role == config.system_token_id) | (role == config.assistant_token_id)
     return ~(cut & (turn > 0) & (turn < turn[-1]))
-
-
-# ===================================================================
-# 1. AudioEncoderSubmodule (enc_dec engine)
-# ===================================================================
-
-
-class AudioEncoderSubmodule(NodeSubmodule):
-    """The shared AuT encoder (``components/aut_encoder.py``, Qwen3-ASR's too)
-    over a step's clips, packed.
-
-    The conv frontend runs eagerly; the transformer layers run over the packed
-    rows, each clip's attention windowed through the node's ragged attention
-    resource, as one captured replay a step when the step fits a token bucket.
-    Eager, the layers are ~600 small launches, tens of ms of host time on the
-    Thinker's worker.
-    """
-
-    # the conv frontend splits by host-side chunk lengths; the layers are captured
-    disable_torch_compile = True
-    AUDIO_LAYERS = "audio_layers"
-    # packed encoder rows a step (13 a second of audio)
-    TOKEN_BUCKETS = [256, 512, 1024, 2048, 4096, 8192]
-    # clips per encoder step
-    MAX_BATCH_SIZE = 16
-
-    def __init__(self, encoder: AuTEncoder, config: Qwen3OmniModelConfig):
-        super().__init__()
-        self.encoder = encoder
-        self.config = config
-
-    def prepare_inputs(
-        self,
-        graph_walk: str,
-        fwd_info: CurrentForwardPassInfo,
-        inputs: NameToTensorList,
-        **kwargs
-    ) -> NodeInputs:
-        # The features' width is the clip's frame count, so the layout comes
-        # from shapes, never from device values.
-        audio_features = inputs["audio_features"][0]
-        return NodeInputs(
-            tensor_inputs={"audio_features": audio_features},
-            input_seq_len=self.encoder.config.tokens_for_frames(audio_features.shape[-1]),
-        )
-
-    def declare_step(
-        self,
-        graph_walk: str,
-        request_ids: list[str],
-        inputs: list[NodeInputs],
-        piecewise_leases: Mapping[str, SlotLease] | None = None,
-        **kwargs,
-    ) -> SubmoduleStep | None:
-        """Each clip's attention windows, when the layers run eagerly; leased, the
-        captured layers plan their own."""
-        if (piecewise_leases or {}).get(self.AUDIO_LAYERS):
-            return None
-        cfg = self.encoder.config
-        return SubmoduleStep(
-            segments=[
-                Segment(request_id=rid, label="main", span=n)
-                for rid, inp in zip(request_ids, inputs, strict=True)
-                for n in cfg.window_lengths(inp.input_seq_len)
-            ],
-            steps={AUDIO_ATTN: AttentionStep(causal=False)},
-        )
-
-    def get_piecewise_accelerator_graph_configs(
-        self, device: torch.device, autocast_dtype: torch.dtype, tp_world_size: int = 1, **kwargs: Any,
-    ) -> dict[str, PiecewiseAcceleratorGraphConfig]:
-        """The layer stack, one replay a step: every clip's windows are segments
-        of one row (`one_row_per_step`)."""
-        d_model, dtype = self.encoder.config.d_model, self.encoder.conv_out.weight.dtype
-
-        def make_static_inputs(shape: PiecewiseCaptureShape) -> dict[str, torch.Tensor]:
-            return {"hidden": torch.zeros(shape.total_tokens, d_model, dtype=dtype, device=device)}
-
-        return {
-            self.AUDIO_LAYERS: PiecewisePackedConfig(
-                capture_fn=self._capture_layers,
-                make_static_inputs=make_static_inputs,
-                attn_key=AUDIO_ATTN,
-                lease_before_step=True,
-                can_lease=self._fits_capture,
-                one_row_per_step=True,
-                total_tokens=self.TOKEN_BUCKETS,
-                capture_batch_sizes=[1],
-            )
-        }
-
-    @classmethod
-    def max_windows(cls, config: AuTEncoderConfig) -> int:
-        """Attention windows the largest step can hold: the top bucket's full
-        windows, plus a short last one per clip."""
-        return cls.TOKEN_BUCKETS[-1] // config.window_tokens + cls.MAX_BATCH_SIZE
-
-    def _fits_capture(self, inputs: list[NodeInputs]) -> bool:
-        """Whether a step fits the largest bucket, in rows, and the replay's
-        attention plan, in windows: the resource's per-request ceiling, read
-        from it so a YAML override holds."""
-        window = self.encoder.config.window_tokens
-        rows = [inp.input_seq_len for inp in inputs]
-        ceiling = self.node_resources[AUDIO_ATTN].max_segments_per_request
-        return sum(rows) <= self.TOKEN_BUCKETS[-1] and sum(-(-n // window) for n in rows) <= ceiling
-
-    def _capture_layers(self, inp: PiecewiseCallInputs) -> dict[str, torch.Tensor]:
-        """The captured region: reads the runner's buffer, never rebinds."""
-        return {"out": self.encoder.encode(inp.static_inputs["hidden"], None)}
-
-    def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
-        # A step's clips run as one pass only within the largest capture, which
-        # bounds its memory until the scheduler can budget a step's tokens; a
-        # larger step runs each clip as its own pass, which still leases and
-        # replays the capture when the clip fits it.
-        return self._fits_capture(model_inputs)
-
-    def max_batch_size(self, graph_walk: str) -> int:
-        return self.MAX_BATCH_SIZE
-
-    def preprocess(
-        self,
-        graph_walk: str,
-        engine_inputs: ModelInputsFromEngine,
-        inputs: list[NodeInputs],
-    ) -> dict[str, torch.Tensor | Any]:
-        # the clips as they are; the frontend packs their frames
-        return {"audio_features": [inp.tensor_inputs["audio_features"] for inp in inputs]}
-
-    def forward(
-        self,
-        graph_walk: str,
-        engine_inputs: ModelInputsFromEngine,
-        audio_features: list[torch.Tensor],
-        **kwargs,
-    ) -> NameToTensorList:
-        rid = engine_inputs.request_ids[0]
-        return self.forward_batched(graph_walk, engine_inputs, audio_features)[rid]
-
-    def forward_batched(
-        self,
-        graph_walk: str,
-        engine_inputs: ModelInputsFromEngine,
-        audio_features: list[torch.Tensor],
-        **kwargs,
-    ) -> dict[str, NameToTensorList]:
-        """Encode the step's clips in one pass and split the rows back by clip."""
-        enc = self.encoder
-        layout = enc.layout([clip.shape[-1] for clip in audio_features])
-        hidden = enc.frontend(audio_features)
-        # replay only under the step's lease; a step the region refused runs
-        # eagerly under declare_step's own plan
-        if self.AUDIO_LAYERS in engine_inputs.piecewise_leases:
-            # an owned copy: the next step's replay overwrites the output buffer
-            out = engine_inputs.piecewise_runners[self.AUDIO_LAYERS].run(
-                static_inputs={"hidden": hidden},
-                request_ids=engine_inputs.request_ids,
-                seq_lens=layout.window_lengths,
-            )["out"]
-        else:
-            out = enc.encode(hidden, layout.cu_seqlens)
-        return {
-            rid: {"audio_embeds": [part]}
-            for rid, part in zip(engine_inputs.request_ids, out.split(layout.tokens_per_request), strict=True)
-        }
 
 
 # ===================================================================
@@ -1216,7 +1045,7 @@ class TalkerSubmodule(ARNodeSubmodule):
     def __init__(
         self,
         talker_model: Qwen3OmniTalkerModel,
-        code_predictor: Qwen3OmniCodePredictor,
+        code_predictor: ResidualCodePredictor,
         config: Qwen3OmniModelConfig
     ):
         super().__init__()
@@ -1224,8 +1053,6 @@ class TalkerSubmodule(ARNodeSubmodule):
         self.code_predictor = code_predictor
         self.talker_code_emb = self.model.model.codec_embedding
         self.config = config
-        self.cp_cfg = config.code_predictor
-        self.num_codes = self.cp_cfg.num_code_groups
 
         # Pre-computed TTS special inputs.
         self._tts_pad_embed_cached: torch.Tensor | None = None
@@ -1244,42 +1071,6 @@ class TalkerSubmodule(ARNodeSubmodule):
         # the text conditioning for this request. We use this flag to
         # inject tts_eos_embed for ONE step before falling back to pad.
         self._eos_embed_sent: set[str] = set()
-
-        # Lazy-built CodePredictor scratch KV cache, overwritten every step.
-        self._cp_kv_cache: torch.Tensor | None = None
-        self._cp_positions: torch.Tensor | None = None
-        self._cp_pair_positions: torch.Tensor | None = None
-
-    def _get_cp_kv_cache(self):
-        # TODO: make this a resource
-        if self._cp_kv_cache is None:
-            self._cp_kv_cache = torch.zeros((
-                    self.cp_cfg.num_hidden_layers,
-                    self.MAX_BATCH_SIZE, 2, self.num_codes,
-                    self.cp_cfg.num_key_value_heads,
-                    self.cp_cfg.head_dim
-                ), dtype=self.talker_code_emb.weight.dtype,
-                device=self.get_device(),
-            )
-        return self._cp_kv_cache
-
-    def _get_cp_positions(self) -> torch.Tensor:
-        """``[g, b, 0] = g``: the code predictor's position for depth step g,
-        the same for every row. Constant, so a step slices it instead of
-        counting up a buffer with a launch per depth step."""
-        if self._cp_positions is None:
-            self._cp_positions = torch.arange(
-                self.num_codes, device=self.get_device(),
-            ).view(-1, 1, 1).expand(-1, self.MAX_BATCH_SIZE, 1).contiguous()
-        return self._cp_positions
-
-    def _get_cp_pair_positions(self) -> torch.Tensor:
-        """``[b] = [0, 1]``: the positions of the depth sequence's opening pair."""
-        if self._cp_pair_positions is None:
-            self._cp_pair_positions = torch.arange(
-                2, device=self.get_device(),
-            ).expand(self.MAX_BATCH_SIZE, 2).contiguous()
-        return self._cp_pair_positions
 
     def init_tts_embeds(self, thinker_embed_tokens: nn.Embedding) -> None:
         """Pre-compute TTS pad/bos/eos hidden states using the Thinker's
@@ -1574,43 +1365,12 @@ class TalkerSubmodule(ARNodeSubmodule):
             request_ids, logits
         )
 
-        # code predictor section
-        embed = self.talker_code_emb(layer0_codes)  # [bs, hidden]
-        bs = embed.shape[0]
-        # Scratch made here rather than passed in, so a captured step zeroes it
-        # in the graph instead of copying zeros into static inputs.
-        codec_emb_sum = embed.float()
-        all_codes = torch.zeros((bs, self.num_codes), device=embed.device, dtype=torch.long)
-        all_codes[:, 0] = layer0_codes
-        positions = self._get_cp_positions()
-
-        kv_cache = self._get_cp_kv_cache()[:, :bs]
-
-        # The depth sequence opens with the Talker's hidden state and the layer-0
-        # code's embedding (as in HF's code-predictor prefill): one two-token pass
-        # whose second token predicts layer 1, then one token per layer.
-        cp = self.code_predictor
-        codec_embedding = cp.model.codec_embedding
-        for group_idx in range(1, self.num_codes):
-            if group_idx == 1:
-                cp.depth.bind_step(kv_cache, self._get_cp_pair_positions()[:bs], cache_pos=0)
-                hidden = cp.forward_depth_unrolled(torch.stack([last_hidden, embed], dim=1))[:, 1]
-            else:
-                cp.depth.bind_step(kv_cache, positions[group_idx, :bs], cache_pos=group_idx)
-                hidden = cp.forward_depth_unrolled(embed.unsqueeze(1)).squeeze(1)
-
-            logits = torch.matmul(
-                hidden, cp.lm_head_weight[group_idx - 1].t()
-            )
-
-            # Params come from the "code_predictor" aux sampler's static
-            # buffers, so per-request values survive graph replay.
-            tokens = code_pred_sampler.sample(
-                request_ids, logits,
-            )
-            embed, _ = cp_embed_accumulate(
-                tokens, codec_embedding[group_idx - 1].weight, codec_emb_sum, all_codes, group_idx,
-            )
+        # Groups 1..15 sample from the "code_predictor" aux sampler's static
+        # buffers, so per-request values survive graph replay.
+        all_codes, codec_emb_sum = self.code_predictor.depth_loop(
+            last_hidden, layer0_codes, self.talker_code_emb.weight,
+            lambda cp_logits: code_pred_sampler.sample(request_ids, cp_logits),
+        )
 
         return {
             "talker_input_embeds": [codec_emb_sum],
