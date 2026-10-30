@@ -166,8 +166,10 @@ class UpStage(nn.Module):
 
     def fold_upsample(self) -> None:
         """Precompute the 4x4 stride-2 transposed-conv kernel that equals nearest x2 + the 3x3
-        conv (each output pixel's taps that read the same input pixel are summed in fp32), so a
-        compiled decode convolves the input instead of a 4x larger upsampled copy of it."""
+        conv, so a compiled decode convolves the input instead of a 4x larger upsampled copy of
+        it. Each folded tap is the sum, in fp32, of the 3x3 taps that read the same input pixel,
+        rounded once to the weight dtype: in bf16 a weight the unfolded conv never uses, so the
+        output differs from it in the last bits."""
         if self.upsample is None:
             return
         w = self.upsample.weight.detach().float()  # [out, in, 3, 3]

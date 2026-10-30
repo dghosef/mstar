@@ -1495,8 +1495,9 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
      graph break). Before it the shipped ``[norms]`` cost klein-4B 4% of its B=1 latency
      (0.371 vs 0.356 s). Keeping the activations too adds cost and nothing else.
    * Z-Image's 180 norms per step cost 45% (1.25 vs 0.86 s at B=1), so it ships ``false``
-     and lands at a median 34 dB. ``[norms]`` turns it reference-faithful (at least
-     55.9 dB on every prompt).
+     and lands at a median 34 dB (the ``false`` figures were measured before its compiled
+     forward fused the q/k norms and rotary into one kernel). ``[norms]``, which keeps
+     that fusion off, turns it reference-faithful (at least 55.9 dB on every prompt).
    * Without it, the plain compile — even with eager rounding — lands at a median 35 to
      38 dB PSNR from eager over the 100 protocol prompts, because a 4- or 8-step
      distilled sampler amplifies the last bit of inductor's own reductions and activation
@@ -1527,10 +1528,12 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
    Rows batched per denoise step.
 
 ``vae_compile``
-   ``torch.compile`` of the VAE decode with inductor autotuning: 89 to 29 ms at 1024² on
-   an H100. Its fused reductions move the image by about 55 dB PSNR from the eager decode
-   on every prompt, and the autotuner may pick different conv kernels in another server
-   process, so set it to ``false`` for bit-exact, repeatable output — which is how the
+   ``torch.compile`` of the VAE decode with inductor autotuning, each nearest-x2 upsample
+   folded into its conv and the GroupNorms (with their SiLU) on a split-reduction kernel.
+   Before those two it measured 89 to 29 ms at 1024² on an H100 and about 55 dB PSNR from
+   the eager decode on every prompt; neither figure is re-measured since. The compiled
+   decode is not bit-exact, and the autotuner may pick different conv kernels in another
+   server process, so set it to ``false`` for bit-exact, repeatable output — which is how the
    parity suite runs. The compiled decode is warmed at load for the ``capture_sizes``
    grids and the decode batch sizes; any other latent shape decodes eagerly rather than
    paying a 40 to 100 s autotune inside a request. Memory cuts the other way: the eager
@@ -1543,8 +1546,9 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
    are rejected with a 400 before scheduling instead of occupying the worker for minutes
    (an 8192² request means 262k tokens of quadratic attention).
 
-With the klein defaults every served image is within 53 dB of the eager path on all 100
-protocol prompts, and with ``vae_compile: false`` it is bit-exact. For scale, the served
+With the klein defaults every served image was within 53 dB of the eager path on all 100
+protocol prompts (measured before the exact q/k RMSNorm op and the folded, split-GroupNorm
+VAE decode), and with ``vae_compile: false`` it is bit-exact. For scale, the served
 images of the other engines are 10 to 16 dB from the diffusers reference for the same
 seeds.
 Requests at the same output size batch across users in every node, including the

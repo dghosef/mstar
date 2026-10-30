@@ -4,8 +4,10 @@ Inductor reduces each (batch, group) pair in one program, so a 1024^2 decode's G
 32 programs over 4M elements each and take ~10 ms of a ~27 ms FLUX VAE decode on an H200. Here
 every program reduces a tile of pixels for all groups (per-tile mean and M2), the tiles are
 combined with Chan's formula, and a second pass normalizes, applies the affine and the optional
-SiLU in one read and one write. Statistics are fp32 like the eager kernel's, so the result
-differs from it only in reduction order (the compiled decode already does).
+SiLU in one read and one write. Statistics are fp32 like the eager kernel's, but the result is
+not eager's beyond the reduction order: normalize, affine and SiLU run in fp32 and round to the
+output dtype once, where eager rounds the GroupNorm's output before its SiLU (and applies the
+affine as one fused scale and shift per channel).
 """
 
 from __future__ import annotations
