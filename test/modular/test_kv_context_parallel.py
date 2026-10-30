@@ -37,6 +37,7 @@ from mstar.engine.resources.position.config import PositionConfig, PositionSpec
 from mstar.engine.resources.recurrent.config import DeltaNetGeometry, RecurrentStateConfig, RecurrentStateSpec
 from mstar.engine.resources.spec import NodeResourceSpec
 from mstar.engine.resources.step import BucketKey, Segment, SlotLease, StepContext
+from mstar.model.components.mla import MLAAttention
 
 P = 2
 CPU = torch.device("cpu")
@@ -414,11 +415,11 @@ class _Case:
 
 
 def _cp_attention(
-    joint: JointGroups, device: torch.device, dtype: torch.dtype, head_shards: int, **attention,
+    joint: JointGroups, device: torch.device, dtype: torch.dtype, head_shards: int, num_kv_heads=1, **attention,
 ):
     """A ``FlashInferManager`` over a placed pool, and this rank's placement."""
     kv = KVSpec(resource_key="kv", nodes={NODE}, config=PagedKVConfig(
-        num_layers=1, num_kv_heads=1, head_dim=HEAD_DIM, max_seq_len=64, num_qo_heads=Q_HEADS,
+        num_layers=1, num_kv_heads=num_kv_heads, head_dim=HEAD_DIM, max_seq_len=64, num_qo_heads=Q_HEADS,
         max_num_pages=16, page_size=CP_PAGE, context_parallel=True,
     ))
     info = EngineResourceInfo(
@@ -478,6 +479,59 @@ def _over_ranks(rank, world, backend, store, over_sp, rows):
         assert calls and all(c == calls for c in everyone), everyone
     finally:
         dist.destroy_process_group()
+
+
+class _AttendOwnTokens:
+    """Each row's queries attending its own tokens causally from the ``k``/``v`` ``run`` is passed:
+    attention over a pool for rows with no stored context."""
+
+    def __init__(self, qo_indptr):
+        self.qo = qo_indptr.tolist()
+
+    def run(self, q, kv_cache_layer=None, k=None, v=None):
+        return torch.cat([_reference(q[a:b], k[a:b], v[a:b])[0] for a, b in itertools.pairwise(self.qo)]).to(q.dtype)
+
+
+def _naive_mla_over_ranks(rank, world, store):
+    """One SP rank running a naive (per-head K/V) MLA layer over attention on a placed pool, for
+    rows with no stored context, against the same layer over its own tokens' attention."""
+    dist.init_process_group("gloo", init_method=f"file://{store}", rank=rank, world_size=world)
+    torch.set_num_threads(1)
+    sys.modules["flashinfer"] = _reference_flashinfer()
+    try:
+        group = CommGroup(rank, rank, list(range(world)))
+        group.device_group, group.initialized = dist.group.WORLD, True
+        joint = JointGroups(tp_group=CommGroup.trivial(), sp_group=group)
+        attn, placement = _cp_attention(joint, CPU, torch.float32, head_shards=1, num_kv_heads=Q_HEADS)
+        case = _Case.build(((0, 5), (0, 3)), CPU, torch.float32)
+        _plan(attn, case)
+        config = types.SimpleNamespace(
+            hidden_size=32, num_attention_heads=Q_HEADS, q_lora_rank=16, kv_lora_rank=16, qk_nope_head_dim=32,
+            qk_rope_head_dim=16, qk_head_dim=48, v_head_dim=32, padded_head_dim=HEAD_DIM, rms_norm_eps=1e-6,
+            softmax_scale=48 ** -0.5, mla_absorb=False,
+        )
+        torch.manual_seed(0)
+        layer = MLAAttention(config, kv_key="kv", attn_key="attn", pos_key="pos")
+        for param in layer.parameters():
+            torch.nn.init.normal_(param, std=0.1)
+        hidden = torch.randn(case.q.shape[0], config.hidden_size)
+        # the rows hold no context, so the pool is read only at SINK_PAGE, NaN here
+        cache = torch.full((16, 2, CP_PAGE // placement.size, Q_HEADS, HEAD_DIM), math.nan)
+        kv = types.SimpleNamespace(write_kv=lambda k, v, layer_idx: None, layer_view=lambda layer_idx: cache)
+        pos = types.SimpleNamespace(apply_qk=lambda q, k, pos_ids: (q, k))
+        positions = torch.zeros(case.q.shape[0], dtype=torch.long)
+        with torch.no_grad():
+            layer.bind_resources({"kv": kv, "attn": attn, "pos": pos})
+            out = layer(hidden, positions)
+            own = _AttendOwnTokens(case.plan["main"].cpu_indptrs.qo_indptr)
+            layer.bind_resources({"kv": kv, "attn": own, "pos": pos})
+            torch.testing.assert_close(out, layer(hidden, positions))
+    finally:
+        dist.destroy_process_group()
+
+
+def test_two_ranks_run_a_naive_mla_layer_over_an_sp_placed_pool(tmp_path):
+    mp.spawn(_naive_mla_over_ranks, args=(P, str(tmp_path / "store")), nprocs=P)
 
 
 def test_sliding_window_attention_over_a_placed_pool_is_refused():
