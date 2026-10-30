@@ -98,7 +98,7 @@ def test_cp_embed_accumulate_matches_the_unfused_ops(bs, projected, init):
 
 
 @needs_cuda
-@pytest.mark.parametrize("rows", [1, 16, 37, 64])
+@pytest.mark.parametrize("rows", [1, 2, 16, 37, 64])
 def test_cp_linear_matches_the_unfused_ops(rows):
     """Each ``cp_linear`` mode against its op sequence in fp32: the folded
     RMSNorm (row sums of squares from x, and from a producer's partials), the

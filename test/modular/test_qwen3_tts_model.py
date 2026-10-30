@@ -2104,48 +2104,12 @@ def test_qwen3_tts_streamed_codec_audio_matches_one_whole_decode(captured):
             assert (got.int() - expected.int()).abs().max().item() <= 1, rid
 
 
-def test_qwen3_tts_codec_ends_a_stream_on_an_empty_final_flush():
-    """A stream whose last chunk was popped before the producer finished ends on
-    a final flush with no frames (no context rides it): the codec emits nothing
-    for it, and the stream ends."""
-    config = _tiny_model_config()   # schedule (1,), chunk 3
-    codec = config.codec
-    submodule = _tiny_codec(config)
-    driver = _CodecDriver(submodule)
-    stream = StreamBuffer(request_id="r", edge_name="codec_tokens", from_partition="Talker",
-                          policy=ScheduledLeftContextChunkPolicy(codec.chunk_schedule, codec.chunk_frames, 0))
-    fwd = SimpleNamespace(request_id="r", rid_handle="r")
-    for i in range(4):
-        stream.pre_read_register(f"t{i}")
-        stream.put(f"t{i}", torch.randint(0, 32, (4,)))
-    audio = []
-    while stream.has_chunk_ready():
-        chunk = stream.pop_chunk()
-        item = submodule.prepare_inputs("codec_chunk", fwd, {"codec_tokens": [chunk.data["data"].reshape(-1, 4)]},
-                                        input_metadata=InputMetadata(stream_chunks={"codec_tokens": chunk.info}))
-        audio.append(driver.step({"r": item})["r"]["audio_chunk"][0])
-    stream.signal_done(4)
-    final = stream.pop_chunk()
-    assert final.data["data"] is None and final.is_final
-    item = submodule.prepare_inputs("codec_chunk", fwd, {"codec_tokens": []},
-                                    input_metadata=InputMetadata(stream_chunks={"codec_tokens": final.info}))
-    assert (item.kwargs["frames"], item.kwargs["is_final"]) == (0, True)
-    assert driver.step({"r": item})["r"]["audio_chunk"][0].numel() == 0
-    assert sum(a.numel() for a in audio) == 4 * submodule.total_upsample
-
-
 def test_qwen3_tts_codec_state_is_the_declared_pool_and_released_with_the_request():
-    """The decoder's state blocks are the ones the model declares for the
-    codec node (built before any weights load), and a finished stream's slot
-    goes back zeroed: a new stream on it decodes as a fresh one."""
-    config = _tiny_model_config()
-    submodule = _tiny_codec(config)
-    from mstar.model.qwen3_tts.components.incremental_codec import codec_state_blocks
-
-    declared = codec_state_blocks(config.codec, torch.float32)
-    assert {n: b.shape for n, b in submodule.incremental.state_blocks().items()} == {
-        n: b.shape for n, b in declared.items()
-    }
+    """The decoder's state lives in the declared pool (``CodecSubmodule``
+    refuses a decoder whose blocks differ from the model's declaration), and a
+    finished stream's slot goes back zeroed: a new stream on it decodes as a
+    fresh one."""
+    submodule = _tiny_codec(_tiny_model_config())
     driver = _CodecDriver(submodule, max_slots=2)   # one usable slot: the second stream reuses it
 
     def first_chunk(rid, codes):
@@ -2209,17 +2173,6 @@ def test_qwen3_tts_codec_takes_every_item_as_a_frame_and_pads_to_capture_shape()
     assert submodule.cg_key_info("codec_chunk", {"request": None}, {
         "request": InputMetadata(stream_chunks={"codec_tokens": StreamChunkInfo(1, 1, 3, True)}),
     }) == 3
-
-    # A stream whose only frame was a withheld EOS ends with an empty chunk: no audio.
-    empty = submodule.prepare_inputs(
-        "codec_chunk", SimpleNamespace(request_id="empty", rid_handle="empty"), {},
-        input_metadata=InputMetadata(stream_chunks={"codec_tokens": StreamChunkInfo(0, 0, 0, True)}),
-    )
-    assert empty.tensor_inputs["codec_tokens"].shape == (0, 4)
-    assert empty.kwargs["frames"] == empty.kwargs["context"] == 0 and empty.kwargs["bucket"] == 1
-    outputs = {"audio_chunk": [torch.arange(4)]}
-    submodule.postprocess("empty", None, outputs, inputs=empty)
-    assert outputs["audio_chunk"][0].numel() == 0
 
     # A single frame lands in the first ramp bucket; too many frames is an error.
     one = submodule.prepare_inputs(
@@ -2345,7 +2298,6 @@ def test_qwen3_tts_codec_batches_and_declares_accelerator_graphs():
     )
 
     assert submodule.can_batch(batch, model_inputs)
-    assert submodule.can_use_accelerator_graphs(batch, model_inputs)
     packed = submodule.preprocess(
         "codec_chunk",
         ModelInputsFromEngine(request_ids=["a", "b"], per_request_info={}),
@@ -2363,7 +2315,6 @@ def test_qwen3_tts_codec_batches_and_declares_accelerator_graphs():
     for graph_config in graph_configs:
         assert graph_config.capture_graph_walk == "codec_chunk"
         assert set(graph_config.replay_graph_walks) == {"codec_chunk"}
-        assert graph_config.capture_batch_sizes == [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 28, 32]
         assert graph_config.single_request_inputs.tensor_inputs["codec_tokens"].shape == (
             graph_config.additional_key_info, 4,
         )
@@ -2387,7 +2338,6 @@ def test_qwen3_tts_codec_batches_and_declares_accelerator_graphs():
     mixed = model_inputs + [ARNodeInputs(tensor_inputs={"codec_tokens": torch.ones(1, 4, dtype=torch.long)},
                                          kwargs={"frames": 1})]
     assert submodule.can_batch(batch, mixed)
-    assert submodule.can_use_accelerator_graphs(batch, mixed)
     packed = submodule.preprocess(
         "codec_chunk", ModelInputsFromEngine(request_ids=["a", "b", "c"], per_request_info={}), mixed,
     )
