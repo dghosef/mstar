@@ -536,7 +536,7 @@ class KVManager(AttentionResource):
     ):
         self.config = cfg
         tp_cache = False
-        # before the cache is allocated: it is sized off the head counts and the placement
+        # the cache is sized off the placement, and off the head counts `build` sharded
         placement = cfg.place(joint_comm_group, name)
         if joint_comm_group is not None:
             tp_cache = joint_comm_group.world_size > 1 and cfg.prefix_cache and cfg.prefix_cache_tp
