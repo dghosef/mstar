@@ -406,7 +406,7 @@ class OmniVoiceBackboneSubmodule(NodeSubmodule):
         if packed > self.config.max_packed_tokens:
             logger.debug(
                 "OmniVoice backbone: %d packed tokens over the %d cap; "
-                "the scheduler will split this batch",
+                "the engine runs each request as its own forward",
                 packed, self.config.max_packed_tokens,
             )
             return False
