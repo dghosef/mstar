@@ -1,5 +1,6 @@
 """Paged attention through FlashInfer's prefill/decode wrappers."""
 
+import functools
 from collections.abc import Mapping
 
 import torch
@@ -20,7 +21,7 @@ from mstar.engine.resources.attn.wrappers import (
     check_flashinfer_head_dim,
 )
 from mstar.engine.resources.base import CGSlotKey
-from mstar.engine.resources.context_parallel import ContextParallel, ContextParallelWrapper
+from mstar.engine.resources.context_parallel import ContextParallel, ContextParallelWrapper, ZigzagWrapper
 from mstar.engine.resources.kv.config import PagedKVConfig
 from mstar.engine.resources.kv.plan import KVPlanOutputs
 from mstar.engine.resources.spec import CombinedSplit
@@ -201,11 +202,25 @@ class FlashInferManager(AttentionManager):
             context = FlashInferPrefillWrapper(
                 workspace_buffer=workspace, max_total_tokens=max_total_tokens, **kv_kwargs,
             )
-            new = FlashInferRaggedPrefillWrapper(
-                self._workspaces.get(f"{label}.own_tokens", slot),
-                max_num_segments=kv_kwargs.get("batch_size"), max_total_tokens=max_total_tokens,
-                accelerator_graph=kv_kwargs.get("accelerator_graph", False), owns_lse=True, **self._new_kwargs,
-            )
+            own_workspace = self._workspaces.get(f"{label}.own_tokens", slot)
+            captured = kv_kwargs.get("accelerator_graph", False)
+            if self._placement.over_sp:
+                # SP partners hold the same heads, so each attends its zigzag share of the own tokens
+                cfg = self._kv_config
+                paged = functools.partial(
+                    FlashInferPrefillWrapper, own_workspace, cfg.num_qo_heads, cfg.num_kv_heads, cfg.head_dim,
+                    page_size=1, device=self._device, accelerator_graph=captured,
+                    backend=self._wrapper_kv_kwargs["backend"],
+                )
+                new = ZigzagWrapper(
+                    self._placement, paged, _one_slot_pages, 1, self._device, self._dtype,
+                    kv_kwargs.get("batch_size") or 0, max_total_tokens or 0,
+                )
+            else:
+                new = FlashInferRaggedPrefillWrapper(
+                    own_workspace, max_num_segments=kv_kwargs.get("batch_size"), max_total_tokens=max_total_tokens,
+                    accelerator_graph=captured, owns_lse=True, **self._new_kwargs,
+                )
         return ContextParallelWrapper(
             self._placement, self._kv_config.page_size, self._dtype, context, new, self._device,
             kv_kwargs.get("batch_size"), max_total_tokens,
@@ -340,3 +355,8 @@ class FlashInferManager(AttentionManager):
         if o.dtype != q.dtype:
             o = o.to(q.dtype)
         return o
+
+
+def _one_slot_pages(k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """The step's own K and V ``[N, H, D]`` as a paged layer of one-slot pages, page ``i`` token ``i``."""
+    return torch.stack([k, v], dim=1).unsqueeze(2)

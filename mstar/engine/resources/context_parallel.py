@@ -109,9 +109,12 @@ class ContextParallel(NamedTuple):
     ) -> torch.Tensor:
         """Attention over the whole pool for this rank's query parts (each ``[N, H, *]``), fp32
         (``new``'s out as is when ``partial`` is None). ``partial`` gives ``(out, lse, valid)`` over
-        this rank's slots; ``new`` is the step's own tokens' ``(out, lse)``. Every rank runs the same
-        collectives; none when ``partial`` is None (no row has stored context), which every rank
-        must agree on."""
+        this rank's slots; ``new`` is the step's own tokens' ``(out, lse)`` this rank computes (under
+        SP placement its zigzag chunks, lse -inf on the rest). Every rank runs the same collectives:
+        under SP placement one all-gather, under TP placement two all-to-alls, or none when
+        ``partial`` is None (no row has stored context), which every rank must agree on."""
+        if self.over_sp:
+            return merge(*_gather_partials(self.group, *self.share(queries, partial, new)))
         if partial is None:
             return new[0]
         outs, lses = self.exchange_partials(*partial(*self.exchange_queries(queries)))
@@ -120,13 +123,29 @@ class ContextParallel(NamedTuple):
             lses = torch.cat([lses, new[1].float().unsqueeze(0)])
         return merge(outs, lses)
 
+    def share(
+        self,
+        queries: tuple[torch.Tensor, ...],
+        partial: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]] | None,
+        new: tuple[torch.Tensor, torch.Tensor] | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Under SP placement, this rank's ``(out, lse)`` for every query as ``attend`` gathers it:
+        its slots' partial merged with its share of the step's own tokens. Each own token's keys
+        are attended by one rank, so merging every rank's share is the whole attention."""
+        parts = [] if partial is None else [_masked(*partial(*queries))]
+        if new is not None:
+            parts.append(new)
+        if len(parts) == 1:
+            return parts[0][0], parts[0][1].float()
+        out, lse = _merge_with_lse(
+            torch.stack([part[0].float() for part in parts]), torch.stack([part[1].float() for part in parts]),
+        )
+        return out.to(parts[0][0].dtype), lse
+
     def exchange_queries(self, queries: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
-        """The query parts this rank attends its slots for, from its own (each ``[N, H, *]``). SP
-        partners hold the same heads, so they are its own; TP partners hold different query heads
-        of one KV head, so each gets every partner's, ``[N, P * H, *]`` partner-major, the parts
-        sent as one tensor."""
-        if self.over_sp:
-            return queries
+        """Under TP placement, the query parts this rank attends its slots for, from its own (each
+        ``[N, H, *]``): its partners hold different query heads of one KV head, so it gets every
+        partner's, ``[N, P * H, *]`` partner-major, the parts sent as one tensor."""
         q = queries[0] if len(queries) == 1 else torch.cat(queries, dim=-1)
         blocks = q.unsqueeze(0).expand(self.size, *q.shape)
         q = self.group.to_partners(blocks, self.partners).transpose(0, 1).flatten(1, 2)
@@ -135,18 +154,21 @@ class ContextParallel(NamedTuple):
     def exchange_partials(
         self, out: torch.Tensor, lse: torch.Tensor, valid: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Every partner's partial for this rank's heads, ``[P, N, H, D]`` in ``out``'s dtype and
-        ``[P, N, H]`` fp32, to ``merge``; from this rank's ``out`` ``[N, H', D]`` and natural-log
-        ``lse`` ``[N, H']`` over its slots, for the heads ``exchange_queries`` returned. A query row
-        ``valid`` (``[N]``) marks as holding none of this rank's slots goes out as out 0, lse -inf,
-        whatever the kernel left there (a select, so a NaN cannot survive)."""
-        out = torch.where(valid[:, None, None], out, 0)
-        lse = torch.where(valid[:, None], lse.float(), -math.inf)
-        if self.over_sp:
-            return _gather_partials(self.group, out, lse)
+        """Under TP placement, every partner's partial for this rank's heads, ``[P, N, H, D]`` in
+        ``out``'s dtype and ``[P, N, H]`` fp32, to ``merge``; from this rank's ``out`` ``[N, H', D]``
+        and natural-log ``lse`` ``[N, H']`` over its slots, for the heads ``exchange_queries``
+        returned, masked by ``valid`` (``_masked``)."""
+        out, lse = _masked(out, lse, valid)
         heads = out.shape[1] // self.size
         blocks = _pack(out, lse).unflatten(1, (self.size, heads)).transpose(0, 1)
         return _unpack(self.group.to_partners(blocks, self.partners), out.dtype)
+
+
+def _masked(out: torch.Tensor, lse: torch.Tensor, valid: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """A partial over this rank's slots with each query row ``valid`` (``[N]``) marks as holding none
+    of them set to out 0, lse -inf, whatever the kernel left there (a select, so a NaN cannot
+    survive); lse fp32."""
+    return torch.where(valid[:, None, None], out, 0), torch.where(valid[:, None], lse.float(), -math.inf)
 
 
 def _pack(out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:
@@ -171,8 +193,9 @@ class ContextParallelWrapper:
     """A step's attention over a placed pool from a backend's two wrappers, exchanged and merged
     by ``ContextParallel.attend``. A one-token-a-row step attends the pages after its write
     (``new`` None); any other step attends its stored context (not causal) on ``context`` and its
-    own tokens, from the keys the layer passes to ``run``, on ``new``. ``page_size`` is the
-    logical one."""
+    own tokens, from the keys the layer passes to ``run``, on ``new``: under TP placement all of
+    them for this rank's heads, under SP placement this rank's zigzag chunks (``ZigzagWrapper``).
+    ``page_size`` is the logical one."""
 
     def __init__(
         self,
@@ -199,7 +222,7 @@ class ContextParallelWrapper:
         self._valid = torch.zeros(captured_tokens, dtype=torch.bool, device=device) if self._captured else None
         self._stager = PinnedStager(torch.bool)
         # an eager step with no stored context on any row (from the logical plan, so the same on
-        # every rank): it attends its own tokens alone, with no context call or exchange
+        # every rank): it attends its own tokens alone, with no context call
         self.context_empty = False
 
     @torch.compiler.disable
@@ -257,6 +280,145 @@ class ContextParallelWrapper:
         return self.new is not None
 
 
+class ZigzagRows(NamedTuple):
+    """This rank's share of a step's own-token attention under SP placement. Each row's ``T``
+    tokens are cut into ``2P`` chunks, chunk ``i`` of ``T // 2P`` tokens and one more when
+    ``i < T % 2P``. Rank ``r`` attends chunks ``r`` and ``2P - 1 - r``, so every rank does the same
+    causal work, each chunk's queries over its row's tokens up to the chunk's end. Arrays run over
+    the non-empty chunks, row by row; token indices are the step's."""
+
+    # [M] the queries this rank attends, chunk by chunk
+    tokens: np.ndarray
+    # [S + 1] each chunk's queries in ``tokens``
+    qo_indptr: np.ndarray
+    # [S + 1] each chunk's keys in ``kv_tokens``
+    kv_indptr: np.ndarray
+    # [K] each chunk's keys: its row's first token to the chunk's last
+    kv_tokens: np.ndarray
+
+
+def zigzag_rows(qo_indptr: np.ndarray, size: int, index: int) -> ZigzagRows:
+    """Rank ``index`` of ``size``'s zigzag chunks of the rows ``qo_indptr`` lays out."""
+    starts, lens = qo_indptr[:-1].astype(np.int64), np.diff(qo_indptr).astype(np.int64)
+    chunks = 2 * size
+    base, rem = lens // chunks, lens % chunks
+
+    def bounds(chunk: int) -> tuple[np.ndarray, np.ndarray]:
+        first = chunk * base + np.minimum(chunk, rem)
+        return first, first + base + (chunk < rem)
+
+    (lo, lo_end), (hi, hi_end) = bounds(index), bounds(chunks - 1 - index)
+    first, end = np.stack([lo, hi], 1).ravel(), np.stack([lo_end, hi_end], 1).ravel()
+    row = np.repeat(starts, 2)
+    keep = end > first
+    first, end, row = first[keep], end[keep], row[keep]
+    q_lens = end - first
+    return ZigzagRows(_ranges(row + first, q_lens), _indptr(q_lens), _indptr(end), _ranges(row, end))
+
+
+def _indptr(lens: np.ndarray) -> np.ndarray:
+    out = np.zeros(len(lens) + 1, dtype=np.int64)
+    np.cumsum(lens, out=out[1:])
+    return out
+
+
+def _ranges(starts: np.ndarray, lens: np.ndarray) -> np.ndarray:
+    """Every ``arange(start, start + len)``, concatenated."""
+    offsets = _indptr(lens)
+    return np.repeat(starts - offsets[:-1], lens) + np.arange(offsets[-1])
+
+
+class ZigzagWrapper:
+    """A step's own tokens under SP placement, attended for this rank's zigzag chunks alone
+    (``zigzag_rows``), as ``ContextParallel.share`` takes them: ``[N, H, D]`` and lse ``[N, H]``,
+    0 and -inf off its chunks.
+
+    The kernel is the backend's paged prefill wrapper over pages of one slot, page ``i`` the step's
+    token ``i``, viewed from the keys ``run`` is passed. A chunk's keys are then a list of page
+    indices, so a rank's two chunks, whose key prefixes overlap, plan as two rows of one call with
+    no copy of the keys. ``run`` gathers the chunks' queries and scatters their outputs back.
+
+    ``paged`` builds the kernel, given ``batch_size``, ``max_total_tokens`` and ``max_num_pages`` for
+    a captured one; ``as_pages`` makes the one-slot pages from ``run``'s keys; the first
+    ``num_queries`` of ``run``'s arguments are query parts, the rest keys."""
+
+    def __init__(
+        self,
+        placement: ContextParallel,
+        paged: Callable,
+        as_pages: Callable[..., torch.Tensor],
+        num_queries: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        captured_rows: int = 0,
+        captured_tokens: int = 0,
+    ):
+        self._placement = placement
+        self._as_pages = as_pages
+        self._num_queries = num_queries
+        self._device, self._dtype = device, dtype
+        self._stager = PinnedStager(torch.int64)
+        self._captured = captured_tokens > 0
+        # how many queries the last plan gave this rank
+        self._planned = 0
+        self._tokens = None
+        if not self._captured:
+            self.kernel = paged()
+            return
+        # fixed for the bucket: at most 2 chunks a row, of at most ceil(T / 2P) tokens each, whose
+        # keys are at most 2T
+        p = placement.size
+        self._segments = 2 * captured_rows
+        queries = min(captured_tokens, -(-(captured_tokens + captured_rows * (2 * p - 1)) // p))
+        self.kernel = paged(batch_size=self._segments, max_total_tokens=queries, max_num_pages=2 * captured_tokens)
+        # a padding entry scatters to the row past the step's last token, which ``run`` drops
+        self._pad = captured_tokens
+        self._tokens = torch.full((queries,), captured_tokens, dtype=torch.int64, device=device)
+
+    @torch.compiler.disable
+    def plan(self, qo_indptr: torch.Tensor, causal: bool = True) -> None:
+        rows = zigzag_rows(qo_indptr.numpy(), self._placement.size, self._placement.index)
+        qo, kv, kv_tokens = rows.qo_indptr, rows.kv_indptr, rows.kv_tokens
+        self._planned = len(rows.tokens)
+        if self._captured:
+            # a captured plan takes the batch size it was built for: pad with rows of no query
+            # and one key
+            pad = self._segments - (len(qo) - 1)
+            qo = np.concatenate([qo, np.full(pad, qo[-1])])
+            kv = np.concatenate([kv, kv[-1] + np.arange(1, pad + 1)])
+            kv_tokens = np.concatenate([kv_tokens, np.zeros(pad, dtype=np.int64)])
+            self._stager.copy_(self._tokens, rows.tokens, pad_value=self._pad)
+        elif self._planned:
+            self._tokens = self._stager.to_device(rows.tokens, self._device)
+        else:
+            # none of the step's tokens is this rank's to attend
+            return
+        self.kernel.plan(
+            qo_indptr=torch.from_numpy(qo.astype(np.int32)),
+            paged_kv_indptr=torch.from_numpy(kv.astype(np.int32)),
+            paged_kv_indices=torch.from_numpy(kv_tokens.astype(np.int32)),
+            paged_kv_last_page_len=torch.ones(len(qo) - 1, dtype=torch.int32),
+            kv_lens=torch.from_numpy(np.diff(kv).astype(np.int32)).as_subclass(HostLens),
+            causal=causal, dtype=self._dtype,
+        )
+
+    def run(self, *queries_and_keys: torch.Tensor, return_lse: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
+        assert return_lse, "a rank's share of the own tokens is only ever merged"
+        queries, keys = queries_and_keys[: self._num_queries], queries_and_keys[self._num_queries:]
+        n, heads = queries[0].shape[:2]
+        # one row past the step's, for padding entries to land in
+        out = queries[0].new_zeros(n + 1, heads, queries[0].shape[-1])
+        lse = torch.full((n + 1, heads), -math.inf, dtype=torch.float32, device=queries[0].device)
+        if self._captured or self._planned:
+            tokens = self._tokens
+            own = [q.index_select(0, tokens.clamp(max=n - 1)) for q in queries]
+            got, got_lse = self.kernel.run(*own, self._as_pages(*keys), return_lse=True)
+            tokens = tokens.clamp(max=n)
+            out.index_copy_(0, tokens, got.to(out.dtype))
+            lse.index_copy_(0, tokens, got_lse.float())
+        return out[:n], lse[:n]
+
+
 def merge(outs: torch.Tensor, lses: torch.Tensor) -> torch.Tensor:
     """Attention over the union of disjoint key sets from each set's partial: ``outs`` ``[K, ..., D]``
     and natural-log ``lses`` ``[K, ...]``; fp32, one ``[..., D]`` accumulated a part at a time. A
@@ -270,6 +432,13 @@ def merge(outs: torch.Tensor, lses: torch.Tensor) -> torch.Tensor:
     for weight, part in zip(weights[1:], outs[1:], strict=True):
         out.addcmul_(weight.unsqueeze(-1), part)
     return out.div_(weights.sum(0).clamp_min(torch.finfo(torch.float32).tiny).unsqueeze(-1))
+
+
+def _merge_with_lse(outs: torch.Tensor, lses: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """``merge`` and the union's lse, fp32; a query no partial has a key for comes out 0, -inf."""
+    lse = torch.logsumexp(lses, dim=0)
+    weights = torch.exp(lses - lse.masked_fill(lse == -math.inf, 0))
+    return (weights.unsqueeze(-1) * outs).sum(dim=0), lse
 
 
 @torch.compiler.disable

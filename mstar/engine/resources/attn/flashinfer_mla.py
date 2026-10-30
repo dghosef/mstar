@@ -26,7 +26,7 @@ from mstar.engine.resources.attn.base import (
 )
 from mstar.engine.resources.attn.config import AttentionStep
 from mstar.engine.resources.base import CGSlotKey
-from mstar.engine.resources.context_parallel import ContextParallel, ContextParallelWrapper
+from mstar.engine.resources.context_parallel import ContextParallel, ContextParallelWrapper, ZigzagWrapper
 from mstar.engine.resources.kv.config import KVConfig, KVLayout
 from mstar.engine.resources.kv.plan import KVPlanOutputs
 from mstar.engine.resources.step import SlotLease, StepContext
@@ -424,9 +424,25 @@ class FlashInferMLAManager(AttentionManager):
         if not decode:
             own = {**kwargs, "num_qo_heads": self._kv_config.num_qo_heads}
             del own["page_size"]
-            if max_total_tokens is not None:
-                own["max_num_pages"] = max_total_tokens
-            new = FlashInferMLAOwnTokensWrapper(self._workspaces.get(f"{label}.own_tokens", slot), self._dtype, **own)
+            workspace = self._workspaces.get(f"{label}.own_tokens", slot)
+            if self._placement.over_sp:
+                # SP partners hold the same heads, so each attends its zigzag share of the own tokens
+                rows = own.pop("batch_size", None) or 0
+                del own["max_num_pages"]
+
+                def paged(batch_size=None, max_num_pages=None, max_total_tokens=None):
+                    return FlashInferMLAWrapper(
+                        workspace, page_size=1, batch_size=batch_size, max_num_pages=max_num_pages, **own,
+                    )
+
+                new = ZigzagWrapper(
+                    self._placement, paged, _one_slot_pages, 2, self._device, self._dtype,
+                    rows, max_total_tokens or 0,
+                )
+            else:
+                if max_total_tokens is not None:
+                    own["max_num_pages"] = max_total_tokens
+                new = FlashInferMLAOwnTokensWrapper(workspace, self._dtype, **own)
         return ContextParallelWrapper(
             self._placement, self._kv_config.page_size, self._dtype, context, new, self._device,
             kwargs.get("batch_size"), max_total_tokens,
@@ -552,3 +568,8 @@ class FlashInferMLAManager(AttentionManager):
         if o.dtype != q_nope.dtype:
             o = o.to(q_nope.dtype)
         return (o, lse) if return_lse else o
+
+
+def _one_slot_pages(latent: torch.Tensor) -> torch.Tensor:
+    """The step's own latents ``[N, latent]`` as a layer of one-slot pages, page ``i`` token ``i``."""
+    return latent.unsqueeze(1)

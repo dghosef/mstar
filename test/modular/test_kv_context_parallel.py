@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 
 sys.path.insert(0, ".")
 
+import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
@@ -30,7 +31,7 @@ from mstar.engine.resources.attn.base import AttentionManager
 from mstar.engine.resources.attn.config import AttentionConfig, AttentionSpec, AttentionStep, AttnBackend
 from mstar.engine.resources.attn.ragged.wrappers import FlashInferRaggedPrefillWrapper
 from mstar.engine.resources.base import EngineResourceInfo, Resource
-from mstar.engine.resources.context_parallel import merge
+from mstar.engine.resources.context_parallel import merge, zigzag_rows
 from mstar.engine.resources.kv import manager as manager_mod
 from mstar.engine.resources.kv.cache import KVCache
 from mstar.engine.resources.kv.config import KVLayout, KVReqConfig, KVSpec, KVStep, PagedKVConfig
@@ -507,9 +508,10 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False)
         pad = 8 if captured and rows == PREFILL_ROWS else 0
         bucket = BucketKey("w", bs=len(rows), num_tokens=n + pad) if captured else None
         _plan(attn, case, bucket=bucket)
-        if pad:
+        if pad and not over_sp:
             # whatever the own-token part's buffers hold past this plan (an earlier, longer step's
-            # rows; NaN here): only plan's reset keeps the padding finite through the merge
+            # rows; NaN here): only plan's reset keeps the padding finite through the merge. An SP
+            # zigzag share starts each run from out 0, lse -inf
             own = next(iter(attn._cg_plan_states.values())).new
             own._out_buf.fill_(math.nan)
             own._lse_buf.fill_(math.nan)
@@ -530,24 +532,24 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False)
                 out = run()
             # what the checks read is the replay's, the own-token part's real rows included
             out.fill_(math.nan)
-            if pad:
+            if pad and not over_sp:
                 own._out_buf[:n].fill_(math.nan)
                 own._lse_buf[:n].fill_(math.nan)
             graph.replay()
             torch.cuda.synchronize()
-            if pad:
+            if pad and not over_sp:
                 # the replayed kernel wrote the real rows into the part's own buffers
                 assert torch.isfinite(own._out_buf[:n]).all() and torch.isfinite(own._lse_buf[:n]).all()
         assert torch.isfinite(out).all()
         torch.testing.assert_close(out[:n].float(), case.want()[:, heads], **tol)
         if rows == PREFILL_ROWS and not captured:
-            # an eager first prefill (no row holds stored context) attends its own tokens alone, on
-            # every rank, with no collective
+            # an eager first prefill (no row holds stored context) attends its own tokens alone, with
+            # no collective in TP mode; SP partners still gather their zigzag shares
             first = _Case.build(((0, 5), (0, 3)), device, dtype, mla)
             _plan(attn, first)
             issued = len(calls)
             torch.testing.assert_close(first.runner(attn, placement, heads)().float(), first.want()[:, heads], **tol)
-            assert len(calls) == issued
+            assert [call[0] for call in calls[issued:]] == (["all_gather_into_tensor"] if over_sp else [])
         everyone = [None] * world
         dist.all_gather_object(everyone, calls)
         assert calls and all(c == calls for c in everyone), everyone
@@ -556,6 +558,20 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False)
         # threads, whatever else holds the group
         group.device_group = None
         dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("size", [2, 3, 4])
+def test_zigzag_rows_split_a_steps_tokens_over_the_ranks_with_equal_causal_work(size):
+    """SP partners attend a step's own tokens in zigzag chunks: together every token once, and on
+    rows a multiple of 2P long, each the same number of query-key pairs."""
+    for lens in ([2 * size, 6 * size, 4 * size], [6 * size + 1, 2 * size - 1, 3, 1]):
+        qo = np.concatenate([[0], np.cumsum(lens)])
+        shares = [zigzag_rows(qo, size, rank) for rank in range(size)]
+        assert sorted(np.concatenate([share.tokens for share in shares]).tolist()) == list(range(qo[-1]))
+        if all(n % (2 * size) == 0 for n in lens):
+            # a query at position t of its row sees t + 1 keys
+            work = {int((s.tokens - qo[np.searchsorted(qo, s.tokens, side="right") - 1] + 1).sum()) for s in shares}
+            assert len(work) == 1, work
 
 
 @pytest.mark.parametrize("attention, refused", [
