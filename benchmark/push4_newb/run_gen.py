@@ -89,7 +89,7 @@ class Server:
         if healthy(port):
             raise RuntimeError(f"port {port} already serving")
         env = dict(os.environ)
-        env.update({"HF_HOME": str(HOME / "hf"), "CUDA_VISIBLE_DEVICES": m["gpus"], "NCCL_NVLS_ENABLE": "0"})
+        env.update({"HF_HOME": str(HOME / "hf"), "CUDA_VISIBLE_DEVICES": m.get("visible", m["gpus"]), "NCCL_NVLS_ENABLE": "0"})
         if arm in m["comps"]:
             self.kind = "comp"
             eng, extra = m["comps"][arm]
@@ -222,8 +222,20 @@ def main() -> int:
     ap.add_argument("--arms", default="base,sglang_b1,sglang_b8,base2")
     ap.add_argument("--rounds", type=int, default=2)
     ap.add_argument("--out", default="")
+    ap.add_argument("--gpu", default="", help="physical GPU for a 1-GPU model (CUDA_VISIBLE_DEVICES)")
+    ap.add_argument("--after-pid", type=int, action="append", default=[],
+                    help="wait for these processes (jobs ahead on the same GPUs) to exit first")
     a = ap.parse_args()
     m = {**MODELS[a.model], "name": a.model}
+    if a.gpu:
+        m["visible"] = a.gpu
+    for pid in a.after_pid:
+        while True:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(20)
     if a.phase == "items":
         cmd_items(m)
         return 0
