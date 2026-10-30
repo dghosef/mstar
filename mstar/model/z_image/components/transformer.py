@@ -13,7 +13,8 @@ Blocks are sandwich-normed: ``x + tanh(gate) * norm2(attn(norm1(x) * (1 + scale)
 same for the SwiGLU feed-forward; every norm is the diffusers ``RMSNorm`` (normalize in
 fp32, cast to the weight dtype, then multiply — reproduced by :class:`ScaledRMSNorm`).
 Rotary embeddings are 3-axis tables (theta 256, kept as fp32 (cos, sin) pairs) applied as a
-complex product in fp32; the compiled forward fuses them with the q/k norms (``qk_norm_rope``).
+complex product in fp32; the compiled forward fuses them with the q/k norms (``qk_norm_rope``)
+where that kernel fits, unless ``compile_exact_ops`` keeps the norms.
 Attention runs through :func:`joint_attention` (SDPA or the ragged FlashInfer resource);
 batching happens only at identical padded lengths, so no key mask is needed.
 """

@@ -13,10 +13,11 @@ model_kwargs:
   # inductor rounds intermediates where eager PyTorch does (and fuses no FMAs); on its own the compiled
   # transformer still lands at a median 35.6 dB from the eager path over the 100 protocol prompts (81 of 100 below 40 dB)
   compile_eager_rounding: true
-  # op classes kept on the eager result inside the compiled forward: with the norms kept the compiled transformer
-  # is bit-exact with the eager one (the activations add nothing but graph breaks). Measured before the exact q/k
-  # RMSNorm op and the folded/split-GroupNorm VAE: every served image >= 53 dB from the eager path on all 100 protocol
-  # prompts (the compiled VAE); true: 0.654 s at B=1 vs 0.608 plain; 0.785 without compile; [norms] pending measurement
+  # op classes kept on the eager result inside the compiled forward. Measured before the exact q/k RMSNorm op (the q/k
+  # norms were graph breaks) and the folded/split-GroupNorm VAE: with the norms kept the compiled transformer was
+  # bit-exact with the eager one (the activations add nothing but graph breaks); every served image >= 53 dB from the
+  # eager path on all 100 protocol prompts (the compiled VAE); true: 0.654 s at B=1 vs 0.608 plain; 0.785 without
+  # compile; [norms] pending measurement
   compile_exact_ops: [norms]
   accelerator_graph: true
   capture_sizes: [[1024, 1024]]

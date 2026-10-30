@@ -45,12 +45,12 @@ def exact_op_types(spec: ExactOps) -> tuple[type, ...] | None:
 def exclude_from_compile(transformer: nn.Module, types: Sequence[type] = EXACT_OP_TYPES) -> int:
     """Keep the transformer's norms and/or activations on the eager result inside a compiled
     forward. A module is kept by type (``types``) or, when ``types`` include the norms, with a
-    ``compile_exact_op = True`` class attribute. A torch ``RMSNorm`` runs :func:`exact_rms_norm`,
-    an op the compiled graph keeps whole (several times faster than torch's kernel on the
-    per-head q/k norms); every other kept module's forward becomes a dynamo graph break, so
-    inductor only fuses the pointwise chains around it. A compiled path that would replace a
-    module, such as a fused kernel, asks :func:`kept_exact` first. Returns the number of modules
-    kept."""
+    ``compile_exact_op = True`` class attribute. A 1-D ``torch.nn.RMSNorm`` (not a subclass) runs
+    :func:`exact_rms_norm`, an op the compiled graph keeps whole (on NVIDIA, several times faster
+    than torch's kernel on the per-head q/k norms); every other kept module's forward becomes a
+    dynamo graph break, so inductor only fuses the pointwise chains around it. A compiled path
+    that would replace a module, such as a fused kernel, asks :func:`kept_exact` first. Returns
+    the number of modules kept."""
     types = tuple(types)
     with_marked = any(t in EXACT_OP_CLASSES["norms"] for t in types)
     count = 0
@@ -86,8 +86,8 @@ def compile_transformer_forward(
     activation decompositions round differently: ``exact_ops`` keeps those modules on the eager
     result (``exclude_from_compile``) and compiles the rest — ``True`` for all of them, or a list
     of the op classes to keep (``["norms"]``, ``["activations"]``), since every kept module but a
-    torch ``RMSNorm`` is a graph break that costs fusion (klein-4B paid 8% at B=1 for all of them
-    while its RMSNorms were breaks too, Z-Image 48%)."""
+    1-D ``torch.nn.RMSNorm`` is a graph break that costs fusion (klein-4B paid 8% at B=1 for all of
+    them while its RMSNorms were breaks too, Z-Image 48%)."""
     types = exact_op_types(exact_ops)
     if types:
         kept = exclude_from_compile(transformer, types)

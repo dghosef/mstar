@@ -1484,16 +1484,17 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
 ``compile_exact_ops``
    ``true``, or a list of op classes among ``norms`` and ``activations``: those modules
    keep the eager result inside the compiled forward, so inductor only fuses the chains
-   around the GEMMs and attention. Each kept module other than a torch ``RMSNorm`` is a
-   graph break, so this is a latency-for-exactness trade:
+   around the GEMMs and attention. Each kept module other than a 1-D ``torch.nn.RMSNorm``
+   is a graph break, so this is a latency-for-exactness trade:
 
    * The norms alone make the transformer bit-exact with eager (measured on klein-4B and
-     9B). A torch ``RMSNorm`` (klein's per-head q/k norms) runs a Triton replica of torch's
-     kernel with the same arithmetic order, as an op the compiled graph keeps whole:
-     bit-identical, ~4x faster than torch's one-block-per-row launch, +5% klein-4B
-     throughput at concurrency >= 4 (H200, measured while the replica still sat behind a
-     graph break). Before it the shipped ``[norms]`` cost klein-4B 4% of its B=1 latency
-     (0.371 vs 0.356 s). Keeping the activations too adds cost and nothing else.
+     9B while the q/k norms were graph breaks). Klein's per-head q/k norms (1-D
+     ``RMSNorm``) run as an op the compiled graph keeps whole. On NVIDIA GPUs that op is
+     a Triton replica of torch's kernel with the same arithmetic order: bit-identical,
+     ~4x faster than torch's one-block-per-row launch, +5% klein-4B throughput at
+     concurrency >= 4 (H200, measured while the replica still sat behind a graph break).
+     Before it the shipped ``[norms]`` cost klein-4B 4% of its B=1 latency (0.371 vs
+     0.356 s). Keeping the activations too adds cost and nothing else.
    * Z-Image's 180 norms per step cost 45% (1.25 vs 0.86 s at B=1), so it ships ``false``
      and lands at a median 34 dB (the ``false`` figures were measured before its compiled
      forward fused the q/k norms and rotary into one kernel). ``[norms]``, which keeps
@@ -1547,10 +1548,10 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
    (an 8192² request means 262k tokens of quadratic attention).
 
 With the klein defaults every served image was within 53 dB of the eager path on all 100
-protocol prompts (measured before the exact q/k RMSNorm op and the folded, split-GroupNorm
-VAE decode), and with ``vae_compile: false`` it is bit-exact. For scale, the served
-images of the other engines are 10 to 16 dB from the diffusers reference for the same
-seeds.
+protocol prompts, and with ``vae_compile: false`` it was bit-exact; both were measured while
+the q/k norms were graph breaks, and the 53 dB before the folded, split-GroupNorm VAE decode.
+For scale, the served images of the other engines are 10 to 16 dB from the diffusers
+reference for the same seeds.
 Requests at the same output size batch across users in every node, including the
 text encoder, whose input is always 512 tokens. ``lora`` lists adapters to fold into the
 transformer weights at load time (``[{path: ..., scale: ...}]``; diffusers/PEFT-format or
