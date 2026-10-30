@@ -117,8 +117,8 @@ def main():
                     help="only sdpa here: flashinfer needs the engine's ragged resource (server path)")
     ap.add_argument("--compile", action="store_true")
     ap.add_argument("--exact-ops", action="store_true",
-                    help="with --compile: compile_exact_ops=[norms], the reference-exact opt-in "
-                         "(the served default is the plain compile)")
+                    help="with --compile: compile_exact_ops=[norms], the exact-transformer opt-in "
+                         "(the served default is the plain compile; exact images also need no --vae-compile)")
     ap.add_argument("--vae-compile", action="store_true",
                     help="the served default: compiled VAE decode, warmed for this size")
     ap.add_argument("--warmup", type=int, default=1)
