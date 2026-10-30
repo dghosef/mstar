@@ -620,15 +620,11 @@ class Engine:
                 fp32_precision=node_fp32_precision(node_name, submodule),
             )
             submodule.bind_node_resources(resources)
-            stop = submodule.token_stop if isinstance(submodule, ARNodeSubmodule) else None
-            if stop is not None and stop.loopback_signal is not None:
-                if stop.walk is None:
-                    raise ValueError(
-                        f"{node_name}: TokenStop.loopback_signal needs the walk whose token loops back"
-                    )
+            loopback = submodule.device_loopback if isinstance(submodule, ARNodeSubmodule) else None
+            if loopback is not None:
                 # the sampler keeps its slot masters only for a node that
-                # reads them back on the device (see TokenStop)
-                resources[stop.sampler].enable_device_loopback_reader()
+                # reads them back on the device (see DeviceLoopback)
+                resources[loopback.sampler].enable_device_loopback_reader()
 
     def paged_kv_caches(self) -> list[PagedKVCache]:
         """Every paged KV cache this engine built, with the nodes that use it."""

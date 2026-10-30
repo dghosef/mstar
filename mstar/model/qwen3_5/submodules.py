@@ -70,6 +70,7 @@ from mstar.model.submodule_base import (
     ARNodeInputs,
     ARNodeSubmodule,
     BatchedModelOutput,
+    DeviceLoopback,
     ModelInputsFromEngine,
     NodeInputs,
     NodeSubmodule,
@@ -135,11 +136,14 @@ class LLMSubmodule(ARNodeSubmodule):
         self.model = model
         self.config = config
         self.vision_config = vision_config
-        # only a decode row's token ends decode_loop; a prefill is not in it
-        # yet. Decode reads its input ids off the sampler's slot masters.
+        # only a decode row's token ends decode_loop; a prefill is not in it yet
         self.token_stop = TokenStop(
             loop="decode_loop", buffer="new_token", stop_ids=config.stop_token_ids,
-            sampler=SAMPLER, walk="decode", loopback_signal="text_inputs",
+            sampler=SAMPLER, walk="decode",
+        )
+        # the decode walk reads its input ids off the sampler's slot masters
+        self.device_loopback = DeviceLoopback(
+            walk="decode", signal="text_inputs", sampler=SAMPLER, buffer="new_token",
         )
         self._vision_sentinels: tuple[torch.Tensor, torch.Tensor] | None = None
 
@@ -375,25 +379,19 @@ class LLMSubmodule(ARNodeSubmodule):
         ):
             # device loop-back: every row of a decode step is its request's
             # last sampled token, read by slot (padding rows read slot 0)
-            sampler: SamplerResource = engine_inputs.resources[SAMPLER]
             t0 = perf_counter() if PHASE_PERIOD else 0.0
-            ids = sampler.loopback_tokens(engine_inputs.request_ids)
-            # rows whose last step ran elsewhere brought their token
-            routed = [
-                i for i, inp in enumerate(inputs)
-                if inp.input_ids is not None and inp.input_seq_len
-            ]
-            if graph_walk != "decode":
+            if graph_walk == "decode":
+                out.update(self.loopback_inputs(engine_inputs, inputs))
+            else:
                 # a mixed step packs its decode rows' single tokens beside the
                 # prompts: each row takes its own ids, or its loop-back token
-                ids = torch.cat([
+                sampler: SamplerResource = engine_inputs.resources[SAMPLER]
+                ids = sampler.loopback_tokens(engine_inputs.request_ids)
+                out["input_ids"] = torch.cat([
                     inp.input_ids.to(ids.dtype) if inp.input_ids is not None
                     else ids[i:i + 1]
                     for i, inp in enumerate(inputs)
                 ])
-            elif routed:
-                sampler.overwrite_rows(routed, (ids, torch.cat([inputs[i].input_ids for i in routed])))
-            out["input_ids"] = ids
             if PHASE_PERIOD:
                 phase_record("engine.preprocess.loopback", perf_counter() - t0)
             if captured:
@@ -601,6 +599,11 @@ class LLMSubmodule(ARNodeSubmodule):
         return request_info.graph_walk == "decode" or request_info.step_metadata.get(
             "last_prefill", False,
         )
+
+    def step_is_input_free(self, graph_walk: str) -> bool:
+        # decode rows are one token each, like the template; the prefill walks
+        # feed `prefill_tokens` from the inputs
+        return graph_walk == "decode"
 
 
 

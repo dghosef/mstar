@@ -51,9 +51,7 @@ class TokenStop(NamedTuple):
     enforces.
 
     Declared as ``ARNodeSubmodule.token_stop``; ``check_stop`` and
-    ``check_stop_batched`` follow from it, and with ``loopback_signal`` the
-    loop-back hooks (``uniform_row_inputs``, ``device_loopback_signals``,
-    ``step_is_input_free``, ``inline_client_signals``) too.
+    ``check_stop_batched`` follow from it.
     """
 
     loop: str
@@ -64,14 +62,6 @@ class TokenStop(NamedTuple):
     sampler: str
     # the only walk whose rows can stop the loop; None for every walk
     walk: str | None = None
-    # the input signal ``walk``'s token loops back to. Its rows then read it
-    # off the sampler's slot masters instead of a routed tensor
-    # (``MSTAR_DEVICE_LOOPBACK``), and the client edge carries ``buffer``
-    # inline. The sampler keeps the masters only for a node that sets this:
-    # their eager step write is a small synchronous host-to-device copy per
-    # step, which a node that reads its tokens on the host would pay for
-    # nothing.
-    loopback_signal: str | None = None
     # walks that sample the reply's first token before the loop runs. That
     # token counts toward the budget, so the model's ``get_loop_caps`` gives
     # the loop ``max_output_tokens - 1`` (GLM-5.2, Command A+). A stop
@@ -84,6 +74,30 @@ class TokenStop(NamedTuple):
     # or not (``StopCheck.withheld``): a frame streamed beside the stop token
     # is loop control, and only the stop check's host copy tells it from data
     withhold: tuple[str, ...] = ()
+
+
+class DeviceLoopback(NamedTuple):
+    """A decode walk whose rows read their last sampled token off the
+    sampler's slot masters instead of a routed tensor
+    (``MSTAR_DEVICE_LOOPBACK``), while the client edge carries the token
+    inline, off the stop check's host copy.
+
+    Declared as ``ARNodeSubmodule.device_loopback``; the loop-back hooks
+    (``uniform_row_inputs``, ``device_loopback_signals``,
+    ``inline_client_signals``) and the read in ``preprocess``
+    (``loopback_inputs``) follow from it. The sampler keeps the masters only
+    for a node that declares this: their eager step write is a small
+    synchronous host-to-device copy per step, which a node that reads its
+    tokens on the host would pay for nothing.
+    """
+
+    walk: str
+    # the input signal the walk's token loops back to
+    signal: str
+    # resource key of the sampler keeping the slot masters
+    sampler: str
+    # the row-addressed output (``check_stop_buffers`` entry) holding the token
+    buffer: str
 
 
 class StopCheck(NamedTuple):
@@ -1187,22 +1201,24 @@ class ARNodeSubmodule(NodeSubmodule):
     cuts_tensor_inputs: bool = False
 
     # Set (in ``__init__``, where the stop ids are known) by a submodule whose
-    # sampled token ends a dynamic loop; the stop checks and loop-back hooks
-    # below follow from it.
+    # sampled token ends a dynamic loop; the stop checks below follow from it.
     token_stop: TokenStop | None = None
 
+    # Set by a submodule whose decode walk reads its last sampled token back on
+    # the device; the loop-back hooks below follow from it.
+    device_loopback: DeviceLoopback | None = None
+
     def _loops_back(self, graph_walk: str) -> bool:
-        """Whether this walk's token loops back on the device: ``token_stop``'s
-        walk, declared with a ``loopback_signal``."""
-        stop = self.token_stop
-        return stop is not None and stop.loopback_signal is not None and graph_walk == stop.walk
+        """Whether this walk's token loops back on the device."""
+        loopback = self.device_loopback
+        return loopback is not None and graph_walk == loopback.walk
 
     def _reads_loopback(self, graph_walk: str) -> bool:
         """Whether this walk's rows read their token off the slot masters: a
         loop-back walk, the knob on, and a sampler that keeps masters."""
         return (
             self._loops_back(graph_walk) and device_loopback_enabled()
-            and self.node_resources[self.token_stop.sampler].has_slot_masters
+            and self.node_resources[self.device_loopback.sampler].has_slot_masters
         )
 
     def uniform_row_inputs(
@@ -1215,18 +1231,37 @@ class ARNodeSubmodule(NodeSubmodule):
 
     def device_loopback_signals(self, graph_walk: str) -> frozenset[str]:
         if self._reads_loopback(graph_walk):
-            return frozenset({self.token_stop.loopback_signal})
+            return frozenset({self.device_loopback.signal})
         return super().device_loopback_signals(graph_walk)
-
-    def step_is_input_free(self, graph_walk: str) -> bool:
-        # decode rows are one token each, like the capture template's
-        return self._loops_back(graph_walk) or super().step_is_input_free(graph_walk)
 
     def inline_client_signals(self, graph_walk: str) -> dict[str, str]:
         # the client's copy of the token the stop check already has on the host
         if self._loops_back(graph_walk):
-            return {self.token_stop.loopback_signal: self.token_stop.buffer}
+            return {self.device_loopback.signal: self.device_loopback.buffer}
         return super().inline_client_signals(graph_walk)
+
+    def loopback_inputs(
+        self, engine_inputs: ModelInputsFromEngine, inputs: list[ARNodeInputs],
+        states: tuple[str, ...] = (),
+    ) -> dict[str, torch.Tensor]:
+        """A loop-back step's ``input_ids``, and each of the sampler's declared
+        loop-back ``states``, one row per row of the step, read by slot
+        (padding rows read the trash row). A row whose last step did not keep
+        them on the device (its first decode step, after the prefill) brings
+        them routed, in ``input_ids`` and ``tensor_inputs[state]``, and they
+        override its slot's."""
+        sampler = engine_inputs.resources[self.device_loopback.sampler]
+        rids = engine_inputs.request_ids
+        out = {"input_ids": sampler.loopback_tokens(rids)}
+        out.update((name, sampler.loopback_state(name, rids)) for name in states)
+        routed = [i for i, inp in enumerate(inputs) if inp.input_ids is not None and inp.input_seq_len]
+        if routed:
+            sampler.overwrite_rows(
+                routed,
+                (out["input_ids"], torch.cat([inputs[i].input_ids for i in routed])),
+                *((out[name], torch.stack([inputs[i].tensor_inputs[name] for i in routed])) for name in states),
+            )
+        return out
 
     def check_stop(
         self, request_id: str,

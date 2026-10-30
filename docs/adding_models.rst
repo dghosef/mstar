@@ -1107,11 +1107,8 @@ methods are:
    gives it ``check_stop_batched``, which checks a whole step off one host copy of its
    tokens. Qwen3.5's ``LLMSubmodule`` is an example. The token budget is the loop's cap
    from ``get_loop_caps``, not a stop check. A decode walk that feeds each row
-   its last sampled token can keep that token on the device instead of routing it: give
-   its ``TokenStop`` a ``walk`` and the ``loopback_signal`` the token feeds back to (see
-   `Device loop-back`_); the loop-back hooks and the client's inline copy of the token
-   follow from it (``MSTAR_DEVICE_LOOPBACK``). Qwen3.5, Higgs Audio, Qwen3-ASR and
-   Whisper declare it.
+   its last sampled token can keep that token on the device instead of routing it, with a
+   ``DeviceLoopback`` (see `Device loop-back`_).
    When a prefill walk outside the loop samples the reply's first token, list it
    in ``prefill_walks``; that token counts toward the budget, so ``get_loop_caps``
    gives the loop ``max_output_tokens - 1``. A stop id sampled
@@ -1355,18 +1352,19 @@ inductor specialize on that integer. The frame is then retraced once per layer.
 .. _Device loop-back:
 
 **Device loop-back.** A decode loop normally routes its sampled token back to itself as a
-tensor per request. A node whose ``TokenStop`` names a ``walk`` and a ``loopback_signal``
-instead reads each row's last sampled token off the sampler on the device: the base
-class's ``device_loopback_signals`` names the signal, so the worker routes it without a
-tensor, ``prepare_inputs`` returns ``self.uniform_row_inputs(...)`` for such a row, and
-``preprocess`` reads the tokens with ``sampler.loopback_tokens(request_ids)``. A row whose
-last step did not keep its value on the device (its first decode step, after the prefill)
-still brings it routed; put it over the one read from the device with
-``sampler.overwrite_rows(rows, (ids, routed_ids))``.
+tensor per request. An AR node that sets ``self.device_loopback = DeviceLoopback(walk,
+signal, sampler, buffer)`` instead reads each row's last sampled token off the sampler on
+the device (``MSTAR_DEVICE_LOOPBACK``): the base class's ``device_loopback_signals`` names
+the signal, so the worker routes it without a tensor and sends the client's copy inline,
+``prepare_inputs`` returns ``self.uniform_row_inputs(...)`` for such a row, and
+``preprocess`` reads the tokens with ``self.loopback_inputs(engine_inputs, inputs)``. A
+row whose last step did not keep its value on the device (its first decode step, after
+the prefill) still brings it routed, and that read puts it over the slot's. Qwen3.5,
+Higgs Audio, Qwen3-ASR and Whisper declare it.
 
 State that a decode loop carries from step to step beside the token, such as Whisper's
 timestamp rule state, is declared on the sampler, not kept in the model (Whisper adds its
-signal to ``device_loopback_signals``):
+signal to ``device_loopback_signals`` and passes its name to ``loopback_inputs``):
 
 .. code-block:: python
 
