@@ -1882,9 +1882,28 @@ declares nothing for it. Which ranks form the group depends on the node's shape:
 pages, so placement alone frees memory without adding capacity: raise ``max_num_pages`` by
 ``P`` to use it. The pool logs its bytes per rank at load. Every resource that depends on
 the pool has to support context parallelism, or loading fails and names it; a ring or
-bounded KV pool can't set the key. DSA (the GLM-5.x indexer) and sliding-window attention
-are not supported, and the prefix cache's limits above one rank (``prefix_cache_tp``) are
-unchanged.
+bounded KV pool can't set the key. The prefix cache's limits above one rank
+(``prefix_cache_tp``) are unchanged.
+
+Over a placed pool, the FlashInfer attention backend (``flashinfer``, and ``auto``) attends
+each rank's slots and returns the partial with its log-sum-exp, and the partners exchange
+the partials and merge them exactly (``mstar/engine/resources/context_parallel.py``). In SP
+mode the partners hold the same query heads, so they all-gather the partials. In TP mode
+they hold different query heads of one KV head: each sends its queries to its partners,
+attends every partner's heads over its own slots, and sends the partials back to their
+heads' owners, two all-to-alls over the TP group. The collectives run on every layer of
+every step, so a request attends at one rank's speed over ``1/P`` of its context, plus the
+exchange. A step whose rows each query one token makes one paged call after its KV write.
+Any other step (prefill, chunked prefill, a prefix hit, speculative verify) attends its
+stored context on the paged kernel and its own tokens on FlashInfer's ragged prefill, over
+the ``k`` and ``v`` the layer passes to ``run``. A layer that calls ``attn.run`` itself must
+pass them (``AttentionCallable`` does); one that writes K/V in a fused kernel that leaves
+``k`` unrotated (``Qwen3Attention`` in ``mstar/model/components/qwen3_lm.py``) rotates it in
+place first when ``kv.placement`` is set. The mixed decode/prefill wrapper (``splits``) is
+not used. Besides attention, the position resource (RoPE) and the recurrent state pool
+(GDN, KDA) support a placed pool; a recurrent pool on an SP-placed node holds the same state
+on every SP partner. The dense, flex, XPU and MLA backends, cross-attention, DSA (the GLM-5.x
+indexer) and ``sliding_window`` attention are not supported and are refused at load.
 
 .. note::
 

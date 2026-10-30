@@ -86,7 +86,11 @@ class AttentionManager(AttentionResource):
         if info.joint_comm_group is not None:
             kv_config.shard(info.head_shards)
         if isinstance(kv_config, PagedKVConfig):
-            kv_config.place(info.joint_comm_group, spec.config.kv_cache)
+            if kv_config.context_parallel and spec.config.sliding_window is not None:
+                raise ValueError(
+                    f"attention {spec.resource_key!r}: sliding_window is unsupported over KV pool "
+                    f"{spec.config.kv_cache!r}, which sets context_parallel"
+                )
         if backend == AttnBackend.DENSE:
             # A dense backend runs on FlashAttention-3 (AITER on ROCm). Where
             # that has no kernel for the GPU or does not import, the same pass

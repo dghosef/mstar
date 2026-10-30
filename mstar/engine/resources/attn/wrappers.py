@@ -15,6 +15,7 @@ Adapted from VoxServe's flashinfer_utils.py for our KV cache layout:
 """
 
 import logging
+import math
 
 import numpy as np
 import torch
@@ -250,17 +251,23 @@ class FlashInferPrefillWrapper:
             self._qo_indptr_buf = qo_indptr
 
     @torch.compiler.disable
-    def run(self, q: torch.Tensor, kv_cache_layer: torch.Tensor) -> torch.Tensor:
+    def run(
+        self, q: torch.Tensor, kv_cache_layer: torch.Tensor, return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Run planned batched prefill attention.
 
         Args:
             q: [total_tokens, num_qo_heads, head_dim]
             kv_cache_layer: [max_pages, 2, page_size, num_kv_heads, head_dim]
                 (single layer slice of the full KV cache)
+            return_lse: also return each query row's log-sum-exp of its scaled scores
         Returns:
-            output: [total_tokens, num_qo_heads, head_dim]
+            output: [total_tokens, num_qo_heads, head_dim], and with ``return_lse``
+            the log-sum-exp [total_tokens, num_qo_heads], fp32, natural log
         """
-        return self.attn_wrapper.run(q.to(self.dtype), kv_cache_layer)
+        if not return_lse:
+            return self.attn_wrapper.run(q.to(self.dtype), kv_cache_layer)
+        return self.attn_wrapper.run(q.to(self.dtype), kv_cache_layer, return_lse=True, lse_base="ln")
 
 
 class FlashInferDecodeWrapper:
@@ -401,16 +408,24 @@ class FlashInferDecodeWrapper:
         self.dtype = dtype
 
     @torch.compiler.disable
-    def run(self, q: torch.Tensor, kv_cache_layer: torch.Tensor) -> torch.Tensor:
+    def run(
+        self, q: torch.Tensor, kv_cache_layer: torch.Tensor, return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Run planned batched decode attention.
 
         Args:
             q: [n_req, num_qo_heads, head_dim]
             kv_cache_layer: [max_pages, 2, page_size, num_kv_heads, head_dim]
+            return_lse: as for the prefill wrapper's ``run``
         Returns:
-            output: [n_req, num_qo_heads, head_dim]
+            output: [n_req, num_qo_heads, head_dim], and with ``return_lse`` the
+            log-sum-exp [n_req, num_qo_heads], fp32, natural log
         """
-        return self.attn_wrapper.run(q.to(self.dtype), kv_cache_layer)
+        if not return_lse:
+            return self.attn_wrapper.run(q.to(self.dtype), kv_cache_layer)
+        out, lse = self.attn_wrapper.run(q.to(self.dtype), kv_cache_layer, return_lse=True)
+        # the decode wrapper has no lse_base: its kernels (fa2, on either core type) report base 2
+        return out, lse * math.log(2)
 
 
 class FlashInferMixedWrapper:
@@ -615,3 +630,72 @@ class FlashInferMixedWrapper:
         out.index_copy_(0, self._perm[:n], out_front[:n])
         out.index_copy_(0, self._dec_dst[: self._num_rows], out_rows.to(out_front.dtype))
         return out[:n]
+
+
+class FlashInferContextParallelWrapper:
+    """Paged attention over a pool whose positions are placed over ranks
+    (``PagedKVConfig.context_parallel``), as this rank's partials over its own slots;
+    ``FlashInferManager.run`` exchanges and merges them.
+
+    A step whose rows each query one token attends the pages after its write (``context`` is a
+    decode wrapper, ``new`` None). Any other step is two attentions: the stored context, not
+    causal, on a prefill wrapper planned on the context-only views; and the step's own tokens,
+    over the ``k``/``v`` the layer passes, on a ragged wrapper (``new``) that needs no exchange.
+    ``context`` is planned with ``page_size`` the pool's slots per page on this rank.
+    """
+
+    def __init__(
+        self,
+        context: "FlashInferPrefillWrapper | FlashInferDecodeWrapper",
+        new,
+        device: torch.device,
+        max_total_tokens: int = 0,
+    ):
+        self.context = context
+        # a FlashInferRaggedPrefillWrapper, or None for a one-token-a-row step
+        self.new = new
+        self._device = device
+        self._qo_indptr_buf = None
+        # per query row, whether it holds any of this rank's slots; a captured wrapper's is sized
+        # to its bucket up front, so a replay reads the address it was captured with
+        self._valid = self._valid_host = None
+        self._done = None
+        if max_total_tokens:
+            self._alloc_valid(max_total_tokens)
+
+    def _alloc_valid(self, n: int) -> None:
+        self._valid = torch.zeros(n, dtype=torch.bool, device=self._device)
+        self._valid_host = torch.zeros(n, dtype=torch.bool, pin_memory=self._device.type == "cuda")
+
+    @torch.compiler.disable
+    def plan(self, placement, page_size: int, context, causal: bool = True, dtype: torch.dtype = torch.bfloat16):
+        """``context``: the logical ``PagedIndptrs`` the context attention reads (the step's own for
+        a one-token-a-row step, its context-only views' otherwise); ``page_size`` the logical one."""
+        local, valid_rows = placement.local_indptrs(context, page_size)
+        if self.new is None:
+            self.context.plan(dtype=dtype, **local.to_kwargs_dict())
+        else:
+            self.context.plan(causal=False, dtype=dtype, **local.to_kwargs_dict())
+            self.new.plan(context.qo_indptr, causal=causal)
+        self._qo_indptr_buf = getattr(self.context, "_qo_indptr_buf", None)
+        valid = np.repeat(valid_rows, np.diff(context.qo_indptr.numpy()))
+        n = len(valid)
+        if self._valid is None or self._valid.shape[0] < n:
+            self._alloc_valid(max(n, 256))
+        if self._done is not None:
+            # the previous plan's copy out of the host buffer, a step or more back
+            self._done.synchronize()
+        elif self._device.type == "cuda":
+            self._done = torch.cuda.Event()
+        self._valid_host[:n].numpy()[:] = valid
+        self._valid[:n].copy_(self._valid_host[:n], non_blocking=True)
+        if self._done is not None:
+            self._done.record()
+
+    def attend_context(self, q: torch.Tensor, kv_cache_layer: torch.Tensor):
+        """``(out, lse, valid)`` over this rank's slots; ``valid`` as ``exchange_partials`` takes it."""
+        out, lse = self.context.run(q, kv_cache_layer, return_lse=True)
+        return out, lse, self._valid[: q.shape[0]]
+
+    def attend_new(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+        return self.new.run(q, k, v, return_lse=True)

@@ -6,7 +6,7 @@ from collections import Counter
 from collections.abc import Callable, Collection
 from concurrent.futures import Future, wait
 from dataclasses import dataclass, field
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import torch
@@ -61,6 +61,9 @@ from mstar.utils.client_errors import client_error_text
 from mstar.utils.h2d import PinnedStager
 from mstar.utils.knobs import kv_chain_lazy_steps, kv_pinned_indptrs, kv_plan_cache
 from mstar.utils.profiler import PhaseLaps
+
+if TYPE_CHECKING:
+    from mstar.engine.resources.context_parallel import ContextParallel
 
 logger = logging.getLogger(__name__)
 
@@ -536,7 +539,7 @@ class KVManager(AttentionResource):
         self.config = cfg
         tp_cache = False
         # before the cache is allocated: it is sized off the head counts and the placement
-        cfg.place(joint_comm_group, name)
+        placement = cfg.place(joint_comm_group, name)
         if joint_comm_group is not None:
             cfg.shard(joint_comm_group.world_size if head_shards is None else head_shards)
             tp_cache = joint_comm_group.world_size > 1 and cfg.prefix_cache and cfg.prefix_cache_tp
@@ -554,11 +557,9 @@ class KVManager(AttentionResource):
                     "and a read from another group would take pages outside rank 0's order. Serve "
                     "the nodes from one group or set prefix_cache_tp to false."
                 )
-        self.kv_cache = KVCache(
-            cfg, device, dtype
-        )
+        self.kv_cache = KVCache(cfg, device, dtype, placement)
         self.name = name
-        cp = cfg.placement
+        cp = placement
         logger.info(
             "KV %s: %.2f GiB on this rank, %d pages of %d slots%s", name, self.kv_cache.nbytes / 2**30,
             cfg.max_num_pages, self.kv_cache.page_slots,
@@ -1570,8 +1571,14 @@ class KVManager(AttentionResource):
         if hold is not None:
             self._release(rid, stream, hold)
 
+    @property
+    def placement(self) -> "ContextParallel | None":
+        """This rank's placement of the pool's positions (``PagedKVConfig.context_parallel``), which
+        the resources over it read here; None when it is off."""
+        return self.kv_cache.placement
+
     def fingerprint(self) -> bytes:
-        cp = self.config.placement
+        cp = self.placement
         return fingerprint(
             self.config.layout.value, self.config.page_size,
             self.kv_cache.tensor.dtype, self._world_size,
@@ -2191,8 +2198,8 @@ class KVManager(AttentionResource):
         abs_page_ptr = paged_kv_indptr[:-1][seg] + page_off
 
         pages, offsets = paged_kv_indices[abs_page_ptr].to(torch.long), off_in_page.to(torch.long)
-        if self.config.placement is not None:
-            pages, offsets = self.config.placement.write_slots(pages, offsets)
+        if self.placement is not None:
+            pages, offsets = self.placement.write_slots(pages, offsets)
         return KVPlanState(token_to_page=pages, token_to_cache=offsets, total_tokens=total_tokens)
 
     def _empty_plan_state(self) -> KVPlanState:
@@ -2210,8 +2217,8 @@ class KVManager(AttentionResource):
         it over as one H2D.
         """
         pages, offsets = self._decode_locations(views)
-        if self.config.placement is not None:
-            pages, offsets = (a.tolist() for a in self.config.placement.write_slots(pages, offsets))
+        if self.placement is not None:
+            pages, offsets = (a.tolist() for a in self.placement.write_slots(pages, offsets))
         locations = torch.tensor(
             [pages, offsets], dtype=torch.long
         ).to(self._device, non_blocking=True)
@@ -2242,8 +2249,8 @@ class KVManager(AttentionResource):
         tensor; rows past the real tokens get SINK_PAGE / 0."""
         if pages is None or offsets is None:
             pages, offsets = self._decode_locations(views)
-        if self.config.placement is not None:
-            pages, offsets = self.config.placement.write_slots(pages, offsets)
+        if self.placement is not None:
+            pages, offsets = self.placement.write_slots(pages, offsets)
         self._plan_stager.copy_(
             static_state.token_to_page[:capture_len], pages, pad_value=SINK_PAGE,
         )

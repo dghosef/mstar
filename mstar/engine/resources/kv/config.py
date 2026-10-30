@@ -101,8 +101,6 @@ class PagedKVConfig(KVConfig):
     # MLA: whether num_qo_heads was given. Unset it defaults to the one latent KV head, which
     # the attention backend would plan; a cache only stored (index keys) needs no query heads
     qo_heads_given: bool = field(default=False, init=False, repr=False, compare=False)
-    # resolved from `context_parallel` by `place`; None when it is off
-    placement: "ContextParallel | None" = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self):
         if self.layout == KVLayout.MLA:
@@ -115,20 +113,19 @@ class PagedKVConfig(KVConfig):
             self.head_dim = self.kv_lora_rank + self.qk_rope_head_dim
         super().__post_init__()
 
-    def place(self, joint: "JointGroups | None", pool: str) -> None:
-        """Resolve ``context_parallel`` into this rank's ``placement``.
+    def place(self, joint: "JointGroups | None", pool: str) -> "ContextParallel | None":
+        """This rank's placement of the pool, resolved from ``context_parallel``; None when it is off.
 
-        Idempotent, like ``shard``: the KV resource and every attention resource over it call
-        it on the one shared config. Positions go over the node's SP ranks when it has more
-        than one, and otherwise over the contiguous blocks of TP ranks that ``QKVParallelLinear``
-        gives one KV head (``kv_head_idx = tp_rank // replicas``).
+        The KV cache holds it (``KVCache.placement``), not this config, which every rank's
+        resources share. Positions go over the node's SP ranks when it has more than one, and
+        otherwise over the contiguous blocks of TP ranks that ``QKVParallelLinear`` gives one KV
+        head (``kv_head_idx = tp_rank // replicas``).
         """
         from mstar.distributed.utils import divide
         from mstar.engine.resources.context_parallel import ContextParallel
 
         if not self.context_parallel:
-            self.placement = None
-            return
+            return None
         sp = joint.sp_group if joint is not None else None
         if sp is not None and sp.world_size > 1:
             placement = ContextParallel(
@@ -156,7 +153,7 @@ class PagedKVConfig(KVConfig):
                 f"KV {pool!r}: context_parallel stripes each page over {placement.size} ranks, "
                 f"which doesn't divide page_size {self.page_size}"
             )
-        self.placement = placement
+        return placement
 
     @property
     def request_pages(self) -> int:

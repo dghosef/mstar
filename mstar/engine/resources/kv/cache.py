@@ -2,12 +2,16 @@
 
 import queue
 import threading
+from typing import TYPE_CHECKING
 
 import torch
 import triton
 import triton.language as tl
 
 from mstar.engine.resources.kv.config import KVLayout, PagedKVConfig
+
+if TYPE_CHECKING:
+    from mstar.engine.resources.context_parallel import ContextParallel
 
 
 class PageAllocator:
@@ -127,17 +131,18 @@ class KVCache:
     consumers (KV transfer, attention) stay layout-agnostic.
 
     Token ranges and ``page_size`` are logical. Under context parallelism
-    (``cfg.placement``) a page stores only this rank's ``page_slots`` slots, and
-    every range method maps its logical range to them."""
+    (``placement``, from ``PagedKVConfig.place``) a page stores only this rank's
+    ``page_slots`` slots, and every range method maps its logical range to them."""
 
     def __init__(
         self,
         cfg: PagedKVConfig,
         device: torch.device,
-        dtype=torch.bfloat16
+        dtype=torch.bfloat16,
+        placement: "ContextParallel | None" = None,
     ):
         self.config = cfg
-        self._placement = cfg.placement
+        self.placement = placement
         slots = self.page_slots
         if cfg.layout == KVLayout.NHD:
             self.tensor = torch.zeros(
@@ -173,11 +178,11 @@ class KVCache:
     @property
     def page_slots(self) -> int:
         """Slots a page stores on this rank: ``page_size``, or this rank's share of it."""
-        cp = self._placement
+        cp = self.placement
         return self.config.page_size if cp is None else self.config.page_size // cp.size
 
     def _slots(self, token_start: int, token_end: int) -> tuple[int, int]:
-        cp = self._placement
+        cp = self.placement
         return (token_start, token_end) if cp is None else cp.slot_range(token_start, token_end)
 
     @property

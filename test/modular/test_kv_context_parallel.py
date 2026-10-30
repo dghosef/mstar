@@ -1,9 +1,14 @@
 """Context parallelism on a paged KV pool: each page's slots striped over the ranks that
-would otherwise hold the same KV head, with logical page ids the same on every rank."""
+would otherwise hold the same KV head, with logical page ids the same on every rank; and
+attention over it, each rank's partial over its slots exchanged and merged."""
 
 from __future__ import annotations
 
+import itertools
+import math
+import os
 import sys
+import types
 from dataclasses import dataclass
 
 sys.path.insert(0, ".")
@@ -11,19 +16,26 @@ sys.path.insert(0, ".")
 import numpy as np
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 from test_kv_prefix_correctness import NODE, PAGE_SIZE, ROOT
 from test_kv_prefix_lease import _StubTransfer
 from test_kv_prefix_tp import WALKS, _ctx, _follow, _ingest, _send, _step, _tokens
 
 from mstar.distributed.communication import CommGroup, JointGroups, WorkerParallelGroups
 from mstar.engine.engine import Engine
-from mstar.engine.resources.base import Resource
+from mstar.engine.resources.attn.base import AttentionManager
+from mstar.engine.resources.attn.config import AttentionConfig, AttentionSpec, AttentionStep
+from mstar.engine.resources.base import EngineResourceInfo, Resource
+from mstar.engine.resources.context_parallel import merge
 from mstar.engine.resources.kv import manager as manager_mod
 from mstar.engine.resources.kv.cache import KVCache
 from mstar.engine.resources.kv.config import KVReqConfig, KVSpec, KVStep, PagedKVConfig
 from mstar.engine.resources.kv.manager import KVManager
-from mstar.engine.resources.kv.plan import SINK_PAGE
+from mstar.engine.resources.kv.plan import SINK_PAGE, KVPlanOutput, KVPlanOutputs, SequenceView, build_paged_indptrs
 from mstar.engine.resources.kv.transfer import KVReadInfo, ShmKVTransferEngine
+from mstar.engine.resources.position.config import PositionConfig, PositionSpec
+from mstar.engine.resources.recurrent.config import DeltaNetGeometry, RecurrentStateConfig, RecurrentStateSpec
 from mstar.engine.resources.spec import NodeResourceSpec
 from mstar.engine.resources.step import BucketKey, Segment, SlotLease, StepContext
 
@@ -40,24 +52,20 @@ def _group(rank: int, size: int) -> CommGroup:
     return CommGroup(my_global_rank=rank, my_group_rank=rank, group_members=list(range(size)))
 
 
-def _placed(rank: int, **overrides) -> PagedKVConfig:
+def _placed(rank: int, **overrides) -> KVCache:
     cfg = dict(
         num_layers=2, num_kv_heads=1, head_dim=2, max_seq_len=64, num_qo_heads=2, max_num_pages=4,
         page_size=8, context_parallel=True,
     )
     cfg.update(overrides)
     config = PagedKVConfig(**cfg)
-    config.place(JointGroups(tp_group=_group(rank, P), sp_group=CommGroup.trivial()), "kv")
-    return config
+    joint = JointGroups(tp_group=_group(rank, P), sp_group=CommGroup.trivial())
+    return KVCache(config, CPU, torch.float32, config.place(joint, "kv"))
 
 
-def _manager(rank: int) -> KVManager:
+def _manager(rank: int, cfg: PagedKVConfig) -> KVManager:
     kv = KVManager(
-        cfg=PagedKVConfig(
-            num_layers=1, num_kv_heads=1, head_dim=8, max_seq_len=4096, num_qo_heads=2, max_num_pages=12,
-            page_size=PAGE_SIZE, prefix_cache_tp=True, context_parallel=True,
-        ),
-        name="kv", joint_comm_group=JointGroups(tp_group=_group(rank, P), sp_group=CommGroup.trivial()),
+        cfg=cfg, name="kv", joint_comm_group=JointGroups(tp_group=_group(rank, P), sp_group=CommGroup.trivial()),
         transfer_engine_info=None, device=CPU, dtype=torch.float32,
     )
     kv.enable_prefix_cache(ROOT, WALKS)
@@ -97,7 +105,12 @@ def _assert_split_writes(ranks: list[KVManager], step: KVStep) -> None:
 
 
 def test_two_ranks_keep_logical_pages_alike_and_split_every_write():
-    ranks = [_manager(0), _manager(1)]
+    # one config for both, as one process emulating TP builds them: each rank's placement is its own
+    cfg = PagedKVConfig(
+        num_layers=1, num_kv_heads=1, head_dim=8, max_seq_len=4096, num_qo_heads=2, max_num_pages=12,
+        page_size=PAGE_SIZE, prefix_cache_tp=True, context_parallel=True,
+    )
+    ranks = [_manager(0, cfg), _manager(1, cfg)]
     leader, follower = ranks
     a = _tokens(3 * PAGE_SIZE + 5, seed=1)
     for kv in ranks:
@@ -145,7 +158,7 @@ def test_two_ranks_keep_logical_pages_alike_and_split_every_write():
 
 @pytest.mark.parametrize("rank", range(P))
 def test_a_placed_cache_maps_logical_token_ranges_to_this_ranks_slots(rank, tmp_path):
-    source, destination = (KVCache(_placed(rank), CPU, torch.float32) for _ in range(2))
+    source, destination = (_placed(rank) for _ in range(2))
     assert source.page_slots == 8 // P and source.tensor.shape[3] == 8 // P
     source.tensor.copy_(torch.arange(1, source.tensor.numel() + 1, dtype=torch.float32).reshape(source.tensor.shape))
     # logical slots 3-5 of a page: rank 0 owns 4 (physical 2), rank 1 owns 3 and 5 (physical 1 and 2)
@@ -166,7 +179,7 @@ def test_a_placed_cache_maps_logical_token_ranges_to_this_ranks_slots(rank, tmp_
     assert destination.tensor.count_nonzero() == page[:, :, first:end].numel()
 
     # the attention plan's local lengths: rows of 1 page holding 1 and 3 slots, and of 2 pages, the last full
-    last, kv_lens = source.config.placement.local_last_page_len(np.array([1, 3, 8]), np.array([1, 1, 2]), 8)
+    last, kv_lens = source.placement.local_last_page_len(np.array([1, 3, 8]), np.array([1, 1, 2]), 8)
     assert (last.tolist(), kv_lens.tolist()) == {0: ([1, 2, 4], [1, 2, 8]), 1: ([0, 1, 4], [0, 1, 8])}[rank]
 
 
@@ -224,19 +237,281 @@ def test_an_sp_placed_node_shards_heads_over_tp_and_refuses_a_dependent_without_
         num_layers=1, num_kv_heads=2, head_dim=8, max_seq_len=256, num_qo_heads=4, max_num_pages=8,
         page_size=PAGE_SIZE, context_parallel=True,
     ))
-    specs = [kv_spec, _DependentSpec(resource_key="attn", nodes={NODE}, supports=supports)]
+    # the resources Qwen3.5 puts over its pool, then a dependent without support
+    specs = [
+        kv_spec,
+        AttentionSpec(resource_key="attn", nodes={NODE}, config=AttentionConfig(kv_cache="kv")),
+        PositionSpec(resource_key="rope", nodes={NODE}, config=PositionConfig(kv_cache="kv")),
+        RecurrentStateSpec(resource_key="gdn", nodes={NODE}, config=RecurrentStateConfig(
+            num_layers=1, max_slots=4, kv_cache="kv",
+            blocks=DeltaNetGeometry(
+                num_k_heads=2, num_v_heads=2, head_k_dim=8, head_v_dim=8, conv_kernel_size=4,
+            ).to_blocks(state_dtype=torch.float32),
+        )),
+        _DependentSpec(resource_key="dependent", nodes={NODE}, supports=supports),
+    ]
     engine = Engine(graph_runtime=None)
     load = lambda: engine.load_model(  # noqa: E731
         {NODE: _Submodule()}, specs=specs, parallel_groups=groups, device=CPU, transfer_engine_info=None,
     )
     if not supports:
-        with pytest.raises(ValueError, match="'attn'.*does not support context parallelism.*'kv'"):
+        with pytest.raises(ValueError, match="'dependent'.*does not support context parallelism.*'kv'"):
             load()
         return
     load()
     # heads over TP alone (1 rank), positions over the 2 SP ranks
-    assert engine._resources["attn"].info.head_shards == 1 and engine._submodules[NODE].head_shards == 1
+    assert engine._resources["dependent"].info.head_shards == 1 and engine._submodules[NODE].head_shards == 1
     assert (kv_spec.config.num_kv_heads, kv_spec.config.num_qo_heads) == (2, 4)
-    placement = kv_spec.config.placement
+    placement = engine._resources["kv"].placement
     assert (placement.size, placement.index, placement.over_sp) == (P, 0, True)
     assert engine._resources["kv"].kv_cache.page_slots == PAGE_SIZE // P
+
+
+# --- attention over a placed pool -------------------------------------------------------------
+
+HEAD_DIM, Q_HEADS, CP_PAGE = 64, 4, 4
+# (stored context, new tokens) per row. Prefill: a row with no context, one whose 1-token
+# context only rank 0 holds, and contexts ending on a page whose one token rank 1 lacks.
+PREFILL_ROWS = ((0, 5), (1, 3), (5, 2), (6, 1))
+# decode, after the write: lengths 1 (rank 1 holds nothing), 5 (a last page rank 1 lacks), 7
+DECODE_ROWS = ((0, 1), (4, 1), (6, 1))
+
+
+def _reference(q, k, v, causal=True):
+    """Attention of ``q`` ``[T, Hq, D]`` over ``k``/``v`` ``[L, Hkv, D]``, the queries the last ``T``
+    positions when causal; fp32 ``(out, lse)``, lse natural-log ``[T, Hq]``."""
+    group = q.shape[1] // k.shape[1]
+    k, v = (t.float().repeat_interleave(group, dim=1) for t in (k, v))
+    scores = torch.einsum("thd,lhd->htl", q.float(), k) * q.shape[-1] ** -0.5
+    if causal:
+        t, length = q.shape[0], k.shape[0]
+        seen = torch.arange(length)[None, :] <= torch.arange(t)[:, None] + (length - t)
+        scores = scores.masked_fill(~seen.to(scores.device), -math.inf)
+    return torch.einsum("htl,lhd->thd", torch.softmax(scores, dim=-1), v), torch.logsumexp(scores, -1).T
+
+
+def _reference_flashinfer() -> types.ModuleType:
+    """FlashInfer's paged prefill/decode and ragged wrappers as dense torch math on CPU, with
+    their lse bases. A paged plan refuses a row FlashInfer's split-KV planner would miscount: no
+    pages, or a last page holding no slot (see ``ContextParallel.local_indptrs``)."""
+    fi = types.ModuleType("flashinfer")
+
+    class Paged:
+        base = "log2"
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def plan(self, qo_indptr=None, paged_kv_indptr=None, paged_kv_indices=None,
+                 paged_kv_last_page_len=None, *, page_size, seq_lens, causal=False, indptr=None,
+                 indices=None, last_page_len=None, **kwargs):
+            kvp = (paged_kv_indptr if indptr is None else indptr).tolist()
+            self.indices = (paged_kv_indices if indices is None else indices).tolist()
+            last = (paged_kv_last_page_len if last_page_len is None else last_page_len).tolist()
+            self.rows = [(kvp[b], kvp[b + 1], int(seq_lens[b])) for b in range(len(last))]
+            for (start, end, length), tail in zip(self.rows, last, strict=True):
+                assert end > start and 1 <= tail <= page_size and length == (end - start - 1) * page_size + tail
+            self.qo = qo_indptr.tolist() if qo_indptr is not None else list(range(len(last) + 1))
+            self.causal = causal
+
+        def run(self, q, kv, return_lse=False, lse_base=None):
+            outs, lses = [], []
+            for b, (start, end, length) in enumerate(self.rows):
+                pages = kv[self.indices[start:end]]
+                k, v = (pages[:, i].flatten(0, 1)[:length] for i in (0, 1))
+                out, lse = _reference(q[self.qo[b]:self.qo[b + 1]], k, v, self.causal)
+                outs.append(out)
+                lses.append(lse)
+            out, lse = torch.cat(outs).to(q.dtype), torch.cat(lses)
+            if (lse_base or self.base) == "log2":
+                lse = lse / math.log(2)
+            return (out, lse) if return_lse else out
+
+    class Decode(Paged):
+        def plan(self, **kwargs):
+            super().plan(**kwargs)
+            self.causal = False
+
+    class Ragged:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def plan(self, qo_indptr, kv_indptr, *args, causal=False, **kwargs):
+            self.qo, self.causal = qo_indptr.tolist(), causal
+
+        def run(self, q, k, v, out=None, return_lse=False, lse_base="log2"):
+            parts = [_reference(q[a:b], k[a:b], v[a:b], self.causal) for a, b in itertools.pairwise(self.qo)]
+            o, lse = torch.cat([p[0] for p in parts]).to(q.dtype), torch.cat([p[1] for p in parts])
+            lse = lse if lse_base == "ln" else lse / math.log(2)
+            return (o, lse) if return_lse else o
+
+    fi.BatchPrefillWithPagedKVCacheWrapper = Paged
+    fi.BatchDecodeWithPagedKVCacheWrapper = Decode
+    fi.BatchPrefillWithRaggedKVCacheWrapper = Ragged
+    return fi
+
+
+@dataclass
+class _Case:
+    """One step's KV plan, the logical keys of its rows, and its queries."""
+    plan: KVPlanOutputs
+    keys: list[torch.Tensor]       # per row [L, 2, 1, D], K and V of every position
+    q: torch.Tensor                # [N, Q_HEADS, D]
+    rows: tuple[tuple[int, int], ...]
+
+    @classmethod
+    def build(cls, rows, device, dtype) -> _Case:
+        gen = torch.Generator().manual_seed(0)
+        views, keys, page = [], [], 1
+        for i, (context, new) in enumerate(rows):
+            length = context + new
+            pages = list(range(page, page + -(-length // CP_PAGE)))
+            page += len(pages)
+            views.append(SequenceView(f"r{i}", "main", pages, length, new))
+            keys.append(torch.randn(length, 2, 1, HEAD_DIM, generator=gen).to(device, dtype))
+        q = torch.randn(sum(new for _, new in rows), Q_HEADS, HEAD_DIM, generator=gen).to(device, dtype)
+        indptrs = build_paged_indptrs(views, CP_PAGE)
+        return cls(KVPlanOutputs({"main": KVPlanOutput(indptrs, views)}), keys, q, rows)
+
+    def cache(self, placement) -> torch.Tensor:
+        """This rank's layer of the pool: each owned slot at its physical place, NaN elsewhere."""
+        slots = CP_PAGE // placement.size
+        pages = max(view.page_idxs[-1] for view in self.plan["main"].views) + 1
+        cache = torch.full((pages, 2, slots, 1, HEAD_DIM), math.nan, device=self.q.device, dtype=self.q.dtype)
+        for view, kv in zip(self.plan["main"].views, self.keys, strict=True):
+            for pos in range(view.length):
+                offset = pos % CP_PAGE
+                if offset % placement.size == placement.index:
+                    cache[view.page_idxs[pos // CP_PAGE], :, offset // placement.size] = kv[pos]
+        return cache
+
+    def new_kv(self):
+        """The step's own tokens' K and V, ``[N, 1, D]`` each, as the layer passes them to ``run``."""
+        new = torch.cat([kv[context:] for kv, (context, _) in zip(self.keys, self.rows, strict=True)])
+        return new[:, 0], new[:, 1]
+
+    def want(self) -> torch.Tensor:
+        outs = []
+        qo = 0
+        for kv, (_, new) in zip(self.keys, self.rows, strict=True):
+            outs.append(_reference(self.q[qo:qo + new], kv[:, 0], kv[:, 1])[0])
+            qo += new
+        return torch.cat(outs)
+
+
+def _cp_attention(joint: JointGroups, device: torch.device, dtype: torch.dtype, head_shards: int):
+    """A ``FlashInferManager`` over a placed pool, and this rank's placement."""
+    kv = KVSpec(resource_key="kv", nodes={NODE}, config=PagedKVConfig(
+        num_layers=1, num_kv_heads=1, head_dim=HEAD_DIM, max_seq_len=64, num_qo_heads=Q_HEADS,
+        max_num_pages=16, page_size=CP_PAGE, context_parallel=True,
+    ))
+    info = EngineResourceInfo(
+        device=device, joint_comm_group=joint, kv_dtype=dtype, dependencies={"kv": kv}, head_shards=head_shards,
+    )
+    spec = AttentionSpec(resource_key="attn", nodes={NODE}, config=AttentionConfig(kv_cache="kv"))
+    attn = AttentionManager.build(spec, info)
+    # the KV resource's one field attention reads
+    placement = kv.config.place(joint, "kv")
+    attn.bind_dependencies({"kv": types.SimpleNamespace(placement=placement)})
+    return attn, placement
+
+
+def _plan(attn, case: _Case, slot: int = 0, bucket: BucketKey | None = None) -> None:
+    ctx = StepContext(request_ids=tuple(v.request_id for v in case.plan["main"].views), graph_walk="w",
+                      slot=slot, capture=False, slot_lease=None if bucket is None else SlotLease(slot, bucket))
+    ctx.plan_results["kv"] = case.plan
+    attn.plan(AttentionStep(), ctx)
+
+
+def _over_ranks(rank, world, backend, store, over_sp, rows):
+    """One rank of a ``world``-rank placement running ``rows`` through ``FlashInferManager.run``
+    against one rank attending every key; every rank issues the same collectives, same shapes."""
+    os.environ["MSTAR_WORKSPACE_BUFFER_MB"] = "1"
+    dist.init_process_group(backend, init_method=f"file://{store}", rank=rank, world_size=world)
+    torch.set_num_threads(1)
+    cuda = backend == "nccl"
+    device = torch.device("cuda", rank) if cuda else CPU
+    if cuda:
+        torch.cuda.set_device(device)
+    else:
+        sys.modules["flashinfer"] = _reference_flashinfer()
+    calls = []
+    for name in ("all_to_all_single", "all_gather_into_tensor"):
+        def record(*args, _name=name, _call=getattr(dist, name), **kwargs):
+            calls.append((_name, tuple(args[0].shape), tuple(args[1].shape), *(str(a) for a in args[2:])))
+            return _call(*args, **kwargs)
+        setattr(dist, name, record)
+    try:
+        group = CommGroup(rank, rank, list(range(world)))
+        group.device_group, group.initialized = dist.group.WORLD, True
+        joint = (JointGroups(tp_group=CommGroup.trivial(), sp_group=group) if over_sp
+                 else JointGroups(tp_group=group, sp_group=CommGroup.trivial()))
+        dtype = torch.bfloat16 if cuda else torch.float32
+        attn, placement = _cp_attention(joint, device, dtype, head_shards=1 if over_sp else world)
+        case = _Case.build(rows, device, dtype)
+        _plan(attn, case)
+        heads = slice(None) if over_sp else slice(rank * Q_HEADS // world, (rank + 1) * Q_HEADS // world)
+        k, v = case.new_kv()
+        out = attn.run(case.q[:, heads].contiguous(), "main", kv_cache_layer=case.cache(placement), k=k, v=v)
+        torch.testing.assert_close(out.float(), case.want()[:, heads], **({"atol": 2e-2, "rtol": 2e-2} if cuda else {}))
+        everyone = [None] * world
+        dist.all_gather_object(everyone, calls)
+        assert calls and all(c == calls for c in everyone), everyone
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("rows", [PREFILL_ROWS, DECODE_ROWS], ids=["prefill", "decode"])
+@pytest.mark.parametrize("over_sp", [False, True], ids=["tp", "sp"])
+def test_two_ranks_attend_a_placed_pool_like_one_rank_with_the_same_collectives(tmp_path, over_sp, rows):
+    mp.spawn(_over_ranks, args=(P, "gloo", str(tmp_path / "store"), over_sp, rows), nprocs=P)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs 2 GPUs")
+@pytest.mark.parametrize("rows", [PREFILL_ROWS, DECODE_ROWS], ids=["prefill", "decode"])
+@pytest.mark.parametrize("over_sp", [False, True], ids=["tp", "sp"])
+def test_two_gpus_attend_a_placed_pool_like_one(tmp_path, over_sp, rows):
+    pytest.importorskip("flashinfer")
+    mp.spawn(_over_ranks, args=(P, "nccl", str(tmp_path / "store"), over_sp, rows), nprocs=P)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@pytest.mark.parametrize("captured", [False, True], ids=["eager", "captured"])
+@pytest.mark.parametrize("rows", [PREFILL_ROWS, DECODE_ROWS], ids=["prefill", "decode"])
+def test_flashinfer_partials_over_simulated_ranks_merge_to_full_attention(rows, captured):
+    """FlashInfer itself, one process: each of P ranks' partials over its slots, masked and merged
+    with the step's own tokens' attention, against attention over every key."""
+    pytest.importorskip("flashinfer")
+    device, dtype = torch.device("cuda"), torch.bfloat16
+    case = _Case.build(rows, device, dtype)
+    k, v = case.new_kv()
+    bucket = BucketKey("w", bs=len(rows), num_tokens=case.q.shape[0]) if captured else None
+    outs, lses, new = [], [], None
+    for rank in range(P):
+        joint = JointGroups(tp_group=CommGroup.trivial(), sp_group=_group(rank, P))
+        attn, placement = _cp_attention(joint, device, dtype, head_shards=1)
+        # this rank's side of the exchange alone: masked, through a gather over itself
+        alone = placement._replace(group=CommGroup.trivial())
+        _plan(attn, case, bucket=bucket)
+        wrapper = attn._current_plan_states["main"]
+        cache = case.cache(placement)
+
+        def partials(wrapper=wrapper, cache=cache, alone=alone):
+            return (*alone.exchange_partials(*wrapper.attend_context(case.q, cache)),
+                    *(wrapper.attend_new(case.q, k, v) if wrapper.new is not None else ()))
+
+        result = partials()
+        if captured:
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                result = partials()
+            graph.replay()
+        outs.append(result[0])
+        lses.append(result[1])
+        new = result[2:] or None
+    if new is not None:
+        outs.append(new[0].float().unsqueeze(0))
+        lses.append(new[1].float().unsqueeze(0))
+    got = merge(torch.cat(outs), torch.cat(lses))
+    torch.testing.assert_close(got, case.want(), atol=2e-2, rtol=2e-2)

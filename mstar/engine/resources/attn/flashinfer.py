@@ -13,20 +13,28 @@ from mstar.engine.resources.attn.base import (
 )
 from mstar.engine.resources.attn.config import AttentionStep, refuse_context_only
 from mstar.engine.resources.attn.wrappers import (
+    FlashInferContextParallelWrapper,
     FlashInferDecodeWrapper,
     FlashInferMixedWrapper,
     FlashInferPrefillWrapper,
     check_flashinfer_head_dim,
 )
-from mstar.engine.resources.base import CGSlotKey
+from mstar.engine.resources.base import CGSlotKey, Resource
+from mstar.engine.resources.context_parallel import merge
 from mstar.engine.resources.kv.config import PagedKVConfig
-from mstar.engine.resources.kv.plan import KVPlanOutputs
+from mstar.engine.resources.kv.plan import KVPlanOutput, KVPlanOutputs, build_paged_indptrs, context_only_views
 from mstar.engine.resources.spec import CombinedSplit
 from mstar.engine.resources.step import SlotLease, StepContext
 from mstar.utils.profiler import PhaseLaps
 
+# The workspace of the ragged wrapper a context-parallel step attends its own tokens on: a
+# ragged prefill spends it only on split-KV partials (see `RaggedAttentionConfig.workspace_mb`)
+_NEW_TOKENS_WORKSPACE_MB = 128
+
 
 class FlashInferManager(AttentionManager):
+    supports_context_parallel = True
+
     def __init__(
         self,
         kv_cache: str,
@@ -72,9 +80,27 @@ class FlashInferManager(AttentionManager):
         self._decode_tensor_cores = decode_tensor_cores
 
         self._workspaces = WorkspacePool(device)
+        # the KV pool's placement (`bind_dependencies`)
+        self._placement = None
 
     def depends_on(self):
         return {self._kv_cache_name}
+
+    def bind_dependencies(self, resources: Mapping[str, Resource]) -> None:
+        placement = getattr(resources.get(self._kv_cache_name), "placement", None)
+        self._placement = placement
+        if placement is None:
+            return
+        # the wrappers read this rank's slots of each page; under TP placement each attends
+        # them for every partner's query heads (`ContextParallel.exchange_queries`)
+        cfg = self._kv_config
+        self._wrapper_kv_kwargs["page_size"] = cfg.page_size // placement.size
+        self._wrapper_kv_kwargs["num_qo_heads"] = cfg.num_qo_heads * (1 if placement.over_sp else placement.size)
+        self._new_kwargs = dict(
+            num_qo_heads=cfg.num_qo_heads, num_kv_heads=cfg.num_kv_heads, head_dim=cfg.head_dim,
+            device=self._device, backend=self._wrapper_kv_kwargs["backend"], q_data_type=self._dtype,
+        )
+        self._new_workspaces = WorkspacePool(self._device, _NEW_TOKENS_WORKSPACE_MB)
 
     def _cg_wrapper(
         self, lease: SlotLease, label: str, num_rows: int, force_prefill: bool,
@@ -107,7 +133,13 @@ class FlashInferManager(AttentionManager):
             "max_num_pages": captured_page_capacity(num_rows, bucket.num_tokens, self._kv_config),
         }
         split = self._splits.get(bucket.graph_walk)
-        if split is not None:
+        if self._placement is not None:
+            # the mixed wrapper is not used: the context wrapper takes rows of any length
+            wrapper = self._context_parallel_wrapper(
+                label, lease.slot, bucket.bs == bucket.num_tokens and not force_prefill,
+                dict(batch_size=num_rows, accelerator_graph=True, **kv_kwargs), bucket.num_tokens,
+            )
+        elif split is not None:
             # its own workspaces: both wrappers are planned for the one step
             wrapper = FlashInferMixedWrapper(
                 decode_workspace=self._workspaces.get(f"{label}.split_decode", lease.slot),
@@ -150,6 +182,10 @@ class FlashInferManager(AttentionManager):
         """
         key = EagerSlotKey(label=label, slot=slot, is_decode=is_decode)
         wrapper = self._eager_plan_states.get(key)
+        if wrapper is None and self._placement is not None:
+            wrapper = self._eager_plan_states[key] = self._context_parallel_wrapper(
+                label, slot, is_decode, dict(self._wrapper_kv_kwargs),
+            )
         if wrapper is None:
             workspace = self._workspaces.get(label, slot)
             if is_decode:
@@ -162,6 +198,43 @@ class FlashInferManager(AttentionManager):
                 wrapper = FlashInferPrefillWrapper(workspace_buffer=workspace, **self._wrapper_kv_kwargs)
             self._eager_plan_states[key] = wrapper
         return wrapper
+
+    def _context_parallel_wrapper(
+        self, label: str, slot: int, decode: bool, kv_kwargs: dict, max_total_tokens: int | None = None,
+    ) -> FlashInferContextParallelWrapper:
+        """The wrappers a step attends a placed pool on: its context's on the label's workspace,
+        and for a step that isn't one token a row, its own tokens' on a small one of their own
+        (both are planned for the one step)."""
+        from mstar.engine.resources.attn.ragged.wrappers import FlashInferRaggedPrefillWrapper
+
+        workspace = self._workspaces.get(label, slot)
+        if decode:
+            context = FlashInferDecodeWrapper(
+                workspace_buffer=workspace, use_tensor_cores=self._decode_tensor_cores, **kv_kwargs,
+            )
+            new = None
+        else:
+            context = FlashInferPrefillWrapper(
+                workspace_buffer=workspace, max_total_tokens=max_total_tokens, **kv_kwargs,
+            )
+            new = FlashInferRaggedPrefillWrapper(
+                self._new_workspaces.get(label, slot),
+                max_num_segments=kv_kwargs.get("batch_size"), max_total_tokens=max_total_tokens,
+                accelerator_graph=kv_kwargs.get("accelerator_graph", False), **self._new_kwargs,
+            )
+        return FlashInferContextParallelWrapper(context, new, self._device, max_total_tokens or 0)
+
+    def _plan_placed(
+        self, wrapper: FlashInferContextParallelWrapper, kv_out: KVPlanOutput, causal: bool,
+    ) -> None:
+        page_size = self._kv_config.page_size
+        context = kv_out.cpu_indptrs
+        if wrapper.new is not None:
+            views = kv_out.views
+            context = build_paged_indptrs(
+                context_only_views(views, [view.to_compute for view in views], page_size), page_size,
+            )
+        wrapper.plan(self._placement, page_size, context, causal=causal, dtype=self._dtype)
 
     @property
     def supports_preplan(self):
@@ -217,6 +290,12 @@ class FlashInferManager(AttentionManager):
                 )
                 wrapper = self._eager_wrapper(label, is_decode, ctx.slot)
 
+            if self._placement is not None:
+                laps.lap("wrapper")
+                self._plan_placed(wrapper, kv_out, step.causal)
+                laps.lap("wrapper_plan")
+                plan_states[label] = wrapper
+                continue
             kwargs = indptrs.to_kwargs_dict()
             laps.lap("wrapper")
             # TODO: cache the latest plan state
@@ -260,14 +339,38 @@ class FlashInferManager(AttentionManager):
         v: torch.Tensor | None = None,
         layer_idx: int | None = None,
     ) -> torch.Tensor:
-        # `k`/`v`/`layer_idx` are the dense backend's; here the K/V is already
-        # in the pages (the layer wrote it through the KV resource) and the
-        # planned wrapper carries the layout. Accepted and ignored so one
+        # The K/V is already in the pages (the layer wrote it through the KV
+        # resource) and the planned wrapper carries the layout, so `k`/`v` are
+        # read only over a placed pool, where a step's own tokens attend each
+        # other from them; `layer_idx` is the dense backend's. Accepted so one
         # layer body serves either backend — see `requires_kv_write`.
-        del k, v, layer_idx
+        del layer_idx
         if label is None:
             label = self._default_label
+        if self._placement is not None:
+            return self._attend_placed(q, label, kv_cache_layer, k, v)
         return self._attend(q, label, kv_cache_layer)
+
+    @torch.compiler.disable
+    def _attend_placed(
+        self, q: torch.Tensor, label: str, kv_cache_layer: torch.Tensor,
+        k: torch.Tensor | None, v: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Every rank's partial over its slots, exchanged (the same collectives on every rank,
+        every layer) and merged with this step's own tokens' attention when it has one."""
+        wrapper: FlashInferContextParallelWrapper = self._current_plan_states[label]
+        if wrapper.new is not None and (k is None or v is None):
+            raise ValueError(
+                "FlashInferManager over a context-parallel KV pool attends a step's own tokens from "
+                "the k and v run is passed; this step has more than one token a row and got none"
+            )
+        out, lse, valid = wrapper.attend_context(self._placement.exchange_queries(q), kv_cache_layer)
+        outs, lses = self._placement.exchange_partials(out, lse, valid)
+        if wrapper.new is not None:
+            new_out, new_lse = wrapper.attend_new(q, k, v)
+            outs = torch.cat([outs, new_out.float().unsqueeze(0)])
+            lses = torch.cat([lses, new_lse.float().unsqueeze(0)])
+        return merge(outs, lses).to(q.dtype)
 
     @torch.compiler.disable
     def _attend(
