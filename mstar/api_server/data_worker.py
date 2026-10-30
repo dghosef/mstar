@@ -12,7 +12,7 @@ from collections.abc import Callable, Collection
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import torch
 
@@ -178,20 +178,20 @@ class PreparingInput(NamedTuple):
     prepared: Future | None = None
 
 
+def _positive_int(name: str, value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+    return value
+
+
 def preprocess_workers(model: Model | None, model_config: dict | None) -> int:
     """``preprocess_workers`` from the serving config, else the model's
     ``PREPROCESS_WORKERS``. A class value of 1 says its ``load_*`` and
     ``process_prompt`` are not thread-safe, so the config cannot add a pool."""
     if model is None:
         return 1
-    declared = model.PREPROCESS_WORKERS
-    if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
-        raise ValueError(
-            f"{type(model).__name__}.PREPROCESS_WORKERS must be a positive integer, got {declared!r}"
-        )
-    workers = (model_config or {}).get("preprocess_workers", declared)
-    if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
-        raise ValueError(f"preprocess_workers must be a positive integer, got {workers!r}")
+    declared = _positive_int(f"{type(model).__name__}.PREPROCESS_WORKERS", model.PREPROCESS_WORKERS)
+    workers = _positive_int("preprocess_workers", (model_config or {}).get("preprocess_workers", declared))
     if workers > 1 and declared == 1:
         raise ValueError(
             f"preprocess_workers is {workers}, but {type(model).__name__}.PREPROCESS_WORKERS is 1: "
@@ -235,7 +235,7 @@ class PreprocessWorker:
         is_pending: Callable[[str], bool] | None = None,
     ):
         check_media_limits()
-        # first, before any socket is made: a bad value must stop startup
+        # before the sockets and the thread exist: a bad value stops startup, with nothing to close
         prep_workers = preprocess_workers(model, model_config)
         self.request_input_queue = queue.Queue()
         self.result_tensor_input_queue = queue.Queue()
