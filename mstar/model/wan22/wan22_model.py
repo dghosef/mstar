@@ -152,6 +152,9 @@ class Wan22Model(Model):
                     head_dim=cfg.attention_head_dim,
                     # one segment per guidance branch
                     max_segments_per_request=2,
+                    # CFG-parallel: the dit's SP ranks split guidance branches, not
+                    # heads, so each keeps every head (TP still splits them)
+                    shard_over_sp=False,
                     # the DiT is compiled, not captured: keep attention in its graph
                     compile_op=True,
                     dtype=torch.bfloat16,
@@ -779,8 +782,6 @@ class Wan22Model(Model):
             self._refresh_checkpoint_defaults()
             transformer = build_wan22_dit(
                 self.config, self.model_path_hf, device=device, cache_dir=self.cache_dir,
-                # serving numerics, like the compile: the reference gates build with compile_dit off
-                fuse_ffn_gelu=self.config.compile_dit,
             )
             return Wan22DitSubmodule(transformer, self.config, sp_group=sp_group)
         logger.warning("Wan2.2 has no submodule for node %r; running it dummy.", node_name)
