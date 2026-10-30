@@ -157,17 +157,21 @@ def test_encode_image_honours_the_openai_output_knobs():
         encode_image(image, {"output_format": "gif"})
 
 
-@pytest.mark.parametrize("knob, value, served", [
-    ("output_compression", 101, False), ("output_compression", "high", False), ("png_compress_level", 10, False),
-    ("png_compress_level", -1, False), ("png_compress_level", True, False), ("output_compression", 50.9, False),
-    ("output_compression", float("inf"), False),
+@pytest.mark.parametrize("fmt, knob, value, served", [
+    ("jpeg", "output_compression", 101, False), ("jpeg", "output_compression", "high", False),
+    ("png", "png_compress_level", 10, False), ("png", "png_compress_level", -1, False),
+    ("png", "png_compress_level", True, False), ("jpeg", "output_compression", 50.9, False),
+    ("jpeg", "output_compression", float("inf"), False),
     # whole numbers that main read through int()
-    ("output_compression", 90.0, True), ("output_compression", "90", True), ("png_compress_level", 0.0, True),
+    ("jpeg", "output_compression", 90.0, True), ("jpeg", "output_compression", "90", True),
+    ("png", "png_compress_level", 0.0, True),
+    # the other format's knob, which main ignored
+    ("png", "output_compression", 150, True), ("jpeg", "png_compress_level", 10, True),
 ])
-def test_intake_refuses_only_an_output_knob_encode_image_cannot_apply(knob, value, served):
+def test_intake_refuses_only_an_output_knob_encode_image_cannot_apply(fmt, knob, value, served):
     """Models check the request with image_output_format before generating, so it must
     refuse what encode_image would refuse (or misapply) after the denoise, and serve the rest."""
-    kwargs = {"output_format": "jpeg" if knob == "output_compression" else "png", knob: value}
+    kwargs = {"output_format": fmt, knob: value}
     if served:
         encode_image(torch.zeros(3, 16, 16, dtype=torch.uint8), kwargs)
     else:
