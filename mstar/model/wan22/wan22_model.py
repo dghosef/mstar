@@ -152,6 +152,9 @@ class Wan22Model(Model):
                     head_dim=cfg.attention_head_dim,
                     # one segment per guidance branch
                     max_segments_per_request=2,
+                    # CFG-parallel: the dit's SP ranks split guidance branches, not
+                    # heads, so each keeps every head (TP still splits them)
+                    shard_over_sp=False,
                     # the DiT is compiled, not captured: keep attention in its graph
                     compile_op=True,
                     dtype=torch.bfloat16,

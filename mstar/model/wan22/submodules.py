@@ -383,8 +383,6 @@ class Wan22DitSubmodule(_SingleRequestMixin, _Fp32IslandMixin, RaggedAttentionMi
     # (patchify -> blocks -> head) is compiled in __init__ (config.compile_dit),
     # leaving the solver, CFG combine, and everything touching sigma eager.
     disable_torch_compile = True
-    # CFG-parallel: the node's two ranks split guidance branches, not heads
-    splits_heads = False
 
     def __init__(self, transformer: nn.Module, config: Wan22Config, sp_group=None):
         super().__init__()

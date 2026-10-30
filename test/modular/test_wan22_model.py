@@ -115,8 +115,8 @@ def test_wan22_declares_only_dit_attention_resources():
     specs = model.get_node_resources()
     assert [spec.resource_key for spec in specs] == [Wan22DitSubmodule.SELF_ATTN]
     assert all(spec.nodes == {"dit"} for spec in specs)
-    # CFG-parallel: every rank keeps all the heads
-    assert not Wan22DitSubmodule.splits_heads
+    # CFG-parallel: every SP rank keeps all the heads
+    assert not specs[0].config.shard_over_sp
     model.config = Wan22Config(attention_backend="sdpa")
     assert model.get_node_resources() == []
     assert model.get_request_resource_configs(partition_fwd_args={}) == {}
