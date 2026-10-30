@@ -663,7 +663,7 @@ def test_mla_ranks_refuse_the_same_steps_past_the_fa_planners_work_item_cap(monk
     ]
     # the context lengths each rank plans
     indptrs = case.plan["main"].cpu_indptrs
-    lens = [place.local_indptrs(indptrs, CP_PAGE, context_only=True)[0].kv_lens.tolist() for _, place in ranks]
+    lens = [place.local_indptrs(indptrs.context_only(CP_PAGE), CP_PAGE)[0].kv_lens.tolist() for _, place in ranks]
     assert lens[0] != lens[1]
 
     def refuses(attn) -> bool:

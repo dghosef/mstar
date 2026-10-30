@@ -73,12 +73,9 @@ class ContextParallel(NamedTuple):
         last = np.clip((logical_last - self.index + self.size - 1) // self.size, 0, slots)
         return last, np.where(npages > 0, (npages - 1) * slots + last, 0)
 
-    def local_indptrs(
-        self, indptrs: PagedIndptrs, page_size: int, context_only: bool = False,
-    ) -> tuple[PagedIndptrs, np.ndarray]:
+    def local_indptrs(self, indptrs: PagedIndptrs, page_size: int) -> tuple[PagedIndptrs, np.ndarray]:
         """A plan's logical paged indptrs as this rank's (``page_size`` the logical one), and per row
-        whether it holds any of this rank's slots. With ``context_only``, a row's KV is its stored
-        context alone: the step's own tokens and the pages past them are dropped.
+        whether it holds any of this rank's slots.
 
         Every row keeps a length of at least 1 and a last page holding at least one slot, as on one
         rank: FlashInfer's split-KV planner counts a row's pages where its kernel counts its tokens,
@@ -87,18 +84,12 @@ class ContextParallel(NamedTuple):
         partial is masked before the exchange (``exchange_partials``)."""
         kvp = indptrs.paged_kv_indptr.numpy().astype(np.int64)
         npages = np.diff(kvp)
-        logical_last = indptrs.paged_kv_last_page_len.numpy()
-        rows_pages = npages
-        if context_only:
-            stored = np.maximum(indptrs.stored_lens(page_size), 0)
-            rows_pages = -(-stored // page_size)
-            logical_last = stored - np.maximum(rows_pages - 1, 0) * page_size
-        last, lens = self.local_last_page_len(logical_last, rows_pages, page_size)
+        last, lens = self.local_last_page_len(indptrs.paged_kv_last_page_len.numpy(), npages, page_size)
         valid = lens > 0
         drop = valid & (last == 0)
         kv_indptr, indices = indptrs.paged_kv_indptr, indptrs.paged_kv_indices
-        if context_only or drop.any() or not valid.all():
-            keep_pages = np.where(valid, rows_pages - drop, 0)
+        if drop.any() or not valid.all():
+            keep_pages = np.where(valid, npages - drop, 0)
             new_kvp = np.zeros(len(npages) + 1, dtype=np.int64)
             np.cumsum(np.where(valid, keep_pages, 1), out=new_kvp[1:])
             row = np.repeat(np.arange(len(npages)), npages)
@@ -123,7 +114,8 @@ class ContextParallel(NamedTuple):
         partial: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]] | None,
         new: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        """Attention over the whole pool for this rank's query, fp32: ``queries`` its parts, each
+        """Attention over the whole pool for this rank's query, fp32 (``new``'s out when ``partial`` is
+        None): ``queries`` its parts, each
         ``[N, H, *]`` (one, or a backend's several, such as MLA's ``q_nope`` and ``q_pe``).
         ``partial`` attends this rank's slots for the parts ``exchange_queries`` returns and gives
         ``(out, lse, valid)`` as ``exchange_partials`` takes them; ``new`` is the step's own
@@ -131,7 +123,7 @@ class ContextParallel(NamedTuple):
         Runs the same collectives on every rank; none when ``partial`` is None, which every rank
         must agree on: no row has stored context, so ``new`` is the whole attention."""
         if partial is None:
-            return new[0].float()
+            return new[0]
         outs, lses = self.exchange_partials(*partial(*self.exchange_queries(queries)))
         if new is not None:
             outs = torch.cat([outs, new[0].to(outs.dtype).unsqueeze(0)])
@@ -226,10 +218,11 @@ class ContextParallelWrapper:
         The context attention reads its indptrs for a one-token-a-row step, its stored context
         alone otherwise."""
         context = kv_out.cpu_indptrs
-        local, valid_rows = placement.local_indptrs(context, page_size, context_only=self.new is not None)
-        self.context_empty = (
-            not self._captured and self.new is not None and not (context.stored_lens(page_size) > 0).any()
-        )
+        if self.new is not None:
+            context = context.context_only(page_size)
+        local, valid_rows = placement.local_indptrs(context, page_size)
+        # no row has a stored page: logical, so the same on every rank
+        self.context_empty = not self._captured and self.new is not None and not int(context.paged_kv_indptr[-1])
         if self.new is None:
             self.context.plan(dtype=dtype, **local.to_kwargs_dict())
         else:
@@ -242,8 +235,9 @@ class ContextParallelWrapper:
             assert n <= self._valid.shape[0], f"{n} query tokens on a wrapper captured for {self._valid.shape[0]}"
         elif self._valid is None or self._valid.shape[0] < n:
             self._valid = torch.zeros(max(n, 256), dtype=torch.bool, device=self._device)
-        # the whole buffer: a captured bucket's padding tokens read False rather than a stale flag
-        self._stager.copy_(self._valid, valid, pad_value=False)
+        # a captured bucket's whole buffer, so its padding tokens read False rather than a stale flag;
+        # an eager step reads its own tokens' alone
+        self._stager.copy_(self._valid, valid, pad_value=False if self._captured else None)
 
     def attend(
         self, placement, queries: tuple[torch.Tensor, ...], kv_cache_layer: torch.Tensor,

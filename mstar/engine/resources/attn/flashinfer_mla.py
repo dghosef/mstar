@@ -28,7 +28,7 @@ from mstar.engine.resources.attn.config import AttentionStep
 from mstar.engine.resources.base import CGSlotKey, Resource
 from mstar.engine.resources.context_parallel import ContextParallelWrapper
 from mstar.engine.resources.kv.config import KVConfig, KVLayout
-from mstar.engine.resources.kv.plan import KVPlanOutputs, build_paged_indptrs, context_only_views
+from mstar.engine.resources.kv.plan import KVPlanOutputs
 from mstar.engine.resources.step import SlotLease, StepContext
 
 logger = logging.getLogger(__name__)
@@ -432,8 +432,9 @@ class FlashInferMLAManager(AttentionManager):
                 # the rows' query counts come from this step's own segments, the kv from the
                 # stored context (the cache's segments describe what the step appends)
                 spans = [int(seg.span) for seg in (step.segments or ()) if seg.label == label]
-                views = context_only_views(kv_out.views, spans, self._kv_config.page_size)
-                indptrs = build_paged_indptrs(views, self._kv_config.page_size)
+                indptrs = indptrs.context_only(
+                    self._kv_config.page_size, torch.from_numpy(np.cumsum([0, *spans], dtype=np.int32)),
+                )
             rows = indptrs.qo_indptr.shape[0] - 1
             if lease is not None:
                 wrapper = self._cg_wrapper(lease, label, rows, ctx.force_prefill)
