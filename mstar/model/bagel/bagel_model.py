@@ -89,6 +89,7 @@ from mstar.model.bagel.submodules import (
     IMAGE_DECODE,
     IMAGE_GEN,
     IMAGE_SENTINELS,
+    LLM_GRAPH_WALKS,
     NODE_TO_CFG_LABEL,
     CFGWindow,
     CombineCFGSubmodule,
@@ -960,7 +961,7 @@ class BagelModel(Model):
         The conductor resolves this once and the engine hands each config to
         its resource at ingest.
         """
-        from mstar.model.bagel.submodules import LLM_GRAPH_WALKS, active_labels
+        from mstar.model.bagel.submodules import active_labels
 
         model_kwargs = model_kwargs or {}
         request = partition_fwd_args[DEFAULT_PARTITION].full_metadata.kwargs
@@ -1007,7 +1008,7 @@ class BagelModel(Model):
                 needed_labels_per_node_walk={
                     (node, walk): active_labels(walk, cfg, node)
                     for node in nodes
-                    for walk in LLM_GRAPH_WALKS
+                    for walk in LLM_GRAPH_WALKS[self._has_cfg_parallel]
                 },
                 # Only the main LLM instance creates cache branches consumed
                 # by the remote CFG replicas, and it exports only the ones the
@@ -1167,9 +1168,8 @@ class BagelModel(Model):
             DECODE: decode,
             IMAGE_DECODE: self._vae_decode(),
         }
-        # the CFG-parallel walks need the branch nodes
         walks.update({
-            walk: self._denoise_walk(walk) for walk, d in DENOISE_WALKS.items() if self._has_cfg_parallel or not d.split
+            walk: self._denoise_walk(walk) for walk in LLM_GRAPH_WALKS[self._has_cfg_parallel] if walk in DENOISE_WALKS
         })
         return walks
 

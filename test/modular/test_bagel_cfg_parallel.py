@@ -62,8 +62,7 @@ def test_cfg_graph_is_reused_for_tp_branches():
 
     assert set(walks) == {
         "prefill_text", "prefill_vit", "prefill_vae", "decode",
-        "image_gen", "image_gen_head", "image_gen_guided2", "image_gen_guided3", "image_gen_cfg2", "image_gen_cfg3",
-        "image_decode",
+        "image_gen", "image_gen_head", "image_gen_cfg2", "image_gen_cfg3", "image_decode",
     }
     assert model.get_default_sharding_config().tp_enabled_nodes == {
         "LLM", "LLM_cfg_text", "LLM_cfg_img",

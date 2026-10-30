@@ -96,10 +96,17 @@ def denoise_loop(walk: str) -> str:
     return f"{walk}_loop"
 
 
-# The LLM nodes' walks, and the CFG branch each node owns. Module level
+# The LLM nodes' walks, by whether the deployment splits the CFG branches
+# (`image_gen_phases` runs a guided window on the branch nodes there, else on
+# LLM alone, never both), and the CFG branch each node owns. Module level
 # because both the submodule (per step) and the model (per request, in
 # get_request_resource_configs) have to answer the same question.
-LLM_GRAPH_WALKS = ("prefill_text", "prefill_vit", "prefill_vae", "decode", *DENOISE_WALKS)
+LLM_GRAPH_WALKS = {
+    cfg_parallel: ("prefill_text", "prefill_vit", "prefill_vae", "decode", *(
+        walk for walk, d in DENOISE_WALKS.items() if d.branches == 1 or d.split == cfg_parallel
+    ))
+    for cfg_parallel in (False, True)
+}
 NODE_TO_CFG_LABEL = {
     "LLM": "main",
     "LLM_cfg_text": "cfg_text",
