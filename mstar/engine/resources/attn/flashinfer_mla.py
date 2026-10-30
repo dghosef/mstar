@@ -47,7 +47,9 @@ def flashinfer_mla_supports(kv_lora_rank: int, qk_rope_head_dim: int) -> bool:
     return qk_rope_head_dim == 0 and _flashinfer_at_least("0.6.18")
 
 
-# the work items a plan of FlashInfer's FA MLA planner (fa2, fa3) holds, as of 0.7.2
+# the FlashInfer whose FA MLA planner (fa2, fa3) rules `fa_work_items_bound` copies: its cap on a
+# plan's work items, its SM cluster and query tile, and its KV split limit
+_FA_PLANNER_VERSION = "0.7.2"
 _FA_MAX_WORK_ITEMS = 16384
 
 
@@ -331,6 +333,16 @@ class FlashInferMLAManager(AttentionManager):
             self._wrapper_kwargs["backend"] = "fa3" if current_platform.arch(self._device) == "sm_90" else "fa2"
         if self._wrapper_kwargs["backend"] in ("fa2", "fa3"):
             self._fa_sm_count = _sm_count(self._device)
+            if self.uses_kernel:
+                import flashinfer
+
+                if flashinfer.__version__ != _FA_PLANNER_VERSION:
+                    raise ValueError(
+                        f"MLA attention over context-parallel KV pool {self._kv_cache_name!r} refuses, on every "
+                        f"rank alike, the steps FlashInfer {_FA_PLANNER_VERSION}'s FA planner may refuse on one "
+                        f"rank alone, from a copy of that planner's rules; FlashInfer {flashinfer.__version__} "
+                        f"is installed. Install flashinfer-python=={_FA_PLANNER_VERSION} (the glm extra pins it)"
+                    )
 
     @property
     def uses_kernel(self) -> bool:

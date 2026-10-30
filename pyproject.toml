@@ -398,7 +398,8 @@ asr = [
 
 # GLM-5.x
 glm = [
-    "flashinfer-python>=0.7.2",
+    # pinned: attention over a context-parallel pool copies this FlashInfer's MLA planner rules
+    "flashinfer-python==0.7.2",
     "huggingface-hub",
     "mooncake-transfer-engine>=0.3.13.post1",
     "ninja",  # speeds up the first-use JIT build of the vendored MoE align kernel

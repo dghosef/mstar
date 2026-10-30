@@ -681,6 +681,42 @@ def test_mla_ranks_refuse_the_same_steps_past_the_fa_planners_work_item_cap(monk
     assert all(a == b for a, b in decisions) and {a for a, _ in decisions} == {False, True}
 
 
+def test_mla_attention_over_a_placed_pool_refuses_a_flashinfer_whose_planner_it_did_not_copy(monkeypatch):
+    monkeypatch.setattr(fm, "_sm_count", lambda device: 132)
+    monkeypatch.setattr(fm.FlashInferMLAManager, "uses_kernel", property(lambda self: True))
+    monkeypatch.setitem(sys.modules, "flashinfer", types.SimpleNamespace(__version__="0.7.3"))
+    joint = JointGroups(tp_group=_group(0, P), sp_group=CommGroup.trivial())
+    with pytest.raises(ValueError, match=r"FlashInfer 0\.7\.3 is installed"):
+        _cp_attention(joint, CPU, torch.float32, mla=True, flashinfer_backend="fa2")
+
+
+def test_the_fa_work_item_bound_holds_flashinfers_own_count():
+    """The refusal above is rank-symmetric only while ``fa_work_items_bound`` is at least what the
+    installed FlashInfer's planner counts on any rank's KV lengths."""
+    flashinfer = pytest.importorskip("flashinfer")
+    if flashinfer.__version__ != fm._FA_PLANNER_VERSION:
+        pytest.skip(f"attention over a placed pool refuses FlashInfer {flashinfer.__version__} at bind")
+    from flashinfer.mla._batch_mla._backends import _fa_common as fa
+
+    assert fm._FA_MAX_WORK_ITEMS == fa._FA_MAX_WORK_ITEMS
+    gen = torch.Generator().manual_seed(0)
+    for _ in range(3000):
+        rows = int(torch.randint(1, 6, (), generator=gen))
+        q = torch.randint(1, 300, (rows,), generator=gen)
+        kv = q + torch.randint(0, 20000, (rows,), generator=gen)
+        heads = (8, 16, 20, 40, 64, 128)[int(torch.randint(6, (), generator=gen))]
+        sm = (78, 132)[int(torch.randint(2, (), generator=gen))]
+        bound = fm.fa_work_items_bound(torch.cat([torch.zeros(1, dtype=q.dtype), q.cumsum(0)]), heads, sm)
+        for causal in (False, True):
+            try:
+                count = fa._fa_plan_work_count(q.tolist(), kv.tolist(), heads, sm, causal)
+            except fa._BackendPlanUnsupportedError:
+                # its query tiles alone are past the cap
+                assert bound > fa._FA_MAX_WORK_ITEMS
+                continue
+            assert count <= bound, (q.tolist(), kv.tolist(), heads, sm, causal)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 @LAYOUTS
 @pytest.mark.parametrize("captured", [False, True], ids=["eager", "captured"])
