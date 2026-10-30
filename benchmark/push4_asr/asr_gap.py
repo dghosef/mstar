@@ -108,7 +108,7 @@ def run(engine: str, model: str, a: argparse.Namespace) -> dict:
         bench = ["numactl", f"--physcpubind={a.client_cores}", VENV_PY, "-m", "benchmark.asr_bench", "--url",
                  f"http://127.0.0.1:{PORT}", "--model", HF[model] if engine == "vllm" else model, "--system",
                  engine, "--data-dir", DATA, "--concurrency", *map(str, a.conc), "--repeats", str(a.repeats),
-                 "--warmup", "16", "--output-json", f"{out}/bench.json"]
+                 "--warmup", "16", "--output-json", f"{out}/bench.json"] + (["--long-form"] if a.long_form else [])
         r = subprocess.run(bench, cwd=a.client_tree, env=dict(os.environ, HF_HOME=f"{HOME}/hf"),
                            capture_output=True, text=True, timeout=7200, check=False)
         open(f"{out}/client.log", "w").write(r.stdout + r.stderr)
@@ -139,6 +139,7 @@ def main() -> None:
     ap.add_argument("--client-tree", default=f"{HOME}/push4/omni/nb")
     ap.add_argument("--config", default=None)
     ap.add_argument("--env", action="append", default=[])
+    ap.add_argument("--long-form", action="store_true", help="also time the ~10 min long_form file at c=1")
     ap.add_argument("--server-cores", default=SERVER_CORES)
     ap.add_argument("--client-cores", default=CLIENT_CORES)
     a = ap.parse_args()
