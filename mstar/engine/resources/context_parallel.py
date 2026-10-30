@@ -272,19 +272,6 @@ class ContextParallelWrapper:
         return self.new.run(*query_and_kv, return_lse=True)
 
 
-def bound_placement(resources, pool: str, config: PagedKVConfig) -> "ContextParallel | None":
-    """The placement of ``pool`` an attention resource over it binds (``resources[pool].placement``),
-    refusing one that doesn't match the pool's ``context_parallel``: unplaced, a wrapper would plan
-    the logical page size over a cache of ``page_size / P``."""
-    placement = resources[pool].placement
-    if (placement is not None) != config.context_parallel:
-        raise ValueError(
-            f"KV pool {pool!r} {'sets' if config.context_parallel else 'does not set'} context_parallel, "
-            f"but the resource bound for it {'has no' if placement is None else 'has a'} placement"
-        )
-    return placement
-
-
 def merge(outs: torch.Tensor, lses: torch.Tensor) -> torch.Tensor:
     """Attention over the union of disjoint key sets from each set's partial: ``outs`` ``[K, ..., D]``
     and natural-log ``lses`` ``[K, ...]``; fp32. A partial with lse -inf and a finite out adds

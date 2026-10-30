@@ -20,7 +20,7 @@ from mstar.engine.resources.attn.wrappers import (
     check_flashinfer_head_dim,
 )
 from mstar.engine.resources.base import CGSlotKey, Resource
-from mstar.engine.resources.context_parallel import ContextParallelWrapper, bound_placement
+from mstar.engine.resources.context_parallel import ContextParallelWrapper
 from mstar.engine.resources.kv.config import PagedKVConfig
 from mstar.engine.resources.kv.plan import KVPlanOutputs
 from mstar.engine.resources.spec import CombinedSplit
@@ -76,14 +76,12 @@ class FlashInferManager(AttentionManager):
         self._decode_tensor_cores = decode_tensor_cores
 
         self._workspaces = WorkspacePool(device)
-        # the KV pool's placement (`bind_dependencies`)
-        self._placement = None
 
     def depends_on(self):
         return {self._kv_cache_name}
 
     def bind_dependencies(self, resources: Mapping[str, Resource]) -> None:
-        placement = bound_placement(resources, self._kv_cache_name, self._kv_config)
+        placement = resources[self._kv_cache_name].placement
         self._placement = placement
         if placement is None:
             return
@@ -295,9 +293,6 @@ class FlashInferManager(AttentionManager):
         self._preplan_states = {}
 
     ### Submodule-level functionality
-    def reads_step_kv(self, label: str | None = None) -> bool:
-        return self._placement is not None and self._current_plan_states[label or self._default_label].reads_step_kv
-
     @torch.compiler.disable
     def qo_indptr_buf(self, label: str="main") -> torch.Tensor | None:
         if label not in self._current_plan_states:

@@ -26,7 +26,7 @@ from mstar.engine.resources.attn.base import (
 )
 from mstar.engine.resources.attn.config import AttentionStep
 from mstar.engine.resources.base import CGSlotKey, Resource
-from mstar.engine.resources.context_parallel import ContextParallelWrapper, bound_placement
+from mstar.engine.resources.context_parallel import ContextParallelWrapper
 from mstar.engine.resources.kv.config import KVConfig, KVLayout
 from mstar.engine.resources.kv.plan import KVPlanOutputs
 from mstar.engine.resources.step import SlotLease, StepContext
@@ -309,8 +309,6 @@ class FlashInferMLAManager(AttentionManager):
             backend=backend,
         )
         self._workspaces = WorkspacePool(device)
-        # the KV pool's placement (`bind_dependencies`)
-        self._placement = None
         # over a placed pool on the FA planner (the kernel in use), the device's SMs, for its work-item cap
         self._fa_sm_count: int | None = None
 
@@ -318,7 +316,7 @@ class FlashInferMLAManager(AttentionManager):
         return {self._kv_cache_name}
 
     def bind_dependencies(self, resources: Mapping[str, Resource]) -> None:
-        placement = bound_placement(resources, self._kv_cache_name, self._kv_config)
+        placement = resources[self._kv_cache_name].placement
         self._placement = placement
         if placement is None:
             return
@@ -491,9 +489,6 @@ class FlashInferMLAManager(AttentionManager):
     def clear_preplan(self):
         self._preplanned = False
         self._preplan_states = {}
-
-    def reads_step_kv(self, label: str | None = None) -> bool:
-        return self._placement is not None and self._current_plan_states[label or self._default_label].reads_step_kv
 
     @torch.compiler.disable
     def qo_indptr_buf(self, label: str = "main") -> torch.Tensor | None:

@@ -8,7 +8,7 @@ naming a backend in a spec does not load the others.
 
 import logging
 import os
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 
@@ -20,6 +20,9 @@ from mstar.engine.resources.attn.wrappers import (
 from mstar.engine.resources.base import AttentionResource, EngineResourceInfo
 from mstar.engine.resources.kv.config import KVConfig, PagedKVConfig, RingKVConfig
 from mstar.engine.resources.kv.keys import fingerprint
+
+if TYPE_CHECKING:
+    from mstar.engine.resources.context_parallel import ContextParallel
 
 logger = logging.getLogger(__name__)
 _BACKEND_KV_CONFIG: dict[AttnBackend, type[KVConfig]] = {
@@ -44,6 +47,8 @@ def resolve_attn_backend(backend: AttnBackend, device: torch.device) -> AttnBack
 
 class AttentionManager(AttentionResource):
     prefix_skip_safe = True
+    # the KV pool's placement, bound by a backend that supports a context-parallel pool
+    _placement: "ContextParallel | None" = None
 
     # Remains abstract except for build; will build based
     # on the attention backend
@@ -216,6 +221,8 @@ class AttentionManager(AttentionResource):
         backend over a context-parallel pool, a step that attends its own tokens apart from the
         pool. Fixed once the step is planned, so a captured bucket replays the same answer.
         """
+        if self._placement is not None:
+            return self._current_plan_states[label or self._default_label].reads_step_kv
         return not self.requires_kv_write
 
 
