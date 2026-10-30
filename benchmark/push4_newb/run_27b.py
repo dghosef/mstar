@@ -66,9 +66,9 @@ def main() -> int:
     out = Path(a.out).expanduser()
     out.mkdir(parents=True, exist_ok=True)
     phases = a.phases.split(",")
-    if "profile" in phases:  # also the cold compile: the first mstar start, untimed
+    if "profile" in phases:  # the last (highest-concurrency) cell; also the cold compile, untimed
         run("profile", out, ["profile", "--arms", ",".join(ARMS[x] for x in a.profile_arms.split(",")),
-                             "--cells", "random_1024_256:128", "--out", str(out / "profile")])
+                             "--cells", a.cells.split(",")[-1], "--out", str(out / "profile")])
     if "bench" in phases:
         arms = ",".join(ARMS[x] for x in a.arms.split(","))
         run("bench", out, ["bench", "--arms", arms, "--cells", a.cells, "--rounds", str(a.rounds),
