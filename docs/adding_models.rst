@@ -1834,7 +1834,7 @@ that a misspelled setting is never silently ignored:
      - Accepts
    * - ``KVSpec`` with ``PagedKVConfig``
      - ``max_num_pages``, ``page_size``, ``max_seq_len``, ``cpu_offload_pages``,
-       ``prefix_cache``, ``prefix_cache_salt``
+       ``prefix_cache``, ``prefix_cache_salt``, ``context_parallel`` (see below)
    * - ``KVSpec`` with ``RingKVConfig``
      - ``num_sessions``
    * - ``BoundedKVSpec``
@@ -1858,6 +1858,33 @@ Tune the cache shape on the KV resource, not on the attention resource that read
 example, ``configs/qwen3tts.yaml`` selects FA2 under ``talker_attn``,
 ``configs/cosmos3_nano.yaml`` sets the page count under its paged KV key, and
 ``configs/waypoint.yaml`` sets the resident world count under its ring KV key.
+
+**Context parallelism.** ``context_parallel: true`` on a paged KV pool splits each request's
+token positions over a group of ranks that would otherwise store the same KV heads. Page ids
+stay the same on every rank; within a page, slot ``s`` is stored by the rank at partner index
+``s % P``, so each rank holds ``page_size / P`` slots a page. Every attention over the pool
+computes over its own slots and merges the partial results across the group. The model
+declares nothing for it. Which ranks form the group depends on the node's shape:
+
+- **No SP ranks (TP mode).** The group is the TP ranks that share one KV head:
+  ``P = tp / num_kv_heads`` (``tp`` for MLA, whose one latent is every rank's). Head sharding
+  is unchanged. Loading fails when the pool has as many KV heads as TP ranks or more, since
+  then no ranks share a head. The partners are contiguous blocks of ``P`` TP ranks, the
+  blocks ``QKVParallelLinear`` gives one KV head (``kv_head_idx = tp_rank // replicas``). A
+  model that shards K and V itself must place its replicas the same way.
+- **SP ranks (SP mode).** The group is the node's SP ranks: ``P = sp_size``. Heads shard over
+  TP alone, and the node loads without its SP group, so its weights and every layer other
+  than attention are replicated across SP. That pays off only where TP can't grow, for
+  example when the query or recurrent head count isn't divisible by the GPU count. Where TP
+  mode applies, prefer it. Every paged pool of such a node must set ``context_parallel``.
+
+``page_size`` must be divisible by ``P``. ``max_num_pages`` still counts whole logical
+pages, so placement alone frees memory without adding capacity: raise ``max_num_pages`` by
+``P`` to use it. The pool logs its bytes per rank at load. Every resource that depends on
+the pool has to support context parallelism, or loading fails and names it; a ring or
+bounded KV pool can't set the key. DSA (the GLM-5.x indexer) and sliding-window attention
+are not supported, and the prefix cache's limits above one rank (``prefix_cache_tp``) are
+unchanged.
 
 .. note::
 
