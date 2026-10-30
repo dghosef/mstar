@@ -706,7 +706,7 @@ class Model(ABC):
         multimodal tensors from file_paths (images, audio, video).
         The model may inspect the raw tensors dict and compute additional
         derived tensors (e.g., Qwen3-Omni computes ``pixel_values``,
-        ``image_grid_thw``, ``audio_features``, ``audio_seqlens`` from the
+        ``image_grid_thw``, ``audio_features`` from the
         raw ``image_inputs`` / ``audio_inputs`` / ``video_inputs``).
 
         Args:
