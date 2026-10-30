@@ -256,6 +256,12 @@ class ContextParallelWrapper:
         new = None if self.new is None else self.attend_new(*queries, *new_keys)
         return placement.attend(queries, context, new).to(queries[0].dtype)
 
+    @property
+    def reads_step_kv(self) -> bool:
+        """Whether the step attends the keys ``run`` is passed (``AttentionManager.reads_step_kv``):
+        any step but one token a row."""
+        return self.new is not None
+
     def attend_context(self, *query_and_kv: torch.Tensor):
         """``(out, lse, valid)`` over this rank's slots, from ``context.run``'s query and KV arguments;
         ``valid`` as ``exchange_partials`` takes it."""
@@ -264,6 +270,19 @@ class ContextParallelWrapper:
 
     def attend_new(self, *query_and_kv: torch.Tensor):
         return self.new.run(*query_and_kv, return_lse=True)
+
+
+def bound_placement(resources, pool: str, config: PagedKVConfig) -> "ContextParallel | None":
+    """The placement of ``pool`` an attention resource over it binds (``resources[pool].placement``),
+    refusing one that doesn't match the pool's ``context_parallel``: unplaced, a wrapper would plan
+    the logical page size over a cache of ``page_size / P``."""
+    placement = resources[pool].placement
+    if (placement is not None) != config.context_parallel:
+        raise ValueError(
+            f"KV pool {pool!r} {'sets' if config.context_parallel else 'does not set'} context_parallel, "
+            f"but the resource bound for it {'has no' if placement is None else 'has a'} placement"
+        )
+    return placement
 
 
 def merge(outs: torch.Tensor, lses: torch.Tensor) -> torch.Tensor:

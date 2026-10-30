@@ -20,7 +20,7 @@ from mstar.engine.resources.attn.wrappers import (
     check_flashinfer_head_dim,
 )
 from mstar.engine.resources.base import CGSlotKey, Resource
-from mstar.engine.resources.context_parallel import ContextParallelWrapper
+from mstar.engine.resources.context_parallel import ContextParallelWrapper, bound_placement
 from mstar.engine.resources.kv.config import PagedKVConfig
 from mstar.engine.resources.kv.plan import KVPlanOutputs
 from mstar.engine.resources.spec import CombinedSplit
@@ -83,7 +83,7 @@ class FlashInferManager(AttentionManager):
         return {self._kv_cache_name}
 
     def bind_dependencies(self, resources: Mapping[str, Resource]) -> None:
-        placement = resources[self._kv_cache_name].placement
+        placement = bound_placement(resources, self._kv_cache_name, self._kv_config)
         self._placement = placement
         if placement is None:
             return
@@ -255,10 +255,6 @@ class FlashInferManager(AttentionManager):
 
         plan_outputs: KVPlanOutputs = ctx.plan_results.get(self._kv_cache_name)
         assert plan_outputs is not None, f"Attention Manager expected plan result from {self._kv_cache_name}"
-        # unbound, the wrappers would plan the logical page size over a cache of page_size / P
-        assert (self._placement is not None) == getattr(self._kv_config, "context_parallel", False), (
-            f"{self._kv_cache_name!r} sets context_parallel but bind_dependencies gave no placement"
-        )
 
         # a preplan leases a different cg slot, so its wrappers and workspaces
         # are disjoint from the ones the in-flight forward reads
@@ -300,10 +296,7 @@ class FlashInferManager(AttentionManager):
 
     ### Submodule-level functionality
     def reads_step_kv(self, label: str | None = None) -> bool:
-        # over a placed pool a step that isn't one token a row attends its own tokens from k and v
-        if self._placement is None:
-            return False
-        return self._current_plan_states[label or self._default_label].new is not None
+        return self._placement is not None and self._current_plan_states[label or self._default_label].reads_step_kv
 
     @torch.compiler.disable
     def qo_indptr_buf(self, label: str="main") -> torch.Tensor | None:
