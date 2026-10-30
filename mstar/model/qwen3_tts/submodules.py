@@ -884,10 +884,9 @@ class TalkerSubmodule(ARNodeSubmodule):
         return self.MAX_BATCH_SIZE
 
     def max_rows_in_combined(self, graph_walk: str) -> int | None:
-        # the cap is per walk: split MIXED_MAX_PREFILL_ROWS over the prefill walks
-        if graph_walk == "talker_decode":
-            return None
-        return self.MIXED_MAX_PREFILL_ROWS // (2 if self.config.supports_reference_audio else 1)
+        # The cap is per walk, and a variant runs one of the prefill walks: Base
+        # always clones, the others never do.
+        return None if graph_walk == "talker_decode" else self.MIXED_MAX_PREFILL_ROWS
 
     def get_accelerator_graph_configs(
         self, device: torch.device, tp_world_size: int = 1
