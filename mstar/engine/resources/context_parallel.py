@@ -192,7 +192,13 @@ class ContextParallelWrapper:
     (``new`` None); any other step attends its stored context (not causal) on ``context`` and its
     own tokens, from the keys the layer passes to ``run``, on ``new``: under TP placement all of
     them for this rank's heads, under SP placement this rank's zigzag chunks (``ZigzagWrapper``).
-    ``page_size`` is the logical one."""
+    ``page_size`` is the logical one.
+
+    ``check(what, qo_indptr)``, before anything is planned, is the backend's refusal of a plan its
+    kernel's planner may refuse on one rank of the lockstep instance alone. It sees every plan whose
+    lengths differ by rank: the context's, and under SP placement every partner's zigzag share of
+    the own tokens. TP mode's own-token plan has the same lengths on every rank, so a refusal of it
+    is symmetric already."""
 
     def __init__(
         self,
@@ -204,8 +210,10 @@ class ContextParallelWrapper:
         device: torch.device,
         batch_size: int | None = None,
         max_total_tokens: int | None = None,
+        check: Callable[[str, np.ndarray], None] | None = None,
     ):
         self._placement, self._page_size, self._dtype = placement, page_size, dtype
+        self._check = check
         self.context = context
         # None for a one-token-a-row step
         self.new = new
@@ -223,27 +231,21 @@ class ContextParallelWrapper:
         self.context_empty = False
 
     @torch.compiler.disable
-    def plan(self, kv_out, causal: bool = True, check: Callable[[str, np.ndarray], None] | None = None):
+    def plan(self, kv_out, causal: bool = True):
         """``kv_out``: the step's logical ``KVPlanOutput`` for this label. The context attention reads
-        its indptrs for a one-token-a-row step, its stored context alone otherwise.
-
-        ``check(what, qo_indptr)``, before anything is planned, is the backend's refusal of a plan
-        its kernel's planner may refuse on one rank of the lockstep instance alone. It sees every
-        plan whose lengths differ by rank: the context's, and under SP placement every partner's
-        zigzag share of the own tokens. TP mode's own-token plan has the same lengths on every rank,
-        so a refusal of it is symmetric already."""
+        its indptrs for a one-token-a-row step, its stored context alone otherwise."""
         context = kv_out.cpu_indptrs
         if self.new is not None:
             context = context.context_only(self._page_size)
-        if check is not None:
+        if self._check is not None:
             qo = context.qo_indptr.numpy()
-            check("the context", qo)
+            self._check("the context", qo)
             # under SP placement ``new`` is a ``ZigzagWrapper``; TP mode's own-token plan is symmetric
             if self._placement.over_sp and self.new is not None:
                 for index in range(self._placement.size):
                     share = self.new.share(qo, index, causal)
                     if len(share) > 1:
-                        check(f"partner {index}'s own tokens", share)
+                        self._check(f"partner {index}'s own tokens", share)
         local, valid_rows = self._placement.local_indptrs(context, self._page_size)
         # no row has a stored page: logical, so the same on every rank
         self.context_empty = not self._captured and self.new is not None and not int(context.paged_kv_indptr[-1])

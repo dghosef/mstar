@@ -449,6 +449,7 @@ class FlashInferMLAManager(AttentionManager):
         return ContextParallelWrapper(
             self._placement, self._kv_config.page_size, self._dtype, context, new, self._device,
             kwargs.get("batch_size"), max_total_tokens,
+            check=None if self._fa_sm_count is None else self._refuse_unplannable,
         )
 
     @property
@@ -498,9 +499,7 @@ class FlashInferMLAManager(AttentionManager):
                 )
                 wrapper = self._eager_wrapper(label, ctx.slot, is_decode)
             if self._placement is not None:
-                wrapper.plan(
-                    kv_out, causal=step.causal, check=None if self._fa_sm_count is None else self._refuse_unplannable,
-                )
+                wrapper.plan(kv_out, causal=step.causal)
             else:
                 wrapper.plan(causal=step.causal, dtype=self._dtype, **indptrs.to_kwargs_dict())
             plan_states[label] = wrapper
@@ -508,7 +507,7 @@ class FlashInferMLAManager(AttentionManager):
 
     def _refuse_unplannable(self, what: str, qo_indptr: np.ndarray) -> None:
         """Refuses, before FlashInfer can, a plan past its FA planner's work-item cap
-        (``ContextParallelWrapper.plan``'s ``check``). The planner counts the KV lengths a rank plans,
+        (``ContextParallelWrapper``'s ``check``). The planner counts the KV lengths a rank plans,
         which differ by rank over a placed pool, so its refusal could come on one rank alone; the
         bound reads the query lengths alone. Under SP placement the context's and the own tokens'
         heads are the same."""
