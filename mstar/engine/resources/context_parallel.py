@@ -241,21 +241,20 @@ class ContextParallelWrapper:
                 "run is passed (k and v, or MLA's latents as k); this step has more than one token "
                 "a row and got none"
             )
-        context = None if self.context_empty else lambda *parts: self.attend_context(*parts, kv_cache_layer)
+
+        def context(*parts: torch.Tensor):
+            # over this rank's slots, with the rows holding any of them
+            out, lse = self.context.run(*parts, kv_cache_layer, return_lse=True)
+            return out, lse, self._valid[: parts[0].shape[0]]
+
         new = None if self.new is None else self.new.run(*queries, *new_keys, return_lse=True)
-        return self._placement.attend(queries, context, new).to(queries[0].dtype)
+        return self._placement.attend(queries, None if self.context_empty else context, new).to(queries[0].dtype)
 
     @property
     def reads_step_kv(self) -> bool:
         """Whether the step attends the keys ``run`` is passed (``AttentionManager.reads_step_kv``):
         any step but one token a row."""
         return self.new is not None
-
-    def attend_context(self, *query_and_kv: torch.Tensor):
-        """``(out, lse, valid)`` over this rank's slots, from ``context.run``'s query and KV arguments;
-        ``valid`` as ``exchange_partials`` takes it."""
-        out, lse = self.context.run(*query_and_kv, return_lse=True)
-        return out, lse, self._valid[: query_and_kv[0].shape[0]]
 
 
 def merge(outs: torch.Tensor, lses: torch.Tensor) -> torch.Tensor:
