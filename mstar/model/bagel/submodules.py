@@ -92,7 +92,7 @@ SINGLE_NODE_DENOISE_WALKS = frozenset(walk for walk, d in DENOISE_WALKS.items() 
 
 def denoise_loop(walk: str) -> str:
     """A denoise walk's Loop. Named, and per walk, so a request's loop cap
-    (`get_loop_caps`) and the step's loop counter each name one phase."""
+    (`get_loop_caps`) names one phase."""
     return f"{walk}_loop"
 
 
@@ -1187,7 +1187,7 @@ class LLMSubmodule(ARNodeSubmodule):
         """
         requires_cfg = requires_cfg_for_inputs(inputs)
         labels = self._get_active_labels(graph_walk, requires_cfg)
-        if graph_walk in SINGLE_NODE_DENOISE_WALKS and requires_cfg:
+        if graph_walk in SINGLE_NODE_DENOISE_WALKS:
             # Only the branches the walk runs: labels are ordered main,
             # cfg_text, cfg_img, so the first n. One branch is the plain
             # "main" step below.
@@ -1236,16 +1236,16 @@ class LLMSubmodule(ARNodeSubmodule):
             })
 
         info = per_request_info or {}
-        guided = sink = frozenset()
+        guided_rids = sink = frozenset()
         if requires_cfg:
             # A pre-plan declares over the bucket's template rows, which are all
             # guided, so whether a row is guided comes from its request.
-            guided = frozenset(
+            guided_rids = frozenset(
                 rid for rid, inp in zip(request_ids, inputs, strict=True)
                 if (info[rid].step_metadata.get("requires_cfg", False) if rid in info else inp.resource_step_info)
             )
             sink = frozenset(
-                (rid, label) for label in labels if label != "main" for rid in request_ids if rid not in guided
+                (rid, label) for label in labels if label != "main" for rid in request_ids if rid not in guided_rids
             )
         writes = graph_walk not in DENOISE_WALKS
         if graph_walk in ("prefill_vit", "prefill_vae"):
@@ -1272,13 +1272,13 @@ class LLMSubmodule(ARNodeSubmodule):
                 # decode row sharing the step
                 fork_rids = frozenset(
                     rid for rid, walk in zip(request_ids, row_walks, strict=True)
-                    if walk == "prefill_text" and rid in guided
+                    if walk == "prefill_text" and rid in guided_rids
                 )
                 pre_forks = (("main", "cfg_text"),)
             elif graph_walk in ("prefill_vit", "prefill_vae"):
                 # cfg_text tracks the context including this image, so it
                 # forks at commit, after the step's writes have landed.
-                fork_rids = guided
+                fork_rids = guided_rids
                 post_forks = (("main", "cfg_text"),)
 
         # `cg_key_info` picks among the walk's capture buckets; it must match
