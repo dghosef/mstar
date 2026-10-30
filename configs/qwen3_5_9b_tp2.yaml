@@ -15,10 +15,10 @@ knobs:
 model_kwargs:
   prefill_token_buckets: [32, 64, 128, 256, 512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192]
 node_groups:
-  # Text, images and video. Colocated: the
-  # encoder runs once per request, then idles.
+  # Text, images and video. A vision encoder replica beside each LLM rank,
+  # so the encoder steps that stall the lockstep LLM split over both ranks.
   - node_names: [vision_encoder]
-    ranks: [0]
+    ranks: [0, 1]
   - node_names: [LLM]
     ranks: [0, 1]
     tp_size: 2
