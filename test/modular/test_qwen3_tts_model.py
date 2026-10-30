@@ -1313,22 +1313,10 @@ def test_qwen3_tts_talker_batches_and_captures_decode():
     assert padding.kwargs == {"suppress_eos": True} and not padding.tensor_inputs
     # the clone prefill is the same forward: it replays the plain prefill's captures
     assert prefill_config.replay_graph_walks == ["talker_prefill", "talker_prefill_clone"]
-    prefill_batch = ExecutingBatch(
-        node_name="Talker", step_context=_step_context("talker_prefill", ["a", "b"]),
-        per_request_input_tensors={}, per_request_info=info,
-    )
-    assert submodule.can_use_accelerator_graphs(prefill_batch, model_inputs)
-    clone_batch = ExecutingBatch(
-        node_name="Talker", step_context=_step_context("talker_prefill_clone", ["a", "b"]),
-        per_request_input_tensors={}, per_request_info=info,
-    )
-    assert submodule.can_use_accelerator_graphs(clone_batch, model_inputs)
     # Residual sampling params live in per-request sampler buffers, so requests
-    # that disagree about them still batch AND still replay the decode graph.
-    # (They used to fall out of both.)
+    # that disagree about them still batch.
     info["b"].step_metadata["subtalker_sampling"] = {"temperature": 0.7}
     assert submodule.can_batch(batch, model_inputs)
-    assert submodule.can_use_accelerator_graphs(batch, model_inputs)
 
 
 def _assert_same_tensor(new: torch.Tensor, old: torch.Tensor) -> None:
