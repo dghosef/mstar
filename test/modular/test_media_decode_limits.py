@@ -225,7 +225,8 @@ class _Metadata:
 
 def _fake_torchcodec(monkeypatch, pulled, metadata=None, opened=None, key_frames=None):
     class FakeDecoder:
-        def __init__(self, *_args, **kwargs):
+        def __init__(self, source=None, *_args, **kwargs):
+            self.source = source
             self.metadata = metadata or _Metadata()
             if opened is not None:
                 opened.append(kwargs)
@@ -243,6 +244,8 @@ def _fake_torchcodec(monkeypatch, pulled, metadata=None, opened=None, key_frames
             return torch.zeros(3, 64, 64, dtype=torch.uint8)
 
         def get_frames_at(self, indices):
+            if isinstance(self.source, str):
+                pathlib.Path(self.source).read_bytes()  # a decoder on a path reads the file to decode
             pulled.extend(indices)
             # every pixel of a frame holds its index (mod 256), to tell the frames apart
             frames = (torch.tensor(indices, dtype=torch.int64) % 256).to(torch.uint8)
@@ -293,14 +296,17 @@ def test_vjepa2_refuses_a_video_without_load_video_metadata():
     # the encoder-only walk encodes the whole clip, whatever horizon the request names
     ({"rollout_horizon": 4, "skip_predictor": True}, 64),
 ])
-def test_vjepa2_ac_decodes_only_the_frames_its_walk_encodes(monkeypatch, kwargs, decoded):
+def test_vjepa2_ac_decodes_only_the_frames_its_walk_encodes(monkeypatch, tmp_path, kwargs, decoded):
     from mstar.model.vjepa2.vjepa2_model import VJepa2Model
 
     pulled = []
     _fake_torchcodec(monkeypatch, pulled, _Metadata(num_frames=1000, height=64, width=64))
     model = VJepa2Model("unused", skip_weight_loading=True, predictor_kind="ac")
-    loaded = model.load_video("clip.mp4", "cpu")
+    upload = tmp_path / "clip.mp4"
+    upload.write_bytes(b"not decoded by the fake")
+    loaded = model.load_video(str(upload), "cpu")
     assert pulled == []
+    upload.unlink()  # the API server deletes an upload on a timer that doesn't wait for the decode
     out = model.process_prompt(
         None, ["video"], ["video"],
         tensors={"video_inputs": [loaded.data]}, input_metadata={"video_inputs": [loaded.metadata]},
@@ -320,10 +326,10 @@ def test_gop_split_decode_returns_the_frames_in_the_order_asked(monkeypatch):
     _fake_torchcodec(monkeypatch, pulled, opened=opened, key_frames=[0, 10, 20, 30, 40])
     monkeypatch.setattr(video_decode, "_max_decoders", lambda: 3)
     indices = [41, 3, 22, 3, 15, 0, 35, 22, 8]
-    frames = video_decode.decode_frames_at("clip.mp4", indices)
+    frames = video_decode.decode_frames_at(torch.zeros(16, dtype=torch.uint8), indices)
     assert frames[:, 0, 0, 0].tolist() == indices
     assert sorted(pulled) == sorted(set(indices))
-    assert len(opened) == 4  # one for the keyframe index, then one per group of GOPs
+    assert len(opened) == 3  # one per group of GOPs: the keyframe index's decoder decodes the first
 
 
 def _mp4(path, frames, side=64):

@@ -99,9 +99,6 @@ logger = logging.getLogger(__name__)
 # frames converted to float and resized at a time
 _PREPROCESS_CHUNK = 4
 
-# load_video's metadata key for the file process_prompt decodes
-_VIDEO_PATH = "path"
-
 # ImageNet normalization constants (match HF ``IMAGENET_DEFAULT_MEAN``/``STD``).
 _IMAGENET_MEAN = (0.485, 0.456, 0.406)
 _IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -603,16 +600,19 @@ class VJepa2Model(Model):
     # ------------------------------------------------------------------
 
     def load_video(self, filepath: str, device: str) -> TensorAndMetadata:
-        """Read the video's header and choose the ``frames_per_clip`` sample indices; decode nothing.
+        """Read the video's header, choose the ``frames_per_clip`` sample indices and read the
+        file's bytes; decode nothing.
 
         Sampling mirrors HuggingFace ``BaseVideoProcessor.sample_frames``
         (``video_processing_utils.py:253``): ``arange(0, total, total / n)``.
         The decode is deferred to :meth:`process_prompt`, which knows how many
         of the sampled frames the request's walk reads (an AC rollout encodes
         only the first ``AC_ROLLOUT_NUM_FRAMES``), so the data worker decodes
-        8 frames rather than 64 for it. The returned tensor is empty; the
-        indices and the file path travel in the metadata. ``device`` is
-        ignored: decode and preprocessing stay on the host.
+        8 frames rather than 64 for it. It decodes the returned bytes (uint8,
+        the file's size), not the file: the API server deletes an upload on a
+        timer that doesn't wait for the decode. The indices travel in the
+        metadata. ``device`` is ignored: decode and preprocessing stay on the
+        host.
 
         The header's charge (``VideoBudget``, every sampled frame) is the
         request's only media-budget check: the decode in ``process_prompt``
@@ -655,8 +655,8 @@ class VJepa2Model(Model):
             metadata = {}
         metadata["sampled_indices"] = indices
         metadata["original_num_frames"] = total
-        metadata[_VIDEO_PATH] = filepath
-        return TensorAndMetadata(data=torch.empty(0, dtype=torch.uint8), metadata=metadata)
+        encoded = torch.frombuffer(bytearray(Path(filepath).read_bytes()), dtype=torch.uint8)
+        return TensorAndMetadata(data=encoded, metadata=metadata)
 
 
     def _preprocess_frames(self, frames: torch.Tensor) -> torch.Tensor:
@@ -677,11 +677,12 @@ class VJepa2Model(Model):
     ) -> ProcessPromptOutput:
         """Decode and pre-process the video (and optional AC inputs) for the first forward pass.
 
-        :meth:`load_video` decoded nothing: its metadata carries the sampled
-        frame indices and the file path. This decodes the frames the request's
-        walk reads and runs HF-style resize + center crop (the official repo's
-        central square for AC) + ImageNet normalization on each decode group
-        as it lands, producing the ``video_frames`` edge the encoder wants.
+        :meth:`load_video` decoded nothing: it returned the file's bytes, and
+        its metadata carries the sampled frame indices. This decodes the frames
+        the request's walk reads and runs HF-style resize + center crop (the
+        official repo's central square for AC) + ImageNet normalization on each
+        decode group as it lands, producing the ``video_frames`` edge the
+        encoder wants.
 
         For V-JEPA 2-AC, callers pass per-timestep ``actions``, ``states``
         (and optionally ``extrinsics``) through ``**kwargs``.
@@ -692,7 +693,7 @@ class VJepa2Model(Model):
         if tensors and "video_inputs" in tensors and len(tensors["video_inputs"]) > 0:
             meta = ((kwargs.get("input_metadata") or {}).get("video_inputs") or [{}])[0]
             sampled = meta.get("sampled_indices")
-            if sampled is None or _VIDEO_PATH not in meta:
+            if sampled is None:
                 raise ValueError("V-JEPA 2 decodes the frames its load_video sampled; this video has no such metadata")
             # Per-request override of the frame budget (e.g. to experiment
             # with longer clips on larger GPUs); defaults to the model's
@@ -718,7 +719,7 @@ class VJepa2Model(Model):
             # is exact; the chunks keep the full-size float frames (~11 MB
             # each at 720p) cache-sized
             processed = decode_frames_at(
-                meta.pop(_VIDEO_PATH), [sampled[i] for i in keep], transform=self._preprocess_frames,
+                tensors["video_inputs"][0], [sampled[i] for i in keep], transform=self._preprocess_frames,
             )
             out["video_frames"] = [processed]
             # the encoder reads ``video_frames``; don't ship the raw input

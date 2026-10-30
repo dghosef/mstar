@@ -59,28 +59,29 @@ def _identity(frames: torch.Tensor) -> torch.Tensor:
     return frames
 
 
-def _decode(filepath: str, indices: list[int], transform: Transform) -> torch.Tensor:
-    from torchcodec.decoders import VideoDecoder
+def _decode(source, indices: list[int], transform: Transform, decoder=None) -> torch.Tensor:
+    if decoder is None:
+        from torchcodec.decoders import VideoDecoder
 
-    decoder = VideoDecoder(filepath, num_ffmpeg_threads=video_decode_threads())
+        decoder = VideoDecoder(source, num_ffmpeg_threads=video_decode_threads())
     return transform(decoder.get_frames_at(indices=indices).data)
 
 
 def decode_frames_at(
-    filepath: str, indices: list[int], decoder=None, transform: Transform | None = None,
+    source: str | torch.Tensor, indices: list[int], transform: Transform | None = None,
 ) -> torch.Tensor:
     """The frames at ``indices``, in that order: ``[len(indices), C, H, W]``
     uint8, or what ``transform`` makes of them.
 
-    ``decoder``: an open torchcodec ``VideoDecoder`` on ``filepath`` to reuse
-    for its keyframe index. ``transform``: a frame-by-frame map of a
-    ``[n, C, H, W]`` uint8 batch (e.g. convert and resize), applied to each
-    group on its decoding thread, so it overlaps the other groups' decode.
+    ``source``: the video as torchcodec's ``VideoDecoder`` opens it, a path or
+    the file's bytes as a uint8 tensor; every decoder reads the bytes without
+    the file. ``transform``: a frame-by-frame map of a ``[n, C, H, W]`` uint8
+    batch (e.g. convert and resize), applied to each group on its decoding
+    thread, so it overlaps the other groups' decode.
     """
     from torchcodec.decoders import VideoDecoder
 
-    if decoder is None:
-        decoder = VideoDecoder(filepath, num_ffmpeg_threads=video_decode_threads())
+    decoder = VideoDecoder(source, num_ffmpeg_threads=video_decode_threads())
     # private in torchcodec 0.17; without it the clip decodes on one decoder
     key_frames = getattr(decoder, "_get_key_frame_indices", None)
     if key_frames is None:
@@ -102,7 +103,9 @@ def decode_frames_at(
         groups[min(int((done + len(gop) / 2) / target), workers - 1)].extend(gop)
         done += len(gop)
     groups = [grp for grp in groups if grp]
-    decoded = list(_decode_pool().map(lambda grp: _decode(filepath, grp, transform), groups))
+    # the first group decodes on the decoder already open, each other group opens its own
+    decoders = [decoder] + [None] * (len(groups) - 1)
+    decoded = list(_decode_pool().map(lambda grp, dec: _decode(source, grp, transform, dec), groups, decoders))
     where = {i: (frames, r) for grp, frames in zip(groups, decoded, strict=True) for r, i in enumerate(grp)}
     out = torch.empty((len(indices), *decoded[0].shape[1:]), dtype=decoded[0].dtype)
     for k, i in enumerate(indices):
