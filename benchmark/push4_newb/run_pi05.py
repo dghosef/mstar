@@ -35,6 +35,8 @@ OPENPI_DIR = Path.home() / "push4" / "engines" / "openpi"
 ROUNDS = {"mstar": lambda a, out, tag: mstar_round(a.gpu, a.n, a.warm, out, tag, False),
           "mstar_u8": lambda a, out, tag: mstar_round(a.gpu, a.n, a.warm, out, f"u8_{tag}", False,
                                                       {"OVN_TREE": U8_TREE}),
+          "mstar_pt1": lambda a, out, tag: mstar_round(a.gpu, a.n, a.warm, out, f"pt1_{tag}", False, {
+              "OVN_CONFIG": str(HERE / "cfg" / "pi05_droid_pt1.yaml")}),
           "openpi": lambda a, out, tag: openpi_round(a.gpu, a.n, a.warm, out, tag),
           "openpi_ws": lambda a, out, tag: openpi_ws_round(a.gpu, a.n, a.warm, out, tag)}
 ACTION_DIM = 32  # mstar returns the full 32-dim flow-matching chunk as float32; openpi slices it to 8 dims
