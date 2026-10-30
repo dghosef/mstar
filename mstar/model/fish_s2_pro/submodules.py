@@ -9,15 +9,15 @@
 #        the Fast AR fills codebooks 1-9 by argmax, and the frame's codes and
 #        its embedding for the next step leave the same forward. The whole
 #        decode step (both loops and sampling) is one CUDA graph.
-#   2. CodecSubmodule (STATELESS engine)
-#      - Decodes each stream window with the DAC; the window's context covers
-#        the decoder's whole receptive field, so the streamed audio equals one
-#        decode of the stream.
+#   2. CodecSubmodule
+#      - Decodes each chunk's new frames with the DAC from its stream's
+#        decoder state (CODEC_STATE), so the streamed audio equals one decode
+#        of the stream.
 #   3. RefEncoderSubmodule (voice clone only)
 #      - DAC-encodes the reference clip on the GPU in full fp32.
 #
 # Streaming topology:
-#   AR --[codec_tokens, ScheduledLeftContextChunkPolicy((4, 8, 16), 32, 1026)]--> Codec
+#   AR --[codec_tokens, ScheduledLeftContextChunkPolicy((4, 8, 16), 32, 0)]--> Codec
 # ---------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ import itertools
 import logging
 import math
 from collections import OrderedDict
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -39,15 +40,18 @@ from mstar.engine.accelerator_graph_config import (
 )
 from mstar.engine.engine import ExecutingBatch
 from mstar.engine.resources import AttentionStep, KVStep, PositionStep, SamplerStep, Segment, SlotLease, SubmoduleStep
+from mstar.engine.resources.recurrent import RecurrentStatePool, RecurrentStep
 from mstar.engine.resources.sampler.resource import SamplerResource
 from mstar.model.fish_s2_pro.components.dac import FishDACDecoder, FishDACEncoder
 from mstar.model.fish_s2_pro.components.fast_ar import FishFastAR
+from mstar.model.fish_s2_pro.components.incremental_dac import IncrementalDACDecoder, codec_state_blocks
 from mstar.model.fish_s2_pro.components.slow_ar import FishSlowAR
 from mstar.model.fish_s2_pro.config import (
     AR_ATTN,
     AR_KV,
     AR_POS,
     AR_SAMPLER,
+    CODEC_STATE,
     PROMPT_LAYOUT_KEY,
     REF_CLIP_KEY,
     FishS2ProConfig,
@@ -357,20 +361,27 @@ class ARSubmodule(ARNodeSubmodule):
 
 
 class CodecSubmodule(ARNodeSubmodule):
-    """Turn streamed frames into PCM chunks that stitch into one whole decode.
+    """Turn streamed frames into PCM chunks, decoding each frame once.
 
-    Each window is ``context`` already-decoded frames plus its new frames,
-    starting ``start_offset`` frames into the stream. The quantizer's post
-    transformer runs over the whole window at the frames' stream positions;
-    the conv stack, which costs most, runs over the new frames and its
-    ``conv_context`` frames of receptive field only. With the default
-    context (the transformer's 1,016 frames plus the conv stack's 10), every
-    emitted sample is the sample one decode of the whole stream produces.
+    Chunks carry new frames only (a ramp of small chunks, then
+    ``chunk_frames``). The decoder is causal, so the state it holds after a
+    chunk is all a later chunk needs (``IncrementalDACDecoder``): it lives in
+    the ``CODEC_STATE`` recurrent pool, each step gathering its rows' state
+    and scattering the new state back, and the streamed audio equals one
+    decode of the whole stream.
+
+    Each chunk width is a CUDA-graph bucket; a shorter chunk (the terminal
+    flush) is zero-padded to the next bucket and its real length rides with it.
     """
 
+    # the decode is a compile region (``compile_regions``); the capture's
+    # gather and scatter stay outside it
     disable_torch_compile = True
     disable_autocast = True
-    MAX_BATCH_SIZE = 32
+    # cuDNN's heuristic conv picks are slower than the ones it times per captured shape
+    capture_cudnn_benchmark = True
+    CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16, 32]
+    MAX_BATCH_SIZE = CAPTURE_BATCH_SIZES[-1]
 
     def __init__(self, decoder: FishDACDecoder, config: FishS2ProConfig, *, exact_fp32: bool = True):
         super().__init__()
@@ -381,26 +392,27 @@ class CodecSubmodule(ARNodeSubmodule):
         if exact_fp32:
             # full fp32 for the decode, as the reference: the engine applies it
             self.float32_matmul_precision, self.cudnn_allow_tf32 = "highest", False
-        receptive_field = decoder.conv_receptive_field()
-        if self.codec.conv_context_frames < receptive_field:
-            raise ValueError(
-                f"Fish codec conv_context_frames={self.codec.conv_context_frames} is below the conv "
-                f"stack's {receptive_field}-frame receptive field"
-            )
-        self.conv_context = self.codec.conv_context_frames
-        self.max_new_frames = max([*self.codec.chunk_schedule, self.codec.chunk_frames])
-        self._geometry_stager = PinnedStager(torch.long, numel=2 * self.MAX_BATCH_SIZE)
-        if not self.codec.exact_streaming:
-            logger.warning(
-                "Fish codec left_context_frames=%d is below the decoder's %d-frame receptive field; "
-                "streamed audio will differ from a whole decode",
-                self.codec.left_context_frames,
-                self.codec.transformer_context_frames + self.conv_context,
-            )
+        self.windows = sorted({*self.codec.chunk_schedule, self.codec.chunk_frames})
+        self.incremental = IncrementalDACDecoder(decoder)
+        blocks = self.incremental.state_blocks()
+        declared = codec_state_blocks(self.codec)
+        if {n: (b.shape, b.dtype) for n, b in blocks.items()} != {n: (b.shape, b.dtype) for n, b in declared.items()}:
+            raise ValueError("the codec decoder's state does not match the CODEC_STATE blocks its model declares")
+        self.state_names = tuple(blocks)
+        self._lengths_stager = PinnedStager(torch.long, numel=self.MAX_BATCH_SIZE)
 
-    def conv_frames(self, width: int) -> int:
-        """Frames the conv stack decodes for a batch padded to ``width``."""
-        return min(width, self.conv_context + self.max_new_frames)
+    def compile_regions(self) -> dict[str, list[tuple]]:
+        """The incremental decode, compiled once for every bucket: Inductor fuses
+        the time-major Snake activations, norms and adds between the convs,
+        which eagerly are most of the decode's GPU time."""
+        return {"incremental": []}
+
+    def _bucket(self, frames: int) -> int:
+        """Smallest captured chunk width that holds ``frames``."""
+        for window in self.windows:
+            if frames <= window:
+                return window
+        raise ValueError(f"Fish codec chunk has {frames} frames, maximum is {self.windows[-1]}")
 
     @staticmethod
     def _codec_chunk(input_metadata: InputMetadata | None) -> StreamChunkInfo | None:
@@ -414,27 +426,58 @@ class CodecSubmodule(ARNodeSubmodule):
         input_metadata: InputMetadata = EMPTY_INPUT_METADATA,
         **kwargs: Any,
     ) -> ARNodeInputs:
-        """Lay the window out as ``[10, frames]`` (the AR withholds the end-of-stream frame)."""
-        del graph_walk, kwargs
-        chunk = self._codec_chunk(input_metadata)
-        codes = inputs["codec_tokens"][0].to(device=self.get_device(), dtype=torch.long)
-        codes = codes.view(-1, self.config.num_codebooks)
+        """The chunk's ``[frames, 10]`` codes and its bucket. Every item is a
+        frame: the AR withholds its ``<|im_end|>`` frame (``TokenStop.withhold``)."""
+        del graph_walk, fwd_info, input_metadata, kwargs
+        received = inputs.get("codec_tokens")
+        if received:
+            codes = received[0].to(device=self.get_device(), dtype=torch.long)
+        else:
+            # A frameless chunk only ends the stream: the producer-done flush of a drained stream.
+            codes = torch.zeros(0, self.config.num_codebooks, dtype=torch.long, device=self.get_device())
+        codes = codes.reshape(-1, self.config.num_codebooks)
         frames = codes.shape[0]
-        context = min(chunk.context_items if chunk is not None else 0, frames)
-        start_offset = chunk.start_offset if chunk is not None else 0
-        conv_start = context - min(context, self.conv_context)
-        logger.debug(
-            "codec %s: window offset=%d context=%d frames=%d final=%s",
-            fwd_info.request_id,
-            start_offset,
-            context,
-            frames,
-            chunk is not None and chunk.is_final,
+        return ARNodeInputs(tensor_inputs={"codec_tokens": codes}, kwargs={"frames": frames})
+
+    @staticmethod
+    def _row_bucket_frames(item: ARNodeInputs) -> int:
+        return max(item.tensor_inputs["codec_tokens"].shape[0], 1)
+
+    def declare_step(
+        self,
+        graph_walk: str,
+        request_ids: list[str],
+        inputs: list[NodeInputs],
+        slot_lease: SlotLease | None = None,
+        piecewise_leases: Mapping[str, SlotLease] | None = None,
+        **kwargs,
+    ) -> SubmoduleStep:
+        """Every row reads and writes its stream's decoder state."""
+        del graph_walk, slot_lease, piecewise_leases, kwargs
+        return SubmoduleStep(
+            segments=[Segment(rid, "main", 1) for rid in request_ids],
+            steps={CODEC_STATE: RecurrentStep()},
+            # the widest bucket, as cg_key_info derives it before prepare_inputs
+            cg_key_info=self._bucket(max(self._row_bucket_frames(item) for item in inputs)),
         )
-        return ARNodeInputs(
-            tensor_inputs={"codec_tokens": codes.t().contiguous()},
-            kwargs={"frames": frames, "context": context, "conv_start": conv_start, "start_offset": start_offset},
-        )
+
+    def cg_key_info(
+        self,
+        graph_walk: str,
+        per_request_info: Mapping[str, CurrentForwardPassInfo],
+        per_request_input_metadata: Mapping[str, InputMetadata] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """The bucket of the batch's widest chunk, which ``preprocess`` pads to."""
+        del graph_walk, kwargs
+        per_request_input_metadata = per_request_input_metadata or {}
+        widths = []
+        for request_id in per_request_info:
+            chunk = self._codec_chunk(per_request_input_metadata.get(request_id))
+            if chunk is None:
+                return None
+            widths.append(max(chunk.num_items - chunk.context_items, 1))
+        return self._bucket(max(widths)) if widths else None
 
     def preprocess(
         self,
@@ -442,36 +485,28 @@ class CodecSubmodule(ARNodeSubmodule):
         engine_inputs: ModelInputsFromEngine,
         inputs: list[ARNodeInputs],
     ) -> dict[str, torch.Tensor]:
-        """Stack the batch's windows, zero-padded on the right to the widest.
-
-        A batch whose windows carry no new frames (a stream's context-only
-        terminal flush) gets width 0 and decodes nothing.
-        """
+        """The batch's chunks as ``[B, 10, width]``, zero-padded on the right to
+        the widest one's bucket, and their real lengths."""
         del graph_walk, engine_inputs
-        windows = [item.tensor_inputs["codec_tokens"] for item in inputs]
-        has_new = any(item.kwargs["frames"] > item.kwargs["context"] for item in inputs)
-        width = max(window.shape[-1] for window in windows) if has_new else 0
-        device = windows[0].device
+        width = self._bucket(max(self._row_bucket_frames(item) for item in inputs))
+        pad = torch.nn.functional.pad
         codec_tokens = torch.stack(
-            [
-                torch.nn.functional.pad(window[:, :width], (0, width - min(width, window.shape[-1])))
-                for window in windows
-            ]
+            [pad(item.tensor_inputs["codec_tokens"], (0, 0, 0, width - item.kwargs["frames"])).t() for item in inputs]
         )
+        lengths = torch.empty(len(inputs), dtype=torch.long, device=codec_tokens.device)
+        self._lengths_stager.copy_(lengths, [item.kwargs["frames"] for item in inputs])
+        return {"codec_tokens": codec_tokens, "lengths": lengths}
 
-        geometry = torch.empty(2, len(inputs), dtype=torch.long, device=device)
-        self._geometry_stager.copy_(
-            geometry,
-            [item.kwargs["start_offset"] for item in inputs] + [item.kwargs["conv_start"] for item in inputs],
-        )
-        return {"codec_tokens": codec_tokens, "start_offset": geometry[0], "conv_start": geometry[1]}
-
-    def _decode(self, codec_tokens: torch.Tensor, start_offset: torch.Tensor, conv_start: torch.Tensor) -> torch.Tensor:
-        """``[B, 10, W]`` windows -> int16 PCM ``[B, conv_frames * hop]``."""
-        width = codec_tokens.shape[-1]
-        if width == 0:
-            return codec_tokens.new_zeros((codec_tokens.shape[0], 0), dtype=torch.int16)
-        wav = self.decoder.decode_window(codec_tokens, start_offset, conv_start, self.conv_frames(width))
+    def _decode(
+        self, engine_inputs: ModelInputsFromEngine, codec_tokens: torch.Tensor, lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        """Decode the batch's chunks from their streams' state to PCM16 ``[B, width * hop]``."""
+        pool: RecurrentStatePool = engine_inputs.resources[CODEC_STATE]
+        # a fresh stream, and a padding row on the sink, read zeros: the decoder's own left padding
+        state = {name: pool.gather(name) for name in self.state_names}
+        wav, new = self.incremental(codec_tokens, state, lengths)
+        for name, value in new.items():
+            pool.scatter_(name, value)
         return (wav.clamp(-1, 1) * 32767).to(torch.int16)
 
     def forward(
@@ -479,25 +514,22 @@ class CodecSubmodule(ARNodeSubmodule):
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
         codec_tokens: torch.Tensor,
-        start_offset: torch.Tensor,
-        conv_start: torch.Tensor,
+        lengths: torch.Tensor,
         **kwargs: Any,
     ) -> NameToTensorList:
-        del graph_walk, engine_inputs, kwargs
-        return {"audio_chunk": [self._decode(codec_tokens, start_offset, conv_start)[0]]}
+        del graph_walk, kwargs
+        return {"audio_chunk": [self._decode(engine_inputs, codec_tokens, lengths)[0]]}
 
     def forward_batched(
         self,
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
         codec_tokens: torch.Tensor,
-        start_offset: torch.Tensor,
-        conv_start: torch.Tensor,
+        lengths: torch.Tensor,
         **kwargs: Any,
-    ) -> dict[str, NameToTensorList]:
+    ) -> BatchedModelOutput:
         del graph_walk, kwargs
-        wavs = self._decode(codec_tokens, start_offset, conv_start)
-        return {request_id: {"audio_chunk": [wavs[i]]} for i, request_id in enumerate(engine_inputs.request_ids)}
+        return BatchedModelOutput(row_outputs={"audio_chunk": self._decode(engine_inputs, codec_tokens, lengths)})
 
     def postprocess(
         self,
@@ -507,26 +539,18 @@ class CodecSubmodule(ARNodeSubmodule):
         inputs: ARNodeInputs | None = None,
         **kwargs: Any,
     ) -> None:
-        """Keep the new frames' samples: ``(context - conv_start) .. (frames - conv_start)`` frames in."""
+        """Keep the chunk's real frames' samples (a bucket's padding never reaches the client)."""
         del request_info, kwargs
         if "audio_chunk" not in outputs:
             return
         if inputs is None:
-            raise ValueError("codec postprocess needs the pass's inputs for its window geometry")
-        frames, context = int(inputs.kwargs["frames"]), int(inputs.kwargs["context"])
-        conv_start = int(inputs.kwargs["conv_start"])
+            raise ValueError("codec postprocess needs the pass's inputs for its chunk length")
+        end = int(inputs.kwargs["frames"]) * self.hop
         audio = outputs["audio_chunk"][0].reshape(-1)
-        if frames <= context:
-            outputs["audio_chunk"][0] = audio[:0]
-            return
-        start, end = (context - conv_start) * self.hop, (frames - conv_start) * self.hop
         if audio.numel() < end:
-            raise ValueError(
-                f"codec produced {audio.numel()} samples for a window of {frames} frames "
-                f"({end} expected after frame {conv_start})"
-            )
-        outputs["audio_chunk"][0] = audio[start:end]
-        logger.debug("codec %s: emit frames %d..%d", request_id, context, frames)
+            raise ValueError(f"codec produced {audio.numel()} samples for a chunk of {end // self.hop} frames")
+        outputs["audio_chunk"][0] = audio[:end]
+        logger.debug("codec %s: emit %d frames", request_id, end // self.hop)
 
     def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
         del batch
@@ -539,12 +563,30 @@ class CodecSubmodule(ARNodeSubmodule):
     def get_accelerator_graph_configs(
         self, device: torch.device, tp_world_size: int = 1
     ) -> list[AcceleratorGraphConfig]:
-        del device, tp_world_size
-        return []
+        """Every chunk width for every batch bucket, widest first."""
+        del tp_world_size
+        return [
+            BatchedAcceleratorGraphConfig(
+                capture_graph_walk="codec_chunk",
+                single_request_inputs=ARNodeInputs(
+                    tensor_inputs={
+                        "codec_tokens": torch.zeros(width, self.config.num_codebooks, dtype=torch.long, device=device)
+                    },
+                    # 1, not the width: batched buckets match on bs
+                    input_seq_len=1,
+                    kwargs={"frames": width},
+                ),
+                additional_key_info=width,
+                capture_batch_sizes=self.CAPTURE_BATCH_SIZES,
+                input_seq_dims={"codec_tokens": 0, "lengths": 0},
+                # the decode inside is compiled already
+                compile=False,
+            )
+            for width in sorted(self.windows, reverse=True)
+        ]
 
     def can_use_accelerator_graphs(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
-        del batch, model_inputs
-        return False
+        return self.can_batch(batch, model_inputs) and super().can_use_accelerator_graphs(batch, model_inputs)
 
 
 # ===========================================================================

@@ -2,15 +2,15 @@
 
 Frames go through the edge's real ``ScheduledLeftContextChunkPolicy`` and
 ``StreamBuffer``, then through ``CodecSubmodule``'s ``prepare_inputs`` /
-``preprocess`` / ``forward_batched`` / ``postprocess``, and the concatenated
-PCM is compared with one decode of the whole stream.
+``declare_step`` / ``preprocess`` / ``forward_batched`` / ``postprocess``
+against a real ``CODEC_STATE`` pool, and the concatenated PCM is compared with
+one decode of the whole stream.
 
 The decoder is the real modded-DAC architecture, shrunk and with random
-weights, in float64. Its quantizer transformer (2 layers, 4-frame window)
-looks 6 frames back and its causal conv stack 22 more, so a window whose
-context covers both decodes its new frames exactly as the whole stream does:
-the frames keep their stream positions, so even the bfloat16 RoPE table
-rotates them the same way.
+weights, in float64. Each chunk decodes its new frames from the state the
+chunks before it left (the transformer's cached keys, each causal conv's last
+inputs, the frame count), and the frames keep their stream positions, so even
+the bfloat16 RoPE table rotates them as one decode of the whole stream does.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from mstar.model.fish_s2_pro.components.dac import (
     precompute_freqs_cis,
 )
 from mstar.model.fish_s2_pro.config import (
+    CODEC_STATE,
     FishDACConfig,
     FishFastARConfig,
     FishGenerationConfig,
@@ -36,7 +37,7 @@ from mstar.model.fish_s2_pro.config import (
 )
 from mstar.model.fish_s2_pro.fish_s2_pro_model import clip_digest
 from mstar.model.fish_s2_pro.submodules import CodecSubmodule, RefEncoderSubmodule
-from mstar.model.submodule_base import InputMetadata, ModelInputsFromEngine
+from mstar.model.submodule_base import ARNodeInputs, InputMetadata, ModelInputsFromEngine
 from mstar.streaming.chunk_policy import ScheduledLeftContextChunkPolicy
 from mstar.streaming.stream_buffer import StreamBuffer, StreamChunkInfo
 
@@ -68,7 +69,6 @@ def tiny_codec(**overrides) -> FishDACConfig:
         post_block_size=256,
         chunk_schedule=(2, 3),
         chunk_frames=5,
-        conv_context_frames=24,
     )
     values.update(overrides)
     return FishDACConfig(**values)
@@ -134,18 +134,81 @@ def whole_decode(decoder: FishDACDecoder, codes: torch.Tensor) -> torch.Tensor:
     return (wav.clamp(-1, 1) * 32767).to(torch.int16)
 
 
-def run_streams(submodule: CodecSubmodule, frames: dict[str, torch.Tensor]):
+class CodecDriver:
+    """The codec node with its state pool, driven as the engine drives a step:
+    declare, admit, plan, preprocess, forward, commit, postprocess. ``captured``
+    pads the step to a batch bucket with the capture template's rows on the
+    pool's sink, as a replay does."""
+
+    BUCKETS = (1, 2, 4, 8)
+
+    def __init__(self, submodule: CodecSubmodule, max_slots: int = 8):
+        from mstar.engine.resources.base import EngineResourceInfo
+        from mstar.engine.resources.recurrent import RecurrentStateConfig, RecurrentStateSpec
+        from mstar.engine.resources.recurrent.pool import RecurrentStatePool
+        from mstar.engine.resources.runner import StepRunner
+        from mstar.model.fish_s2_pro.components.incremental_dac import codec_state_blocks
+
+        self.node = submodule
+        blocks = {
+            name: type(block)(shape=block.shape, dtype=torch.float64 if block.dtype == torch.float32 else block.dtype)
+            for name, block in codec_state_blocks(submodule.codec).items()
+        }
+        spec = RecurrentStateSpec(CODEC_STATE, {"Codec"}, RecurrentStateConfig(
+            num_layers=1, blocks=blocks, max_slots=max_slots))
+        self.pool = RecurrentStatePool.build(spec, EngineResourceInfo(device=torch.device("cpu")))
+        self.runner = StepRunner({CODEC_STATE: self.pool})
+        self.added: set[str] = set()
+
+    def step(self, items: dict, captured: bool = False) -> dict:
+        from mstar.engine.resources.step import BucketKey, SlotLease, StepContext
+
+        rids, inputs = list(items), list(items.values())
+        ctx = StepContext(request_ids=tuple(rids), graph_walk="codec_chunk", slot=0, capture=False)
+        rows = list(rids)
+        if captured:
+            bs = next(b for b in self.BUCKETS if b >= len(rids))
+            rows += [f"pad{i}" for i in range(bs - len(rids))]
+            width = self.node._bucket(max(item.kwargs["frames"] for item in inputs) or 1)
+            template = ARNodeInputs(tensor_inputs={"codec_tokens": torch.zeros(width, NUM_CODEBOOKS, dtype=torch.long)},
+                                    kwargs={"frames": width})
+            ctx.slot_lease = SlotLease(slot=0, bucket=BucketKey("codec_chunk", bs, bs, width))
+            ctx.set_padded_rids(tuple(rows))
+            inputs = inputs + [template] * (bs - len(rids))
+        for rid in rids:
+            if rid not in self.added:
+                self.pool.ingest_request(rid)
+                self.added.add(rid)
+        step = self.node.declare_step("codec_chunk", rows, inputs)
+        step.set_ctx(ctx)
+        assert self.runner.admit(step).ok
+        self.runner.plan(step)
+        engine_inputs = ModelInputsFromEngine(request_ids=rows, per_request_info={},
+                                              resources={CODEC_STATE: self.pool}, step=step)
+        packed = self.node.preprocess("codec_chunk", engine_inputs, inputs)
+        with torch.no_grad():
+            audio = self.node.forward_batched("codec_chunk", engine_inputs, **packed).row_outputs["audio_chunk"]
+        self.runner.commit(step)
+        out = {}
+        for i, rid in enumerate(rids):
+            out[rid] = {"audio_chunk": [audio[i]]}
+            self.node.postprocess(rid, None, out[rid], inputs=items[rid])
+        return out
+
+
+def run_streams(submodule: CodecSubmodule, frames: dict[str, torch.Tensor], captured: bool = False):
     """Stream each request's frames through its own buffer; every step batches the
     requests that have a chunk ready, as the scheduler batches the codec.
-    Returns, per request, ``(chunk_info, audio)`` per step and the decode count."""
+    Returns, per request, ``(chunk_info, audio)`` per step and the step count."""
     cfg = submodule.codec
+    driver = CodecDriver(submodule)
     buffers = {}
     for rid, request_frames in frames.items():
         buffers[rid] = StreamBuffer(
             request_id=rid,
             edge_name="codec_tokens",
             from_partition="AR",
-            policy=ScheduledLeftContextChunkPolicy(cfg.chunk_schedule, cfg.chunk_frames, cfg.left_context_frames),
+            policy=ScheduledLeftContextChunkPolicy(cfg.chunk_schedule, cfg.chunk_frames, 0),
         )
         for i, frame in enumerate(request_frames):
             buffers[rid].pre_read_register(f"t{i}")
@@ -153,26 +216,25 @@ def run_streams(submodule: CodecSubmodule, frames: dict[str, torch.Tensor]):
         buffers[rid].signal_done()
     infos = {rid: SimpleNamespace(request_id=rid, rid_handle=rid) for rid in frames}
     steps = {rid: [] for rid in frames}
-    decodes = 0
+    count = 0
     while rids := [rid for rid, buffer in buffers.items() if buffer.has_chunk_ready()]:
         chunks = {rid: buffers[rid].pop_chunk() for rid in rids}
         meta = {rid: InputMetadata(stream_chunks={"codec_tokens": chunk.info}) for rid, chunk in chunks.items()}
-        engine_inputs = ModelInputsFromEngine(request_ids=rids, per_request_info={})
-        items = [
-            submodule.prepare_inputs(
+        items = {
+            rid: submodule.prepare_inputs(
                 "codec_chunk", infos[rid], {"codec_tokens": [chunks[rid].data["data"]]}, input_metadata=meta[rid]
             )
             for rid in rids
-        ]
-        assert submodule.can_batch(None, items)
-        packed = submodule.preprocess("codec_chunk", engine_inputs, items)
-        decodes += packed["codec_tokens"].shape[-1] > 0
-        with torch.no_grad():
-            outputs = submodule.forward_batched("codec_chunk", engine_inputs, **packed)
-        for rid, item in zip(rids, items, strict=True):
-            submodule.postprocess(rid, infos[rid], outputs[rid], inputs=item)
+        }
+        assert submodule.can_batch(None, list(items.values()))
+        # the capture key, known before prepare_inputs, is the bucket preprocess pads to
+        assert submodule.cg_key_info("codec_chunk", meta, meta) == submodule._bucket(
+            max(max(item.kwargs["frames"], 1) for item in items.values()))
+        outputs = driver.step(items, captured=captured)
+        count += 1
+        for rid in rids:
             steps[rid].append((chunks[rid].info, outputs[rid]["audio_chunk"][0]))
-    return steps, decodes
+    return steps, count
 
 
 def streamed(steps) -> torch.Tensor:
@@ -208,26 +270,6 @@ def decoder(config) -> FishDACDecoder:
     return random_decoder(config)
 
 
-def test_default_context_is_the_decoders_receptive_field(config, decoder):
-    assert decoder.conv_receptive_field() <= config.codec.conv_context_frames
-    assert config.codec.transformer_context_frames == decoder.quantizer.post_module.receptive_field == 6
-    assert config.codec.left_context_frames == 6 + config.codec.conv_context_frames
-    assert config.codec.exact_streaming
-    full = FishDACConfig()
-    assert (full.transformer_context_frames, full.left_context_frames, full.hop_length) == (1016, 1026, 2048)
-    assert FishDACDecoder(full).conv_receptive_field() == full.conv_context_frames == 10
-
-
-def test_conv_receptive_field_matches_autograd(decoder):
-    """The earliest latent frame a frame's first sample depends on is ``frame - rf``."""
-    frames, target = 40, 32
-    latents = torch.randn(1, decoder.config.latent_dim, frames, dtype=torch.float64, requires_grad=True)
-    audio = decoder.run_conv_stack(latents)
-    audio[0, target * HOP].backward()
-    touched = latents.grad.abs().sum(1)[0].nonzero().flatten()
-    assert int(touched.min()) == target - decoder.conv_receptive_field()
-
-
 def test_transformer_receptive_field_matches_autograd(decoder):
     """A post-transformer frame depends on exactly ``layers * (window - 1)`` earlier frames."""
     module = decoder.quantizer.post_module
@@ -239,14 +281,15 @@ def test_transformer_receptive_field_matches_autograd(decoder):
     assert int(touched.max()) == target
 
 
+@pytest.mark.parametrize("captured", [False, True])
 @pytest.mark.parametrize("num_frames", [1, 2, 4, 5, 7, 10, 15, 16, 17, 26, 31, 41, 64, 90])
-def test_streamed_chunks_stitch_into_the_whole_decode(config, decoder, num_frames):
-    """Ramp chunks, steady chunks and the terminal flush, around every boundary of the
-    schedule and past the point where the context stops growing."""
+def test_streamed_chunks_stitch_into_the_whole_decode(config, decoder, num_frames, captured):
+    """Ramp chunks, steady chunks and a short final chunk, each padded to its
+    bucket (and, as a replay runs it, its batch padded with sink rows)."""
     submodule = CodecSubmodule(decoder, config)
     codes = stream_codes(num_frames)
 
-    steps = run_streams(submodule, {"r": codes})[0]["r"]
+    steps = run_streams(submodule, {"r": codes}, captured=captured)[0]["r"]
 
     full = whole_decode(decoder, codes)
     assert full.numel() == num_frames * HOP
@@ -255,80 +298,67 @@ def test_streamed_chunks_stitch_into_the_whole_decode(config, decoder, num_frame
     assert_same_audio(streamed(steps), full)
 
 
-def test_short_context_changes_the_audio(decoder):
-    """The test has teeth: windows with half the conv stack's context drift audibly."""
-    conv = decoder.conv_receptive_field()
-    config = tiny_config(conv_context_frames=conv, left_context_frames=conv // 2)
-    codes = stream_codes(90)
+@pytest.mark.parametrize("chunks", [(4, 8, 16, 32, 7), (1, 2, 3, 50), (67,)])
+def test_incremental_decode_stitches_into_the_whole_decode(config, decoder, chunks):
+    """Chunk by chunk from carried state (each chunk zero-padded to the batch's
+    width beside a longer row) is one decode of the whole stream."""
+    from mstar.model.fish_s2_pro.components.incremental_dac import IncrementalDACDecoder, codec_state_blocks
 
-    steps = run_streams(CodecSubmodule(decoder, config), {"r": codes})[0]["r"]
-
-    out, full = streamed(steps), whole_decode(decoder, codes)
-    assert out.shape == full.shape
-    assert int((out.int() - full.int()).abs().max()) > 64
+    inc = IncrementalDACDecoder(decoder)
+    blocks = inc.state_blocks()
+    assert {n: (b.shape, b.dtype) for n, b in blocks.items()} == {
+        n: (b.shape, b.dtype) for n, b in codec_state_blocks(config.codec).items()
+    }
+    total = sum(chunks)
+    codes = stream_codes(total, seed=7)
+    other = stream_codes(total + 64, seed=8)
+    state = {n: torch.zeros(2, *b.shape, dtype=torch.float64 if b.dtype == torch.float32 else b.dtype)
+             for n, b in blocks.items()}
+    out, start = [], 0
+    with torch.no_grad():
+        for n in chunks:
+            width = n + 5
+            window = torch.zeros(2, NUM_CODEBOOKS, width, dtype=torch.long)
+            window[0, :, :n] = codes[start:start + n].t()
+            window[1] = other[start:start + width].t()
+            wav, state = inc(window, state, torch.tensor([n, width]))
+            out.append(wav[0, : n * HOP])
+            start += n
+    streamed_audio = (torch.cat(out).clamp(-1, 1) * 32767).to(torch.int16)
+    assert_same_audio(streamed_audio, whole_decode(decoder, codes))
 
 
 def test_streams_batched_at_different_offsets_each_stitch_into_their_own_decode(config, decoder):
     submodule = CodecSubmodule(decoder, config)
     codes = {"a": stream_codes(23, seed=3), "b": stream_codes(77, seed=4), "c": stream_codes(5, seed=5)}
 
-    steps, _ = run_streams(submodule, codes)
+    steps, _ = run_streams(submodule, codes, captured=True)
 
     for rid, request_codes in codes.items():
         assert_same_audio(streamed(steps[rid]), whole_decode(decoder, request_codes))
 
 
-def test_context_only_terminal_flush_decodes_nothing(config, decoder):
-    """A stream that ends after its consumer drained it gets a final window of
-    context only: it emits nothing and, alone in its batch, runs no decode."""
+def test_frameless_terminal_flush_emits_nothing(config, decoder):
+    """A stream that ends after its consumer drained it gets a final chunk with
+    no frames: it decodes at the smallest bucket and emits nothing."""
     submodule = CodecSubmodule(decoder, config)
     item = submodule.prepare_inputs(
         "codec_chunk",
         SimpleNamespace(request_id="r", rid_handle="r"),
-        {"codec_tokens": [stream_codes(5)]},
-        input_metadata=InputMetadata(stream_chunks={"codec_tokens": StreamChunkInfo(10, 5, 5, is_final=True)}),
+        {},
+        input_metadata=InputMetadata(stream_chunks={"codec_tokens": StreamChunkInfo(10, 0, 0, is_final=True)}),
     )
-    engine_inputs = ModelInputsFromEngine(request_ids=["r"], per_request_info={})
-    packed = submodule.preprocess("codec_chunk", engine_inputs, [item])
-    assert packed["codec_tokens"].shape[-1] == 0
-    with torch.no_grad():
-        outputs = submodule.forward_batched("codec_chunk", engine_inputs, **packed)
-    submodule.postprocess("r", None, outputs["r"], inputs=item)
-    assert outputs["r"]["audio_chunk"][0].numel() == 0
+    assert item.kwargs["frames"] == 0
+    out = CodecDriver(submodule).step({"r": item})
+    assert out["r"]["audio_chunk"][0].numel() == 0
 
 
-def test_codec_preprocess_stages_window_geometry_as_the_per_column_copies_did(config, decoder):
+def test_codec_buckets_are_the_chunk_widths(config, decoder):
     submodule = CodecSubmodule(decoder, config)
-    windows = [(0, 0, 4), (4, 4, 12), (40, 30, 62), (100, 30, 30)]  # (start_offset, context, frames)
-    items = [
-        submodule.prepare_inputs(
-            "codec_chunk",
-            SimpleNamespace(request_id=str(i), rid_handle=i),
-            {"codec_tokens": [stream_codes(frames)]},
-            input_metadata=InputMetadata(
-                stream_chunks={"codec_tokens": StreamChunkInfo(start, context, frames, is_final=False)}
-            ),
-        )
-        for i, (start, context, frames) in enumerate(windows)
-    ]
-    packed = submodule.preprocess("codec_chunk", ModelInputsFromEngine(request_ids=[], per_request_info={}), items)
-    for name in ("start_offset", "conv_start"):
-        old = torch.tensor([item.kwargs[name] for item in items], dtype=torch.long)
-        assert packed[name].dtype == old.dtype and packed[name].shape == old.shape and torch.equal(packed[name], old)
-    assert packed["start_offset"].tolist() == [0, 4, 40, 100]
-
-
-@pytest.mark.parametrize("schedule", [(), (2, 3)])
-def test_codec_sizes_its_window_with_or_without_a_schedule(schedule):
-    config = tiny_config(chunk_schedule=schedule)
-    submodule = CodecSubmodule(random_decoder(config), config)
-    assert submodule.max_new_frames == max([*schedule, config.codec.chunk_frames])
-
-
-def test_codec_rejects_conv_context_below_the_receptive_field():
-    config = tiny_config(conv_context_frames=1)
-    with pytest.raises(ValueError, match="receptive field"):
-        CodecSubmodule(random_decoder(config), config)
+    assert submodule.windows == [2, 3, 5]
+    assert [submodule._bucket(n) for n in (1, 2, 3, 4, 5)] == [2, 2, 3, 5, 5]
+    with pytest.raises(ValueError, match="maximum is 5"):
+        submodule._bucket(6)
 
 
 # ---------------------------------------------------------------------------
