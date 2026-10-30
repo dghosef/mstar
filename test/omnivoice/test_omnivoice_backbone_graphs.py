@@ -1,8 +1,13 @@
 """The captured backbone path's attention layout. No GPU, no weights: each
 request owns two documents (a zero-length unconditional one with CFG off), and
 the step spreads them over its ids. Its numerics against the reference are in
-``test_omnivoice_parity.py``.
+``test_omnivoice_parity.py``. Also code2wav's compiled codec decoder, which is
+warmed for every canvas length.
 """
+
+from types import SimpleNamespace
+
+import pytest
 
 from mstar.model.omnivoice.submodules import (
     BACKBONE_ATTN,
@@ -49,8 +54,6 @@ def test_node_resources_do_not_follow_backbone_graphs():
 def test_forward_batched_keys_rows_by_the_engine_ids():
     """The engine reads a row's outputs back by the worker's handle for the
     request, which is not the request's wire id."""
-    from types import SimpleNamespace
-
     import torch
 
     from mstar.model.omnivoice.config import OmniVoiceConfig
@@ -78,3 +81,57 @@ def test_forward_batched_keys_rows_by_the_engine_ids():
     rows_out = pre["canvas"].tgt_index.shape[0]
     sub._logits = lambda _inputs, _canvas: torch.zeros(1, c, rows_out, cfg.audio_vocab_size)
     assert set(sub.forward_batched("speech_gen", engine_inputs, **pre)) == {0, 1}
+
+
+def test_the_codec_decoder_compiles_at_start_up_not_on_a_request(monkeypatch):
+    """code2wav's warm-up builds the compiled acoustic decoder's graphs for
+    very short, typical and 10 s canvases, so none of them compiles on the GPU
+    thread mid-serving. Dynamo guards the length against thresholds that
+    depend on the conv widths, so the decoder has the checkpoint's geometry
+    (k2-fsa/OmniVoice ``audio_tokenizer/config.json``); the encoders, which
+    decode never runs, are shrunk."""
+    pytest.importorskip("transformers.models.higgs_audio_v2_tokenizer")
+    import torch
+    from torch._dynamo.testing import CompileCounter
+    from transformers import HiggsAudioV2TokenizerConfig, HiggsAudioV2TokenizerModel
+
+    from mstar.engine.engine import Engine
+    from mstar.model.omnivoice.components.codec import decode_canvas
+    from mstar.model.omnivoice.config import OmniVoiceConfig
+    from mstar.model.omnivoice.submodules import OmniVoiceCode2WavSubmodule
+
+    ratios = [8, 5, 4, 2, 3]
+    torch.manual_seed(0)
+    codec = HiggsAudioV2TokenizerModel(HiggsAudioV2TokenizerConfig(
+        acoustic_model_config={
+            "model_type": "dac", "upsampling_ratios": ratios, "downsampling_ratios": ratios,
+            "hop_length": 960, "decoder_hidden_size": 1024, "hidden_size": 256, "encoder_hidden_size": 2,
+        },
+        semantic_model_config={
+            "model_type": "hubert", "hidden_size": 16, "num_hidden_layers": 1, "num_attention_heads": 2,
+            "intermediate_size": 16, "conv_dim": [8] * 7, "num_conv_pos_embeddings": 16,
+            "num_conv_pos_embedding_groups": 2,
+        },
+        codebook_dim=8,
+    )).eval().requires_grad_(False)
+
+    engine = Engine.__new__(Engine)
+    engine._device = torch.device("cpu")
+    engine._device_capability = SimpleNamespace(is_available=True)
+    engine._submodules = {
+        "code2wav": SimpleNamespace(submodule=OmniVoiceCode2WavSubmodule(codec, OmniVoiceConfig()), fp32_precision=None),
+    }
+    counter, compile_ = CompileCounter(), torch.compile
+    monkeypatch.setattr(torch, "compile", lambda fn, **kwargs: compile_(fn, backend=counter, **kwargs))
+    torch._dynamo.reset()
+    engine._compile_regions()
+    assert counter.frame_count > 0
+
+    compiled_at = []
+    with torch.no_grad():   # as the engine runs a forward
+        for frames in (3, 6, 30, 250):
+            before = counter.frame_count
+            decode_canvas(codec, torch.randint(0, 1024, (len(codec.quantizer.quantizers), frames)))
+            if counter.frame_count > before:
+                compiled_at.append(frames)
+    assert compiled_at == []
