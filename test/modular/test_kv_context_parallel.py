@@ -17,6 +17,7 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from packaging.version import Version
 from test_kv_prefix_correctness import NODE, PAGE_SIZE, ROOT
 from test_kv_prefix_lease import _StubTransfer
 from test_kv_prefix_tp import WALKS, _ctx, _follow, _ingest, _send, _step, _tokens
@@ -617,6 +618,13 @@ def test_attention_a_placed_pool_cannot_serve_is_refused_at_build(attention, ref
 LAYOUTS = pytest.mark.parametrize("mla", [False, True], ids=["gqa", "mla"])
 
 
+def _flashinfer(mla: bool) -> None:
+    """Skips without FlashInfer, and for MLA on a FlashInfer a placed pool refuses at bind."""
+    flashinfer = pytest.importorskip("flashinfer")
+    if mla and Version(flashinfer.__version__).public != fm._FA_PLANNER_VERSION:
+        pytest.skip(f"attention over a placed MLA pool refuses FlashInfer {flashinfer.__version__} at bind")
+
+
 @LAYOUTS
 @pytest.mark.parametrize("rows", [PREFILL_ROWS, DECODE_ROWS], ids=["prefill", "decode"])
 @pytest.mark.parametrize("over_sp", [False, True], ids=["tp", "sp"])
@@ -630,7 +638,7 @@ def test_two_ranks_attend_a_placed_pool_like_one_rank_with_the_same_collectives(
 @pytest.mark.parametrize("rows", [PREFILL_ROWS, DECODE_ROWS], ids=["prefill", "decode"])
 @pytest.mark.parametrize("over_sp", [False, True], ids=["tp", "sp"])
 def test_two_gpus_attend_a_placed_pool_like_one(tmp_path, over_sp, rows, captured, mla):
-    pytest.importorskip("flashinfer")
+    _flashinfer(mla)
     mp.spawn(_over_ranks, args=(P, "nccl", str(tmp_path / "store"), over_sp, rows, mla, captured), nprocs=P)
 
 
@@ -652,11 +660,19 @@ def test_mla_attention_refuses_a_context_only_step_over_a_placed_pool():
         _plan(attn, _Case.build(PREFILL_ROWS, CPU, torch.float32, mla=True), context_only=True)
 
 
+def _fa_kernel(monkeypatch, version: str = fm._FA_PLANNER_VERSION) -> None:
+    """The MLA manager plans as if FlashInfer ``version``'s FA kernel served it; on CPU its
+    wrappers still plan the torch fallback."""
+    monkeypatch.setattr(fm, "_sm_count", lambda device: 132)
+    monkeypatch.setattr(fm.FlashInferMLAManager, "uses_kernel", property(lambda self: True))
+    monkeypatch.setitem(sys.modules, "flashinfer", types.SimpleNamespace(__version__=version))
+
+
 def test_mla_ranks_refuse_the_same_steps_past_the_fa_planners_work_item_cap(monkeypatch):
     """FlashInfer's FA MLA planner counts each rank's own KV lengths, which differ over a placed
     pool, so its own refusal could come on one rank alone and hang the others in the exchange.
     The refusal before it is the same on every rank, whatever the cap."""
-    monkeypatch.setattr(fm, "_sm_count", lambda device: 132)
+    _fa_kernel(monkeypatch)
     case = _Case.build(PREFILL_ROWS, CPU, torch.float32, mla=True)
     ranks = [
         _cp_attention(JointGroups(tp_group=_group(rank, P), sp_group=CommGroup.trivial()), CPU, torch.float32,
@@ -681,23 +697,34 @@ def test_mla_ranks_refuse_the_same_steps_past_the_fa_planners_work_item_cap(monk
         monkeypatch.setattr(fm, "_FA_MAX_WORK_ITEMS", cap)
         decisions.append([refuses(attn) for attn, _ in ranks])
     assert all(a == b for a, b in decisions) and {a for a, _ in decisions} == {False, True}
+    # the torch fallback runs no FA planner, so nothing is refused for it
+    monkeypatch.setattr(fm, "_FA_MAX_WORK_ITEMS", 1)
+    monkeypatch.setattr(fm.FlashInferMLAManager, "uses_kernel", property(lambda self: False))
+    _plan(_cp_attention(JointGroups(tp_group=_group(0, P), sp_group=CommGroup.trivial()), CPU, torch.float32,
+                        mla=True, flashinfer_backend="fa2")[0], case)
 
 
-def test_mla_attention_over_a_placed_pool_refuses_a_flashinfer_whose_planner_it_did_not_copy(monkeypatch):
-    monkeypatch.setattr(fm, "_sm_count", lambda device: 132)
-    monkeypatch.setattr(fm.FlashInferMLAManager, "uses_kernel", property(lambda self: True))
-    monkeypatch.setitem(sys.modules, "flashinfer", types.SimpleNamespace(__version__="0.7.3"))
+@pytest.mark.parametrize("version, refused", [
+    ("0.7.3", r"FlashInfer 0\.7\.3 is installed"),
+    # a local build of the release
+    (f"{fm._FA_PLANNER_VERSION}+cu130", None),
+])
+def test_mla_attention_over_a_placed_pool_refuses_a_flashinfer_whose_planner_it_did_not_copy(
+    monkeypatch, version, refused,
+):
+    _fa_kernel(monkeypatch, version)
     joint = JointGroups(tp_group=_group(0, P), sp_group=CommGroup.trivial())
-    with pytest.raises(ValueError, match=r"FlashInfer 0\.7\.3 is installed"):
+    if refused is None:
+        _cp_attention(joint, CPU, torch.float32, mla=True, flashinfer_backend="fa2")
+        return
+    with pytest.raises(ValueError, match=refused):
         _cp_attention(joint, CPU, torch.float32, mla=True, flashinfer_backend="fa2")
 
 
 def test_the_fa_work_item_bound_holds_flashinfers_own_count():
     """The refusal above is rank-symmetric only while ``fa_work_items_bound`` is at least what the
     installed FlashInfer's planner counts on any rank's KV lengths."""
-    flashinfer = pytest.importorskip("flashinfer")
-    if flashinfer.__version__ != fm._FA_PLANNER_VERSION:
-        pytest.skip(f"attention over a placed pool refuses FlashInfer {flashinfer.__version__} at bind")
+    _flashinfer(mla=True)
     from flashinfer.mla._batch_mla._backends import _fa_common as fa
 
     assert fm._FA_MAX_WORK_ITEMS == fa._FA_MAX_WORK_ITEMS
@@ -726,7 +753,7 @@ def test_the_fa_work_item_bound_holds_flashinfers_own_count():
 def test_flashinfer_partials_over_simulated_ranks_merge_to_full_attention(rows, captured, mla):
     """FlashInfer itself, one process: each of P ranks' partials over its slots, masked and merged
     with the step's own tokens' attention, against attention over every key."""
-    pytest.importorskip("flashinfer")
+    _flashinfer(mla)
     device, dtype = torch.device("cuda"), torch.bfloat16
     case = _Case.build(rows, device, dtype, mla)
     queries, new_keys = case.queries(), case.new_keys()

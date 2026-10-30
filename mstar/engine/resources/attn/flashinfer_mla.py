@@ -311,7 +311,7 @@ class FlashInferMLAManager(AttentionManager):
         self._workspaces = WorkspacePool(device)
         # the KV pool's placement (`bind_dependencies`)
         self._placement = None
-        # over a placed pool on the FA planner, the device's SMs, for its work-item cap
+        # over a placed pool on the FA planner (the kernel in use), the device's SMs, for its work-item cap
         self._fa_sm_count: int | None = None
 
     def depends_on(self):
@@ -331,18 +331,18 @@ class FlashInferMLAManager(AttentionManager):
             from mstar.platforms import current_platform
 
             self._wrapper_kwargs["backend"] = "fa3" if current_platform.arch(self._device) == "sm_90" else "fa2"
-        if self._wrapper_kwargs["backend"] in ("fa2", "fa3"):
-            self._fa_sm_count = _sm_count(self._device)
-            if self.uses_kernel:
-                import flashinfer
+        if self._wrapper_kwargs["backend"] in ("fa2", "fa3") and self.uses_kernel:
+            import flashinfer
+            from packaging.version import Version
 
-                if flashinfer.__version__ != _FA_PLANNER_VERSION:
-                    raise ValueError(
-                        f"MLA attention over context-parallel KV pool {self._kv_cache_name!r} refuses, on every "
-                        f"rank alike, the steps FlashInfer {_FA_PLANNER_VERSION}'s FA planner may refuse on one "
-                        f"rank alone, from a copy of that planner's rules; FlashInfer {flashinfer.__version__} "
-                        f"is installed. Install flashinfer-python=={_FA_PLANNER_VERSION}"
-                    )
+            if Version(flashinfer.__version__).public != _FA_PLANNER_VERSION:
+                raise ValueError(
+                    f"MLA attention over context-parallel KV pool {self._kv_cache_name!r} refuses, on every "
+                    f"rank alike, the steps FlashInfer {_FA_PLANNER_VERSION}'s FA planner may refuse on one "
+                    f"rank alone, from a copy of that planner's rules; FlashInfer {flashinfer.__version__} "
+                    f"is installed. Install flashinfer-python=={_FA_PLANNER_VERSION}"
+                )
+            self._fa_sm_count = _sm_count(self._device)
 
     @property
     def uses_kernel(self) -> bool:
