@@ -399,7 +399,9 @@ class _Case:
         return torch.cat(outs)
 
 
-def _cp_attention(joint: JointGroups, device: torch.device, dtype: torch.dtype, head_shards: int):
+def _cp_attention(
+    joint: JointGroups, device: torch.device, dtype: torch.dtype, head_shards: int, **attention,
+):
     """A ``FlashInferManager`` over a placed pool, and this rank's placement."""
     kv = KVSpec(resource_key="kv", nodes={NODE}, config=PagedKVConfig(
         num_layers=1, num_kv_heads=1, head_dim=HEAD_DIM, max_seq_len=64, num_qo_heads=Q_HEADS,
@@ -408,7 +410,7 @@ def _cp_attention(joint: JointGroups, device: torch.device, dtype: torch.dtype, 
     info = EngineResourceInfo(
         device=device, joint_comm_group=joint, kv_dtype=dtype, dependencies={"kv": kv}, head_shards=head_shards,
     )
-    spec = AttentionSpec(resource_key="attn", nodes={NODE}, config=AttentionConfig(kv_cache="kv"))
+    spec = AttentionSpec(resource_key="attn", nodes={NODE}, config=AttentionConfig(kv_cache="kv", **attention))
     attn = AttentionManager.build(spec, info)
     # the KV resource's one field attention reads
     placement = kv.config.place(joint, "kv")
@@ -452,6 +454,9 @@ def _over_ranks(rank, world, backend, store, over_sp, rows):
         _plan(attn, case)
         heads = slice(None) if over_sp else slice(rank * Q_HEADS // world, (rank + 1) * Q_HEADS // world)
         k, v = case.new_kv()
+        if rows is PREFILL_ROWS:
+            with pytest.raises(ValueError, match="got none"):
+                attn.run(case.q[:, heads].contiguous(), "main", kv_cache_layer=case.cache(placement))
         out = attn.run(case.q[:, heads].contiguous(), "main", kv_cache_layer=case.cache(placement), k=k, v=v)
         torch.testing.assert_close(out.float(), case.want()[:, heads], **({"atol": 2e-2, "rtol": 2e-2} if cuda else {}))
         everyone = [None] * world
@@ -459,6 +464,12 @@ def _over_ranks(rank, world, backend, store, over_sp, rows):
         assert calls and all(c == calls for c in everyone), everyone
     finally:
         dist.destroy_process_group()
+
+
+def test_sliding_window_attention_over_a_placed_pool_is_refused():
+    joint = JointGroups(tp_group=_group(0, P), sp_group=CommGroup.trivial())
+    with pytest.raises(ValueError, match="'attn': sliding_window is unsupported over KV pool 'kv'"):
+        _cp_attention(joint, CPU, torch.float32, head_shards=P, sliding_window=8)
 
 
 @pytest.mark.parametrize("rows", [PREFILL_ROWS, DECODE_ROWS], ids=["prefill", "decode"])
