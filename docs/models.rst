@@ -423,7 +423,8 @@ needs FlashInfer's fused bf16 decode kernel (K = V = 128).
 Text prefill and mixed steps replay captured graphs by total tokens, on the
 ladder ``32 ... 8192`` (powers of two); a step pads to its bucket and a longer
 one runs eagerly. ``model_kwargs: prefill_token_buckets: [...]`` sets a
-deployment's own ladder: ``configs/qwen3_5_9b*.yaml`` add 3072, 5120, 6144 and
+deployment's own ladder (distinct positive token counts, checked when the
+worker loads): ``configs/qwen3_5_9b*.yaml`` add 3072, 5120, 6144 and
 7168, which cut the padding of compute-bound long prefills (+2% output tok/s
 on 9B, random 1024/256 at c=64/128, H200); the same ladder was not a win on
 0.8B, whose prefill is launch-bound. Each bucket adds captures and startup time.
@@ -574,10 +575,13 @@ Qwen3-Omni notes
   and a prefix-cached audio prefix keeps the embeddings it was first computed
   with, so a later request reusing it inherits that first batch's rounding.
 - The Thinker's text and audio prefill replay captured graphs on the ladder
-  ``128 ... 8192`` tokens (with 6144), so a burst of new prompts that batches
-  into one step of a few thousand tokens still replays; a longer step runs
-  eagerly. ``model_kwargs: prefill_token_buckets: [...]`` sets a deployment's
-  own ladder; each bucket adds captures and startup time.
+  ``128 ... 2048`` tokens, and a longer step runs eagerly.
+  ``model_kwargs: prefill_token_buckets: [...]`` sets a deployment's own
+  ladder; ``configs/qwen3omni_2gpu*.yaml`` run it to 8192 (with 4096 and
+  6144), so a burst of new prompts that batches into one step of a few
+  thousand tokens still replays (measured on 2xH200: the first t2t c=32
+  burst's TTFT p99 3.5 s -> 0.45 s). Each bucket adds captures, graph memory
+  and startup time.
 - The MoE layers route through the fused softmax-top-k kernel
   (``TopKRouter(fused_softmax_topk=True)``), which gives equal probabilities to
   the lower expert id where ``torch.topk`` may pick another.

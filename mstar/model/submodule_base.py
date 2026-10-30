@@ -1186,6 +1186,22 @@ class ARNodeSubmodule(NodeSubmodule):
     # below follow from it.
     token_stop: TokenStop | None = None
 
+    def __init__(self, prefill_token_buckets: Sequence[int] | None = None):
+        """``prefill_token_buckets``: a deployment's own captured prefill ladder
+        (``model_kwargs.prefill_token_buckets``), in place of the class's
+        ``PREFILL_TOKEN_BUCKETS``."""
+        super().__init__()
+        if prefill_token_buckets is not None:
+            buckets = prefill_token_buckets
+            if (
+                not isinstance(buckets, (list, tuple)) or not buckets or len(set(buckets)) < len(buckets)
+                or not all(isinstance(n, int) and not isinstance(n, bool) and n > 0 for n in buckets)
+            ):
+                raise ValueError(
+                    f"prefill_token_buckets must be a non-empty list of distinct positive token counts, got {buckets!r}"
+                )
+            self.PREFILL_TOKEN_BUCKETS = sorted(buckets)
+
     def _loops_back(self, graph_walk: str) -> bool:
         """Whether this walk's token loops back on the device: ``token_stop``'s
         walk, declared with a ``loopback_signal``."""
