@@ -687,6 +687,7 @@ class VJepa2Model(Model):
         (and optionally ``extrinsics``) through ``**kwargs``.
         """
         out: NameToTensorList = {}
+        rollout = self._initial_walk(kwargs) in (self.PREFILL_VIDEO_ROLLOUT, self.PREFILL_VIDEO_ROLLOUT_STREAMING)
 
         if tensors and "video_inputs" in tensors and len(tensors["video_inputs"]) > 0:
             meta = ((kwargs.get("input_metadata") or {}).get("video_inputs") or [{}])[0]
@@ -702,7 +703,7 @@ class VJepa2Model(Model):
             target_frames = int(kwargs.get("num_frames", self.config.frames_per_clip))
             target_frames = min(target_frames, len(sampled))
             keep = _sample_frames_uniform(torch.arange(len(sampled)), target_frames).tolist()
-            if self.config.predictor_kind == "ac" and int(kwargs.get("rollout_horizon", 0) or 0) > 1:
+            if self.config.predictor_kind == "ac" and rollout:
                 # AC rollout encoder context: AC_ROLLOUT_NUM_FRAMES frames, as
                 # upstream's DROID training config (droid-256px-8f.yaml,
                 # `dataset_fpcs: 8`). Each is encoded on its own via the
@@ -814,7 +815,6 @@ class VJepa2Model(Model):
         if self.config.predictor_kind == "ac":
             # a rollout frame is its action and state tokens, an extrinsics token if used, then its spatial tokens
             frame = (3 if self.config.ac_predictor.use_extrinsics else 2) + self.config.grid_size ** 2
-            rollout = self._initial_walk(kwargs) in (self.PREFILL_VIDEO_ROLLOUT, self.PREFILL_VIDEO_ROLLOUT_STREAMING)
             kv_layout[KV_CACHE] = {"main": LabelLayout(growth=((self.ROLLOUT_LOOP_NAME, frame),) if rollout else ())}
         return ProcessPromptOutput(out, {"kv_layout": kv_layout})
 

@@ -287,8 +287,13 @@ def test_vjepa2_refuses_a_video_without_load_video_metadata():
         model.process_prompt(None, ["video"], ["video"], tensors={"video_inputs": [torch.zeros(8, 3, 64, 64)]})
 
 
-@pytest.mark.parametrize("rollout_horizon, decoded", [(0, 64), (4, 8)])
-def test_vjepa2_ac_decodes_only_the_frames_its_walk_encodes(monkeypatch, rollout_horizon, decoded):
+@pytest.mark.parametrize("kwargs, decoded", [
+    ({"rollout_horizon": 0}, 64),
+    ({"rollout_horizon": 4}, 8),
+    # the encoder-only walk encodes the whole clip, whatever horizon the request names
+    ({"rollout_horizon": 4, "skip_predictor": True}, 64),
+])
+def test_vjepa2_ac_decodes_only_the_frames_its_walk_encodes(monkeypatch, kwargs, decoded):
     from mstar.model.vjepa2.vjepa2_model import VJepa2Model
 
     pulled = []
@@ -299,7 +304,7 @@ def test_vjepa2_ac_decodes_only_the_frames_its_walk_encodes(monkeypatch, rollout
     out = model.process_prompt(
         None, ["video"], ["video"],
         tensors={"video_inputs": [loaded.data]}, input_metadata={"video_inputs": [loaded.metadata]},
-        actions=[[0.0] * 7] * 4, states=[[0.0] * 7] * 4, rollout_horizon=rollout_horizon,
+        actions=[[0.0] * 7] * 4, states=[[0.0] * 7] * 4, **kwargs,
     ).new_input_tensors
     assert pulled == loaded.metadata["sampled_indices"][:decoded]
     assert out["video_frames"][0].shape[0] == decoded
