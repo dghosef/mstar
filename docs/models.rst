@@ -550,12 +550,16 @@ Qwen3-Omni notes
   Thinker KV pool holds 1,024 GPU pages (128k tokens) plus 1,024 host pages it
   offloads to. When concurrent requests hold more than 128k tokens of Thinker KV,
   serve ``configs/qwen3omni_2gpu_large_kv.yaml``, which keeps 2,048 pages (256k
-  tokens) on the GPU and offloads nothing; it should fit beside its captures on an
-  H200 (not run since the prefill buckets grew to 8192 tokens). On 80 GB GPUs such
-  as the H100, serve ``configs/qwen3omni_2gpu_h100.yaml``: the Thinker's GPU holds
-  every prefill capture, and the larger ones don't fit beside a 1,024-page KV pool.
-  The H100 config's 512 pages (64k tokens) leave room for all of them. It also runs
-  the audio and vision encoders on the Talker's GPU, so an encoder step doesn't wait
+  tokens) on the GPU; it should fit beside its captures on an H200 (not run since
+  the prefill buckets grew to 8192 tokens). It has no host pages, so with the
+  Thinker's prefix cache on, a decode step that finds the pool full holds its
+  requests until they time out. Set ``max_concurrent_requests`` in that config:
+  2,048 / 256 = 8 requests of the full 32k context (see the prefix cache under
+  "Config files" in :doc:`serving`). On 80 GB GPUs such as the H100, serve
+  ``configs/qwen3omni_2gpu_h100.yaml``: the Thinker's GPU holds every prefill
+  capture, and the larger ones don't fit beside a 1,024-page KV pool. The H100
+  config's 512 pages (64k tokens) leave room for all of them. It also runs the
+  audio and vision encoders on the Talker's GPU, so an encoder step doesn't wait
   behind a Thinker step.
 - Streamed audio starts after 12 codec frames (0.96 s of audio), then 13, then
   25-frame chunks behind 25 frames of left context. Playback stays gapless
@@ -1510,7 +1514,8 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
      Excluding the activations too adds cost and nothing else.
    * Z-Image's 180 norms per step cost 45% (1.25 vs 0.86 s at B=1), so it ships ``false``
      and lands at a median 34 dB. ``[norms]`` turns it reference-faithful (at least
-     55.9 dB on every prompt).
+     55.9 dB on every prompt). These figures were measured before its fused q/k norm and
+     rotary kernel and the VAE decode change.
    * klein-4B and 9B ship ``false`` too, since the other engines are not bit-exact
      either. On ``sdpa`` the plain compile serves klein-4B about 1 to 2% more images
      per second than ``[norms]`` at concurrency 1 to 8 (H100, one round); 9B is not
