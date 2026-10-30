@@ -82,126 +82,6 @@ def filter_top_k(logits: torch.Tensor, ratio: float = 0.1) -> torch.Tensor:
     return probs
 
 
-def gumbel_sample(
-    logits: torch.Tensor,
-    temperature: float,
-    generator: torch.Generator | None = None,
-) -> torch.Tensor:
-    """Add Gumbel noise at ``temperature``; caller takes the argmax.
-
-    ``generator`` carries the request's seed. Both draws in a step (token
-    choice and reveal order) come from it, so a seeded request replays
-    exactly; passing ``None`` keeps the global RNG and stays unreproducible.
-    """
-    scaled_logits = logits / temperature
-    u = torch.rand(
-        scaled_logits.shape,
-        dtype=scaled_logits.dtype,
-        device=scaled_logits.device,
-        generator=generator,
-    )
-    gumbel_noise = -torch.log(-torch.log(u + 1e-10) + 1e-10)
-    return scaled_logits + gumbel_noise
-
-
-def predict_tokens_with_scoring(
-    c_logits: torch.Tensor,
-    u_logits: torch.Tensor,
-    audio_mask_id: int,
-    guidance_scale: float,
-    class_temperature: float,
-    generator: torch.Generator | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """CFG-combine conditional and unconditional logits, then rank.
-
-    Args:
-        c_logits: conditional logits, ``[1, C, T, V]``.
-        u_logits: unconditional logits, same shape.  Ignored when
-            ``guidance_scale`` is 0.
-        audio_mask_id: the MASK class, forced to -inf so it is never predicted.
-        guidance_scale: 0 disables CFG entirely (and the caller may then skip
-            the unconditional forward).
-        class_temperature: 0 takes the argmax; above 0 samples from the top
-            decile with Gumbel noise.
-        generator: the request's seeded RNG, or ``None`` for the global one.
-
-    Returns:
-        ``(pred_tokens, confidence_scores)``, each ``[1, C, T]``.  The scores
-        are max log-probabilities and drive which cells get revealed.
-    """
-    if guidance_scale != 0:
-        c_log_probs = F.log_softmax(c_logits, dim=-1)
-        u_log_probs = F.log_softmax(u_logits, dim=-1)
-        log_probs = torch.log_softmax(
-            c_log_probs + guidance_scale * (c_log_probs - u_log_probs),
-            dim=-1,
-        )
-    else:
-        log_probs = F.log_softmax(c_logits, dim=-1)
-
-    log_probs[..., audio_mask_id] = -float("inf")
-
-    if class_temperature > 0.0:
-        filtered_probs = filter_top_k(log_probs, ratio=0.1)
-        pred_tokens = gumbel_sample(
-            filtered_probs, class_temperature, generator
-        ).argmax(dim=-1)
-    else:
-        pred_tokens = log_probs.argmax(dim=-1)
-
-    confidence_scores = log_probs.max(dim=-1)[0]
-    return pred_tokens, confidence_scores
-
-
-def apply_reveal(
-    tokens: torch.Tensor,
-    pred_tokens: torch.Tensor,
-    scores: torch.Tensor,
-    reveal_count: int,
-    audio_mask_id: int,
-    layer_penalty_factor: float,
-    position_temperature: float,
-    generator: torch.Generator | None = None,
-) -> torch.Tensor:
-    """Reveal ``reveal_count`` cells of ``tokens`` in place and return it.
-
-    Ranking is over the flattened ``(C, T)`` canvas, so a step may spend its
-    whole budget on one codebook row.  Two biases shape the choice, both from
-    the reference:
-
-    - ``layer_penalty_factor`` subtracts ``layer_index * factor`` from the
-      score, pushing the earliest codebooks to resolve first (they carry the
-      coarse content the later residual rows refine).
-    - ``position_temperature`` adds Gumbel noise to the *position* ranking, so
-      the reveal order is stochastic even when token choice is greedy.
-
-    Already-revealed cells are driven to -inf so a cell is only written once.
-
-    Args:
-        tokens: ``[1, C, T]``, the request's live canvas, modified in place.
-        pred_tokens, scores: ``[1, C, T]`` from ``predict_tokens_with_scoring``.
-        generator: the request's seeded RNG, or ``None`` for the global one.
-    """
-    if reveal_count <= 0:
-        return tokens
-
-    num_codebook = tokens.shape[1]
-    layer_ids = torch.arange(num_codebook, device=tokens.device).view(1, -1, 1)
-    scores = scores - (layer_ids * layer_penalty_factor)
-
-    if position_temperature > 0.0:
-        scores = gumbel_sample(scores, position_temperature, generator)
-
-    scores = scores.masked_fill(tokens != audio_mask_id, -float("inf"))
-
-    _, topk_idx = torch.topk(scores.flatten(), reveal_count)
-    flat_tokens = tokens.flatten()
-    flat_tokens[topk_idx] = pred_tokens.flatten()[topk_idx]
-    tokens.copy_(flat_tokens.view_as(tokens))
-    return tokens
-
-
-
 def _cat(parts: list[torch.Tensor], dim: int) -> torch.Tensor:
     """``torch.cat`` without the copy for a single part."""
     return parts[0] if len(parts) == 1 else torch.cat(parts, dim=dim)
@@ -209,8 +89,8 @@ def _cat(parts: list[torch.Tensor], dim: int) -> torch.Tensor:
 
 def _per_position(values: list, lens: list[int], device: torch.device) -> float | torch.Tensor:
     """A per-request knob over the packed positions: the shared value as a
-    Python float when every request has the same one (the per-request
-    functions' arithmetic to the bit), else each position's value, ``[P]``."""
+    Python float when every request has the same one (the reference's
+    arithmetic to the bit), else each position's value, ``[P]``."""
     if len(set(values)) == 1:
         return values[0]
     return to_device_nonblocking(
@@ -232,12 +112,12 @@ def unmask_step(
 ) -> torch.Tensor:
     """One unmask iteration for every request of a step, batched.
 
-    ``predict_tokens_with_scoring`` then ``apply_reveal`` per request, over the
-    step's packed target positions at once. Each request draws from its own
-    generator in the reference's order (token choice, then reveal order), so
-    a request's result does not depend on the batch, and it is the
-    per-request functions' when the requests share their knobs; a knob that
-    differs between requests changes only the rounding of one divide.
+    The reference's scoring (``_predict_tokens_with_scoring``) and reveal for
+    each request, over the step's packed target positions at once. Each request
+    draws from its own generator in the reference's order (token choice, then
+    reveal order), so a request's result does not depend on the batch, and it
+    is the reference's arithmetic when the requests share their knobs; a knob
+    that differs between requests changes only the rounding of one divide.
 
     Args:
         logits: ``[1, C, R, V]``: every request's conditional target block in

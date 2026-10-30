@@ -46,16 +46,12 @@ import os
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.model.omnivoice.components.backbone import CanvasItem, build_packed_canvas
 from mstar.model.omnivoice.components.text import build_prefix
-from mstar.model.omnivoice.components.unmask import (
-    apply_reveal,
-    build_reveal_schedule,
-    predict_tokens_with_scoring,
-    unmask_step,
-)
+from mstar.model.omnivoice.components.unmask import build_reveal_schedule, filter_top_k, unmask_step
 from mstar.model.omnivoice.config import OmniVoiceConfig
 from mstar.model.omnivoice.submodules import (
     UNMASK_LOOP_NAME,
@@ -196,58 +192,91 @@ def test_reveal_schedule_covers_the_canvas():
             assert sum(schedule) == target_len * NUM_CODEBOOK
 
 
+def _reveal_all(item, canvas, logits, generator=None, class_temperature=0.0, count=None):
+    """One ``unmask_step`` over ``item`` alone, revealing ``count`` cells (all by default)."""
+    count = NUM_CODEBOOK * item.target_len if count is None else count
+    return unmask_step(
+        logits, [item.tokens[0]], [canvas.flat_target_total + item.flat_u_start], [count], [generator],
+        [item.guidance_scale], [class_temperature], [0.1], [1.0], MASK_ID,
+    )
+
+
 def test_mask_class_is_never_predicted():
     item = _item(prefix_len=10, target_len=6)
     canvas = build_packed_canvas([item], torch.device("cpu"))
     logits = torch.randn(1, NUM_CODEBOOK, 2 * canvas.flat_target_total, 1025)
-    c_logits, u_logits = canvas.slice_logits(logits, item)
-    assert c_logits.shape == (1, NUM_CODEBOOK, 6, 1025)
-
-    pred, _ = predict_tokens_with_scoring(
-        c_logits, u_logits, MASK_ID, guidance_scale=2.0, class_temperature=0.0
-    )
-    assert (pred != MASK_ID).all()
+    logits[..., MASK_ID] += 100.0  # the MASK class would win every cell's argmax
+    assert (_reveal_all(item, canvas, logits) != MASK_ID).all()
 
 
 def test_sampling_is_reproducible_under_a_seed():
-    """Same seed, same draw; different seed, different draw.
-
-    Both stochastic paths are covered: the token choice inside
-    ``predict_tokens_with_scoring`` and the reveal order in ``apply_reveal``.
-    """
+    """Same seed, same draw; different seed, different draw: the token
+    choice and the reveal order both come from the request's generator."""
     item = _item(prefix_len=10, target_len=6)
     canvas = build_packed_canvas([item], torch.device("cpu"))
     logits = torch.randn(1, NUM_CODEBOOK, 2 * canvas.flat_target_total, 1025)
-    c_logits, u_logits = canvas.slice_logits(logits, item)
 
     def draw(seed):
-        gen = torch.Generator().manual_seed(seed)
-        pred, scores = predict_tokens_with_scoring(
-            c_logits, u_logits, MASK_ID, guidance_scale=2.0,
-            class_temperature=1.0, generator=gen,
-        )
-        tokens = torch.full((1, NUM_CODEBOOK, 6), MASK_ID, dtype=torch.long)
-        revealed = apply_reveal(
-            tokens=tokens, pred_tokens=pred, scores=scores, reveal_count=5,
-            audio_mask_id=MASK_ID, layer_penalty_factor=0.1,
-            position_temperature=1.0, generator=gen,
-        )
-        return pred.clone(), revealed.clone()
+        return _reveal_all(item, canvas, logits, torch.Generator().manual_seed(seed), class_temperature=1.0, count=5)
 
-    pred_a, rev_a = draw(1234)
-    pred_b, rev_b = draw(1234)
-    pred_c, rev_c = draw(5678)
-    assert torch.equal(pred_a, pred_b)
-    assert torch.equal(rev_a, rev_b)
-    assert not (torch.equal(pred_a, pred_c) and torch.equal(rev_a, rev_c))
+    assert torch.equal(draw(1234), draw(1234))
+    assert not torch.equal(draw(1234), draw(5678))
+
+
+# ---------------------------------------------------------------------------
+# the reference's per-request scoring and reveal: the oracle for ``unmask_step``
+# ---------------------------------------------------------------------------
+
+
+def _gumbel(logits, temperature, generator=None):
+    """``logits / temperature`` plus Gumbel noise; the caller takes the argmax."""
+    scaled_logits = logits / temperature
+    u = torch.rand(scaled_logits.shape, dtype=scaled_logits.dtype, device=scaled_logits.device, generator=generator)
+    gumbel_noise = -torch.log(-torch.log(u + 1e-10) + 1e-10)
+    return scaled_logits + gumbel_noise
+
+
+def _predict(c_logits, u_logits, guidance_scale, class_temperature, generator=None):
+    """The reference's ``_predict_tokens_with_scoring`` for one request:
+    ``(pred_tokens, scores)``, each ``[1, C, T]``."""
+    if guidance_scale != 0:
+        c_log_probs = F.log_softmax(c_logits, dim=-1)
+        u_log_probs = F.log_softmax(u_logits, dim=-1)
+        log_probs = torch.log_softmax(c_log_probs + guidance_scale * (c_log_probs - u_log_probs), dim=-1)
+    else:
+        log_probs = F.log_softmax(c_logits, dim=-1)
+    log_probs[..., MASK_ID] = -float("inf")
+    if class_temperature > 0.0:
+        pred_tokens = _gumbel(filter_top_k(log_probs, ratio=0.1), class_temperature, generator).argmax(dim=-1)
+    else:
+        pred_tokens = log_probs.argmax(dim=-1)
+    return pred_tokens, log_probs.max(dim=-1)[0]
+
+
+def _reveal(tokens, pred_tokens, scores, reveal_count, layer_penalty_factor, position_temperature, generator=None):
+    """The reference's reveal for one request: its ``reveal_count`` best
+    masked cells of ``tokens`` (``[1, C, T]``), written in place."""
+    if reveal_count <= 0:
+        return tokens
+    layer_ids = torch.arange(tokens.shape[1], device=tokens.device).view(1, -1, 1)
+    scores = scores - (layer_ids * layer_penalty_factor)
+    if position_temperature > 0.0:
+        scores = _gumbel(scores, position_temperature, generator)
+    scores = scores.masked_fill(tokens != MASK_ID, -float("inf"))
+    _, topk_idx = torch.topk(scores.flatten(), reveal_count)
+    flat_tokens = tokens.flatten()
+    flat_tokens[topk_idx] = pred_tokens.flatten()[topk_idx]
+    tokens.copy_(flat_tokens.view_as(tokens))
+    return tokens
 
 
 @pytest.mark.parametrize("guidance", [(2.0, 2.0, 2.0), (2.0, 0.0, 3.0)])
 @pytest.mark.parametrize("class_temperature", [0.0, 1.0])
 def test_batched_unmask_step_matches_the_per_request_reveal(guidance, class_temperature):
-    """``unmask_step`` over a step's requests is ``predict_tokens_with_scoring``
-    then ``apply_reveal`` per request, with each request's own generator, cell
-    for cell; also with CFG off for one request, and with sampled tokens."""
+    """``unmask_step`` over a step's requests is the reference's scoring and
+    reveal per request (``_predict``, ``_reveal``), with each request's own
+    generator, cell for cell; also with CFG off for one request, and with
+    sampled tokens."""
     gen = torch.Generator().manual_seed(0)
     items = [_item(prefix_len=4, target_len=n, guidance_scale=g) for n, g in zip((9, 5, 12), guidance, strict=True)]
     for item, done in zip(items, (0, 7, 30), strict=True):
@@ -265,12 +294,9 @@ def test_batched_unmask_step_matches_the_per_request_reveal(guidance, class_temp
     for item, count, g in zip(items, counts, gens(), strict=True):
         c_logits, u_logits = canvas.slice_logits(logits, item)
         u_logits = c_logits if u_logits is None else u_logits
-        pred, scores = predict_tokens_with_scoring(
-            c_logits.float(), u_logits.float(), MASK_ID, item.guidance_scale, class_temperature, generator=g,
-        )
-        want.append(apply_reveal(
-            item.tokens.clone(), pred, scores, count, MASK_ID, layer_penalty_factor=5.0,
-            position_temperature=5.0, generator=g,
+        pred, scores = _predict(c_logits.float(), u_logits.float(), item.guidance_scale, class_temperature, g)
+        want.append(_reveal(
+            item.tokens.clone(), pred, scores, count, layer_penalty_factor=5.0, position_temperature=5.0, generator=g,
         )[0])
     before = [item.tokens.clone() for item in items]
     got = unmask_step(
@@ -485,22 +511,19 @@ def _run_ours(backbone, config, specs, num_step=None):
             num_step=num_step, t_shift=GREEDY["t_shift"],
         ))
 
+    knobs = [[GREEDY[name]] * len(items) for name in (
+        "guidance_scale", "class_temperature", "layer_penalty_factor", "position_temperature",
+    )]
     for k in range(num_step):
         canvas = build_packed_canvas(items, torch.device("cuda"))
-        logits = _packed_logits(backbone, canvas).to(torch.float32)
-        for item, schedule in zip(items, schedules, strict=True):
-            c_logits, u_logits = canvas.slice_logits(logits, item)
-            pred, scores = predict_tokens_with_scoring(
-                c_logits, u_logits, config.audio_mask_id,
-                guidance_scale=GREEDY["guidance_scale"],
-                class_temperature=GREEDY["class_temperature"],
-            )
-            apply_reveal(
-                tokens=item.tokens, pred_tokens=pred, scores=scores,
-                reveal_count=schedule[k], audio_mask_id=config.audio_mask_id,
-                layer_penalty_factor=GREEDY["layer_penalty_factor"],
-                position_temperature=GREEDY["position_temperature"],
-            )
+        # the served step: one batched scoring and reveal over the packed logits
+        tokens = unmask_step(
+            _packed_logits(backbone, canvas), [item.tokens[0] for item in items],
+            [canvas.flat_target_total + item.flat_u_start for item in items],
+            [schedule[k] for schedule in schedules], [None] * len(items), *knobs, config.audio_mask_id,
+        )
+        for item in items:
+            item.tokens = tokens[:, item.flat_start:item.flat_start + item.target_len].unsqueeze(0)
     return [item.tokens[0].cpu() for item in items]
 
 
