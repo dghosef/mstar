@@ -107,6 +107,8 @@ class ARSubmodule(ARNodeSubmodule):
         self.eos_code = config.eos_code
         # The prefill frame counts toward max_new_tokens. <|im_end|> is not a
         # codebook index: its frame is withheld, so the codec never sees it.
+        # Prefill walks suppress <|im_end|> (prepare_inputs): a stop sampled at
+        # prefill would close the loop without withholding that step's frame.
         self.token_stop = TokenStop(
             loop="ar_decode_loop", buffer="new_token", stop_ids=frozenset({config.eos_code}),
             sampler=AR_SAMPLER, prefill_walks=frozenset({"ar_prefill", "ar_prefill_clone"}),
