@@ -559,14 +559,12 @@ Worker scheduling
        but that step's commit touched the streams: every length is one
        more, pages change only where a row crossed a page boundary, and the
        five FlashInfer index arrays come from numpy instead of a per-row
-       Python pass. Off by default; of the shipped configs only
-       ``configs/qwen3_5_27b_tp4.yaml`` turns it on, measured only bundled
-       with ``gc_gen0_threshold`` and ``tp_async_sched``. In four-arm splits
-       (none / plan cache / GC threshold / both) on Qwen3.5 0.8B, 2B, 4B and
-       9B TP2 (H100) it gained nothing beside ``gc_gen0_threshold``, which
-       carries the high-concurrency gain (on 0.8B it cost 2-3% at c=1 alone
-       and 4-5% beside it; on 9B TP2 0.6-2.5% at c=128 beside it), so those
-       configs leave it off. ``0`` plans every step from the streams.
+       Python pass. Off by default, and no shipped config turns it on. In
+       four-arm splits (none / plan cache / GC threshold / both) on Qwen3.5
+       0.8B, 2B, 4B, 9B TP2 and 27B TP4 (H100) it gained nothing beside
+       ``gc_gen0_threshold``, which carries the high-concurrency gain (on 0.8B
+       it cost 2-3% at c=1 alone and 4-5% beside it; on 9B TP2 0.6-2.5% at
+       c=128 beside it; on 27B TP4 within 0.3% either way). ``0`` plans every step from the streams.
        ``2`` runs both and logs a difference, for checking a run. Read by
        ``knobs.kv_plan_cache``.
    * - ``MSTAR_DEVICE_LOOPBACK``
