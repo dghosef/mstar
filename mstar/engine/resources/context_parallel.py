@@ -308,6 +308,13 @@ def zigzag_rows(qo_indptr: np.ndarray, size: int, index: int, causal: bool = Tru
     return ZigzagRows(tokens, kv, kv_tokens)
 
 
+def zigzag_share(qo_indptr: np.ndarray, size: int, index: int) -> np.ndarray:
+    """The ``qo_indptr`` of rank ``index`` of ``size``'s zigzag chunks of the rows ``qo_indptr`` lays
+    out, as its own-token plan has them before a capture's padding."""
+    _, first, end, _ = _zigzag_chunks(qo_indptr, size, index, causal=True)
+    return np.concatenate([[0], np.cumsum(end - first)])
+
+
 def _zigzag_chunks(
     qo_indptr: np.ndarray, size: int, index: int, causal: bool,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -381,9 +388,8 @@ class ZigzagWrapper:
 
     def share(self, qo_indptr: np.ndarray, index: int) -> np.ndarray:
         """Partner ``index``'s plan of a step as this wrapper makes it, which ``plan`` hands its kernel:
-        its chunks' ``qo_indptr``, padded as its kernel's planner reads it."""
-        _, first, end, _ = _zigzag_chunks(qo_indptr, self._placement.size, index, causal=True)
-        return self._padded(np.concatenate([[0], np.cumsum(end - first)]))
+        its chunks' ``qo_indptr`` (``zigzag_share``), padded as its kernel's planner reads it."""
+        return self._padded(zigzag_share(qo_indptr, self._placement.size, index))
 
     def _padded(self, qo_indptr: np.ndarray) -> np.ndarray:
         """A share's chunks' ``qo_indptr`` on a captured wrapper, padded to the bucket's queries and

@@ -31,7 +31,7 @@ from mstar.engine.resources.attn.base import AttentionManager
 from mstar.engine.resources.attn.config import AttentionConfig, AttentionSpec, AttentionStep, AttnBackend
 from mstar.engine.resources.attn.ragged.wrappers import FlashInferRaggedPrefillWrapper
 from mstar.engine.resources.base import EngineResourceInfo, Resource
-from mstar.engine.resources.context_parallel import ContextParallel, ZigzagWrapper, merge, zigzag_rows
+from mstar.engine.resources.context_parallel import ContextParallel, ZigzagWrapper, merge, zigzag_rows, zigzag_share
 from mstar.engine.resources.kv import manager as manager_mod
 from mstar.engine.resources.kv.cache import KVCache
 from mstar.engine.resources.kv.config import KVLayout, KVReqConfig, KVSpec, KVStep, PagedKVConfig
@@ -868,6 +868,23 @@ def test_mla_attention_refuses_at_admit_a_step_past_the_fa_planners_cap_so_the_w
     assert (refused.rows_fit, refused.rows_fit_alone, refused.rows_sized, refused.request_id) == (2, 2, 4, "r2")
     refused = admit(min(bound([span]) for span in spans) - 1).reason
     assert isinstance(refused, AdmitRuntimeError) and refused.request_ids == {"r0", "r1", "r2", "r3"}
+
+
+def test_sp_placed_mla_attention_admits_a_step_only_if_every_partners_zigzag_share_fits(monkeypatch):
+    """Under SP placement each rank plans its own zigzag share of the step's own tokens, whose short
+    chunks can take the FA planner past its cap where the context fits; admission counts them all."""
+    _fa_kernel(monkeypatch)
+    attn, _ = _cp_attention(JointGroups(tp_group=CommGroup.trivial(), sp_group=_group(0, P)), CPU, torch.float32,
+                            mla=True, flashinfer_backend="fa2")
+    step = AttentionStep(segments=tuple(Segment(f"r{i}", "main", 2 * P) for i in range(4)))
+    ctx = StepContext(request_ids=tuple(seg.request_id for seg in step.segments), graph_walk="w", slot=0,
+                      capture=False)
+    heads = attn._wrapper_kwargs["num_qo_heads"]
+    qo = np.cumsum([0, *(seg.span for seg in step.segments)])
+    context = fm.fa_work_items_bound(qo, heads, 132)
+    assert max(fm.fa_work_items_bound(zigzag_share(qo, P, index), heads, 132) for index in range(P)) > context
+    monkeypatch.setattr(fm, "_FA_MAX_WORK_ITEMS", context)
+    assert isinstance(attn.admit(step, ctx).reason, AllocationFailed)
 
 
 def test_tp_mla_decode_plans_its_context_where_the_causal_tile_check_cannot_refuse_it(monkeypatch):

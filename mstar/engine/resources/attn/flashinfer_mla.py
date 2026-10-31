@@ -26,7 +26,7 @@ from mstar.engine.resources.attn.base import (
 )
 from mstar.engine.resources.attn.config import AttentionStep
 from mstar.engine.resources.base import CGSlotKey
-from mstar.engine.resources.context_parallel import ContextParallel, one_slot_pages
+from mstar.engine.resources.context_parallel import ContextParallel, one_slot_pages, zigzag_share
 from mstar.engine.resources.kv.config import KVConfig, KVLayout
 from mstar.engine.resources.kv.plan import KVPlanOutputs
 from mstar.engine.resources.step import (
@@ -491,15 +491,16 @@ class FlashInferMLAManager(AttentionManager):
         ))
 
     def _fits(self, rows: list[dict[str, int]]) -> bool:
-        """Whether each label's plan over ``rows`` (label -> queries, a request each) stays within
-        the FA planner's work-item cap."""
-        labels = {label for row in rows for label in row}
-        heads = self._wrapper_kwargs["num_qo_heads"]
-        return all(
-            fa_work_items_bound(np.cumsum([0, *(row[label] for row in rows if label in row)]), heads,
-                                self._fa_sm_count) <= _FA_MAX_WORK_ITEMS
-            for label in labels
-        )
+        """Whether each label's plans over ``rows`` (label -> queries, a request each) stay within
+        the FA planner's work-item cap: its context's, and under SP placement every partner's
+        zigzag share of its own tokens."""
+        heads, size = self._wrapper_kwargs["num_qo_heads"], self._placement.size
+        for label in {label for row in rows for label in row}:
+            qo = np.cumsum([0, *(row[label] for row in rows if label in row)])
+            plans = [qo, *(zigzag_share(qo, size, index) for index in range(size))] if self._placement.over_sp else [qo]
+            if any(fa_work_items_bound(plan, heads, self._fa_sm_count) > _FA_MAX_WORK_ITEMS for plan in plans):
+                return False
+        return True
 
     def _cap_hint(self) -> str:
         if self._placement.over_sp:
