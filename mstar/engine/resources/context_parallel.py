@@ -369,6 +369,9 @@ class ZigzagWrapper:
         # each planned query's token to gather and row to scatter to; None when the last plan gave
         # this rank none
         self._gather = self._scatter = None
+        # an eager step's out and lse, and whether the next run starts a step (``_step_buffers``)
+        self._out = self._lse = None
+        self._reset = True
         if not self._captured:
             self.kernel = paged()
             return
