@@ -604,11 +604,12 @@ Qwen3-Omni notes
 - The Thinker's text and audio prefill replay captured graphs on the ladder
   ``128 ... 2048`` tokens, and a longer step runs eagerly.
   ``model_kwargs: prefill_token_buckets: [...]`` sets a deployment's own
-  ladder; ``configs/qwen3omni_2gpu*.yaml`` run it to 8192 (with 4096 and
-  6144), so a burst of new prompts that batches into one step of a few
-  thousand tokens still replays (measured on 2xH200: the first t2t c=32
-  burst's TTFT p99 3.5 s -> 0.45 s). Each bucket adds captures, graph memory
-  and startup time.
+  ladder; ``configs/qwen3omni_2gpu_large_kv.yaml`` runs it to 8192 (with 4096
+  and 6144) on H200-class GPUs, so a burst of new prompts that batches into one
+  step of a few thousand tokens still replays (measured on 2xH200: the first
+  t2t c=32 burst's TTFT p99 3.5 s -> 0.45 s). Each bucket adds captures, graph
+  memory and startup time. ``configs/qwen3omni_2gpu.yaml``, sized for 80 GB
+  GPUs, keeps the default ladder.
 - The MoE layers route through the fused softmax-top-k kernel
   (``TopKRouter(fused_softmax_topk=True)``), which gives equal probabilities to
   the lower expert id where ``torch.topk`` may pick another.

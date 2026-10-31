@@ -749,7 +749,7 @@ class ThinkerSubmodule(ARNodeSubmodule):
         return len(model_inputs) > 1
 
     # A deployment sets its own with `model_kwargs.prefill_token_buckets`
-    # (configs/qwen3omni_2gpu*.yaml run it to 8192).
+    # (configs/qwen3omni_2gpu_large_kv.yaml runs it to 8192).
     PREFILL_TOKEN_BUCKETS = [128, 256, 512, 1024, 2048]
     # past 4 for thinker_mixed, whose decode rows ride in these captures
     PREFILL_CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16, 32]
