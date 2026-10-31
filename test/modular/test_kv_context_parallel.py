@@ -555,8 +555,9 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False,
         dist.all_gather_object(everyone, calls)
         assert calls and all(c == calls for c in everyone), everyone
     finally:
-        # defensive: clear our reference so destroy drops the group's last one and joins gloo's
-        # threads, whatever else holds the group
+        # clear our reference so destroy drops the group's last one and joins gloo's threads,
+        # whatever else holds the group (here, a cycle through the MLA manager's bound work-item
+        # check); ranks were seen to abort at exit without this
         group.device_group = None
         dist.destroy_process_group()
 
