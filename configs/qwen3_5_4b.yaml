@@ -1,10 +1,9 @@
 model: "qwen3_5_4b"
 max_seq_len: 32768
-# Plan a decode step from the last step's KV plan when its rows are unchanged,
-# and raise the gen-0 GC threshold (at CPython's 700 a 128-row decode step
-# collects almost every step and runs a full collection every few hundred).
+# Raise the gen-0 GC threshold: at CPython's 700 a 128-row decode step collects
+# almost every step and runs a full collection every few hundred.
+# (kv_plan_cache measured no gain at concurrency 1 or 128 on top of this.)
 knobs:
-  kv_plan_cache: 1
   gc_gen0_threshold: 50000
 # Captured text-prefill ladder (see docs/models.rst): the default powers of
 # two plus 3072-7168, which cut the padding of packed prefills between 2048
