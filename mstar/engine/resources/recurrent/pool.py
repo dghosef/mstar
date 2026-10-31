@@ -133,15 +133,17 @@ class RecurrentAddressing:
 
 
 class RecurrentStatePool(Resource):
+    # it reads the KV pool only to key prefix snapshots, which are off above one rank; over a
+    # pool placed over SP ranks `head_shards` is TP's, so every SP partner holds the same state
+    supports_context_parallel = True
+
     @classmethod
     def build(
         cls, spec: RecurrentStateSpec, info: EngineResourceInfo,
     ) -> "RecurrentStatePool":
         config = spec.config
-        world_size = 1
-        if info.joint_comm_group is not None:
-            world_size = info.joint_comm_group.world_size
-            config.shard(world_size)
+        config.shard(info.head_shards)
+        world_size = 1 if info.joint_comm_group is None else info.joint_comm_group.world_size
         kv = info.dependencies.get(config.kv_cache)
         if world_size > 1 or kv is None or not kv.config.prefix_cache:
             # no snapshot slots where the prefix cache can't open
