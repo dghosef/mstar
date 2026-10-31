@@ -492,9 +492,9 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False)
             calls.append((_name, tuple(args[0].shape), tuple(args[1].shape), *(str(a) for a in args[2:])))
             return _call(*args, **kwargs)
         setattr(dist, name, record)
+    group = CommGroup(rank, rank, list(range(world)))
+    group.device_group, group.initialized = dist.group.WORLD, True
     try:
-        group = CommGroup(rank, rank, list(range(world)))
-        group.device_group, group.initialized = dist.group.WORLD, True
         joint = (JointGroups(tp_group=CommGroup.trivial(), sp_group=group) if over_sp
                  else JointGroups(tp_group=group, sp_group=CommGroup.trivial()))
         dtype = torch.bfloat16 if cuda else torch.float32
@@ -551,6 +551,10 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False)
         dist.all_gather_object(everyone, calls)
         assert calls and all(c == calls for c in everyone), everyone
     finally:
+        # clear our reference so destroy drops the group's last one and joins gloo's threads:
+        # objects built over this group can outlive the test, and ranks were seen to abort at exit
+        # without this
+        group.device_group = None
         dist.destroy_process_group()
 
 
