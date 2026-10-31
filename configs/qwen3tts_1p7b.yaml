@@ -6,9 +6,9 @@ model: "qwen3_tts_1p7b"
 max_seq_len: 32768
 # bf16 codec decoder (its norm and RoPE arithmetic in fp32): ~1.9x a codec
 # step's speed on an H200, within the WER/speaker gate on this checkpoint.
-# Gated on an H200. H100 runs served it too (Whisper large-v3 WER 1.73% and
-# 2.09% over 128 sentences, for the two chunk ramps), but its speed against
-# float32 there is unmeasured. On a B300 the previous windowed codec ran bf16
+# Gated on an H200. H100 runs served it too (Whisper large-v3 WER 1.73% with
+# the [2, 4, 8, 16] schedule below, 2.09% with [4, 8, 16], over 128
+# sentences), but its speed against float32 there is unmeasured. On a B300 the previous windowed codec ran bf16
 # slower under cuDNN's heuristic conv picks, and this decoder has not been
 # measured there; set codec_dtype: float32 on other GPUs until it is.
 model_kwargs:
