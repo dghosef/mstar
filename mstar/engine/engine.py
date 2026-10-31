@@ -536,11 +536,13 @@ class Engine:
 
         self._classify_tp_roles(node_names, parallel_groups)
         # node -> how many ways its heads split: TP alone where its pools place positions over its SP ranks
-        sp_enabled = () if model is None else model.get_default_sharding_config().sp_enabled_nodes
         shards = {}
         for node in node_names:
             group = parallel_groups.get_joint_group_for_node(node)
-            over_sp = positions_over_sp(specs, node, group.sp_group.world_size, sp_enabled)
+            sp = group.sp_group.world_size
+            over_sp = sp > 1 and positions_over_sp(
+                specs, node, sp, () if model is None else model.get_default_sharding_config().sp_enabled_nodes,
+            )
             shards[node] = head_shards(group, over_sp)
 
         for spec in specs:
