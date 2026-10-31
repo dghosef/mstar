@@ -1624,9 +1624,9 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
      9B while the q/k norms were graph breaks). Klein's per-head q/k norms (1-D
      ``RMSNorm``) run as an op the compiled graph keeps whole. On NVIDIA GPUs that op is
      a Triton replica of torch's kernel with the same arithmetic order: bit-identical and
-     ~4x faster than torch's one-block-per-row launch. Every kept norm shares one
+     ~4x faster than torch's one-block-per-row launch. Kept norms of one class share a
      class-level forward, so the blocks share one compiled frame: with a forward per
-     block, dynamo hit its recompile limit and the small batches ran the blocks eagerly
+     module, dynamo hit its recompile limit and the small batches ran the blocks eagerly
      (klein-4B 2.86 / 3.10 / 3.69 against 3.33 / 3.75 / 3.80 img/s at concurrency
      1 / 4 / 16, H200). Before the q/k op the shipped ``[norms]`` cost klein-4B 4% of
      its B=1 latency (0.371 vs 0.356 s). Keeping the activations too adds cost and
