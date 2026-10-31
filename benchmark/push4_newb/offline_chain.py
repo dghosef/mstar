@@ -45,8 +45,16 @@ KVPC_27B_ARMS = ",".join(f"{n}={HEAD}:OVN_CONFIG={c}" for n, c in (
     ("none", KV / "27b_none.yaml"), ("kvpc", KV / "27b_kvpc.yaml"), ("gc", KV / "27b_gc.yaml"),
     ("both", f"{HEAD}/configs/qwen3_5_27b_tp4.yaml")))
 
+SHARED = "/root/push4/newb/shared"  # perf/push4-shared 3daafc851 (select_last_hidden fix)
+
 # (name, command, timeout s, env, needs GPUs 1-3)
 JOBS = [
+    # q35text's prefill buckets 1152-1792 on 27B TP4 (a ~1040-token prompt padded to 2048): c1 TTFT + no regression
+    ("buckets_27b", [PY, "ab.py", "bench", "--model", "qwen3_5_27b_tp4", "--rounds", "2",
+                     "--cells", "random_1024_256:1,random_1024_256:128,sharegpt:1,sharegpt:128",
+                     "--arms", f"shipped={SHARED},buckets={SHARED}:OVN_CONFIG={KV / '27b_buckets.yaml'}",
+                     "--gpus", "0,1,2,3", "--port", "59100", "--out", str(R / "q27b_buckets")], 4 * 3600,
+     {**TP4, "PUSH4_MSTAR_CORES": evens(0, 14), "PUSH4_CORES": evens(16, 206)}, True),
     # the knobs split on 27B TP4, reduced per main (9B showed no plan-cache effect): c1 + c128 random, 2 rounds
     ("kvpc_27b", [PY, "ab.py", "bench", "--model", "qwen3_5_27b_tp4", "--rounds", "2",
                   "--cells", "random_1024_256:1,random_1024_256:128", "--arms", KVPC_27B_ARMS,
