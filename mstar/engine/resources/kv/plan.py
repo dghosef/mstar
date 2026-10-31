@@ -100,11 +100,7 @@ class PagedIndptrs(NamedTuple):
         lens = np.where(npages > 0, (npages - 1) * page_size + self.paged_kv_last_page_len.numpy(), 0)
         stored = np.maximum(lens - np.diff(self.qo_indptr.numpy()), 0)
         pages = -(-stored // page_size)
-        new_kvp = np.zeros_like(kvp)
-        np.cumsum(pages, out=new_kvp[1:])
-        row = np.repeat(np.arange(len(pages)), pages)
-        within = np.arange(len(row)) - new_kvp[row]
-        indices = self.paged_kv_indices.numpy()[kvp[row] + within]
+        new_kvp, indices = first_pages(kvp, self.paged_kv_indices.numpy(), pages)
         # as `build_paged_indptrs` gives a row with no pages
         last = np.where(pages > 0, stored - (pages - 1) * page_size, page_size)
         return PagedIndptrs(
@@ -123,6 +119,21 @@ class PagedIndptrs(NamedTuple):
             paged_kv_last_page_len=self.paged_kv_last_page_len,
             kv_lens=self.kv_lens,
         )
+
+
+def first_pages(
+    paged_kv_indptr: np.ndarray, paged_kv_indices: np.ndarray, keep: np.ndarray, fill: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Each row's first ``keep`` pages of a plan's paged ``(indptr, indices)``, as a new pair
+    (int64 indptr, int32 indices). With ``fill``, a row that keeps none holds one page ``fill``."""
+    pages = keep if fill is None else np.where(keep > 0, keep, 1)
+    indptr = np.zeros(len(pages) + 1, dtype=np.int64)
+    np.cumsum(pages, out=indptr[1:])
+    row = np.repeat(np.arange(len(pages)), pages)
+    kept = np.repeat(keep > 0, pages)
+    indices = np.full(len(row), 0 if fill is None else fill, dtype=np.int32)
+    indices[kept] = paged_kv_indices[(paged_kv_indptr[row] + np.arange(len(row)) - indptr[row])[kept]]
+    return indptr, indices
 
 
 def build_paged_indptrs(

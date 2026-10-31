@@ -18,7 +18,7 @@ import numpy as np
 import torch
 
 from mstar.distributed.communication import CommGroup
-from mstar.engine.resources.kv.plan import SINK_PAGE, HostLens, PagedIndptrs
+from mstar.engine.resources.kv.plan import SINK_PAGE, HostLens, PagedIndptrs, first_pages
 from mstar.engine.resources.spec import NodeResourceSpec
 from mstar.utils.h2d import PinnedStager
 
@@ -81,14 +81,7 @@ class ContextParallel(NamedTuple):
         drop = valid & (last == 0)
         kv_indptr, indices = indptrs.paged_kv_indptr, indptrs.paged_kv_indices
         if drop.any() or not valid.all():
-            keep_pages = np.where(valid, npages - drop, 0)
-            new_kvp = np.zeros(len(npages) + 1, dtype=np.int64)
-            np.cumsum(np.where(valid, keep_pages, 1), out=new_kvp[1:])
-            row = np.repeat(np.arange(len(npages)), npages)
-            within = np.arange(len(row)) - kvp[row]
-            keep = within < keep_pages[row]
-            out = np.full(int(new_kvp[-1]), SINK_PAGE, dtype=np.int32)
-            out[new_kvp[row[keep]] + within[keep]] = indices.numpy()[:len(row)][keep]
+            new_kvp, out = first_pages(kvp, indices.numpy(), np.where(valid, npages - drop, 0), fill=SINK_PAGE)
             last = np.where(valid, np.where(drop, page_size // self.size, last), 1)
             lens = np.where(valid, lens, 1)
             kv_indptr, indices = torch.from_numpy(new_kvp.astype(np.int32)), torch.from_numpy(out)
