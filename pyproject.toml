@@ -274,8 +274,7 @@ chatterbox_multilingual = [
 # torchcodec as the fallback); the speech tokenizer and speaker encoder load from
 # the checkpoint's ONNX files without onnxruntime.
 cosyvoice3 = [
-    # 0.7.2: the prefill wrappers' ``lse_base``, which attention over a context-parallel KV pool reads
-    "flashinfer-python>=0.7.2",
+    "flashinfer-python>=0.6.14",
     "huggingface-hub",
     "mooncake-transfer-engine>=0.3.13.post1",
     "safetensors",
