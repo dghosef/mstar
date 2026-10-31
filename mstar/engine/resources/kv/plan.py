@@ -88,6 +88,33 @@ class PagedIndptrs(NamedTuple):
             kv_lens=self.kv_lens,
         )
 
+    def context_only(self, page_size: int, qo_indptr: torch.Tensor | None = None) -> "PagedIndptrs":
+        """Each row's KV cut to its stored context (its KV before the tokens the step appends at the
+        row's end), the pages past it dropped, for attention over the stored context alone
+        (``AttentionStep.context_only``). ``qo_indptr``: the rows' query counts, by default the
+        step's own."""
+        kvp = self.paged_kv_indptr.numpy().astype(np.int64)
+        if qo_indptr is not None and len(qo_indptr) != len(kvp):
+            raise ValueError(f"{len(qo_indptr) - 1} rows of query counts for a plan of {len(kvp) - 1}")
+        npages = np.diff(kvp)
+        lens = np.where(npages > 0, (npages - 1) * page_size + self.paged_kv_last_page_len.numpy(), 0)
+        stored = np.maximum(lens - np.diff(self.qo_indptr.numpy()), 0)
+        pages = -(-stored // page_size)
+        new_kvp = np.zeros_like(kvp)
+        np.cumsum(pages, out=new_kvp[1:])
+        row = np.repeat(np.arange(len(pages)), pages)
+        within = np.arange(len(row)) - new_kvp[row]
+        indices = self.paged_kv_indices.numpy()[kvp[row] + within]
+        # as `build_paged_indptrs` gives a row with no pages
+        last = np.where(pages > 0, stored - (pages - 1) * page_size, page_size)
+        return PagedIndptrs(
+            qo_indptr=self.qo_indptr if qo_indptr is None else qo_indptr,
+            paged_kv_indptr=torch.from_numpy(new_kvp.astype(np.int32)),
+            paged_kv_indices=torch.from_numpy(indices.astype(np.int32)),
+            paged_kv_last_page_len=torch.from_numpy(last.astype(np.int32)),
+            kv_lens=torch.from_numpy(np.where(pages > 0, stored, page_size).astype(np.int32)).as_subclass(HostLens),
+        )
+
     def to_kwargs_dict(self):
         return dict(
             qo_indptr=self.qo_indptr,
@@ -96,20 +123,6 @@ class PagedIndptrs(NamedTuple):
             paged_kv_last_page_len=self.paged_kv_last_page_len,
             kv_lens=self.kv_lens,
         )
-
-
-def context_only_views(
-    views: list[SequenceView], query_spans: list[int], page_size: int,
-) -> list[SequenceView]:
-    """The views of a step's streams without the tokens the step appends: ``length`` shrinks by
-    ``to_compute`` (the pages beyond it dropped) and ``to_compute`` becomes the row's query count.
-    For attention over the stored context alone (``AttentionStep.context_only``)."""
-    out = []
-    for view, queries in zip(views, query_spans, strict=True):
-        length = view.length - view.to_compute
-        pages = -(-(view.start + length) // page_size) if length > 0 else 0
-        out.append(view._replace(page_idxs=view.page_idxs[:pages], length=length, to_compute=queries))
-    return out
 
 
 def build_paged_indptrs(

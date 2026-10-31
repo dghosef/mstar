@@ -18,6 +18,7 @@ if TYPE_CHECKING:
         AcceleratorGraphConfig,
         PiecewiseAcceleratorGraphConfig,
     )
+    from mstar.engine.resources.context_parallel import ContextParallel
     from mstar.engine.resources.kv.transfer import TransferEngineInfo
 
 
@@ -48,6 +49,14 @@ class CGSlotKey:
     label: str
 
 
+def head_shards(group: JointGroups | None, positions_over_sp: bool) -> int:
+    """How many ways a node's ranks split its attention heads: its TP and SP ranks, or TP alone
+    when its KV pool places positions over the SP ranks (``positions_over_sp``)."""
+    if group is None:
+        return 1
+    return group.tp_group.world_size * (1 if positions_over_sp else group.sp_group.world_size)
+
+
 @dataclass(frozen=True)
 class EngineResourceInfo:
     """What the engine has to offer a resource at build time.
@@ -73,6 +82,14 @@ class EngineResourceInfo:
     max_rows_in_combined: "Mapping[str, int | None]" = field(
         default_factory=dict
     )
+    # the node's KV pool places positions over its SP ranks (`context_parallel.positions_over_sp`)
+    positions_over_sp: bool = False
+
+    @property
+    def head_shards(self) -> int:
+        """How many ways the node's ranks split its attention heads, which each builder sizes head
+        counts by (``head_shards``)."""
+        return head_shards(self.joint_comm_group, self.positions_over_sp)
 
     def dependency(self, key: str) -> NodeResourceSpec:
         spec = self.dependencies.get(key)
@@ -118,6 +135,14 @@ class Resource(ABC):
 
     # stays correct when a hit skips the front of a request; required of every resource on a keyed node
     prefix_skip_safe: bool = False
+    # stays correct when a pool it depends on has a `placement`; the engine refuses to load it otherwise
+    supports_context_parallel: bool = False
+
+    @property
+    def placement(self) -> "ContextParallel | None":
+        """How this resource places token positions over ranks (`PagedKVConfig.context_parallel`);
+        None for one that doesn't."""
+        return None
 
     def enable_prefix_cache(self, root: bytes, walks: dict[str, KeyedWalks] | None = None) -> bool:
         """Open whatever this resource keeps across requests, under ``root``;

@@ -46,8 +46,11 @@ def _manager(
         max_num_pages=max_num_pages, page_size=PAGE_SIZE, prefix_cache_tp=opt_in,
     )
     cfg.update(overrides)
+    cfg = PagedKVConfig(**cfg)
+    # what `KVManager.build` does first
+    cfg.shard(world_size)
     kv = KVManager(
-        cfg=PagedKVConfig(**cfg),
+        cfg=cfg,
         name="kv", joint_comm_group=SimpleNamespace(rank=rank, world_size=world_size),
         transfer_engine_info=None, device=torch.device("cpu"), dtype=torch.float32,
         needs_remote_transfer=shared,
@@ -315,6 +318,7 @@ def test_the_serving_config_turns_on_prefix_cache_tp():
         page_size=PAGE_SIZE,
     ))
     apply_yaml_overrides([spec], yaml.safe_load("resources:\n  kv:\n    prefix_cache_tp: true\n"))
+    spec.config.shard(2)
     kv = KVManager(
         cfg=spec.config, name="kv", joint_comm_group=SimpleNamespace(rank=0, world_size=2),
         transfer_engine_info=None, device=torch.device("cpu"), dtype=torch.float32,
