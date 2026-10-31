@@ -18,7 +18,6 @@ import numpy as np
 import torch
 
 from mstar.distributed.communication import CommGroup
-from mstar.engine.resources.kv.config import KVSpec, PagedKVConfig
 from mstar.engine.resources.kv.plan import SINK_PAGE, HostLens, PagedIndptrs
 from mstar.engine.resources.spec import NodeResourceSpec
 from mstar.utils.h2d import PinnedStager
@@ -273,35 +272,29 @@ def gather_merge(group: CommGroup, out: torch.Tensor, lse: torch.Tensor) -> torc
     return merge(*_gather_partials(group, out, lse)).to(out.dtype)
 
 
-def _paged_pools(specs: Iterable[NodeResourceSpec], node: str) -> dict[str, bool]:
-    """``node``'s paged KV pools, each to whether it places positions over the node's ranks.
-    Raises when one is placed and another isn't."""
+def _position_pools(specs: Iterable[NodeResourceSpec], node: str) -> dict[str, bool]:
+    """``node``'s resources that hold token positions, each to whether it places them
+    (``NodeResourceSpec.places_positions``). Raises when one is placed and another isn't."""
     pools = {
-        spec.resource_key: spec.config.context_parallel for spec in specs
-        if node in spec.nodes and isinstance(spec, KVSpec) and isinstance(spec.config, PagedKVConfig)
+        spec.resource_key: placed for spec in specs
+        if node in spec.nodes and (placed := spec.places_positions) is not None
     }
     if any(pools.values()) and not all(pools.values()):
         raise ValueError(
-            f"node {node!r} places positions over its SP ranks, so every paged KV pool it uses must: "
+            f"node {node!r} places positions over its ranks, so every pool of them it uses must: "
             f"set context_parallel on {sorted(key for key, placed in pools.items() if not placed)} too"
         )
     return pools
 
 
-def positions_over_sp(specs: Iterable[NodeResourceSpec], node: str, sp_size: int) -> bool:
-    """Whether ``node``'s KV pool places positions over its SP ranks. Such a node shards heads
-    over TP alone and runs replicated across SP, so the model loads without its SP group.
-
-    Raises when the node has a paged pool that is placed and one that isn't."""
-    return sp_size > 1 and any(_paged_pools(specs, node).values())
-
-
-def sp_rank_placement(specs: Iterable[NodeResourceSpec], node: str, sp_size: int, sp_enabled_nodes) -> bool:
-    """Whether ``node``, on ``sp_size`` > 1 SP ranks, places its KV pools' positions over them
-    (`positions_over_sp`) rather than running the model's own sequence parallelism (it is in
-    ``sp_enabled_nodes``). Raises when it does neither, or both: the placement loads the node
-    without the SP group its own sequence parallelism needs."""
-    pools = _paged_pools(specs, node)
+def positions_over_sp(specs: Iterable[NodeResourceSpec], node: str, sp_size: int, sp_enabled_nodes) -> bool:
+    """Whether ``node``, on ``sp_size`` SP ranks, places its pools' positions over them, sharding
+    heads over TP alone and running replicated across SP, so the model loads without its SP group;
+    otherwise it runs the model's own sequence parallelism (it is in ``sp_enabled_nodes``). False on
+    one SP rank. Raises when it does neither, or both, or places one pool and not another."""
+    if sp_size == 1:
+        return False
+    pools = _position_pools(specs, node)
     placed = any(pools.values())
     if placed and node in sp_enabled_nodes:
         raise ValueError(

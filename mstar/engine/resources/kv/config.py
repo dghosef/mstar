@@ -490,6 +490,11 @@ class KVSpec(NodeResourceSpec):
 
         return KVManager
 
+    @property
+    def places_positions(self) -> bool | None:
+        # a paged pool's (`PagedKVConfig.context_parallel`); a ring keeps every position on each rank
+        return self.config.context_parallel if isinstance(self.config, PagedKVConfig) else None
+
     def apply_yaml_overrides(self, **kwargs):
         """Forwarded to the config: which keys are legal is a property of the
         storage strategy, so the config answers for them."""

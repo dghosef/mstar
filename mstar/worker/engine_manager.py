@@ -9,7 +9,7 @@ from mstar.distributed.communication import WorkerParallelGroups
 from mstar.engine.engine import Engine
 from mstar.engine.node_dtype import resolve_model_dtype, resolve_node_dtype
 from mstar.engine.resources import ResourceReqConfig, apply_yaml_overrides
-from mstar.engine.resources.context_parallel import sp_rank_placement
+from mstar.engine.resources.context_parallel import positions_over_sp
 from mstar.engine.resources.kv.transfer import TransferEngineInfo
 from mstar.graph.runtime.base import GraphRuntime
 from mstar.model.base import Model, node_moe_parallel_configs
@@ -136,7 +136,7 @@ class EngineManager:
         for name in sorted(node_names):
             # A node on SP ranks gets the SP group for its own sequence
             # parallelism, unless it places its KV pools' positions over them
-            # and runs replicated across them (`sp_rank_placement`, which
+            # and runs replicated across them (`positions_over_sp`, which
             # validate_deployment checks before spawn; here it is loud where
             # that was skipped). A node off SP ranks keeps its existing
             # get_submodule call. Likewise ``moe_parallel``, only for a node
@@ -144,7 +144,7 @@ class EngineManager:
             extra = {}
             node_sp_group = parallel_groups.get_sp_config_for_node(name)
             sp = node_sp_group.world_size
-            if sp > 1 and not sp_rank_placement(specs, name, sp, model.get_default_sharding_config().sp_enabled_nodes):
+            if sp > 1 and not positions_over_sp(specs, name, sp, model.get_default_sharding_config().sp_enabled_nodes):
                 extra["sp_group"] = node_sp_group
             if name in moe_parallel:
                 extra["moe_parallel"] = moe_parallel[name]

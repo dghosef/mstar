@@ -535,11 +535,13 @@ class Engine:
         specs_by_key = resolve_spec_dependencies(specs)
 
         self._classify_tp_roles(node_names, parallel_groups)
-        # node -> whether its KV pool places positions over its SP ranks, leaving its heads to TP
-        over_sp = {
-            node: positions_over_sp(specs, node, parallel_groups.get_joint_group_for_node(node).sp_group.world_size)
-            for node in node_names
-        }
+        # node -> how many ways its heads split: TP alone where its pools place positions over its SP ranks
+        sp_enabled = () if model is None else model.get_default_sharding_config().sp_enabled_nodes
+        shards = {}
+        for node in node_names:
+            group = parallel_groups.get_joint_group_for_node(node)
+            over_sp = positions_over_sp(specs, node, group.sp_group.world_size, sp_enabled)
+            shards[node] = head_shards(group, over_sp)
 
         for spec in specs:
             relevant_nodes = spec.nodes & node_names
@@ -571,7 +573,7 @@ class Engine:
                     max_rows_in_combined=self._max_rows_in_combined(
                         spec.resource_key, relevant_nodes, submodules, model,
                     ),
-                    positions_over_sp=over_sp[first_node],
+                    head_shards=shards[first_node],
                 ),
             )
             for node in relevant_nodes:
@@ -620,7 +622,7 @@ class Engine:
                 node_dtype=resolve_node_dtype(submodule, self._autocast_dtype),
                 fp32_precision=node_fp32_precision(node_name, submodule),
                 # the count its resources shard heads by
-                head_shards=head_shards(parallel_groups.get_joint_group_for_node(node_name), over_sp[node_name]),
+                head_shards=shards[node_name],
             )
             submodule.bind_node_resources(resources)
             if getattr(submodule, "reads_device_loopback", False):

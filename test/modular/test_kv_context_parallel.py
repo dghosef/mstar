@@ -487,7 +487,7 @@ def _cp_attention(
     ))
     info = EngineResourceInfo(
         device=device, joint_comm_group=joint, kv_dtype=dtype, dependencies={"kv": kv},
-        positions_over_sp=joint.sp_group.world_size > 1,
+        head_shards=joint.tp_group.world_size,
     )
     spec = AttentionSpec(resource_key="attn", nodes={NODE}, config=AttentionConfig(kv_cache="kv", **attention))
     attn = AttentionManager.build(spec, info)

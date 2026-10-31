@@ -49,9 +49,9 @@ class CGSlotKey:
     label: str
 
 
-def head_shards(group: JointGroups | None, positions_over_sp: bool) -> int:
+def head_shards(group: JointGroups | None, positions_over_sp: bool = False) -> int:
     """How many ways a node's ranks split its attention heads: its TP and SP ranks, or TP alone
-    when its KV pool places positions over the SP ranks (``positions_over_sp``)."""
+    when its pools place positions over the SP ranks (``context_parallel.positions_over_sp``)."""
     if group is None:
         return 1
     return group.tp_group.world_size * (1 if positions_over_sp else group.sp_group.world_size)
@@ -82,14 +82,14 @@ class EngineResourceInfo:
     max_rows_in_combined: "Mapping[str, int | None]" = field(
         default_factory=dict
     )
-    # the node's KV pool places positions over its SP ranks (`context_parallel.positions_over_sp`)
-    positions_over_sp: bool = False
+    # how many ways the node's ranks split its attention heads, which each builder sizes head counts
+    # by; None for every TP and SP rank (`head_shards`), which the engine narrows for a node that
+    # places positions over its SP ranks
+    head_shards: int | None = None
 
-    @property
-    def head_shards(self) -> int:
-        """How many ways the node's ranks split its attention heads, which each builder sizes head
-        counts by (``head_shards``)."""
-        return head_shards(self.joint_comm_group, self.positions_over_sp)
+    def __post_init__(self):
+        if self.head_shards is None:
+            object.__setattr__(self, "head_shards", head_shards(self.joint_comm_group))
 
     def dependency(self, key: str) -> NodeResourceSpec:
         spec = self.dependencies.get(key)

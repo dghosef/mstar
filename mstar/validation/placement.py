@@ -6,8 +6,7 @@ from typing import Any
 
 from mstar.distributed.base import ShardingConfig
 from mstar.distributed.communication import GlobalParallelConfig
-from mstar.engine.resources.context_parallel import sp_rank_placement
-from mstar.engine.resources.kv.config import KVSpec, PagedKVConfig
+from mstar.engine.resources.context_parallel import positions_over_sp
 from mstar.engine.resources.spec import NodeResourceSpec
 from mstar.graph.base import GraphSection, self_triggered, top_level_entities
 from mstar.model.base import Model, WorkerGraph
@@ -431,7 +430,7 @@ def _worker_parallelism(
 def _sequence_parallel(
     model: Model, worker_graphs: Sequence[WorkerGraph], specs: Sequence[NodeResourceSpec] | None,
 ) -> Iterator[str]:
-    """What a node group's SP ranks do (`sp_rank_placement`, which the engine manager checks
+    """What a node group's SP ranks do (`positions_over_sp`, which the engine manager checks
     again at load), and whether each KV pool placed over a group's ranks can stripe over them.
     Without ``specs`` (the model's resources failed to resolve, which is reported apart) there is
     nothing to check this against."""
@@ -441,10 +440,7 @@ def _sequence_parallel(
     groups: dict[int, tuple[int, int, set[str]]] = {}
     for wg in worker_graphs:
         groups.setdefault(wg._group_id, (wg._tp_comm_size, wg.sp_size, set()))[2].update(wg.section.get_nodes())
-    placed_pools = [
-        spec for spec in specs
-        if isinstance(spec, KVSpec) and isinstance(spec.config, PagedKVConfig) and spec.config.context_parallel
-    ]
+    placed_pools = [spec for spec in specs if spec.places_positions]
     for i, (tp, sp, nodes) in sorted(groups.items()):
         for spec in placed_pools:
             if spec.nodes & nodes:
@@ -456,6 +452,6 @@ def _sequence_parallel(
             continue
         for node in sorted(nodes):
             try:
-                sp_rank_placement(specs, node, sp, enabled)
+                positions_over_sp(specs, node, sp, enabled)
             except ValueError as e:
                 yield f"node_groups[{i}]: {e}"
