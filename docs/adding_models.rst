@@ -1895,8 +1895,7 @@ the partners hold the same query heads, so they all-gather the partials. In TP m
 different query heads of one KV head: each sends its queries to its partners, attends every
 partner's heads over its own slots, and sends the partials back to their heads' owners, two
 all-to-alls over the TP group. The collectives run on every layer of every step, so a request
-attends at one rank's speed over ``1/P`` of its context, plus the exchange. An eager step whose
-rows hold no stored context yet (a first prefill) skips both.
+attends at one rank's speed over ``1/P`` of its context, plus the exchange.
 
 A step whose rows each query one token makes one paged call after its KV write; in TP mode it
 runs on tensor cores whatever ``decode_tensor_cores`` says, since a rank's query heads over its

@@ -104,16 +104,12 @@ class ContextParallel(NamedTuple):
     def attend(
         self,
         queries: tuple[torch.Tensor, ...],
-        partial: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]] | None,
+        partial: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
         new: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        """Attention over the whole pool for this rank's query parts (each ``[N, H, *]``), fp32
-        (``new``'s out as is when ``partial`` is None). ``partial`` gives ``(out, lse, valid)`` over
-        this rank's slots; ``new`` is the step's own tokens' ``(out, lse)``. Every rank runs the same
-        collectives; none when ``partial`` is None (no row has stored context), which every rank
-        must agree on."""
-        if partial is None:
-            return new[0]
+        """Attention over the whole pool for this rank's query parts (each ``[N, H, *]``), fp32.
+        ``partial`` gives ``(out, lse, valid)`` over this rank's slots; ``new`` is the step's own
+        tokens' ``(out, lse)``. Every rank runs the same collectives."""
         outs, lses = self.exchange_partials(*partial(*self.exchange_queries(queries)))
         if new is not None:
             outs = torch.cat([outs, new[0].to(outs.dtype).unsqueeze(0)])
@@ -198,9 +194,6 @@ class ContextParallelWrapper:
         self._captured = captured_tokens > 0
         self._valid = torch.zeros(captured_tokens, dtype=torch.bool, device=device) if self._captured else None
         self._stager = PinnedStager(torch.bool)
-        # an eager step with no stored context on any row (from the logical plan, so the same on
-        # every rank): it attends its own tokens alone, with no context call or exchange
-        self.context_empty = False
 
     @torch.compiler.disable
     def plan(self, kv_out, causal: bool = True):
@@ -210,8 +203,6 @@ class ContextParallelWrapper:
         if self.new is not None:
             context = context.context_only(self._page_size)
         local, valid_rows = self._placement.local_indptrs(context, self._page_size)
-        # no row has a stored page: logical, so the same on every rank
-        self.context_empty = not self._captured and self.new is not None and not int(context.paged_kv_indptr[-1])
         # not causal whatever the step: every query sees all of it (a one-token row's own key
         # included), and FA MLA's causal tile check reads each rank's KV lengths
         self.context.plan(causal=False, dtype=self._dtype, **local.to_kwargs_dict())
@@ -248,7 +239,7 @@ class ContextParallelWrapper:
             return out, lse, self._valid[: parts[0].shape[0]]
 
         new = None if self.new is None else self.new.run(*queries, *new_keys, return_lse=True)
-        return self._placement.attend(queries, None if self.context_empty else context, new).to(queries[0].dtype)
+        return self._placement.attend(queries, context, new).to(queries[0].dtype)
 
     @property
     def reads_step_kv(self) -> bool:

@@ -575,13 +575,10 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False)
         assert torch.isfinite(out).all()
         torch.testing.assert_close(out[:n].float(), case.want()[:, heads], **tol)
         if rows == PREFILL_ROWS and not captured:
-            # an eager first prefill (no row holds stored context) attends its own tokens alone, on
-            # every rank, with no collective
+            # a first prefill: no row holds stored context on any rank, so every partial is masked
             first = _Case.build(((0, 5), (0, 3)), device, dtype, mla)
             _plan(attn, first)
-            issued = len(calls)
             torch.testing.assert_close(first.runner(attn, placement, heads)().float(), first.want()[:, heads], **tol)
-            assert len(calls) == issued
         everyone = [None] * world
         dist.all_gather_object(everyone, calls)
         assert calls and all(c == calls for c in everyone), everyone
