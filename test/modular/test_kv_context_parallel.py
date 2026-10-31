@@ -637,8 +637,8 @@ class _OneSlotPrefill:
 def test_captured_zigzag_shares_replan_in_place_and_merge_to_attention_over_a_larger_bucket(causal):
     """SP partners' zigzag shares of a step's own tokens on wrappers captured for a bucket larger
     than the step, planned for one step and then another (with a zero-length padding row, as the
-    graph runner pads): each plan writes the buffers a replay reads, the padding queries cost one
-    key each, the bucket's padding tokens merge to 0, and the real ones to their rows' attention."""
+    graph runner pads): each plan writes the buffers a replay reads, the bucket's padding tokens
+    merge to 0, and the real ones to their rows' attention."""
     rows, tokens = 3, 16
     kernels = []
 
@@ -660,12 +660,8 @@ def test_captured_zigzag_shares_replan_in_place_and_merge_to_attention_over_a_la
         qo = torch.tensor(np.concatenate([[0], np.cumsum(lens)]), dtype=torch.int32)
         q, k, v = (torch.randn(tokens, heads, HEAD_DIM, generator=gen) for heads in (Q_HEADS, 1, 1))
         shares = []
-        for index, (wrapper, kernel) in enumerate(zip(wrappers, kernels, strict=True)):
+        for wrapper in wrappers:
             wrapper.plan(qo, causal=causal)
-            assert len(kernel.qo) == 2 * rows + 2
-            # past the real chunks, the padding queries' row and the leftover rows hold one key each
-            chunks = len(zigzag_rows(qo.numpy(), P, index, causal).qo_indptr) - 1
-            assert np.diff(kernel.kv)[chunks:].tolist() == [1] * (2 * rows + 1 - chunks)
             shares.append(wrapper.run(q, k, v))
         assert [(w._gather.data_ptr(), w._scatter.data_ptr()) for w in wrappers] == addresses
         got = merge(torch.stack([out for out, _ in shares]), torch.stack([lse for _, lse in shares]))

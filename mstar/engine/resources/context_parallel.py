@@ -105,13 +105,13 @@ class ContextParallel(NamedTuple):
         computes (under SP placement its zigzag chunks, lse -inf on the rest). Every rank runs the
         same collectives: under SP placement one all-gather, under TP placement two all-to-alls."""
         if self.over_sp:
-            return gather_merge(self.group, *self.share(queries, partial, new))
+            return gather_merge(self.group, *self.merged_share(queries, partial, new))
         outs, lses = self.exchange_partials(*partial(*self.exchange_queries(queries)))
         if new is None:
             return merge(outs, lses)
         return merge([*outs, new[0]], torch.cat([lses, new[1][None]]))
 
-    def share(
+    def merged_share(
         self,
         queries: tuple[torch.Tensor, ...],
         partial: Callable[..., tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
@@ -185,9 +185,9 @@ class ContextParallelWrapper:
 
     ``check(what, qo_indptr)``, before anything is planned, is the backend's refusal of a plan its
     kernel's planner may refuse on one rank of the lockstep instance alone. It sees every plan whose
-    lengths differ by rank: the context's, and under SP placement every partner's zigzag share of
-    the own tokens. TP mode's own-token plan has the same lengths on every rank, so a refusal of it
-    is symmetric already."""
+    lengths differ by rank: the context's here, and under SP placement every partner's zigzag share
+    of the own tokens (``ZigzagWrapper``). TP mode's own-token plan has the same lengths on every
+    rank, so a refusal of it is symmetric already."""
 
     def __init__(
         self,
@@ -226,14 +226,10 @@ class ContextParallelWrapper:
         if self.new is not None:
             context = context.context_only(self._page_size)
         if self._check is not None:
-            qo = context.qo_indptr.numpy()
-            self._check("the context", qo)
-            # under SP placement ``new`` is a ``ZigzagWrapper``; TP mode's own-token plan is symmetric
-            if self._placement.over_sp and self.new is not None:
-                for index in range(self._placement.size):
-                    share = self.new.share(qo, index, causal)
-                    if len(share) > 1:
-                        self._check(f"partner {index}'s own tokens", share)
+            self._check("the context", context.qo_indptr.numpy())
+        if self.new is not None:
+            # before the context, so a share's refusal (``ZigzagWrapper``) comes before anything is planned
+            self.new.plan(context.qo_indptr, causal=causal)
         local, valid_rows = self._placement.local_indptrs(context, self._page_size)
         if kv_out.cpu_indptrs.paged_kv_indices.is_pinned() and not local.paged_kv_indices.is_pinned():
             # page-locked plan indices (MSTAR_KV_PINNED_INDPTRS) stay page-locked once trimmed, so
@@ -242,8 +238,6 @@ class ContextParallelWrapper:
         # not causal whatever the step: every query sees all of it (a one-token row's own key
         # included), and FA MLA's causal tile check reads each rank's KV lengths
         self.context.plan(causal=False, dtype=self._dtype, **local.to_kwargs_dict())
-        if self.new is not None:
-            self.new.plan(context.qo_indptr, causal=causal)
         self._qo_indptr_buf = getattr(self.context, "_qo_indptr_buf", None)
         valid = np.repeat(valid_rows, np.diff(context.qo_indptr.numpy()))
         n = len(valid)
@@ -298,10 +292,8 @@ class ZigzagRows(NamedTuple):
     ``2P - 1 - r`` of each row's ``2P``; see the context-parallel docs). Arrays run over the
     non-empty chunks, row by row; token indices are the step's."""
 
-    # [M] the queries this rank attends, chunk by chunk
+    # [M] the queries this rank attends, chunk by chunk (``ZigzagWrapper.share`` counts them)
     tokens: np.ndarray
-    # [S + 1] each chunk's queries in ``tokens``
-    qo_indptr: np.ndarray
     # [S + 1] each chunk's keys in ``kv_tokens``
     kv_indptr: np.ndarray
     # [K] each chunk's keys: its row's first token to the chunk's last (or the row's)
@@ -311,9 +303,9 @@ class ZigzagRows(NamedTuple):
 def zigzag_rows(qo_indptr: np.ndarray, size: int, index: int, causal: bool = True) -> ZigzagRows:
     """Rank ``index`` of ``size``'s zigzag chunks of the rows ``qo_indptr`` lays out."""
     row, first, end, kv_end = _zigzag_chunks(qo_indptr, size, index, causal)
-    qo, tokens = token_runs(row + first, end - first)
+    _, tokens = token_runs(row + first, end - first)
     kv, kv_tokens = token_runs(row, kv_end)
-    return ZigzagRows(tokens, qo, kv, kv_tokens)
+    return ZigzagRows(tokens, kv, kv_tokens)
 
 
 def _zigzag_chunks(
@@ -345,7 +337,8 @@ class ZigzagWrapper:
 
     ``paged`` builds the kernel, with ``batch_size``, ``max_total_tokens`` and ``max_num_pages``
     for a captured one; the first ``num_queries`` of ``run``'s arguments are query parts, the rest
-    keys (``one_slot_pages``)."""
+    keys (``one_slot_pages``). ``check`` is ``ContextParallelWrapper``'s, which ``plan`` applies to
+    every partner's share, as each rank can lay out every partner's."""
 
     def __init__(
         self,
@@ -356,9 +349,11 @@ class ZigzagWrapper:
         dtype: torch.dtype,
         captured_rows: int = 0,
         captured_tokens: int = 0,
+        check: Callable[[str, np.ndarray], None] | None = None,
     ):
         self._placement = placement
         self._num_queries = num_queries
+        self._check = check
         self._device, self._dtype = device, dtype
         self._stager = PinnedStager(torch.int64)
         self._captured = captured_tokens > 0
@@ -384,10 +379,10 @@ class ZigzagWrapper:
         self._gather, self._scatter = self._tokens
         self._bucket_tokens = captured_tokens
 
-    def share(self, qo_indptr: np.ndarray, index: int, causal: bool = True) -> np.ndarray:
-        """Partner ``index``'s plan of a step as this wrapper makes it: its chunks' ``qo_indptr``,
-        padded as its kernel's planner reads it. Every rank can lay out every partner's."""
-        _, first, end, _ = _zigzag_chunks(qo_indptr, self._placement.size, index, causal)
+    def share(self, qo_indptr: np.ndarray, index: int) -> np.ndarray:
+        """Partner ``index``'s plan of a step as this wrapper makes it, which ``plan`` hands its kernel:
+        its chunks' ``qo_indptr``, padded as its kernel's planner reads it."""
+        _, first, end, _ = _zigzag_chunks(qo_indptr, self._placement.size, index, causal=True)
         return self._padded(np.concatenate([[0], np.cumsum(end - first)]))
 
     def _padded(self, qo_indptr: np.ndarray) -> np.ndarray:
@@ -401,10 +396,16 @@ class ZigzagWrapper:
 
     @torch.compiler.disable
     def plan(self, qo_indptr: torch.Tensor, causal: bool = True) -> None:
-        rows = zigzag_rows(qo_indptr.numpy(), self._placement.size, self._placement.index, causal)
-        qo = self._padded(rows.qo_indptr)
+        step = qo_indptr.numpy()
+        if self._check is not None:
+            for index in range(self._placement.size):
+                share = self.share(step, index)
+                if len(share) > 1:
+                    self._check(f"partner {index}'s own tokens", share)
+        rows = zigzag_rows(step, self._placement.size, self._placement.index, causal)
+        qo = self.share(step, self._placement.index)
         # a padding or leftover row's one key is token 0
-        extra = len(qo) - len(rows.qo_indptr)
+        extra = len(qo) - len(rows.kv_indptr)
         kv_indptr = np.concatenate([rows.kv_indptr, rows.kv_indptr[-1] + np.arange(1, extra + 1)])
         kv_tokens = np.concatenate([rows.kv_tokens, np.zeros(extra, dtype=np.int64)])
         self._step_tokens = int(qo_indptr[-1])

@@ -112,7 +112,7 @@ class AttentionManager(AttentionResource):
 
             new = ZigzagWrapper(
                 self._placement, paged, self._query_parts, self._device, self._dtype,
-                kwargs.get("batch_size") or 0, max_total_tokens or 0,
+                kwargs.get("batch_size") or 0, max_total_tokens or 0, check=self._plan_check,
             )
         else:
             new = self._own_tokens_wrapper(workspace, kwargs, max_total_tokens)
