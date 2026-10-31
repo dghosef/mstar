@@ -371,8 +371,8 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
        (``true``/``false`` or an integer). Each one's environment variable
        (``MSTAR_DEVICE_LOOPBACK`` and so on; see
        :doc:`environment_variables`) overrides it when set, and an unknown name
-       fails at startup. For example ``knobs: {kv_plan_cache: 1,
-       kv_pinned_indptrs: true}``, or ``knobs: {pre_plan: false}``
+       fails at startup. For example ``knobs: {gc_gen0_threshold: 50000}``
+       (``qwen3_5_0.8b.yaml``), or ``knobs: {pre_plan: false}``
        (``whisper_large_v3_turbo.yaml``).
 
 Node names are model-specific — they are the node names appearing in the model's graph

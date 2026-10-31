@@ -564,7 +564,8 @@ Worker scheduling
        0.8B, 2B, 4B, 9B TP2 and 27B TP4 (H100) it gained nothing beside
        ``gc_gen0_threshold``, which carries the high-concurrency gain (on 0.8B
        it cost 2-3% at c=1 alone and 4-5% beside it; on 9B TP2 0.6-2.5% at
-       c=128 beside it; on 27B TP4 within 0.3% either way). ``0`` plans every step from the streams.
+       c=128 beside it; on 27B TP4 +0.3% alone and -0.1% beside it).
+       ``0`` plans every step from the streams.
        ``2`` runs both and logs a difference, for checking a run. Read by
        ``knobs.kv_plan_cache``.
    * - ``MSTAR_DEVICE_LOOPBACK``
