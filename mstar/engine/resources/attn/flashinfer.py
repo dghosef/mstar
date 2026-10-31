@@ -1,5 +1,6 @@
 """Paged attention through FlashInfer's prefill/decode wrappers."""
 
+import logging
 from collections.abc import Mapping
 
 import torch
@@ -26,6 +27,8 @@ from mstar.engine.resources.kv.plan import KVPlanOutputs
 from mstar.engine.resources.spec import CombinedSplit
 from mstar.engine.resources.step import SlotLease, StepContext
 from mstar.utils.profiler import PhaseLaps
+
+logger = logging.getLogger(__name__)
 
 
 class FlashInferManager(AttentionManager):
@@ -78,6 +81,12 @@ class FlashInferManager(AttentionManager):
         self._workspaces = WorkspacePool(device)
 
     def _bind_placement(self, placement: ContextParallel) -> None:
+        if not self._decode_tensor_cores and not placement.over_sp:
+            logger.info(
+                "attention over context-parallel KV pool %r decodes on tensor cores although "
+                "decode_tensor_cores is off: a TP-placed rank's query heads over its one KV head can form "
+                "a group FlashInfer's CUDA-core decode has no kernel for", self._kv_cache_name,
+            )
         cfg = self._kv_config
         self._wrapper_kv_kwargs.update(placement.local_geometry(cfg.page_size, cfg.num_qo_heads))
         self._new_kwargs = dict(

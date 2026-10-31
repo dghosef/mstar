@@ -355,6 +355,10 @@ class FlashInferMLAManager(AttentionManager):
             from mstar.platforms import current_platform
 
             self._wrapper_kwargs["backend"] = "fa3" if current_platform.arch(self._device) == "sm_90" else "fa2"
+            logger.info(
+                "MLA attention over context-parallel KV pool %r plans on %s for flashinfer_backend 'auto'",
+                self._kv_cache_name, self._wrapper_kwargs["backend"],
+            )
         if self._wrapper_kwargs["backend"] in ("fa2", "fa3") and self.uses_kernel:
             import flashinfer
             from packaging.version import Version
