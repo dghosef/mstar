@@ -49,7 +49,8 @@ KVPC_27B_ARMS = ",".join(f"{n}={HEAD}:OVN_CONFIG={c}" for n, c in (
 JOBS = [
     # the knobs split on 27B TP4, reduced per main (9B showed no plan-cache effect): c1 + c128 random, 2 rounds
     ("kvpc_27b", [PY, "ab.py", "bench", "--model", "qwen3_5_27b_tp4", "--rounds", "2",
-                  "--cells", "random_1024_256:1,random_1024_256:128", "--arms", KVPC_27B_ARMS, "--gpus", "0,1,2,3", "--port", "59100",
+                  "--cells", "random_1024_256:1,random_1024_256:128", "--arms", KVPC_27B_ARMS,
+                  "--gpus", "0,1,2,3", "--port", "59100",
                   "--out", str(R / "kvpc" / "q27b")], 4 * 3600,
      {**TP4, "PUSH4_MSTAR_CORES": evens(0, 14), "PUSH4_CORES": evens(16, 206)}, True),
     ("sg_profile_head", [PY, "ab.py", "profile", "--arms", f"head={HEAD}", "--cells", "sharegpt:128,sharegpt:64",
