@@ -86,15 +86,18 @@ class AttentionManager(AttentionResource):
     def _context_parallel_wrapper(
         self, label: str, slot: int, decode: bool, kwargs: dict, max_total_tokens: int | None = None,
     ):
-        """The ``ContextParallelWrapper`` a step attends a placed pool on: the context's wrapper on
-        the label's workspace and, for a step that isn't one token a row, its own tokens' on a
-        workspace of their own (both are planned for the one step)."""
+        """The ``ContextParallelWrapper`` a step attends a placed pool on: the context's wrapper and,
+        for a step that isn't one token a row, its own tokens'.
+
+        Both take the label's workspace although both are planned for the one step: a FlashInfer
+        wrapper keeps its plan in an int workspace of its own, and uses this one only for the
+        split-KV partials of a ``run``, which it merges within that ``run``; the two run one after
+        the other on one stream."""
         from mstar.engine.resources.context_parallel import ContextParallelWrapper
 
-        context = self._context_wrapper(self._workspaces.get(label, slot), decode, kwargs, max_total_tokens)
-        new = None if decode else self._own_tokens_wrapper(
-            self._workspaces.get(f"{label}.own_tokens", slot), kwargs, max_total_tokens,
-        )
+        workspace = self._workspaces.get(label, slot)
+        context = self._context_wrapper(workspace, decode, kwargs, max_total_tokens)
+        new = None if decode else self._own_tokens_wrapper(workspace, kwargs, max_total_tokens)
         return ContextParallelWrapper(
             self._placement, self._kv_config.page_size, self._dtype, context, new, self._device,
             kwargs.get("batch_size"), max_total_tokens,
