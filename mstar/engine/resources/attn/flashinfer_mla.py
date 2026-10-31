@@ -48,7 +48,10 @@ def flashinfer_mla_supports(kv_lora_rank: int, qk_rope_head_dim: int) -> bool:
 
 
 # the FlashInfer whose FA MLA planner (fa2, fa3) rules `fa_work_items_bound` copies: its cap on a
-# plan's work items, its SM cluster and query tile, and its KV split limit
+# plan's work items, its SM cluster and query tile, and its KV split limit. In that release they are
+# `_fa_plan_work_count` and `_FA_MAX_WORK_ITEMS` in flashinfer/mla/_batch_mla/_backends/_fa_common.py,
+# which mirror `MLAPlan` in include/flashinfer/attention/scheduler.cuh; the `64 % heads` refusal
+# at bind is that file's `_validate_fa_causal_tile_bound`
 _FA_PLANNER_VERSION = "0.7.2"
 _FA_MAX_WORK_ITEMS = 16384
 

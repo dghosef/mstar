@@ -274,6 +274,7 @@ chatterbox_multilingual = [
 # torchcodec as the fallback); the speech tokenizer and speaker encoder load from
 # the checkpoint's ONNX files without onnxruntime.
 cosyvoice3 = [
+    # 0.7.2: the prefill wrappers' ``lse_base``, which attention over a context-parallel KV pool reads
     "flashinfer-python>=0.7.2",
     "huggingface-hub",
     "mooncake-transfer-engine>=0.3.13.post1",
@@ -410,7 +411,9 @@ asr = [
 
 # GLM-5.x
 glm = [
-    "flashinfer-python>=0.7.2",
+    # exactly: MLA attention over a context-parallel KV pool mirrors this release's FA planner rules
+    # (`flashinfer_mla.fa_work_items_bound`) and refuses any other at load
+    "flashinfer-python==0.7.2",
     "huggingface-hub",
     "mooncake-transfer-engine>=0.3.13.post1",
     "ninja",  # speeds up the first-use JIT build of the vendored MoE align kernel
