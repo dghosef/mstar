@@ -189,6 +189,8 @@ class ContextParallelWrapper:
         self._captured = captured_tokens > 0
         self._valid = torch.zeros(captured_tokens, dtype=torch.bool, device=device) if self._captured else None
         self._stager = PinnedStager(torch.bool)
+        # page-locked copy of the trimmed paged indices; one per wrapper, so per slot
+        self._pinned_indices: torch.Tensor | None = None
 
     @torch.compiler.disable
     def plan(self, kv_out, causal: bool = True):
@@ -198,6 +200,10 @@ class ContextParallelWrapper:
         if self.new is not None:
             context = context.context_only(self._page_size)
         local, valid_rows = self._placement.local_indptrs(context, self._page_size)
+        if kv_out.cpu_indptrs.paged_kv_indices.is_pinned() and not local.paged_kv_indices.is_pinned():
+            # page-locked plan indices (MSTAR_KV_PINNED_INDPTRS) stay page-locked once trimmed, so
+            # FlashInfer copies them asynchronously on every rank alike, whichever rows a rank trims
+            local = local._replace(paged_kv_indices=self._pin(local.paged_kv_indices))
         # not causal whatever the step: every query sees all of it (a one-token row's own key
         # included), and FA MLA's causal tile check reads each rank's KV lengths
         self.context.plan(causal=False, dtype=self._dtype, **local.to_kwargs_dict())
@@ -213,6 +219,15 @@ class ContextParallelWrapper:
         # a captured bucket's whole buffer, so its padding tokens read False rather than a stale flag;
         # an eager step reads its own tokens' alone
         self._stager.copy_(self._valid, valid, pad_value=False if self._captured else None)
+
+    def _pin(self, indices: torch.Tensor) -> torch.Tensor:
+        """``indices`` in this wrapper's page-locked buffer. A plan rewrites it only after the step
+        the last plan was for retired, as the wrapper is its slot's alone."""
+        n = len(indices)
+        if self._pinned_indices is None or len(self._pinned_indices) < n:
+            grown = 2 * (0 if self._pinned_indices is None else len(self._pinned_indices))
+            self._pinned_indices = torch.empty(max(n, grown, 256), dtype=torch.int32, pin_memory=True)
+        return self._pinned_indices[:n].copy_(indices)
 
     def attend(
         self, queries: tuple[torch.Tensor, ...], kv_cache_layer: torch.Tensor,
