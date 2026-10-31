@@ -426,8 +426,10 @@ class GDNPrefillWrapper(GDNWrapper):
 
     def run(self, q, k, v, a, b, state, a_log, dt_bias):
         """The chunked delta rule over the plan's sequences. ``q``, ``k`` and
-        ``v`` must be ``run_conv``'s output: under capture it zeroes the padded
-        tail, which can hold inf, and ``run`` zeroes only the gates'."""
+        ``v`` must have the padded tail zeroed, as ``run_conv``'s output has
+        under capture (the tail can hold inf; ``run`` zeroes only the gates'),
+        and as ``GDNMixedWrapper``'s does, which writes only its decode run's
+        rows over it."""
         from flashinfer.gdn_prefill import chunk_gated_delta_rule
 
         slots = self._plan_state.slots.to(torch.int64)
