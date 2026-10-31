@@ -454,7 +454,8 @@ class FlashInferMLAManager(AttentionManager):
         (``_refuse_past_work_item_cap``) before it is planned, so the worker retries it smaller:
         sized by how many of its requests, in its order, fit, or terminal for a request that
         doesn't fit alone. The bound reads query lengths alone, so every rank refuses alike."""
-        if self._fa_sm_count is None or not step.segments:
+        # a step of one query a row (decode) is about a work item a row, far under the cap
+        if self._fa_sm_count is None or all(segment.span == 1 for segment in step.segments):
             return ADMIT_OK
         # request -> label -> its queries this step
         rows: dict[str, dict[str, int]] = {}
