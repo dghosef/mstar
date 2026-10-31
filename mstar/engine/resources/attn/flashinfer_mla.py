@@ -280,6 +280,10 @@ class FlashInferMLAOwnTokensWrapper(FlashInferMLAWrapper):
         owned = {}
         if self._out_buf is not None:
             n = q_nope.shape[0]
+            assert n <= self._out_buf.shape[0], (
+                f"{type(self).__name__}: {n} rows exceeds the "
+                f"{self._out_buf.shape[0]} this graph-mode wrapper was built for"
+            )
             owned = dict(out=self._out_buf[:n], lse=self._lse_buf[:n] if return_lse else None)
         return super().run(q_nope, q_pe, latent.unsqueeze(1), return_lse=return_lse, **owned)
 
