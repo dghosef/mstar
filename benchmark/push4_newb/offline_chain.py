@@ -40,8 +40,18 @@ HEAD = "/root/push4/newb/head"
 NSYS_SG = [PY, "nsysrun.py", "--model", "qwen3_5_27b_tp4", "--gpus", "0,1,2,3", "--port", "59100",
            "--cell", "sharegpt:128", "--n", "512", "--out", str(R / "q27b_sg_nsys")]
 
+KV = R / "kvpc" / "cfg"
+KVPC_27B_ARMS = ",".join(f"{n}={HEAD}:OVN_CONFIG={c}" for n, c in (
+    ("none", KV / "27b_none.yaml"), ("kvpc", KV / "27b_kvpc.yaml"), ("gc", KV / "27b_gc.yaml"),
+    ("both", f"{HEAD}/configs/qwen3_5_27b_tp4.yaml")))
+
 # (name, command, timeout s, env, needs GPUs 1-3)
 JOBS = [
+    # the knobs split on 27B TP4, reduced per main (9B showed no plan-cache effect): c1 + c128 random, 2 rounds
+    ("kvpc_27b", [PY, "ab.py", "bench", "--model", "qwen3_5_27b_tp4", "--rounds", "2",
+                  "--cells", "random_1024_256:1,random_1024_256:128", "--arms", KVPC_27B_ARMS, "--gpus", "0,1,2,3", "--port", "59100",
+                  "--out", str(R / "kvpc" / "q27b")], 4 * 3600,
+     {**TP4, "PUSH4_MSTAR_CORES": evens(0, 14), "PUSH4_CORES": evens(16, 206)}, True),
     ("sg_profile_head", [PY, "ab.py", "profile", "--arms", f"head={HEAD}", "--cells", "sharegpt:128,sharegpt:64",
                          "--model", "qwen3_5_27b_tp4", "--gpus", "0,1,2,3", "--port", "59100",
                          "--out", str(R / "q27b_sg_profile")], 3600, TP4, True),
