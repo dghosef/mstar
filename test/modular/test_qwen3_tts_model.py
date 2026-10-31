@@ -1600,7 +1600,9 @@ def _depth_loop(model, monkeypatch):
             if model == "qwen3_tts":
                 for cache_pos in range(n):
                     predictor.depth.bind_step(kv_cache, pos[cache_pos], cache_pos=cache_pos)
-                    predictor.depth_step(x.squeeze(1).clone(), partials, head=0)
+                    # as the talker's loop: no head at position 0, then one per group
+                    head = None if cache_pos == 0 else cache_pos - 1
+                    predictor.depth_step(x.squeeze(1).clone(), partials, head=head)
             else:
                 # Qwen3-Omni opens with a two-token pass at cache_pos 0
                 predictor.depth.bind_step(kv_cache, pair_pos, cache_pos=0)
@@ -1617,9 +1619,9 @@ def _depth_loop(model, monkeypatch):
 @pytest.mark.parametrize("model", ["qwen3_tts", "qwen3_omni"])
 def test_code_predictor_depth_loop_compiles_no_frame_per_position(model, monkeypatch, dynamo_counts):
     """The engine compiles a captured forward with static ints, so a compiled
-    frame that holds a depth step's ``cache_pos`` recompiles at every depth
-    position (and batch bucket) until the recompile limit: four steps must
-    compile no more frames than two."""
+    frame that holds a depth step's ``cache_pos`` or LM head recompiles at
+    every depth position (and batch bucket) until the recompile limit: four
+    steps must compile no more frames than two."""
     _, walk = _depth_loop(model, monkeypatch)
     fn4, args4 = walk(4)
     fn2, args2 = walk(2)

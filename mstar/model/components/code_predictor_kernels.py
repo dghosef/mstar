@@ -10,10 +10,13 @@ each a few microseconds around a ~1 us job when launched apart.
 over the frame-local KV cache its ``DepthKV`` holds.
 
 A captured forward compiles with static ints, so any compiled frame that holds a
-depth step's ``cache_pos`` or a layer index recompiles at every depth position
-or layer. Both live on the ``DepthKV``, which the depth loop binds per step and
-``run_layers`` moves per layer, and are read only in its eager methods: the
-layers' frames, the projections included, compile once per shape.
+depth step's ``cache_pos``, LM head or layer index recompiles at every depth
+position or layer. ``cache_pos`` and the layer index live on the ``DepthKV``,
+which the depth loop binds per step and moves per layer, and are read only in
+its eager methods; the LM head index is read only in eager code: Qwen3-TTS's
+``run_depth_layers`` (from its eager ``depth_step``) and Qwen3-Omni's depth
+loop, which Dynamo runs eager because it graph-breaks inside the loop.
+Qwen3-Omni's layer frames, the projections included, compile once per shape.
 """
 from __future__ import annotations
 
@@ -203,8 +206,8 @@ def cp_embed_accumulate(
 class DepthKV:
     """A code predictor's frame-local KV cache and the depth step attending
     over it, as its layers' attention cursor: the depth loop calls
-    ``bind_step`` per step, and ``run_layers`` calls ``set_layer_idx`` per
-    layer. Its methods are all eager, so the ints stay out of compiled frames
+    ``bind_step`` per step, and ``run_layers`` or ``run_depth_layers`` calls
+    ``set_layer_idx`` per layer. Its methods are all eager, so the ints stay out of compiled frames
     (and none is ``recursive=False``; see ``run_layers``). A binding serves
     one pass over the layers: the pass's first layer consumes it, so a step
     that was not bound fails instead of reusing the previous step's slots."""
@@ -458,7 +461,9 @@ def run_depth_layers(
     residual stream, updated in place, through ``cp_linear`` and ``cp_attend``:
     five launches a layer. ``n_part`` says whether ``partials`` already holds
     ``x``'s row sums of squares (0: the first projection takes them from ``x``).
-    Returns the logits of LM head ``head`` (an index into ``w.heads``), or None."""
+    Returns the logits of LM head ``head`` (an index into ``w.heads``), or None.
+    Call it from an eager frame: a compiled one would guard on ``head`` and
+    recompile per depth position."""
     bs = x.shape[0]
     for i, attn in enumerate(attn_modules):
         depth.set_layer_idx(i)

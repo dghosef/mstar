@@ -8,11 +8,17 @@ ATTN = "attn"
 SAMPLER = "sampler"
 ROPE = "rope"
 
-# SNAC captures one CUDA graph per window size at every capture batch size,
-# and every size from 1 frame up to the widest window occurs (final flushes),
-# so the widest window (left + right context + largest chunk) bounds startup
-# and graph memory.
+# SNAC captures one CUDA graph per window size ``snac_window_frames`` lists, at
+# every capture batch size, so the widest window (left + right context +
+# largest chunk) bounds startup and graph memory. Some of those sizes never
+# replay: a window past the decoder's left reach is padded to the widest.
 SNAC_MAX_WINDOW_FRAMES = 16
+
+# A decoded frame's audio depends on fewer than this many frames to its left:
+# the snac_24khz decoder's receptive field reaches about 2.5 frames, and
+# frames 3 or more into a window decode the same audio (to float rounding) with
+# any frames prepended. Also the left context a window needs.
+SNAC_LEFT_REACH_FRAMES = 3
 
 @dataclass
 class OrpheusModelConfig:

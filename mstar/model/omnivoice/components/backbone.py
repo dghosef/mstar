@@ -113,7 +113,6 @@ class CanvasItem:
     head GEMM, so building it would be close to twice the work for nothing.
     """
 
-    request_id: str
     prefix_ids: torch.Tensor
     prefix_audio_mask: torch.Tensor
     tokens: torch.Tensor
@@ -155,6 +154,12 @@ class PackedCanvas:
     flat_target_total: int
     flat_uncond_total: int
     items: list[CanvasItem]
+
+    def uncond_rows(self) -> list[int]:
+        """Where each item's unconditional block starts in the gathered
+        logits, or -1 for an item with CFG off: ``unmask_step``'s
+        ``uncond_rows``."""
+        return [self.flat_target_total + item.flat_u_start if item.flat_u_start >= 0 else -1 for item in self.items]
 
     def slice_logits(
         self, logits: torch.Tensor, item: CanvasItem

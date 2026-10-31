@@ -23,6 +23,7 @@ from mstar.engine.resources.base import CachedPrefix
 from mstar.engine.resources.kv.plan import KVPlanOutputs
 from mstar.engine.resources.position.config import PositionConfig
 from mstar.engine.resources.position.manager import RopeManager
+from mstar.model.multimodal import TEXT, PromptPart
 from mstar.model.qwen3_omni.components.rope import get_rope_index_vision
 from mstar.model.qwen3_omni.config import AUDIO_ATTN, THINKER_KV, THINKER_MIXED, THINKER_POS, Qwen3OmniModelConfig
 from mstar.model.qwen3_omni.qwen3_omni_model import Qwen3OmniModel, image_span
@@ -126,8 +127,9 @@ def test_a_cut_vision_walk_cuts_its_masks_and_deepstack_with_the_embeds(thinker)
 
 
 def test_each_cut_row_of_a_mixed_step_moves_its_own_counter_past_its_whole_walk(thinker):
-    # The cache holds 6 of 12 text tokens, 28 of a clip's 30 slots, and 3 of an image's 8 slots,
-    # which advance the counter by 5. A partly held item leaves the counter at its start.
+    # The cache holds 6 of 12 text tokens, 28 of a clip's 30 slots, 3 of an image's 8 slots, which
+    # advance the counter by 5, and 30 of a 45-slot walk of a clip with the text either side of it.
+    # A partly held item leaves the counter at its start.
     rope = thinker.node_resources[THINKER_POS]
     rows = {
         "text": ("prefill_text", {"text_inputs": [torch.arange(8, 14).repeat(2)]}, 10, CachedPrefix("main", 6, 16)),
@@ -136,6 +138,10 @@ def test_each_cut_row_of_a_mixed_step_moves_its_own_counter_past_its_whole_walk(
             "vision_embeds": [torch.randn(6, HIDDEN)], "deepstack": [torch.randn(6, HIDDEN)] * 2,
             "image_grid_thw": [torch.tensor([1, 4, 6])],
         }, 30, CachedPrefix("main", 3, 30)),
+        "clip with text": ("prefill_audio", {
+            "audio_embeds": [torch.zeros(28, HIDDEN)], "text_before": [torch.arange(1, 11)],
+            "text_after": [torch.arange(10, 15)],
+        }, 40, CachedPrefix("main", 30, 40)),
     }
     inputs = []
     for rid, (walk, tensors, counter, held) in rows.items():
@@ -147,8 +153,11 @@ def test_each_cut_row_of_a_mixed_step_moves_its_own_counter_past_its_whole_walk(
     step = thinker.declare_step(THINKER_MIXED, list(rows), inputs)
     rope.commit(step.steps[THINKER_POS], StepContext(tuple(rows), THINKER_MIXED, slot=0, capture=False))
 
-    assert [cut.input_seq_len for cut in inputs] == [6, 2, 5], "a row ran slots the cache already holds"
-    assert [rope.position(rid, "main") for rid in rows] == [22, 50, 35], (
+    assert [cut.input_seq_len for cut in inputs] == [6, 2, 5, 15], "a row ran slots the cache already holds"
+    assert inputs[3].custom_pos_ids[0].tolist() == list(range(70, 85)), (
+        "the uncached tail of a clip's walk runs at positions other than the ones its slots were keyed at"
+    )
+    assert [rope.position(rid, "main") for rid in rows] == [22, 50, 35, 85], (
         "a row moved its counter by the slots it ran, so its later walks would run at wrong positions"
     )
 
@@ -235,23 +244,40 @@ _IMAGE = ("prefill_vision", 8, 5)
 # A second of audio is 100 feature frames, which the encoder turns into 13, so it writes 15 slots with its sentinels.
 _AUDIO = ("prefill_audio", 15, 15)
 _PROMPTS = {
-    "text, image, text": (["text", "image", "text"], {"image_inputs": [torch.rand(3, 64, 96)]}, [_IMAGE]),
-    "audio then text": (["audio", "text"], {"audio_inputs": [torch.zeros(16000)]}, [_AUDIO]),
+    "text, image, text": (["text", "image", "text"], {"image_inputs": [torch.rand(3, 64, 96)]}, [_IMAGE], None),
+    # The default system prompt fills a KV page here (one id a character), so it keeps a walk of its own
+    "audio then text": (["audio", "text"], {"audio_inputs": [torch.zeros(16000)]}, [_AUDIO], None),
+    # and a shorter one joins the clip's walk.
+    "short system, audio, text": (["text", "audio", "text"], {"audio_inputs": [torch.zeros(16000)]}, [_AUDIO], [
+        PromptPart(TEXT, "Hi.", 0, "system"), PromptPart("audio", None, 0, "user"),
+        PromptPart(TEXT, "Say what you see.", 1, "user"),
+    ]),
 }
 
 
-@pytest.mark.parametrize(("modalities", "tensors", "items"), _PROMPTS.values(), ids=_PROMPTS.keys())
-def test_the_layout_lists_each_walk_the_schedule_runs_with_the_slots_it_writes(model, modalities, tensors, items):
-    out = _prompt(model, modalities, tensors)
+@pytest.mark.parametrize(("modalities", "tensors", "items", "parts"), _PROMPTS.values(), ids=_PROMPTS.keys())
+def test_the_layout_lists_each_walk_the_schedule_runs_with_the_slots_it_writes(
+    model, modalities, tensors, items, parts,
+):
+    out = _prompt(model, modalities, tensors, prompt_parts=parts)
     layout = out.metadata["kv_layout"][THINKER_KV]["main"].spans
-    signals = {name: [object()] * len(value) for name, value in out.new_input_tensors.items()}
+    # what the conductor gets for each signal: its dims
+    signals = {
+        name: [SimpleNamespace(dims=list(tensor.shape)) for tensor in value]
+        for name, value in out.new_input_tensors.items()
+    }
 
-    walks = [walk for walk, _ in model._build_thinker_prefill_schedule(modalities, signals)]
     segments = iter(out.new_input_tensors["text_inputs"])
     media = iter(items)
-    expected = [
-        ("prefill_text", len(next(segments)), None) if walk == "prefill_text" else next(media) for walk in walks
-    ]
+    expected = []
+    for walk, entry in model._build_thinker_prefill_schedule(modalities, signals):
+        if walk == "prefill_text":
+            expected.append(("prefill_text", len(next(segments)), None))
+            continue
+        # an audio clip's walk also writes the text either side of it
+        media_walk, length, advance = next(media)
+        text = sum(len(next(segments)) for side in ("text_before", "text_after") if side in entry)
+        expected.append((media_walk, length + text, advance + text))
     assert [(span.walk, span.length, None if span.kind == "ids" else span.advance) for span in layout] == expected, (
         "the layout disagrees with the walks the schedule runs, so the cache would drop it partway through"
     )

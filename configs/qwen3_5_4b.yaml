@@ -1,5 +1,15 @@
 model: "qwen3_5_4b"
 max_seq_len: 32768
+# Raise the gen-0 GC threshold: at CPython's 700 a 128-row decode step collects
+# almost every step and runs a full collection every few hundred.
+# (kv_plan_cache measured no gain at concurrency 1 or 128 on top of this.)
+knobs:
+  gc_gen0_threshold: 50000
+# Captured text-prefill ladder (see docs/models.rst): the default powers of
+# two plus 1152-1792, so a prompt just past 1024 tokens (1k of text plus its
+# chat template) doesn't pad to 2048, and 3072-7168 for long packed prefills.
+model_kwargs:
+  prefill_token_buckets: [32, 64, 128, 256, 512, 1024, 1152, 1280, 1536, 1792, 2048, 3072, 4096, 5120, 6144, 7168, 8192]
 node_groups:
   # Text, images and video. Colocated: the
   # encoder runs once per request, then idles.
@@ -20,3 +30,15 @@ warmup_requests:
   - text: What is in this image?
     files: [hf://nvidia/Cosmos3-Edge/assets/edge_action_id_av_0_output.png]
     model_kwargs: {max_output_tokens: 4}
+  # A packed text prefill past the top captured bucket (8192 tokens) runs the
+  # LLM eager: its first shape compiles static and the next token count
+  # recompiles the forward dynamic (~2 s with the batch waiting), so take both
+  # before the server binds. Different texts, so neither hits a cached prefix.
+  - text: "The quick brown fox jumps over the lazy dog while the cat sleeps by the fire. "
+    repeat: 150
+    model_kwargs: {max_output_tokens: 2}
+    concurrency: 6
+  - text: "Pack my box with five dozen liquor jugs and send it to the harbor before noon. "
+    repeat: 90
+    model_kwargs: {max_output_tokens: 2}
+    concurrency: 12

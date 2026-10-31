@@ -60,15 +60,21 @@ def _seed():
 # ------------------------------------------------------------------
 
 
+# 1 and 4 tokens take the per-pair GEMV path (fused_moe.decode) where its tiles fit, 16 and 64
+# the grouped GEMMs; reduce_results=False is the TP path, summed after the all-reduce.
 @pytest.mark.parametrize("num_tokens", [1, 4, 16, 64])
 @pytest.mark.parametrize(
     "hidden,inter,num_experts,top_k",
     [
         (2048, 768, 128, 8),  # Thinker
         (1024, 384, 128, 8),  # Talker routed experts
+        (1024, 192, 128, 8),  # Talker at TP2: the per-pair tiles don't divide it
+        (1024, 96, 128, 8),  # Talker at TP4: a tile clamped to 96 isn't a power of two
     ],
 )
-def test_fused_experts_numerical_parity(num_tokens, hidden, inter, num_experts, top_k):
+@pytest.mark.parametrize("reduce_results", [True, False])
+def test_fused_experts_numerical_parity(num_tokens, hidden, inter, num_experts, top_k,
+                                        reduce_results):
     from mstar.utils.fused_moe import fused_experts
 
     device = torch.device("cuda")
@@ -85,7 +91,11 @@ def test_fused_experts_numerical_parity(num_tokens, hidden, inter, num_experts, 
         norm_topk_prob=True,
     )
 
-    fused_out = fused_experts(hidden_states, w1, w2, topk_weights, topk_ids)
+    fused_out = fused_experts(hidden_states, w1, w2, topk_weights, topk_ids,
+                              reduce_results=reduce_results)
+    if not reduce_results:
+        assert fused_out.shape == (num_tokens, top_k, hidden)
+        fused_out = fused_out.float().sum(1).to(dtype)
     naive_out = _dispatch_experts_fused(
         hidden_states,
         w1,

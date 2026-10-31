@@ -292,6 +292,7 @@ class Qwen3TTSCodePredictor(nn.Module):
             return x, proj.weight.shape[0] // STREAM_TILE
         return last_hidden.clone(), 0
 
+    @torch.compiler.disable
     def depth_step(
         self, x: torch.Tensor, partials: torch.Tensor, n_part: int = 0, head: int | None = None,
     ) -> torch.Tensor | None:
@@ -304,7 +305,9 @@ class Qwen3TTSCodePredictor(nn.Module):
         Unlike the Talker's, the cache it binds is frame-local scratch space:
         every generated frame starts at ``cache_pos=0`` and overwrites it. The
         depth loop binds the step, not this frame, which would compile once
-        per ``cache_pos``."""
+        per ``cache_pos``. Eager for the same reason: a compiled frame holding
+        ``head`` would recompile per depth position, and it only launches
+        custom kernels."""
         return run_depth_layers(
             x, self.fused, self.depth, [layer.self_attn for layer in self.model.layers], partials,
             n_part=n_part, head=head,

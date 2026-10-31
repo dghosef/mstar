@@ -1,5 +1,12 @@
 model: "qwen3_5_0.8b"
 max_seq_len: 32768
+# 0.8B's decode step is host-bound, so per-step Python is throughput. Raise
+# the gen-0 GC threshold: at CPython's 700 a 128-row step collects almost
+# every step and runs a full collection every few hundred. (kv_plan_cache
+# measured -2..-3% at concurrency 1 alone, -4..-5% on top of this, and no
+# gain at 128.)
+knobs:
+  gc_gen0_threshold: 50000
 node_groups:
   # Text, images and video. Colocated: the
   # encoder runs once per request, then idles.
@@ -20,3 +27,15 @@ warmup_requests:
   - text: What is in this image?
     files: [hf://nvidia/Cosmos3-Edge/assets/edge_action_id_av_0_output.png]
     model_kwargs: {max_output_tokens: 4}
+  # A prompt step past the top captured bucket (8192 tokens) runs the LLM eager:
+  # its first shape compiles static and the next token count recompiles the
+  # forward dynamic (~2 s with the step's requests waiting). One long prompt
+  # alone is always such a step, so two of different lengths take both compiles
+  # before the server binds. (Concurrent warmups, as the 2B config uses, finish
+  # in captured steps on 0.8B before they can pack past 8192.)
+  - text: "The quick brown fox jumps over the lazy dog while the cat sleeps by the fire. "
+    repeat: 600
+    model_kwargs: {max_output_tokens: 2}
+  - text: "Pack my box with five dozen liquor jugs and send it to the harbor before noon. "
+    repeat: 700
+    model_kwargs: {max_output_tokens: 2}

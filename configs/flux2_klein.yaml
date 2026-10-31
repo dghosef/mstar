@@ -5,21 +5,24 @@ model: "flux2_klein"
 max_seq_len: 512
 
 # FLUX.2 [klein] 4B, single GPU, all four nodes colocated. Serving knobs (forwarded to
-# Flux2KleinModel.__init__): attention_backend flashinfer|sdpa, torch.compile of the
+# Flux2KleinModel.__init__): attention_backend sdpa|flashinfer, torch.compile of the
 # transformer per shape, CUDA-graph capture of the denoise step for the listed
 # (height, width) shapes and batch sizes (other shapes run the eager batched path).
+#
+# Shipped with the plain compile (compile_exact_ops: false), which is not reference-exact, as the
+# other engines are not either. compile_exact_ops: [norms] makes the transformer exact at a latency
+# cost (with vae_compile: false too, served images are bit-exact; see docs/models.rst).
 model_kwargs:
-  # sdpa (cuDNN on H100) served as fast as FlashInfer FA3 (0.349 vs 0.355 s at B=1) and is the
-  # reference kernel; flashinfer stays available
+  # sdpa (cuDNN on H100) is the reference kernel; flashinfer stays available
   attention_backend: sdpa
   compile: true
   # inductor rounds intermediates where eager PyTorch does (and fuses no FMAs); on its own the compiled
-  # transformer still lands at a median 37.6 dB from the eager path over the 100 protocol prompts (67 of 100 below 40 dB)
+  # transformer is still not bit-exact with the eager path (measured PSNR: compile_exact_ops in docs/models.rst)
   compile_eager_rounding: true
-  # op classes kept on the eager kernels inside the compiled forward: with the norms eager the compiled transformer
-  # is bit-exact with the eager one (the activations add nothing but graph breaks); every served image is then
-  # >= 53 dB from the eager path on all 100 protocol prompts (the compiled VAE) — [norms] 0.371 s at B=1 vs 0.356 plain and 0.383 with the activations too; 0.461 without compile
-  compile_exact_ops: [norms]
+  # op classes kept on the eager kernels inside the compiled forward. [norms] makes the compiled transformer
+  # bit-exact with the eager one at a latency cost (see compile_exact_ops in docs/models.rst); false is the
+  # plain compile
+  compile_exact_ops: false
   accelerator_graph: true
   capture_sizes: [[1024, 1024]]
   # every batch size up to max_batch_size: a lockstep group of 5-7 requests would otherwise be padded into the 8-graph.

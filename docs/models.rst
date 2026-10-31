@@ -221,8 +221,8 @@ OmniVoice notes
   rows over a few unmasking steps, so there is no KV cache and no per-token
   sampling loop. Serve it with ``mstar serve omnivoice --gpus 0``.
 - The backbone's layer stack replays CUDA graphs per (requests, packed-token
-  bucket up to 4096 tokens) with attention through a ragged attention resource;
-  larger steps are GPU-bound and run eagerly. The layer loop is mstar's own over
+  bucket up to 8192 tokens) with attention through a ragged attention resource;
+  larger steps run the same layer loop eagerly. The layer loop is mstar's own over
   the reference's fused weights: q/k norms read the fused QKV output in place
   and each residual add folds into the next RMSNorm (flashinfer
   ``fused_add_rmsnorm``), so logits match the reference to half-precision
@@ -394,9 +394,11 @@ default, which lowers the token count of short clips. Notes:
   embeddings can differ at the last bit with what it is batched beside.
 - On two GPUs, ``configs/qwen3_5_9b_dp2.yaml`` (a whole replica per GPU)
   serves image and video traffic faster than ``configs/qwen3_5_9b_tp2.yaml``,
-  whose vision encoder runs on one rank while the other waits for it in the
-  lockstep LLM: 9B on 2xH200, video_60s c32 1520 vs ~900-1000 output tok/s,
-  MMMU c32 4457 vs ~3100.
+  whose lockstep LLM waits whenever a rank runs a vision encoder step: 9B on
+  2xH200 with the encoder on rank 0 only, video_60s c32 1520 vs ~900-1000
+  output tok/s, MMMU c32 4457 vs ~3100. ``configs/qwen3_5_9b_tp2.yaml``
+  places an encoder replica beside each LLM rank, which splits those steps
+  over both ranks (H100: video +4%, MMMU c32 -1% vs one encoder on rank 0).
 - A long video is one wide prefill: one 1-3 minute video is ~11-12k tokens,
   beyond the largest captured ``prefill_vision`` bucket (4096), so it runs
   eagerly.
@@ -423,10 +425,15 @@ needs FlashInfer's fused bf16 decode kernel (K = V = 128).
 Text prefill and mixed steps replay captured graphs by total tokens, on the
 ladder ``32 ... 8192`` (powers of two); a step pads to its bucket and a longer
 one runs eagerly. ``model_kwargs: prefill_token_buckets: [...]`` sets a
-deployment's own ladder: ``configs/qwen3_5_9b*.yaml`` add 3072, 5120, 6144 and
-7168, which cut the padding of compute-bound long prefills (+2% output tok/s
-on 9B, random 1024/256 at c=64/128, H200); the same ladder was not a win on
-0.8B, whose prefill is launch-bound. Each bucket adds captures and startup time.
+deployment's own ladder: ``configs/qwen3_5_{2b,4b,9b,9b_tp2,27b_tp4}.yaml``
+add 3072, 5120, 6144 and 7168, which cut the padding of compute-bound long
+prefills (+2% output tok/s on 9B, random 1024/256 at c=64/128, H200; about +2%
+on 2B and +1% on 4B, H100); the same ladder was not a win on 0.8B, whose
+prefill is launch-bound. The 2B, 4B, 9B, 9B TP2 and 27B TP4 configs also add
+1152, 1280, 1536 and 1792: a 1k-token prompt plus its chat template is just
+past 1024 tokens and padded to 2048, which on 9B made one prompt's prefill
+twice the work (c=1 TTFT 59 -> 39 ms on 9B, 40 -> 29 ms on 4B, 43 -> 31 ms on
+9B TP2, 89 -> 66 ms on 27B TP4, H100). Each bucket adds captures and startup time.
 
 A captured decode step builds its rotary tables inside the graph from the
 planned positions, rather than staging tables built eagerly before the replay
@@ -546,6 +553,33 @@ Kokoro notes
 Qwen3-Omni notes
 ----------------
 
+- The default ``configs/qwen3omni_2gpu.yaml`` is for 141 GB H200-class GPUs. Its
+  Thinker KV pool holds 1,024 GPU pages (128k tokens) plus 1,024 host pages it
+  offloads to. When concurrent requests hold more than 128k tokens of Thinker KV,
+  serve ``configs/qwen3omni_2gpu_large_kv.yaml``, which keeps 2,048 pages (256k
+  tokens) on the GPU; it should fit beside its captures on an H200 (not run since
+  the prefill buckets grew to 8192 tokens). It has no host pages, so with the
+  Thinker's prefix cache on, a decode step that finds the pool full has no host
+  pool to offload to and holds its requests until they time out. Set
+  ``max_concurrent_requests`` in that config: 2,048 / 256 = 8 requests of the full
+  32k context. The two configs with host pages need the cap too, set the same way
+  from their GPU pages: 4 for the default (1,024 pages) and 2 for
+  ``configs/qwen3omni_2gpu_h100.yaml`` (512 pages). Their host pages help a pool
+  that runs short now and then but don't replace the cap (see the prefix cache
+  under "Config files" in :doc:`serving`). On
+  80 GB GPUs such as the H100, serve ``configs/qwen3omni_2gpu_h100.yaml``: the
+  Thinker's GPU holds every prefill capture, and the larger ones don't fit beside
+  a 1,024-page KV pool. The H100 config's 512 pages (64k tokens) leave room for
+  all of them. It also runs the audio and vision encoders on the Talker's GPU, so
+  an encoder step doesn't wait behind a Thinker step.
+- When every attachment is audio, a clip is prefilled in one Thinker walk with all
+  the text after it up to the next clip (and the text before it, if no earlier
+  clip took it and it is under a 128-token page), so the clip's prefix-cache key
+  includes that text. A later turn of an audio chat, or the same clip with a
+  different question, re-prefills the clip and that text, which in a chat is the
+  rest of the history, so the cost grows with the history's length. On 4-turn
+  chats with short histories this measured neutral on later turns at concurrency 1
+  and faster at 16; long histories (thousands of tokens) were not measured.
 - Streamed audio starts after 12 codec frames (0.96 s of audio), then 13, then
   25-frame chunks behind 25 frames of left context. Playback stays gapless
   while the Talker produces frames at about 1.5x real time over the first 50
@@ -554,8 +588,12 @@ Qwen3-Omni notes
   ``codec_chunk_schedule: []`` under the deployment YAML's ``model_kwargs`` to
   start with a 25-frame chunk instead: first audio comes later, and the
   Talker needs only about 1.0 to 1.3x real time.
-- Numerics: the code predictor's residual adds fold into the next RMSNorm
-  (FlashInfer's fused add + norm) and its attention is one Triton kernel
+- Numerics: the Thinker's q/k RMSNorm and multimodal RoPE run in one kernel
+  with the KV write, in fp32 throughout and rounded once, where the unfused ops
+  (and Hugging Face) round to bf16 after the norm and after each step of the
+  rotation: no less accurate, but not bit-exact. The code predictor's residual
+  adds fold into the next RMSNorm (FlashInfer's fused add + norm) and its
+  attention is one Triton kernel
   (``cp_attend``, shared with Qwen3-TTS), neither bit-exact with the unfused ops. Its 15 depth
   steps feed each sampled code into the next, so small differences can change
   later codes at near-ties.
@@ -742,13 +780,15 @@ Fish Audio S2-Pro notes
   probability carries the running total past top-p, while the reference drops
   it unless it is the most likely token. ``max_new_tokens`` (default 2048, at most
   4096 frames of 2048 samples at 44.1 kHz) and ``ignore_eos`` pass through.
-- Each codec window carries the decoder's whole receptive field as context.
-  With ``model_kwargs: {codec_exact_fp32: true}`` the codec runs in fp32 with
-  TF32 off and the streamed audio matches the whole-utterance decode to within
-  one int16 step. The shipped ``configs/fish_s2_pro.yaml`` sets it to ``false``:
-  TF32 halves the codec's conv stack, most of the GPU time under concurrency
-  (c=32 throughput +35% on an H200), and the audio stays within ~60 dB SNR of
-  the exact decode.
+- The codec decodes each chunk's new frames from its stream's decoder state
+  (the ``codec_state`` recurrent pool, 256 streams by default; size it with
+  ``resources: {codec_state: {max_slots: ...}}``), so every frame is decoded
+  once. With ``model_kwargs: {codec_exact_fp32: true}`` the codec runs in fp32
+  with TF32 off and the streamed audio matches the whole-utterance decode to
+  within one int16 step. The shipped ``configs/fish_s2_pro.yaml`` sets it to ``false``:
+  TF32 roughly halves the codec's conv stack and the audio stays within ~60 dB
+  SNR of the exact decode, both measured on the earlier windowed codec, not yet
+  on the frame-once codec.
 
 Nemotron VoiceChat (``nemotron_duplex``) notes
 ----------------------------------------------
@@ -1137,8 +1177,13 @@ with each other. Short answers (128 tokens) came out identical in 8 of 8 runs;
 into one denoise pass too, which is the same maths but not the same bf16
 arithmetic — under classifier-free guidance the branch rounding is amplified,
 so an image or clip produced alongside other requests differs from its solo
-result at the kernel-drift level (~30 dB PSNR at guidance 6). Serve with one
-request at a time when outputs must be bitwise repeatable.
+result at the kernel-drift level (~30 dB PSNR at guidance 6). A generation
+step whose requests total more than 16384 vision tokens (at 832x480, more
+than 42 latent frames across the step's requests, e.g. two clips of 85 or more
+frames each; a windowed request counts its current window) runs
+every request in it alone, since batching such steps cost more than it saved,
+so those outputs match their solo results. Serve with one request at a time
+when outputs must be bitwise repeatable.
 
 The action policy (``cosmos3_edge_droid``, or ``cosmos3_edge`` with an action
 ``domain_name``) predicts a chunk of robot actions from the current observation:
@@ -1237,7 +1282,9 @@ own ``window_decoder`` partition; a request opts in per call:
 The schedule is padded up to whole windows and the video trimmed back to
 ``num_frames``; a seeded request is deterministic end to end (later windows draw
 their noise from the same generator). Windowed requests batch with each other
-and with plain requests at the same walk. ``gen_capture_video`` lists (height,
+and with plain requests at the same walk, under the same 16384-vision-token
+cap on the step (each windowed request counts its current window).
+``gen_capture_video`` lists (height,
 width, frames) tiers whose denoise steps replay a per-step CUDA graph (one graph per
 latent shape, the clean/noisy frame layout carried as a mask input; plain t2v/i2v and
 ``chained`` windows, never ``kv`` windows). It is empty by default: at 832x480 the
@@ -1471,9 +1518,9 @@ conditioning tokens, in order).
 Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
 
 ``attention_backend``
-   ``sdpa`` (default) is the reference kernel, cuDNN on an H100 and measured as fast as
-   FlashInfer in the served path. ``flashinfer`` runs the DiT's joint attention on the
-   engine's ragged FlashInfer resource; both are CUDA-graph replayable.
+   ``sdpa`` (default) is the reference kernel, cuDNN on an H100. ``flashinfer`` runs the
+   DiT's joint attention on the engine's ragged FlashInfer resource; both are CUDA-graph
+   replayable.
 
 ``compile``
    ``torch.compile`` of the transformer, one trace per shape.
@@ -1491,14 +1538,21 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
      9B). A torch ``RMSNorm`` (klein's per-head q/k norms) runs a Triton replica of torch's
      kernel with the same arithmetic order: bit-identical, ~4x faster than torch's
      one-block-per-row launch, +5% klein-4B throughput at concurrency >= 4 (H200). Before
-     it the shipped ``[norms]`` cost klein-4B 4% of its B=1 latency (0.371 vs 0.356 s).
+     it, ``[norms]`` cost klein-4B 4% of its B=1 latency (0.371 vs 0.356 s).
      Excluding the activations too adds cost and nothing else.
    * Z-Image's 180 norms per step cost 45% (1.25 vs 0.86 s at B=1), so it ships ``false``
      and lands at a median 34 dB. ``[norms]`` turns it reference-faithful (at least
-     55.9 dB on every prompt).
-   * Without it, the plain compile — even with eager rounding — lands at a median 35 to
-     38 dB PSNR from eager over the 100 protocol prompts, because a 4- or 8-step
-     distilled sampler amplifies the last bit of inductor's own reductions and activation
+     55.9 dB on every prompt). These figures were measured before its fused q/k norm and
+     rotary kernel and the VAE decode change.
+   * klein-4B and 9B ship ``false`` too, since the other engines are not bit-exact
+     either. On ``sdpa`` the plain compile serves klein-4B about 1 to 2% more images
+     per second than ``[norms]`` at concurrency 1 to 8 (H100, one round); 9B is not
+     measured.
+   * Without ``[norms]``, the plain compile — even with eager rounding — lands at a
+     median 37.6 dB (klein-4B) and 35.6 dB (9B) PSNR from eager over the 100 protocol
+     prompts (measured with the original compiled VAE decode, before it gained its
+     folded upsample conv and split GroupNorm), because a 4- or 8-step distilled
+     sampler amplifies the last bit of inductor's own reductions and activation
      decompositions.
 
 ``cuda_graph``, ``capture_sizes``, ``capture_batch_sizes``
@@ -1542,10 +1596,12 @@ Deployment knobs live under ``model_kwargs`` in ``configs/flux2_klein.yaml``:
    are rejected with a 400 before scheduling instead of occupying the worker for minutes
    (an 8192² request means 262k tokens of quadratic attention).
 
-With the klein defaults every served image is within 53 dB of the eager path on all 100
-protocol prompts, and with ``vae_compile: false`` it is bit-exact. For scale, the served
-images of the other engines are 10 to 16 dB from the diffusers reference for the same
-seeds.
+The shipped plain compile is not reference-exact (see ``compile_exact_ops``). For the
+exact path, set ``compile_exact_ops: [norms]``: every served klein image is then within
+53 dB of the eager path on all 100 protocol prompts (also measured with the original
+compiled VAE decode), and with ``vae_compile: false`` too it is bit-exact. For scale,
+SGLang 0.5.22's images sit at a median 23.8 dB (minimum 13.1) on klein-4B and 24.0 dB
+(14.5) on 9B from klein's ``[norms]`` output at the same seeds (H100).
 Requests at the same output size batch across users in every node, including the
 text encoder, whose input is always 512 tokens. ``lora`` lists adapters to fold into the
 transformer weights at load time (``[{path: ..., scale: ...}]``; diffusers/PEFT-format or

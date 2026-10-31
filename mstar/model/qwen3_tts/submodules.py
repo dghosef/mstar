@@ -1043,8 +1043,8 @@ class CodecSubmodule(ARNodeSubmodule):
     """
 
     # the decoder runs in its own dtype (``codec_dtype``), and only the
-    # stateless decode is compiled (``__init__``): the capture's gather and
-    # scatter stay outside it
+    # stateless decode is a compile region (``compile_regions``): the
+    # capture's gather and scatter stay outside it
     disable_torch_compile = True
     disable_autocast = True
     # cuDNN times its conv algorithms per captured shape: its heuristic pick
@@ -1088,10 +1088,13 @@ class CodecSubmodule(ARNodeSubmodule):
         if {n: (b.shape, b.dtype) for n, b in blocks.items()} != {n: (b.shape, b.dtype) for n, b in declared.items()}:
             raise ValueError("the codec decoder's state does not match the CODEC_STATE blocks its model declares")
         self.state_names = tuple(blocks)
-        # One compile for every capture rather than each config's own.
-        on_cuda = next(decoder.parameters()).is_cuda
-        self._decode_step = torch.compile(self.incremental, dynamic=False) if on_cuda else self.incremental
         self._lengths_stager = PinnedStager(torch.long, numel=self.MAX_BATCH_SIZE)
+
+    def compile_regions(self) -> dict[str, list[tuple]]:
+        """The stateless decode, compiled with dynamic shapes, so a couple of
+        graphs (batch 1 specializes) serve every chunk width and batch bucket
+        rather than one per captured shape."""
+        return {"incremental": []}
 
     def _bucket(self, frames: int) -> int:
         """Smallest captured width that holds ``frames``."""
@@ -1206,7 +1209,7 @@ class CodecSubmodule(ARNodeSubmodule):
         pool: RecurrentStatePool = engine_inputs.resources[CODEC_STATE]
         # a fresh stream, and a padding row on the sink, read zeros: the decoder's own left padding
         state = {name: pool.gather(name) for name in self.state_names}
-        wav, new = self._decode_step(codec_tokens, state, lengths)
+        wav, new = self.incremental(codec_tokens, state, lengths)
         for name, value in new.items():
             pool.scatter_(name, value)
         return (wav.float() * 32767).to(torch.int16)

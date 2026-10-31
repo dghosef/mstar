@@ -62,6 +62,57 @@ class AttentionCallable:
             self.kv.write_kv(k, v)
         return self.attn.run(q, kv_cache_layer=self.kv.layer_view(), k=k, v=v)
 
+    @torch.compiler.disable
+    def norm_rope_attend(
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, q_norm: torch.nn.Module, k_norm: torch.nn.Module,
+        *, pos_ids: torch.Tensor | None = None, rope_theta: float | None = None,
+        cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        """Per-head q/k RMSNorm (``q_norm``, ``k_norm``), RoPE and attention.
+        For a backend that reads K/V from the paged cache, the step's KV write
+        rides in the norm/RoPE kernel (``qk_norm_rope_kv_write``) rather than a
+        launch of its own. The rotation is one of plain RoPE at ``pos_ids`` and
+        ``rope_theta``, or each token's rotate-half ``cos_sin`` rows (both halves
+        equal), for a multimodal RoPE whose position grids one position can't
+        express.
+
+        A backend that takes fresh K/V gets them normed and rotated, unfused;
+        so does ``cos_sin`` off CUDA. ``pos_ids`` needs CUDA: a layer off it
+        rotates through its position resource instead.
+        """
+        from mstar.utils.attention import qk_norm_rope_inplace, qk_norm_rope_kv_write, qk_norm_rotary_kv_write
+
+        if (pos_ids is None) == (cos_sin is None):
+            raise ValueError("norm_rope_attend rotates by pos_ids or by cos_sin: pass exactly one")
+        if pos_ids is not None and rope_theta is None:
+            raise ValueError("norm_rope_attend: pos_ids needs rope_theta")
+        eps = (float(q_norm.variance_epsilon), float(k_norm.variance_epsilon))
+        if cos_sin is not None and not (q.is_cuda and self.attn.requires_kv_write):
+            cos, sin = (t[: q.shape[0], None] for t in cos_sin)
+            q, k = (
+                _rotate_half_rope(norm(x.reshape(-1, x.shape[-1])).view(x.shape), cos, sin)
+                for x, norm in ((q, q_norm), (k, k_norm))
+            )
+            return self(q, k, v)
+        if not self.attn.requires_kv_write:
+            qk_norm_rope_inplace(q, k, q_norm.weight, k_norm.weight, pos_ids, *eps, rope_theta)
+            return self(q, k, v)
+        layer, page_idx, slot_idx, n = self.kv.write_target()
+        n = min(n, q.shape[0])
+        if cos_sin is None:
+            qk_norm_rope_kv_write(
+                q, k, v, q_norm.weight, k_norm.weight, pos_ids, layer, page_idx, slot_idx, n, *eps, rope_theta,
+            )
+        else:
+            qk_norm_rotary_kv_write(q, k, v, q_norm.weight, k_norm.weight, *cos_sin, layer, page_idx, slot_idx, n, *eps)
+        return self.attn.run(q, kv_cache_layer=self.kv.layer_view())
+
+
+def _rotate_half_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """``x * cos + rotate_half(x) * sin``, the unfused rotation by rotate-half tables."""
+    half = x.shape[-1] // 2
+    return x * cos + torch.cat((-x[..., half:], x[..., :half]), dim=-1) * sin
+
 
 class LinearAttnCallable:
     """A recurrent state pool plus the resource running kernels against it,

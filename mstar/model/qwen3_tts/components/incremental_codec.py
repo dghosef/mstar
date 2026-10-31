@@ -29,6 +29,14 @@ import torch.nn.functional as F
 from torch import nn
 
 from mstar.engine.resources.recurrent import RecurrentBlockConfig
+from mstar.model.components.streaming_codec import (
+    causal_conv,
+    overlap_tconv,
+    snake_time_major,
+    tail,
+    tconv_gemm,
+    to_channels_last,
+)
 
 FRAMES = "frames"
 # the reference decoder's conv geometry (fixed in its module definitions, not its config)
@@ -105,9 +113,9 @@ class IncrementalDecoder(nn.Module):
         # NHWC 2-D weight, and the reference modules still run on the same storage.
         with torch.no_grad():
             for _, _, module in self.convs[1:]:
-                _to_channels_last(module.conv)
+                to_channels_last(module.conv)
             for tconv, _ in decoder.upsample:
-                _to_channels_last(tconv.conv)
+                to_channels_last(tconv.conv)
 
     def state_blocks(self) -> dict[str, RecurrentBlockConfig]:
         """The blocks this decoder's modules read and write (``codec_state_blocks`` must match)."""
@@ -151,7 +159,7 @@ class IncrementalDecoder(nn.Module):
             o = F.scaled_dot_product_attention(q, keys, values, attn_mask=mask, scale=attn.scaling)
             h = h + layer.self_attn_layer_scale(attn.o_proj(o.transpose(1, 2).reshape(batch, width, -1)))
             h = h + layer.mlp_layer_scale(layer.mlp(_rms_norm(layer.post_attention_layernorm, h)))
-            new[f"k{i}"], new[f"v{i}"] = _tail(keys, lengths, self.cache, 2), _tail(values, lengths, self.cache, 2)
+            new[f"k{i}"], new[f"v{i}"] = tail(keys, lengths, self.cache, 2), tail(values, lengths, self.cache, 2)
         return transformer.output_proj(_rms_norm(transformer.norm, h))
 
     def forward(
@@ -176,29 +184,21 @@ class IncrementalDecoder(nn.Module):
             name, transposed, module = next(convs)
             keep = state[name].shape[1]
             xs = torch.cat([state[name], x], 1)
-            new[name] = _tail(xs, lengths * rate[0], keep, 1)
-            c = module.conv
+            new[name] = tail(xs, lengths * rate[0], keep, 1)
             if transposed:
-                # Kernel 2 * stride: input i writes outputs i*stride .. i*stride + 2*stride - 1, so
-                # each output block is its input's first half plus the previous input's second.
-                stride = c.stride[0]
-                rate[0] *= stride
-                y = _tconv_gemm(xs, c).unflatten(2, (2, stride))       # [B, 1 + T, 2, stride, C]
-                y = y[:, 1:, 0] + y[:, :-1, 1]
-                return y.flatten(1, 2) + c.bias
-            x4 = xs.transpose(1, 2).unsqueeze(2)   # [B, C, 1, T], a channels-last view
-            y = F.conv2d(x4, c.weight.unsqueeze(2), c.bias, dilation=(1, c.dilation[0]), groups=c.groups)
-            return y.squeeze(2).transpose(1, 2)
+                rate[0] *= module.conv.stride[0]
+                return overlap_tconv(xs, module.conv)
+            return causal_conv(xs, module.conv)
 
         next(convs)   # the pre-transformer conv, channels-first:
         pre = decoder.pre_conv.conv
         xs = torch.cat([state["pre_conv"], decoder.quantizer.decode(codes)], -1)
-        new["pre_conv"] = _tail(xs, lengths, state["pre_conv"].shape[-1], 2)
+        new["pre_conv"] = tail(xs, lengths, state["pre_conv"].shape[-1], 2)
         h = F.conv1d(xs, pre.weight, pre.bias)
         h = self._transformer(h.transpose(1, 2), state, new, lengths)   # [B, T, latent]
         for tconv, convnext in decoder.upsample:
             c = tconv.conv   # kernel == stride: each input writes its own output block
-            h = _tconv_gemm(h, c).flatten(1, 2) + c.bias
+            h = tconv_gemm(h, c).flatten(1, 2) + c.bias
             rate[0] *= c.stride[0]
             y = convnext.pwconv2(convnext.act(convnext.pwconv1(convnext.norm(conv(h)))))
             h = h + convnext.gamma * y
@@ -222,34 +222,8 @@ def _rms_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
 
 
 def _snake(module: nn.Module, x: torch.Tensor) -> torch.Tensor:
-    """``FusedSnakeBeta`` over a time-major ``x [B, T, C]``, in fp32 as its kernel computes."""
-    x32 = x.float()
-    return (x32 + module.inv_beta * torch.sin(x32 * module.alpha).pow(2)).to(x.dtype)
-
-
-def _tconv_gemm(x: torch.Tensor, conv: nn.Module) -> torch.Tensor:
-    """Every input sample's transposed-conv output, one GEMM: ``x [B, T, C_in]`` ->
-    ``[B, T, kernel, C_out]`` (no bias, no overlap-add). A tensor-core GEMM where
-    cuDNN runs these transposed convs on its fp32 dgrad engine."""
-    weight = conv.weight   # [C_in, C_out, kernel], laid out [C_in, kernel, C_out] (_to_channels_last)
-    y = x @ weight.permute(0, 2, 1).reshape(weight.shape[0], -1)
-    return y.unflatten(2, (weight.shape[2], weight.shape[1]))
-
-
-def _to_channels_last(conv: nn.Module) -> None:
-    w = conv.weight
-    w.data = w.data.unsqueeze(2).contiguous(memory_format=torch.channels_last).squeeze(2)
-
-
-def _tail(xs: torch.Tensor, valid: torch.Tensor, keep: int, dim: int) -> torch.Tensor:
-    """Per row, the ``keep`` entries of ``xs`` along ``dim`` that end ``valid[row]``
-    entries past its first ``keep`` (``xs`` is ``[keep of state | new]``)."""
-    shape = [1] * xs.dim()
-    shape[0], shape[dim] = -1, keep
-    index = (valid.view(-1, *[1] * (xs.dim() - 1)) + torch.arange(keep, device=xs.device).view(shape))
-    size = list(xs.shape)
-    size[dim] = keep
-    return xs.gather(dim, index.expand(size))
+    """``FusedSnakeBeta`` over a time-major ``x [B, T, C]``."""
+    return snake_time_major(x, module.alpha, module.inv_beta)
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:

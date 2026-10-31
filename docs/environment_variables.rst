@@ -559,11 +559,15 @@ Worker scheduling
        but that step's commit touched the streams: every length is one
        more, pages change only where a row crossed a page boundary, and the
        five FlashInfer index arrays come from numpy instead of a per-row
-       Python pass. The first version measured a loss at c64/c128 on 0.8B
-       (batches change every step or two there, and a hit still rebuilt the
-       views); the reworked path keeps the views lazy and is off by default
-       until measured. ``0`` plans every step from the streams. ``2`` runs
-       both and logs a difference, for checking a run.
+       Python pass. Off by default, and no shipped config turns it on. In
+       four-arm splits (none / plan cache / GC threshold / both) on Qwen3.5
+       0.8B, 2B, 4B, 9B TP2 and 27B TP4 (H100) it gained nothing beside
+       ``gc_gen0_threshold``, which carries the high-concurrency gain (on 0.8B
+       it cost 2-3% at c=1 alone and 4-5% beside it; on 9B TP2 0.6-2.5% at
+       c=128 beside it; on 27B TP4 +0.3% alone and -0.1% beside it).
+       ``0`` plans every step from the streams.
+       ``2`` runs both and logs a difference, for checking a run. Read by
+       ``knobs.kv_plan_cache``.
    * - ``MSTAR_DEVICE_LOOPBACK``
      - config's ``knobs: device_loopback``, else ``1``
      - Whether a decode node may keep its loop-back token on the device:

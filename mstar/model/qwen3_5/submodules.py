@@ -626,8 +626,9 @@ class VisionEncoderSubmodule(NodeSubmodule):
     """
 
     # Patch-count buckets of one replay. 16384 patches merge to the LLM's
-    # 4096 `prefill_vision` bucket; a larger step runs eagerly.
-    BLOCK_LOOP_PATCH_BUCKETS = [256, 512, 1024, 2048, 4096, 8192, 16384]
+    # 4096 `prefill_vision` bucket; a larger step runs eagerly. 12288 holds a
+    # 30 s video at 2 fps (~11.8k patches), which 16384 pads by 39%.
+    BLOCK_LOOP_PATCH_BUCKETS = [256, 512, 1024, 2048, 4096, 8192, 12288, 16384]
     # Requests per encoder step. They share one replay, so a burst of image
     # requests pays the per-step host cost once per this many, not per image.
     MAX_BATCH_SIZE = 8
@@ -666,9 +667,7 @@ class VisionEncoderSubmodule(NodeSubmodule):
         # the graph and makes h, w symints inductor cannot codegen from. And
         # built on the host: on the device, the grid upload and the
         # `repeat_interleave`s each block on the stream.
-        indices, weights = vision_interpolation(
-            grid, self.config.num_grid_per_side, merge, torch.device("cpu"),
-        )
+        indices, weights = vision_interpolation(grid, self.config.num_grid_per_side, merge)
         num_patches = sum(t * h * w for t, h, w in grid)
         return NodeInputs(
             # what the engine leases the captured block loop's bucket by
@@ -677,9 +676,7 @@ class VisionEncoderSubmodule(NodeSubmodule):
                 "pixel_values": torch.cat(inputs["pixel_values"], dim=0),
                 "indices": to_device_nonblocking(indices, device),
                 "weights": to_device_nonblocking(weights, device),
-                "position_ids": to_device_nonblocking(
-                    vision_grid_position_ids(grid, merge, torch.device("cpu")), device,
-                ),
+                "position_ids": to_device_nonblocking(vision_grid_position_ids(grid, merge), device),
                 # not forward args: `declare_step` makes segments of the
                 # lengths, `forward_batched` cuts the output at the count
                 "seq_lengths": vision_seq_lengths(grid),
@@ -721,8 +718,13 @@ class VisionEncoderSubmodule(NodeSubmodule):
         return self.MAX_BATCH_SIZE
 
     def compile_regions(self) -> dict[str, list[tuple]]:
-        # compiled on the first image (configs warm it with `warmup_requests`)
-        return {"model.embed": [], "model.encode": [], "model.merger": []}
+        # The blocks compile in the block loop's capture warm-up, embed and
+        # merger on the first image (configs warm it with `warmup_requests`).
+        # Each block on its own rather than the whole block loop: every block
+        # runs one code object, so Dynamo traces it once and the others reuse
+        # the graph, where tracing the unrolled loop took ~80 s of every start.
+        blocks = {f"model.blocks.{i}": [] for i in range(len(self.model.blocks))}
+        return {"model.embed": [], **blocks, "model.merger": []}
 
     def get_piecewise_accelerator_graph_configs(
         self, device: torch.device, autocast_dtype: torch.dtype,
