@@ -730,8 +730,9 @@ Qwen3-TTS notes
   Talker is bf16 either way), about 1.9x a codec step's speed on an H200 once
   the captures keep cuDNN's searched conv plans (``capture_cudnn_benchmark``).
   That config was gated on an H200. H100 runs served it too, at a Whisper
-  large-v3 WER of 1.73% and 2.09% over 128 sentences for the two chunk ramps,
-  but its speed against float32 there is unmeasured. On a B300 with cuDNN's
+  large-v3 WER of 1.73% with its ``[2, 4, 8, 16]`` chunk schedule (2.09%
+  with ``[4, 8, 16]``) over 128 sentences, but its speed against float32
+  there is unmeasured. On a B300 with cuDNN's
   heuristic conv picks, the previous windowed codec ran bf16 slower, not
   faster (several of its convs on a kernel without tensor cores), and this
   decoder has not been measured there: serve ``codec_dtype: float32`` on
