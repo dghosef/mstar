@@ -331,8 +331,8 @@ class KVCache:
     def copy_slots(self, src_page: int, dst_page: int, end: int) -> None:
         """Copy tokens [0, end) of one page onto another, every layer, both K and V."""
         # Index with slices rather than tensors. Slices need no copy from the host,
-        # so the copy doesn't wait on the stream.
-        _, end = self._slots(0, end)
+        # so the copy doesn't wait on the stream. Logical slots: only one rank caches
+        # an image end (`KVManager._cache_image_end`), so no placed pool reaches here.
         if self.layout == KVLayout.MLA:
             self.tensor[:, dst_page, :end] = self.tensor[:, src_page, :end]
         else:
