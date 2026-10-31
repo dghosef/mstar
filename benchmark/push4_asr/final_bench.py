@@ -8,10 +8,11 @@
   rt     Qwen3-ASR realtime (0.6B), mstar only: base vs head, 50 utterances at real time, 1/8/32 sessions, 2 rounds
   omni   Qwen3-Omni audio->text via the omni harness's ab.py: base / head / SGLang-Omni 0.1.9 on short clips
          (c1/4/16/32), ~67 s and ~187 s clips (c1/4/16) and the 4-turn chat (c1/c16), 2 rounds rotated + a profile pass
+  omni_mt / rt2   reruns of the 4-turn chat (TTFT p99 per turn) and of realtime (first-partial latency)
 
 Resumable: a cell whose result file exists is skipped. Results under ~/push4/results/omni/final/.
 
-  python final_bench.py [--only asr,rt,omni]
+  python final_bench.py [--only asr,rt,omni,omni_mt,rt2]
 """
 import argparse
 import json
@@ -93,10 +94,11 @@ def run_asr():
                                      repeats=1, long_form=False))
 
 
-def run_rt():
+def run_rt(name="rt", client=None):
+    """``client``: the realtime bench script (default ``-m benchmark.asr_realtime_bench`` from the head tree)."""
     for r in (0, 1):
         for arm in (("base", "head") if r == 0 else ("head", "base")):
-            out = f"{FINAL}/rt/r{r}/{arm}"
+            out = f"{FINAL}/{name}/r{r}/{arm}"
             if os.path.exists(f"{out}/rt.json"):
                 continue
             os.makedirs(out, exist_ok=True)
@@ -119,11 +121,13 @@ def run_rt():
                     if proc.poll() is not None or time.time() - t0 > 2400:
                         raise RuntimeError("server did not start")
                     time.sleep(5)
-                res = subprocess.run(["numactl", "--physcpubind=48-63", g.VENV_PY, "-m", "benchmark.asr_realtime_bench",
-                                      "--url", f"ws://127.0.0.1:{g.PORT}", "--model", "qwen3_asr_realtime",
+                bench = [client] if client else ["-m", "benchmark.asr_realtime_bench"]
+                res = subprocess.run(["numactl", "--physcpubind=48-63", g.VENV_PY, *bench, "--url",
+                                      f"ws://127.0.0.1:{g.PORT}", "--model", "qwen3_asr_realtime",
                                       "--system", arm, "--data-dir", g.DATA, "--num-utterances", "50", "--sessions",
                                       "1", "8", "32", "--dialect", "openai", "--output-json", f"{out}/rt.json"],
-                                     cwd=HEAD, env=dict(os.environ, HF_HOME=f"{HOME}/hf", HF_HUB_OFFLINE="1"),
+                                     cwd=HEAD, env=dict(os.environ, HF_HOME=f"{HOME}/hf", HF_HUB_OFFLINE="1",
+                                                        PYTHONPATH=HEAD),
                                      capture_output=True, text=True, check=False)
                 open(f"{out}/client.log", "w").write(res.stdout + res.stderr)
             except RuntimeError as e:
@@ -132,20 +136,20 @@ def run_rt():
                 g.stop(proc)
 
 
-def run_omni():
-    if os.path.exists(f"{g.RES}/final/omni/done"):
+def run_omni(tag="final/omni", cells=None, profile="a2t:16,a2tlong180:4:32", warm="1"):
+    if os.path.exists(f"{g.RES}/{tag}/done"):
         return
-    log("omni ab")
-    cells = ("a2t:1,a2t:4,a2t:16,a2t:32,a2tlong60:1:32,a2tlong60:4:32,a2tlong60:16:32,a2tlong180:1:32,"
-             "a2tlong180:4:32,a2tlong180:16:32,mta2t:1:8,mta2t:16:32")
-    rc = subprocess.run([g.VENV_PY, f"{HOME}/push4/omni/harness/ab.py", "--tag", "final/omni", "--rounds", "2",
-                         "--warm", "1", "--cells", cells, "--arm", f"base={BASE}", "--arm", f"head={HEAD}",
-                         "--arm", "sgomni=SGOMNI", "--arm-serve", "base=--enable-metrics", "--arm-serve",
-                         "head=--enable-metrics", "--profile-cells", "a2t:16,a2tlong180:4:32"],
-                        env=dict(os.environ, PATH=f"{HOME}/push4/venv/bin:{HOME}/.local/bin:" + os.environ["PATH"]),
-                        check=False).returncode
+    log(f"omni ab {tag}")
+    cells = cells or ("a2t:1,a2t:4,a2t:16,a2t:32,a2tlong60:1:32,a2tlong60:4:32,a2tlong60:16:32,a2tlong180:1:32,"
+                      "a2tlong180:4:32,a2tlong180:16:32,mta2t:1:8,mta2t:16:32")
+    cmd = [g.VENV_PY, f"{HOME}/push4/omni/harness/ab.py", "--tag", tag, "--rounds", "2", "--warm", warm, "--cells",
+           cells, "--arm", f"base={BASE}", "--arm", f"head={HEAD}", "--arm", "sgomni=SGOMNI", "--arm-serve",
+           "base=--enable-metrics", "--arm-serve", "head=--enable-metrics"]
+    cmd += ["--profile-cells", profile] if profile else []
+    path = f"{HOME}/push4/venv/bin:{HOME}/.local/bin:" + os.environ["PATH"]
+    rc = subprocess.run(cmd, env=dict(os.environ, PATH=path), check=False).returncode
     if rc == 0:
-        open(f"{g.RES}/final/omni/done", "w").write("ok")
+        open(f"{g.RES}/{tag}/done", "w").write("ok")
 
 
 def main():
@@ -153,7 +157,10 @@ def main():
     ap.add_argument("--only", default="asr,rt,omni")
     a = ap.parse_args()
     os.makedirs(f"{FINAL}/asr", exist_ok=True)
-    steps = {"asr": run_asr, "rt": run_rt, "omni": run_omni}
+    steps = {"asr": run_asr, "rt": run_rt, "omni": run_omni,
+             # reruns that record what the first pass didn't: multi-turn TTFT p99, realtime first-partial latency
+             "omni_mt": lambda: run_omni("final/omni_mt", "mta2t:1:8,mta2t:16:32", profile=None, warm="0"),
+             "rt2": lambda: run_rt("rt2", f"{HOME}/push4/asr/harness/rt_first_bench.py")}
     for step in a.only.split(","):
         steps[step]()
     log("FINAL BENCH DONE")

@@ -140,9 +140,13 @@ def main() -> None:
     ap.add_argument("--config", default=None)
     ap.add_argument("--env", action="append", default=[])
     ap.add_argument("--long-form", action="store_true", help="also time the ~10 min long_form file at c=1")
+    ap.add_argument("--gpu", default=None, help="physical GPU (default the slice's GPU 2)")
+    ap.add_argument("--port", type=int, default=None)
     ap.add_argument("--server-cores", default=SERVER_CORES)
     ap.add_argument("--client-cores", default=CLIENT_CORES)
     a = ap.parse_args()
+    global GPU, PORT
+    GPU, PORT = a.gpu or GPU, a.port or PORT
     for spec in a.runs.split(","):
         engine, model = spec.split(":")
         run(engine, model, a)

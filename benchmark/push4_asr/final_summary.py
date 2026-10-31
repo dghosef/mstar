@@ -7,7 +7,6 @@ latencies, and Qwen3-Omni (ab.py's table + the multi-turn per-turn table). Write
 import json
 import os
 import statistics
-import subprocess
 import sys
 
 from benchmark.asr_bench import make_normalizer, word_error_rate
@@ -89,27 +88,67 @@ for label, model, comp, comp_key in ASR:
                    for name, v in (("base", base_lf), ("head", head_lf)) if v)
     out += ["", f"Long-form 605 s, c1: {lf or '-'}", ""]
 
-out += ["## Qwen3-ASR realtime (0.6B), mstar only", "",
-        "| sessions | partial p50 ms base / head | partial p95 ms base / head | final p50 ms base / head "
-        "| WER base / head |",
-        "|---|---|---|---|---|"]
-for s in ("1", "8", "32"):
-    row = {}
-    for arm in ("base", "head"):
-        runs = [load(f"{F}/rt/r{r}/{arm}/rt.json") for r in (0, 1)]
-        runs = [x["sessions"][s] for x in runs if x and s in x.get("sessions", {})]
-        row[arm] = runs
-    def col(k, scale=1.0, nd=0, row=row):
-        return " / ".join(fmt([x[k] * scale for x in row[a]], nd) for a in ("base", "head"))
-    out.append(f"| {s} | {col('partial_p50_ms')} | {col('partial_p95_ms')} | {col('final_p50_ms')} | "
-               f"{col('wer', 100, 2)} |")
+out += ["## Qwen3-ASR realtime (0.6B), mstar only (rt2: 50 utterances at real time, r0 / r1)", "",
+        "First partial: audio-to-partial delay of each session's first partial, and its time since the session's "
+        "first audio frame. Final: commit to completed transcript.", "",
+        "| sessions | first partial p50 / p99 ms, base | head | since first frame p50 ms, base / head "
+        "| final p50 / p99 ms, base | head | WER base / head | errors base / head |",
+        "|---|---|---|---|---|---|---|---|"]
+for sess in ("1", "8", "32"):
+    runs = {arm: [x["sessions"][sess] for x in (load(f"{F}/rt2/r{r}/{arm}/rt.json") for r in (0, 1))
+                  if x and sess in x.get("sessions", {})] for arm in ("base", "head")}
 
-out += ["", "## Qwen3-Omni audio->text (ab.py, tok/s / TTFT p50 ms / TPOT p50 ms per round)", "", "```"]
-log = open(f"{HOME}/push4/results/omni/final_bench.log").read()
-table = log[log.rfind("cell       arm"):] if "cell       arm" in log else "(ab.py table not found)"
-out += [table.split("[ab] AB DONE")[0].rstrip(), "```", ""]
-mt = subprocess.run([sys.executable, f"{HOME}/push4/omni/harness/mt_summary.py",
-                     f"{HOME}/push4/results/omni/final/omni"], capture_output=True, text=True, check=False).stdout
-out += ["### 4-turn chat, per turn", "", "```", mt.rstrip(), "```"]
+    def pp(arm, k50, k99, runs=runs):
+        return " ; ".join(f"{x[k50]:.0f} / {x[k99]:.0f}" for x in runs[arm]) or "-"
+
+    out.append(f"| {sess} | {pp('base', 'first_partial_p50_ms', 'first_partial_p99_ms')} "
+               f"| {pp('head', 'first_partial_p50_ms', 'first_partial_p99_ms')} "
+               f"| {fmt([x['first_partial_since_start_p50_ms'] for x in runs['base']])} / "
+               f"{fmt([x['first_partial_since_start_p50_ms'] for x in runs['head']])} "
+               f"| {pp('base', 'final_p50_ms', 'final_p99_ms')} | {pp('head', 'final_p50_ms', 'final_p99_ms')} "
+               f"| {fmt([x['wer'] * 100 for x in runs['base']], 2)} / {fmt([x['wer'] * 100 for x in runs['head']], 2)} "
+               f"| {sum(x['errors'] for x in runs['base'])} / {sum(x['errors'] for x in runs['head'])} |")
+
+ARMS = ("base", "head", "sgomni")
+rows = [json.loads(line) for r in (0, 1) for line in open(f"{F}/omni/r{r}/rows.jsonl") if line.strip()] \
+    if os.path.exists(f"{F}/omni/r0/rows.jsonl") else []
+out += ["", "## Qwen3-Omni audio->text (ab.py, 2 rounds rotated; values r0 / r1)", "",
+        "Short clips: the Oct-21 a2t set (2-30 s); long: ~67 s and ~187 s LibriSpeech joins, 32 distinct clips per "
+        "cell. FLAG = head's TTFT (mean of the rounds) worse than SGLang-Omni's.", "",
+        "| cell | tok/s base | head | SGLang-Omni | TTFT p50 ms base | head | SGLang-Omni "
+        "| TTFT p99 ms base | head | SGLang-Omni | failed | flag |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+cells = sorted({(x["kind"], x["conc"]) for x in rows if x["kind"] != "mta2t"},
+               key=lambda kc: (["a2t", "a2tlong60", "a2tlong180"].index(kc[0]), kc[1]))
+for kind, conc in cells:
+    by = {a: [x for x in rows if x["kind"] == kind and x["conc"] == conc and x["arm"] == a] for a in ARMS}
+    col = {a: {k: [x[k] * (1000 if k.startswith("ttft") else 1) for x in by[a] if x.get(k) is not None]
+               for k in ("output_tok_s", "ttft_p50", "ttft_p99")} for a in ARMS}
+    flags = [name for name, k in (("p50", "ttft_p50"), ("p99", "ttft_p99"))
+             if col["head"][k] and col["sgomni"][k]
+             and statistics.mean(col["head"][k]) > statistics.mean(col["sgomni"][k])]
+    failed = "/".join(str(sum(x.get("failed") or 0 for x in by[a])) for a in ARMS)
+    out.append(f"| {kind} c{conc} | " + " | ".join(fmt(col[a]["output_tok_s"]) for a in ARMS) + " | "
+               + " | ".join(fmt(col[a]["ttft_p50"]) for a in ARMS) + " | "
+               + " | ".join(fmt(col[a]["ttft_p99"]) for a in ARMS)
+               + f" | {failed} | {'FLAG ' + ','.join(flags) if flags else ''} |")
+
+out += ["", "### 4-turn chat (omni_mt rerun; per turn, values r0 / r1)", "",
+        "| cell | turn | tok/s base | head | SGLang-Omni | TTFT p50 ms base | head | SGLang-Omni "
+        "| TTFT p99 ms base | head | SGLang-Omni | failed | flag |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+for conc in (1, 16):
+    turns = {a: [load(f"{F}/omni_mt/r{r}/{a}/mta2t_c{conc}/mt.json") for r in (0, 1)] for a in ARMS}
+    for t in range(4):
+        col = {a: {k: [m["summary"][t][k] for m in turns[a] if m and len(m["summary"]) > t]
+                   for k in ("out_tok_s", "ttft_p50_ms", "ttft_p99_ms", "failed")} for a in ARMS}
+        flags = [name for name, k in (("p50", "ttft_p50_ms"), ("p99", "ttft_p99_ms"))
+                 if col["head"][k] and col["sgomni"][k]
+                 and statistics.mean(col["head"][k]) > statistics.mean(col["sgomni"][k])]
+        out.append(f"| c{conc} | {t + 1} | " + " | ".join(fmt(col[a]["out_tok_s"]) for a in ARMS) + " | "
+                   + " | ".join(fmt(col[a]["ttft_p50_ms"]) for a in ARMS) + " | "
+                   + " | ".join(fmt(col[a]["ttft_p99_ms"]) for a in ARMS)
+                   + f" | {'/'.join(str(sum(col[a]['failed'])) for a in ARMS)} "
+                   f"| {'FLAG ' + ','.join(flags) if flags else ''} |")
 open(f"{F}/summary.md", "w").write("\n".join(out) + "\n")
 print("\n".join(out))
