@@ -1,6 +1,6 @@
 """``compile_mode`` on a capture config: checked when the config is built, and
 turned into ``torch.compile``'s arguments by ``accelerator_graph_runner.compile_kwargs``;
-and the frames a forward compiled with those arguments keys on its buckets."""
+and how many cache entries a forward compiled with them takes per bucket."""
 
 import sys
 from types import SimpleNamespace
@@ -76,11 +76,9 @@ def test_configs_carry_the_field():
     (XPUPagedAttentionManager, "_current_plans", lambda qo: SimpleNamespace(cu_q=qo)),
 ])
 def test_select_last_hidden_compiles_no_frame_per_prefill_bucket(manager_cls, plans_attr, plan):
-    """A captured forward compiles with static shapes, so a compiled frame
-    holding both a bucket's token count and its row count recompiles once per
-    (tokens, rows) bucket: a ladder of prefill buckets took one inside
-    ``select_last_hidden`` past Dynamo's recompile limit. Three token counts by
-    three row counts must fit in three entries per frame."""
+    """Captured forwards compile with static shapes, so a frame holding both a
+    bucket's token count and its row count takes one cache entry per pair.
+    Three token counts by three row counts must fit in three entries per frame."""
     manager = manager_cls.__new__(manager_cls)
     head = torch.nn.Linear(8, 4)
 
