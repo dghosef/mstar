@@ -120,7 +120,8 @@ class ContextParallel(NamedTuple):
         """Under SP placement, this rank's ``(out, lse)`` as ``attend`` gathers it: its slots' partial
         merged with its share of the step's own tokens, rounded back to the partial's dtype for the
         gather. Each own token's keys are attended by one rank, so merging every rank's share is the
-        whole attention."""
+        whole attention. The rounding is one more than TP placement's, at the floor a bf16 partial
+        carries already; gathering the fp32 merge instead would double the gather's bytes."""
         parts = [_masked(*partial(*queries))]
         if new is not None:
             parts.append(new)
@@ -418,6 +419,7 @@ class ZigzagWrapper:
         kv_indptr = np.concatenate([rows.kv_indptr, rows.kv_indptr[-1] + np.arange(1, extra + 1)])
         kv_tokens = np.concatenate([rows.kv_tokens, np.zeros(extra, dtype=np.int64)])
         self._step_tokens = int(qo_indptr[-1])
+        self._reset = True
         if self._captured:
             # a padding query gathers token 0 and scatters to the row past the bucket's, dropped
             host = np.zeros((2, self._queries), dtype=np.int64)
@@ -446,14 +448,32 @@ class ZigzagWrapper:
         assert n >= self._step_tokens, f"{n} query tokens for a plan of {self._step_tokens}"
         # one row past the bucket's (an eager step's), for padding queries to land in
         rows = (self._bucket_tokens if self._captured else n) + 1
-        out = queries[0].new_zeros(rows, heads, queries[0].shape[-1])
-        lse = torch.full((rows, heads), -math.inf, dtype=torch.float32, device=queries[0].device)
+        if self._captured:
+            out = queries[0].new_zeros(rows, heads, queries[0].shape[-1])
+            lse = torch.full((rows, heads), -math.inf, dtype=torch.float32, device=queries[0].device)
+        else:
+            out, lse = self._step_buffers(queries[0], rows)
         if self._gather is not None:
             own = [q.index_select(0, self._gather) for q in queries]
             got, got_lse = self.kernel.run(*own, one_slot_pages(*keys), return_lse=True)
             out.index_copy_(0, self._scatter, got.to(out.dtype))
             lse.index_copy_(0, self._scatter, got_lse.float())
         return out[:n], lse[:n]
+
+    def _step_buffers(self, query: torch.Tensor, rows: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """An eager step's ``(out, lse)`` rows, out 0 and lse -inf where this rank owns no token: set
+        on the step's first ``run`` and kept by its other layers, whose scatter writes the same rows.
+        A layer's result is merged before the next ``run``, so the next layer may overwrite it."""
+        shape = (rows, *query.shape[1:])
+        if self._out is None or self._out.shape[0] < rows or self._out.shape[1:] != shape[1:] \
+                or self._out.dtype != query.dtype:
+            self._out = query.new_zeros(shape)
+            self._lse = torch.full(shape[:2], -math.inf, dtype=torch.float32, device=query.device)
+        elif self._reset:
+            self._out[:rows].zero_()
+            self._lse[:rows].fill_(-math.inf)
+        self._reset = False
+        return self._out[:rows], self._lse[:rows]
 
 
 def one_slot_pages(*keys: torch.Tensor):
