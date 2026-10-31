@@ -2473,7 +2473,13 @@ class Worker:
             self.scheduler.hold_requests(shed)
             if self.scheduler.could_refill(batch.node_name, batch.graph_walk, batch_ids):
                 if too_big:
-                    self.scheduler.cap_batch(batch.node_name, batch.graph_walk, alone, failed)
+                    # no teardown hands back room in a resource that evicts nothing (attention's
+                    # per-step work-item bound), so any teardown lifts its cap
+                    engine = self.engine_manager.get_engine(batch.node_name)
+                    evicts = failed is None or engine.evictable(batch.node_name, {failed})
+                    self.scheduler.cap_batch(
+                        batch.node_name, batch.graph_walk, alone, failed if evicts else None,
+                    )
                 fit = getattr(reason, "rows_fit", None)
                 self.scheduler.limit_batch(
                     batch.node_name, batch.graph_walk,

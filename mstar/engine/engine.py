@@ -2611,10 +2611,12 @@ class Engine:
     # worker's; the resources only move their own state. A node's resources
     # are reclaimed together, so a request is either resident or not.
 
-    def evictable(self, node_name: str) -> bool:
+    def evictable(self, node_name: str, resources: set[str] | None = None) -> bool:
+        """Whether any of this node's resources, or of ``resources`` among them, can evict."""
         return any(
             resource.supports_eviction
-            for resource in self._submodules[node_name].resources.values()
+            for key, resource in self._submodules[node_name].resources.items()
+            if resources is None or key in resources
         )
 
     def is_offloaded(self, node_name: str, request_id: str) -> bool:
