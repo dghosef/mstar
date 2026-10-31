@@ -62,7 +62,9 @@ class SeqParallel(NamedTuple):
     def attend(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, run: Attend) -> torch.Tensor:
         return ulysses_attention(self.group, q, k, v, run, self.sizes, seq_dim=1, head_dim=2)
 
+    @torch.compiler.disable
     def attend_shards(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, run: Attend) -> torch.Tensor:
+        # eager like the gather, so a compiled block doesn't trace the SDPA fallback's fp32 lse
         return gather_merge(self.group, *run(q, k, v, return_lse=True))
 
 
