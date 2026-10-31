@@ -605,8 +605,8 @@ Qwen3-Omni notes
   and 6144) on H200-class GPUs, so a burst of new prompts that batches into one
   step of a few thousand tokens still replays (measured on 2xH200: the first
   t2t c=32 burst's TTFT p99 3.5 s -> 0.45 s). Each bucket adds captures, graph
-  memory and startup time. ``configs/qwen3omni_2gpu.yaml`` keeps the default
-  ladder: on an 80 GB GPU the larger captures don't fit beside its KV pool.
+  memory and startup time. ``configs/qwen3omni_2gpu.yaml``, sized for 80 GB
+  GPUs, keeps the default ladder.
 - The MoE layers route through the fused softmax-top-k kernel
   (``TopKRouter(fused_softmax_topk=True)``), which gives equal probabilities to
   the lower expert id where ``torch.topk`` may pick another.
