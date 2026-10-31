@@ -2473,8 +2473,10 @@ class Worker:
             self.scheduler.hold_requests(shed)
             if self.scheduler.could_refill(batch.node_name, batch.graph_walk, batch_ids):
                 if too_big:
-                    # no teardown hands back room in a resource that evicts nothing (attention's
-                    # per-step work-item bound), so any teardown lifts its cap
+                    # a cap from a resource that evicts nothing keys on no resource, which any
+                    # freeing teardown lifts: no teardown hands back room in attention's work-item
+                    # bound, and for a KV pool without host offload it lifts at the teardowns a
+                    # "kv" key would, since only KV pools reclaim
                     engine = self.engine_manager.get_engine(batch.node_name)
                     evicts = failed is None or engine.evictable(batch.node_name, {failed})
                     self.scheduler.cap_batch(

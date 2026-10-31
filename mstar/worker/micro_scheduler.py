@@ -430,7 +430,8 @@ class MicroScheduler:
 
     def lift_batch_caps(self, resources: Collection[str]) -> None:
         """A teardown handed pages of ``resources`` back: lift the `cap_batch`
-        caps their refusals set, and a cap whose refusal named no resource.
+        caps their refusals set, and a cap keyed on no resource (its refusal
+        named none, or named one that evicts nothing).
 
         A cap is sized from the rows refused then. On a busy walk every step
         is at the cap, so a smaller step never comes to lift it, and it would
