@@ -122,10 +122,13 @@ class ContextParallel(NamedTuple):
         sent as one tensor."""
         if self.over_sp:
             return queries
-        q = queries[0] if len(queries) == 1 else torch.cat(queries, dim=-1)
-        blocks = q.unsqueeze(0).expand(self.size, *q.shape)
-        q = self.group.to_partners(blocks, self.partners).transpose(0, 1).flatten(1, 2)
-        return q.split([part.shape[-1] for part in queries], dim=-1)
+        q = (queries[0] if len(queries) == 1 else torch.cat(queries, dim=-1)).unsqueeze(0)
+        if self.size == self.group.world_size:
+            # every rank of the group is a partner (MLA's always are): the same block goes to each
+            q = self.group.all_gather(q.contiguous(), dim=0)
+        else:
+            q = self.group.to_partners(q.expand(self.size, *q.shape[1:]), self.partners)
+        return q.transpose(0, 1).flatten(1, 2).split([part.shape[-1] for part in queries], dim=-1)
 
     def exchange_partials(
         self, out: torch.Tensor, lse: torch.Tensor, valid: torch.Tensor,
