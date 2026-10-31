@@ -4,11 +4,10 @@ max_seq_len: 32768
 # nodes do (see MSTAR_TP_ASYNC_SCHED); without it each step's schedule and
 # plan run serially between the ranks' forwards.
 tp_async_sched: true
-# Plan a decode step from the last step's KV plan when its rows are unchanged,
-# and raise the gen-0 GC threshold (at CPython's 700 a 128-row decode step
-# collects almost every step and runs a full collection every few hundred).
+# Raise the gen-0 GC threshold: at CPython's 700 a 128-row decode step
+# collects almost every step and runs a full collection every few hundred.
+# (kv_plan_cache measured neutral alone and -0.6..-2.5% beside this at c128.)
 knobs:
-  kv_plan_cache: 1
   gc_gen0_threshold: 50000
 # Captured text-prefill ladder (see docs/models.rst): the default powers of
 # two plus 3072-7168, which cut the padding of 9B's compute-bound long prefills.
