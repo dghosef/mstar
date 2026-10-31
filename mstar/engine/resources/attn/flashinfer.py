@@ -20,7 +20,7 @@ from mstar.engine.resources.attn.wrappers import (
     check_flashinfer_head_dim,
 )
 from mstar.engine.resources.base import CGSlotKey
-from mstar.engine.resources.context_parallel import ContextParallel, ContextParallelWrapper
+from mstar.engine.resources.context_parallel import ContextParallel
 from mstar.engine.resources.kv.config import PagedKVConfig
 from mstar.engine.resources.kv.plan import KVPlanOutputs
 from mstar.engine.resources.spec import CombinedSplit
@@ -182,33 +182,20 @@ class FlashInferManager(AttentionManager):
             self._eager_plan_states[key] = wrapper
         return wrapper
 
-    def _context_parallel_wrapper(
-        self, label: str, slot: int, decode: bool, kv_kwargs: dict, max_total_tokens: int | None = None,
-    ) -> ContextParallelWrapper:
-        """The wrappers a step attends a placed pool on: its context's on the label's workspace,
-        and for a step that isn't one token a row, its own tokens' on a workspace of their own
-        (both are planned for the one step)."""
-        from mstar.engine.resources.attn.ragged.wrappers import FlashInferRaggedPrefillWrapper
-
-        workspace = self._workspaces.get(label, slot)
+    def _context_wrapper(self, workspace, decode, kwargs, max_total_tokens):
         if decode:
             # under TP placement a rank attends every partner's query heads over one KV head, a GQA
             # group FlashInfer's CUDA-core decode may have no kernel for
             tensor_cores = self._decode_tensor_cores or not self._placement.over_sp
-            context = FlashInferDecodeWrapper(workspace_buffer=workspace, use_tensor_cores=tensor_cores, **kv_kwargs)
-            new = None
-        else:
-            context = FlashInferPrefillWrapper(
-                workspace_buffer=workspace, max_total_tokens=max_total_tokens, **kv_kwargs,
-            )
-            new = FlashInferRaggedPrefillWrapper(
-                self._workspaces.get(f"{label}.own_tokens", slot),
-                max_num_segments=kv_kwargs.get("batch_size"), max_total_tokens=max_total_tokens,
-                accelerator_graph=kv_kwargs.get("accelerator_graph", False), owns_padding=True, **self._new_kwargs,
-            )
-        return ContextParallelWrapper(
-            self._placement, self._kv_config.page_size, self._dtype, context, new, self._device,
-            kv_kwargs.get("batch_size"), max_total_tokens,
+            return FlashInferDecodeWrapper(workspace_buffer=workspace, use_tensor_cores=tensor_cores, **kwargs)
+        return FlashInferPrefillWrapper(workspace_buffer=workspace, max_total_tokens=max_total_tokens, **kwargs)
+
+    def _own_tokens_wrapper(self, workspace, kwargs, max_total_tokens):
+        from mstar.engine.resources.attn.ragged.wrappers import FlashInferRaggedPrefillWrapper
+
+        return FlashInferRaggedPrefillWrapper(
+            workspace, max_num_segments=kwargs.get("batch_size"), max_total_tokens=max_total_tokens,
+            accelerator_graph=kwargs.get("accelerator_graph", False), owns_padding=True, **self._new_kwargs,
         )
 
     @property
@@ -321,16 +308,8 @@ class FlashInferManager(AttentionManager):
         if label is None:
             label = self._default_label
         if self._placement is not None:
-            return self._attend_placed(q, label, kv_cache_layer, k, v)
+            return self._attend_placed(label, (q,), kv_cache_layer, (k, v))
         return self._attend(q, label, kv_cache_layer)
-
-    @torch.compiler.disable
-    def _attend_placed(
-        self, q: torch.Tensor, label: str, kv_cache_layer: torch.Tensor,
-        k: torch.Tensor | None, v: torch.Tensor | None,
-    ) -> torch.Tensor:
-        wrapper: ContextParallelWrapper = self._current_plan_states[label]
-        return wrapper.attend((q,), kv_cache_layer, (k, v))
 
     @torch.compiler.disable
     def _attend(

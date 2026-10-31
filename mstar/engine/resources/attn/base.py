@@ -68,6 +68,47 @@ class AttentionManager(AttentionResource):
         """This rank's share of a context-parallel pool. Reached only for a backend that supports
         one (``supports_context_parallel``): the engine refuses the others at load."""
 
+    # A backend that supports a placed pool supplies the two wrappers a step attends it on;
+    # `_context_parallel_wrapper` composes them and `_attend_placed` runs them.
+
+    def _context_wrapper(self, workspace: torch.Tensor, decode: bool, kwargs: dict, max_total_tokens: int | None):
+        """The paged wrapper over this rank's slots, from ``kwargs`` (the backend's wrapper
+        arguments with the placed geometry, and any capture sizes), for a one-token-a-row step or
+        not."""
+        raise NotImplementedError
+
+    def _own_tokens_wrapper(self, workspace: torch.Tensor, kwargs: dict, max_total_tokens: int | None):
+        """The wrapper a multi-token step attends its own tokens on, from the keys ``run`` is
+        passed: ``run(*queries, *keys, return_lse=True)``, out 0 and lse -inf on a captured
+        bucket's padding."""
+        raise NotImplementedError
+
+    def _context_parallel_wrapper(
+        self, label: str, slot: int, decode: bool, kwargs: dict, max_total_tokens: int | None = None,
+    ):
+        """The ``ContextParallelWrapper`` a step attends a placed pool on: the context's wrapper on
+        the label's workspace and, for a step that isn't one token a row, its own tokens' on a
+        workspace of their own (both are planned for the one step)."""
+        from mstar.engine.resources.context_parallel import ContextParallelWrapper
+
+        context = self._context_wrapper(self._workspaces.get(label, slot), decode, kwargs, max_total_tokens)
+        new = None if decode else self._own_tokens_wrapper(
+            self._workspaces.get(f"{label}.own_tokens", slot), kwargs, max_total_tokens,
+        )
+        return ContextParallelWrapper(
+            self._placement, self._kv_config.page_size, self._dtype, context, new, self._device,
+            kwargs.get("batch_size"), max_total_tokens,
+        )
+
+    @torch.compiler.disable
+    def _attend_placed(
+        self, label: str, queries: tuple[torch.Tensor, ...], kv_cache_layer: torch.Tensor,
+        new_keys: tuple[torch.Tensor | None, ...],
+    ) -> torch.Tensor:
+        """``run`` over a placed pool, ``queries`` and ``new_keys`` as this backend's ``run`` takes
+        them (``ContextParallelWrapper.attend``)."""
+        return self._current_plan_states[label].attend(queries, kv_cache_layer, new_keys)
+
     def fingerprint(self) -> bytes:
         # the class, not the declared backend: `build` moves dense to another
         # kernel where the FA3 one is unusable, and they do not agree bit for bit

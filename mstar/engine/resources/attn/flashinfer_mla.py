@@ -26,7 +26,7 @@ from mstar.engine.resources.attn.base import (
 )
 from mstar.engine.resources.attn.config import AttentionStep
 from mstar.engine.resources.base import CGSlotKey
-from mstar.engine.resources.context_parallel import ContextParallel, ContextParallelWrapper
+from mstar.engine.resources.context_parallel import ContextParallel
 from mstar.engine.resources.kv.config import KVConfig, KVLayout
 from mstar.engine.resources.kv.plan import KVPlanOutputs
 from mstar.engine.resources.step import SlotLease, StepContext
@@ -417,23 +417,16 @@ class FlashInferMLAManager(AttentionManager):
         self._eager_plan_states[key] = wrapper
         return wrapper
 
-    def _context_parallel_wrapper(
-        self, label: str, slot: int, decode: bool, kwargs: dict, max_total_tokens: int | None = None,
-    ) -> ContextParallelWrapper:
-        """As ``FlashInferManager``'s: the context's MLA wrapper on the label's workspace and, for a
-        step that isn't one token a row, its own tokens' on a workspace of their own."""
-        context = FlashInferMLAWrapper(workspace_buffer=self._workspaces.get(label, slot), **kwargs)
-        new = None
-        if not decode:
-            own = {**kwargs, "num_qo_heads": self._kv_config.num_qo_heads}
-            del own["page_size"]
-            if max_total_tokens is not None:
-                own["max_num_pages"] = max_total_tokens
-            new = FlashInferMLAOwnTokensWrapper(self._workspaces.get(f"{label}.own_tokens", slot), self._dtype, **own)
-        return ContextParallelWrapper(
-            self._placement, self._kv_config.page_size, self._dtype, context, new, self._device,
-            kwargs.get("batch_size"), max_total_tokens,
-        )
+    def _context_wrapper(self, workspace, decode, kwargs, max_total_tokens):
+        # one wrapper takes either kind of step
+        return FlashInferMLAWrapper(workspace_buffer=workspace, **kwargs)
+
+    def _own_tokens_wrapper(self, workspace, kwargs, max_total_tokens):
+        own = {**kwargs, "num_qo_heads": self._kv_config.num_qo_heads}
+        del own["page_size"]
+        if max_total_tokens is not None:
+            own["max_num_pages"] = max_total_tokens
+        return FlashInferMLAOwnTokensWrapper(workspace, self._dtype, **own)
 
     @property
     def supports_preplan(self):
@@ -538,15 +531,8 @@ class FlashInferMLAManager(AttentionManager):
         if self._placement is not None:
             if return_lse:
                 raise ValueError("FlashInferMLAManager returns no lse over a context-parallel KV pool")
-            return self._attend_placed(q, q_pe, label, kv_cache_layer, k)
+            return self._attend_placed(label, (q, q_pe), kv_cache_layer, (k,))
         return self._attend(q, q_pe, label, kv_cache_layer, return_lse)
-
-    @torch.compiler.disable
-    def _attend_placed(self, q_nope, q_pe, label, kv_cache_layer, latent):
-        """As ``FlashInferManager._attend_placed``, with the query in two parts and the step's own
-        keys its latents."""
-        wrapper: ContextParallelWrapper = self._current_plan_states[label]
-        return wrapper.attend((q_nope, q_pe), kv_cache_layer, (latent,))
 
     @torch.compiler.disable
     def _attend(self, q_nope, q_pe, label, kv_cache_layer, return_lse=False):
