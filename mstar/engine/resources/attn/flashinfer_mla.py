@@ -26,7 +26,7 @@ from mstar.engine.resources.attn.base import (
 )
 from mstar.engine.resources.attn.config import AttentionStep
 from mstar.engine.resources.base import CGSlotKey
-from mstar.engine.resources.context_parallel import ContextParallel
+from mstar.engine.resources.context_parallel import ContextParallel, ZigzagWrapper
 from mstar.engine.resources.kv.config import KVConfig, KVLayout
 from mstar.engine.resources.kv.plan import KVPlanOutputs
 from mstar.engine.resources.step import (
@@ -295,7 +295,7 @@ class FlashInferMLAOwnTokensWrapper(FlashInferMLAWrapper):
                 f"{self._out_buf.shape[0]} this graph-mode wrapper was built for"
             )
             owned = dict(out=self._out_buf[:n], lse=self._lse_buf[:n] if return_lse else None)
-        return super().run(q_nope, q_pe, latent.unsqueeze(1), return_lse=return_lse, **owned)
+        return super().run(q_nope, q_pe, _one_slot_pages(latent), return_lse=return_lse, **owned)
 
 
 class FlashInferMLAManager(AttentionManager):
@@ -344,6 +344,7 @@ class FlashInferMLAManager(AttentionManager):
         self._workspaces = WorkspacePool(device)
         # over a placed pool on the FA planner (the kernel in use), the device's SMs, for its work-item cap
         self._fa_sm_count: int | None = None
+        self._plan_check = self._refuse_unplannable
 
     def _bind_placement(self, placement: ContextParallel) -> None:
         # the latent is every TP rank's, so under TP placement it is attended for every partner's heads
@@ -372,8 +373,9 @@ class FlashInferMLAManager(AttentionManager):
                 )
             # FA's causal tile-bound check can refuse a causal plan at a head count that doesn't divide
             # its query tile, which is 64 on a plan averaging few queries a row (a captured bucket's
-            # padding rows make one). The backend is pinned, so such a step would fail mid-serving
-            # rather than fall through: refused here instead, under TP placement too
+            # padding rows, or a zigzag share's empty ones, make one). The backend is pinned, so such
+            # a step would fail rather than fall through, under SP placement on one partner's share
+            # alone: refused here instead, under TP placement too
             heads = self._kv_config.num_qo_heads
             if 64 % heads:
                 raise ValueError(
@@ -435,6 +437,22 @@ class FlashInferMLAManager(AttentionManager):
     def _own_tokens_wrapper(self, workspace, kwargs, max_total_tokens):
         own = {**kwargs, "num_qo_heads": self._kv_config.num_qo_heads}
         del own["page_size"]
+        if self._placement.over_sp:
+            # SP partners hold the same heads, so each attends its zigzag share of the own tokens
+            rows = own.pop("batch_size", None) or 0
+            del own["max_num_pages"]
+            own.pop("use_cuda_graph", None)
+
+            def paged(max_total_tokens=None, **captured):
+                # the MLA wrapper sizes a capture by its rows and pages alone
+                return FlashInferMLAWrapper(
+                    workspace, page_size=1, use_cuda_graph=bool(captured), **captured, **own,
+                )
+
+            return ZigzagWrapper(
+                self._placement, paged, _one_slot_pages, 2, self._device, self._dtype,
+                rows, max_total_tokens or 0,
+            )
         if max_total_tokens is not None:
             own["max_num_pages"] = max_total_tokens
         return FlashInferMLAOwnTokensWrapper(workspace, self._dtype, **own)
@@ -451,7 +469,7 @@ class FlashInferMLAManager(AttentionManager):
 
     def admit(self, step: AttentionStep, ctx: StepContext) -> AdmitOutcome:
         """Over a placed pool on the FA planner, refuses a step its planner may not hold
-        (``_refuse_past_work_item_cap``) before it is planned, so the worker retries it smaller:
+        (``_refuse_unplannable``) before it is planned, so the worker retries it smaller:
         sized by how many of its requests, in its order, fit, or terminal for a request that
         doesn't fit alone. The bound reads query lengths alone, so every rank refuses alike."""
         # a step of one query a row (decode) is about a work item a row, far under the cap
@@ -538,27 +556,29 @@ class FlashInferMLAManager(AttentionManager):
                 )
                 wrapper = self._eager_wrapper(label, ctx.slot, is_decode)
             if self._placement is not None:
-                self._refuse_past_work_item_cap(indptrs.qo_indptr)
                 wrapper.plan(kv_out, causal=step.causal)
             else:
                 wrapper.plan(causal=step.causal, dtype=self._dtype, **indptrs.to_kwargs_dict())
             plan_states[label] = wrapper
         self._preplanned = ctx.is_preplan
 
-    def _refuse_past_work_item_cap(self, qo_indptr: torch.Tensor) -> None:
-        """Refuses, before FlashInfer can, a step its FA planner may not hold. The planner counts
-        this rank's own KV lengths, so its refusal could come on one rank of the lockstep instance
-        alone; the bound reads the step's query lengths, the same on every rank. ``admit`` refuses
-        such a step first; this sees what admit doesn't, a captured bucket's padding rows."""
+    def _refuse_unplannable(self, what: str, qo_indptr: np.ndarray) -> None:
+        """Refuses, before FlashInfer can, a plan past its FA planner's work-item cap
+        (``ContextParallelWrapper``'s ``check``). The planner counts the KV lengths a rank plans,
+        which differ by rank over a placed pool, so its refusal could come on one rank alone; the
+        bound reads the query lengths alone. Under SP placement the context's and the own tokens'
+        heads are the same. ``admit`` refuses such a step first; this sees what admit doesn't, a
+        captured bucket's padding rows."""
         if self._fa_sm_count is None:
+            # not planned on the FA planner (bind stamps it where it is)
             return
         heads = self._wrapper_kwargs["num_qo_heads"]
         bound = fa_work_items_bound(qo_indptr, heads, self._fa_sm_count)
         if bound > _FA_MAX_WORK_ITEMS:
             raise ValueError(
-                f"a step of {int(qo_indptr[-1])} query tokens at {heads} heads can take FlashInfer's FA MLA "
-                f"planner up to {bound} work items over context-parallel KV pool {self._kv_cache_name!r}, past "
-                f"its cap of {_FA_MAX_WORK_ITEMS}.{self._cap_hint()}"
+                f"{what}, {int(qo_indptr[-1])} queries at {heads} heads, can take FlashInfer's "
+                f"FA MLA planner up to {bound} work items over context-parallel KV pool "
+                f"{self._kv_cache_name!r}, past its cap of {_FA_MAX_WORK_ITEMS}.{self._cap_hint()}"
             )
 
     def clear_preplan(self):
@@ -603,3 +623,8 @@ class FlashInferMLAManager(AttentionManager):
         if o.dtype != q_nope.dtype:
             o = o.to(q_nope.dtype)
         return (o, lse) if return_lse else o
+
+
+def _one_slot_pages(latent: torch.Tensor) -> torch.Tensor:
+    """The step's own latents ``[N, latent]`` as a layer of one-slot pages, page ``i`` token ``i``."""
+    return latent.unsqueeze(1)
