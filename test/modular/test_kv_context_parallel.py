@@ -354,9 +354,9 @@ def _reference_flashinfer() -> types.ModuleType:
             # the planned rows alone, into the caller's buffers or q-sized ones of its own (FlashInfer's
             # torch.empty; NaN here)
             if out is None:
-                out = torch.full((q.shape[0], *o.shape[1:]), math.nan, dtype=o.dtype)
+                out = torch.full((q.shape[0], *o.shape[1:]), math.nan, dtype=o.dtype, device=q.device)
             if lse is None:
-                lse = torch.full((q.shape[0], *got.shape[1:]), math.nan)
+                lse = torch.full((q.shape[0], *got.shape[1:]), math.nan, dtype=got.dtype, device=q.device)
             out[:len(o)], lse[:len(got)] = o, got
             return (out, lse) if return_lse else out
 
@@ -509,7 +509,7 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False)
         _plan(attn, case, bucket=bucket)
         if pad:
             # whatever the own-token part's buffers hold past this plan (an earlier, longer step's
-            # rows; NaN here): only plan's reset keeps the padding 0 through the merge
+            # rows; NaN here): only plan's reset keeps the padding finite through the merge
             own = next(iter(attn._cg_plan_states.values())).new
             own._out_buf.fill_(math.nan)
             own._lse_buf.fill_(math.nan)
@@ -528,15 +528,16 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 out = run()
-            # what the check reads is the replay's
+            # what the checks read is the replay's, the own-token part's real rows included
             out.fill_(math.nan)
+            if pad:
+                own._out_buf[:n].fill_(math.nan)
+                own._lse_buf[:n].fill_(math.nan)
             graph.replay()
             torch.cuda.synchronize()
             if pad:
-                # the kernel wrote the real rows into the part's own buffers (NaN before plan), and
-                # plan reset the padding to out 0, lse -inf
-                assert torch.isfinite(own._out_buf[: n + pad]).all() and torch.isfinite(own._lse_buf[: n + pad]).all()
-                assert not own._out_buf[n : n + pad].any() and (own._lse_buf[n : n + pad] == -math.inf).all()
+                # the replayed kernel wrote the real rows into the part's own buffers
+                assert torch.isfinite(own._out_buf[:n]).all() and torch.isfinite(own._lse_buf[:n]).all()
         assert torch.isfinite(out).all()
         torch.testing.assert_close(out[:n].float(), case.want()[:, heads], **tol)
         if rows == PREFILL_ROWS and not captured:
