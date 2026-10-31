@@ -7,10 +7,10 @@ knobs:
   kv_plan_cache: 1
   gc_gen0_threshold: 50000
 # Captured text-prefill ladder (see docs/models.rst): the default powers of
-# two plus 3072-7168, which cut the padding of packed prefills between 2048
-# and 8192 tokens.
+# two plus 1152-1792, so a prompt just past 1024 tokens (1k of text plus its
+# chat template) doesn't pad to 2048, and 3072-7168 for long packed prefills.
 model_kwargs:
-  prefill_token_buckets: [32, 64, 128, 256, 512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192]
+  prefill_token_buckets: [32, 64, 128, 256, 512, 1024, 1152, 1280, 1536, 1792, 2048, 3072, 4096, 5120, 6144, 7168, 8192]
 node_groups:
   # Text, images and video. Colocated: the
   # encoder runs once per request, then idles.
