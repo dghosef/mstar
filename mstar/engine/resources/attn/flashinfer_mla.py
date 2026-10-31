@@ -468,7 +468,7 @@ class FlashInferMLAManager(AttentionManager):
         alone = frozenset(rid for rid, labels in rows.items() if not self._fits([labels]))
         if alone:
             return AdmitOutcome(ok=False, reason=AdmitRuntimeError(
-                message=f"The request's prompt takes {where} in one step; shorten it{self._cap_hint()}.",
+                message=f"The request's prompt takes {where} in one step; shorten it.{self._cap_hint()}",
                 request_ids=alone,
             ))
         fit = next(n for n in range(len(spans) - 1, 0, -1) if self._fits(spans[:n]))
@@ -497,8 +497,8 @@ class FlashInferMLAManager(AttentionManager):
     def _cap_hint(self) -> str:
         if self._placement.over_sp:
             return ""
-        return (f", or place positions over SP ranks: under TP placement each rank plans every partner's query "
-                f"heads, so a step reaches the cap {self._placement.size}x sooner")
+        return (f" Under TP placement each rank plans every partner's query heads, so a step reaches the cap "
+                f"{self._placement.size}x sooner; placing positions over SP ranks avoids that.")
 
     def plan(self, step: AttentionStep, ctx: StepContext):
         if step.context_only and self._placement is not None:
@@ -557,7 +557,7 @@ class FlashInferMLAManager(AttentionManager):
             raise ValueError(
                 f"a step of {int(qo_indptr[-1])} query tokens at {heads} heads can take FlashInfer's FA MLA "
                 f"planner up to {bound} work items over context-parallel KV pool {self._kv_cache_name!r}, past "
-                f"its cap of {_FA_MAX_WORK_ITEMS}{self._cap_hint()}"
+                f"its cap of {_FA_MAX_WORK_ITEMS}.{self._cap_hint()}"
             )
 
     def clear_preplan(self):
