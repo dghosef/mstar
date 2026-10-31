@@ -21,7 +21,7 @@ from mstar.engine.resources.attn.wrappers import (
     check_flashinfer_head_dim,
 )
 from mstar.engine.resources.base import CGSlotKey
-from mstar.engine.resources.context_parallel import ContextParallel, ZigzagWrapper
+from mstar.engine.resources.context_parallel import ContextParallel
 from mstar.engine.resources.kv.config import PagedKVConfig
 from mstar.engine.resources.kv.plan import KVPlanOutputs
 from mstar.engine.resources.spec import CombinedSplit
@@ -202,21 +202,6 @@ class FlashInferManager(AttentionManager):
     def _own_tokens_wrapper(self, workspace, kwargs, max_total_tokens):
         from mstar.engine.resources.attn.ragged.wrappers import FlashInferRaggedPrefillWrapper
 
-        if self._placement.over_sp:
-            # SP partners hold the same heads, so each attends its zigzag share of the own tokens
-            cfg = self._kv_config
-
-            def paged(**captured):
-                return FlashInferPrefillWrapper(
-                    workspace, cfg.num_qo_heads, cfg.num_kv_heads, cfg.head_dim, page_size=1,
-                    device=self._device, accelerator_graph=bool(captured),
-                    backend=self._wrapper_kv_kwargs["backend"], **captured,
-                )
-
-            return ZigzagWrapper(
-                self._placement, paged, _one_slot_pages, 1, self._device, self._dtype,
-                kwargs.get("batch_size") or 0, max_total_tokens or 0,
-            )
         return FlashInferRaggedPrefillWrapper(
             workspace, max_num_segments=kwargs.get("batch_size"), max_total_tokens=max_total_tokens,
             accelerator_graph=kwargs.get("accelerator_graph", False), owns_padding=True, **self._new_kwargs,
@@ -343,12 +328,3 @@ class FlashInferManager(AttentionManager):
         if o.dtype != q.dtype:
             o = o.to(q.dtype)
         return o
-
-
-def _one_slot_pages(k: torch.Tensor, v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """The step's own K and V ``[N, H, D]`` as FlashInfer's paged ``(k, v)`` of one-slot pages, page
-    ``i`` token ``i``: views, unless their strides differ, for which FA2 runs a kernel of its own
-    that a capture would have to prewarm."""
-    if k.stride() != v.stride():
-        k, v = k.contiguous(), v.contiguous()
-    return k.unsqueeze(1), v.unsqueeze(1)

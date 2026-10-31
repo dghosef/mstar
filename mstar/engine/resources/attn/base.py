@@ -73,6 +73,8 @@ class AttentionManager(AttentionResource):
 
     # A backend that supports a placed pool supplies the two wrappers a step attends it on;
     # `_context_parallel_wrapper` composes them and `_attend_placed` runs them.
+    # ``run``'s query parts, as `_attend_placed` passes them
+    _query_parts = 1
 
     def _context_wrapper(self, workspace: torch.Tensor, decode: bool, kwargs: dict, max_total_tokens: int | None):
         """The paged wrapper over this rank's slots, from ``kwargs`` (the backend's wrapper
@@ -81,9 +83,9 @@ class AttentionManager(AttentionResource):
         raise NotImplementedError
 
     def _own_tokens_wrapper(self, workspace: torch.Tensor, kwargs: dict, max_total_tokens: int | None):
-        """The wrapper a multi-token step attends its own tokens on, from the keys ``run`` is
-        passed: ``run(*queries, *keys, return_lse=True)``, out 0 and lse -inf on a captured
-        bucket's padding."""
+        """The wrapper a multi-token step attends its own tokens on under TP placement, from the
+        keys ``run`` is passed: ``run(*queries, *keys, return_lse=True)``, out 0 and lse -inf on a
+        captured bucket's padding."""
         raise NotImplementedError
 
     def _context_parallel_wrapper(
@@ -96,11 +98,24 @@ class AttentionManager(AttentionResource):
         wrapper keeps its plan in an int workspace of its own, and uses this one only for the
         split-KV partials of a ``run``, which it merges within that ``run``; the two run one after
         the other on one stream."""
-        from mstar.engine.resources.context_parallel import ContextParallelWrapper
+        from mstar.engine.resources.context_parallel import ContextParallelWrapper, ZigzagWrapper
 
         workspace = self._workspaces.get(label, slot)
         context = self._context_wrapper(workspace, decode, kwargs, max_total_tokens)
-        new = None if decode else self._own_tokens_wrapper(workspace, kwargs, max_total_tokens)
+        if decode:
+            new = None
+        elif self._placement.over_sp:
+            # SP partners hold the same heads, so each attends its zigzag share of the own tokens, on
+            # the context's kernel over pages of one slot
+            def paged(max_total_tokens=None, **captured):
+                return self._context_wrapper(workspace, False, {**kwargs, **captured, "page_size": 1}, max_total_tokens)
+
+            new = ZigzagWrapper(
+                self._placement, paged, self._query_parts, self._device, self._dtype,
+                kwargs.get("batch_size") or 0, max_total_tokens or 0,
+            )
+        else:
+            new = self._own_tokens_wrapper(workspace, kwargs, max_total_tokens)
         return ContextParallelWrapper(
             self._placement, self._kv_config.page_size, self._dtype, context, new, self._device,
             kwargs.get("batch_size"), max_total_tokens, check=self._plan_check,

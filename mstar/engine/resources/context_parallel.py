@@ -344,14 +344,13 @@ class ZigzagWrapper:
     plan as two rows of one call with no copy of the keys.
 
     ``paged`` builds the kernel, with ``batch_size``, ``max_total_tokens`` and ``max_num_pages``
-    for a captured one; ``as_pages`` makes the one-slot pages from ``run``'s keys; the first
-    ``num_queries`` of ``run``'s arguments are query parts, the rest keys."""
+    for a captured one; the first ``num_queries`` of ``run``'s arguments are query parts, the rest
+    keys (``one_slot_pages``)."""
 
     def __init__(
         self,
         placement: ContextParallel,
         paged: Callable,
-        as_pages: Callable[..., torch.Tensor],
         num_queries: int,
         device: torch.device,
         dtype: torch.dtype,
@@ -359,7 +358,6 @@ class ZigzagWrapper:
         captured_tokens: int = 0,
     ):
         self._placement = placement
-        self._as_pages = as_pages
         self._num_queries = num_queries
         self._device, self._dtype = device, dtype
         self._stager = PinnedStager(torch.int64)
@@ -442,10 +440,23 @@ class ZigzagWrapper:
         lse = torch.full((rows, heads), -math.inf, dtype=torch.float32, device=queries[0].device)
         if self._gather is not None:
             own = [q.index_select(0, self._gather) for q in queries]
-            got, got_lse = self.kernel.run(*own, self._as_pages(*keys), return_lse=True)
+            got, got_lse = self.kernel.run(*own, one_slot_pages(*keys), return_lse=True)
             out.index_copy_(0, self._scatter, got.to(out.dtype))
             lse.index_copy_(0, self._scatter, got_lse.float())
         return out[:n], lse[:n]
+
+
+def one_slot_pages(*keys: torch.Tensor):
+    """A step's own keys as a paged kernel's layer of one-slot pages, page ``i`` token ``i``: MLA's
+    latents ``[N, latent]``, or K and V ``[N, H, D]`` as FlashInfer's paged ``(k, v)``. Views,
+    unless K's and V's strides differ, for which FA2 runs a kernel of its own that a capture would
+    have to prewarm."""
+    if len(keys) == 1:
+        return keys[0].unsqueeze(1)
+    k, v = keys
+    if k.stride() != v.stride():
+        k, v = k.contiguous(), v.contiguous()
+    return k.unsqueeze(1), v.unsqueeze(1)
 
 
 def merge(outs: Sequence[torch.Tensor], lses: torch.Tensor) -> torch.Tensor:

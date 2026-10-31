@@ -649,8 +649,8 @@ def test_captured_zigzag_shares_replan_in_place_and_merge_to_attention_over_a_la
 
     wrappers = [
         ZigzagWrapper(
-            ContextParallel(P, index, CommGroup.trivial(), True, tuple(range(P))), paged,
-            lambda k, v: (k.unsqueeze(1), v.unsqueeze(1)), 1, CPU, torch.float32, rows, tokens,
+            ContextParallel(P, index, CommGroup.trivial(), True, tuple(range(P))), paged, 1, CPU, torch.float32,
+            rows, tokens,
         )
         for index in range(P)
     ]
