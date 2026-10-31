@@ -346,7 +346,6 @@ class FlashInferMLAManager(AttentionManager):
         self._workspaces = WorkspacePool(device)
         # over a placed pool on the FA planner (the kernel in use), the device's SMs, for its work-item cap
         self._fa_sm_count: int | None = None
-        self._plan_check = self._refuse_unplannable
 
     def _bind_placement(self, placement: ContextParallel) -> None:
         # the latent is every TP rank's, so under TP placement it is attended for every partner's heads
@@ -386,6 +385,9 @@ class FlashInferMLAManager(AttentionManager):
                     "use a TP size that gives each rank a head count dividing 64, or turn context_parallel off"
                 )
             self._fa_sm_count = _sm_count(self._device)
+            if self._fa_sm_count is not None:
+                # only where the FA planner plans: elsewhere there is nothing to refuse
+                self._plan_check = self._refuse_unplannable
 
     @property
     def uses_kernel(self) -> bool:
@@ -555,9 +557,6 @@ class FlashInferMLAManager(AttentionManager):
         bound reads the query lengths alone. Under SP placement the context's and the own tokens'
         heads are the same. ``admit`` refuses such a step first; this sees what admit doesn't, a
         captured bucket's padding rows."""
-        if self._fa_sm_count is None:
-            # not planned on the FA planner (bind stamps it where it is)
-            return
         heads = self._wrapper_kwargs["num_qo_heads"]
         bound = fa_work_items_bound(qo_indptr, heads, self._fa_sm_count)
         if bound > _FA_MAX_WORK_ITEMS:
