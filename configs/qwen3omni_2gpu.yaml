@@ -1,13 +1,10 @@
 model: "qwen3_omni"
 max_seq_len: 32768
-# The Thinker's captured prefill ladder, past the default 2048: a burst of new
-# prompts batches into one prefill step (5101 tokens for 32 ShareGPT prompts),
-# which otherwise ran eagerly and recompiled on the request path.
-model_kwargs:
-  prefill_token_buckets: [128, 256, 512, 1024, 2048, 4096, 6144, 8192]
-# The Thinker's KV pool defaults to 2,048 pages, 24 GiB at 12 MiB a page, which
-# doesn't fit beside its weights on an 80 GB GPU; qwen3omni_2gpu_large_kv.yaml
-# keeps the default for larger GPUs. Host pages give a full pool a request to move.
+# Sized for 80 GB GPUs. The Thinker's KV pool defaults to 2,048 pages, 24 GiB at
+# 12 MiB a page, which doesn't fit beside its weights there, and its prefill ladder
+# stays at the default 128-2048: beside this pool the 4096-8192 captures don't fit
+# on an H100. qwen3omni_2gpu_large_kv.yaml keeps the default pool and runs the
+# ladder to 8192 on H200-class GPUs. Host pages give a full pool a request to move.
 resources:
   thinker_kv:
     max_num_pages: 1024
