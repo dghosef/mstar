@@ -298,7 +298,8 @@ def _reference(q, k, v, causal=True):
 def _reference_flashinfer() -> types.ModuleType:
     """FlashInfer's paged prefill/decode and ragged wrappers as dense torch math on CPU, with
     their lse bases. A paged plan refuses a row FlashInfer's split-KV planner would miscount: no
-    pages, or a last page holding no slot (see ``ContextParallel.local_indptrs``)."""
+    pages, or a last page holding no slot (see ``ContextParallel.local_indptrs``). The ragged one
+    reads keys past its plan as FA3 does."""
     fi = types.ModuleType("flashinfer")
 
     class Paged:
@@ -341,14 +342,24 @@ def _reference_flashinfer() -> types.ModuleType:
             self.causal = False
 
     class Ragged:
-        def __init__(self, *args, **kwargs):
-            pass
+        def __init__(self, *args, qo_indptr_buf=None, kv_indptr_buf=None, **kwargs):
+            self.bufs = (qo_indptr_buf, kv_indptr_buf)
 
         def plan(self, qo_indptr, kv_indptr, *args, causal=False, **kwargs):
             self.qo, self.causal = qo_indptr.tolist(), causal
+            # graph mode: the layouts into the caller's buffers
+            for buf, indptr in zip(self.bufs, (qo_indptr, kv_indptr), strict=True):
+                if buf is not None:
+                    buf.copy_(indptr)
 
         def run(self, q, k, v, out=None, lse=None, return_lse=False, lse_base="log2"):
             parts = [_reference(q[a:b], k[a:b], v[a:b], self.causal) for a, b in itertools.pairwise(self.qo)]
+            # FA3 reads the keys past the last row to its 128-key tile and masks them additively:
+            # nothing from a finite key, NaN in the last rows from a NaN one
+            end = self.qo[-1]
+            over = slice(end, min(k.shape[0], -(-end // 128) * 128))
+            poison = (k[over].float().sum() + v[over].float().sum()) * 0
+            parts[-1] = (parts[-1][0] + poison, parts[-1][1] + poison)
             o, got = torch.cat([p[0] for p in parts]).to(q.dtype), torch.cat([p[1] for p in parts])
             got = got if lse_base == "ln" else got / math.log(2)
             # the planned rows alone, into the caller's buffers or q-sized ones of its own (FlashInfer's
@@ -391,10 +402,11 @@ class _Case:
         indptrs = build_paged_indptrs(views, CP_PAGE)
         return cls(KVPlanOutputs({"main": KVPlanOutput(indptrs, views)}), keys, q, rows, mla)
 
-    def cache(self, placement) -> torch.Tensor:
-        """This rank's layer of the pool: each owned slot at its physical place, NaN elsewhere."""
+    def cache(self, placement, pages: int = 0) -> torch.Tensor:
+        """This rank's layer of the pool, of at least ``pages`` pages: each owned slot at its
+        physical place, NaN elsewhere."""
         slots = CP_PAGE // placement.size
-        pages = max(view.page_idxs[-1] for view in self.plan["main"].views) + 1
+        pages = max(pages, max(view.page_idxs[-1] for view in self.plan["main"].views) + 1)
         shape = (pages, slots, LATENT) if self.mla else (pages, 2, slots, 1, HEAD_DIM)
         cache = torch.full(shape, math.nan, device=self.q.device, dtype=self.q.dtype)
         for view, kv in zip(self.plan["main"].views, self.keys, strict=True):
@@ -416,17 +428,29 @@ class _Case:
         new = torch.cat([kv[context:] for kv, (context, _) in zip(self.keys, self.rows, strict=True)])
         return (new,) if self.mla else (new[:, 0], new[:, 1])
 
-    def runner(self, attn, placement, heads=slice(None), keys=True, pad=0):
-        """``attn.run`` for ``heads`` over this rank's cache, passed the new keys when ``keys``, as a
-        call whose inputs are built once (so it can be captured); ``pad`` zero tokens past the
-        step's, as a captured bucket larger than the step passes them."""
-        q, cache = self.queries(heads), self.cache(placement)
-        new = self.new_keys() if keys else (None, None)
+    def inputs(self, placement, heads=slice(None), keys=True, pad=0, pages=0) -> list[torch.Tensor | None]:
+        """What ``runner`` passes ``attn.run``: the query parts, the new keys (None without
+        ``keys``) and this rank's cache (``cache``). ``pad`` NaN tokens follow the step's, as the
+        padding rows of a captured bucket larger than the step hold whatever the model's layers
+        left there."""
+        q, new = self.queries(heads), self.new_keys()
+        if not keys:
+            new = (None,) * len(new)
         if pad:
-            q, new = (tuple(torch.cat([t, t.new_zeros(pad, *t.shape[1:])]) for t in parts) for parts in (q, new))
+            q, new = (tuple(torch.cat([t, t.new_full((pad, *t.shape[1:]), math.nan)]) for t in parts)
+                      for parts in (q, new))
+        return [*q, *new, self.cache(placement, pages)]
+
+    def runner(self, attn, placement, heads=slice(None), keys=True, pad=0, inputs=None):
+        """``attn.run`` for ``heads`` as a call whose ``inputs`` are built once (so it can be
+        captured), by default ``self.inputs(placement, heads, keys, pad)``."""
+        if inputs is None:
+            inputs = self.inputs(placement, heads, keys, pad)
         if self.mla:
-            return lambda: attn.run(q[0], "main", kv_cache_layer=cache, k=new[0], q_pe=q[1])
-        return lambda: attn.run(q[0], "main", kv_cache_layer=cache, k=new[0], v=new[1])
+            q_nope, q_pe, latent, cache = inputs
+            return lambda: attn.run(q_nope, "main", kv_cache_layer=cache, k=latent, q_pe=q_pe)
+        q, k, v, cache = inputs
+        return lambda: attn.run(q, "main", kv_cache_layer=cache, k=k, v=v)
 
     def want(self) -> torch.Tensor:
         outs = []
@@ -475,9 +499,11 @@ def _plan(attn, case: _Case, slot: int = 0, bucket: BucketKey | None = None, **s
 def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False):
     """One rank of a ``world``-rank placement running ``rows`` through ``FlashInferManager.run``
     against one rank attending every key; every rank issues the same collectives, same shapes.
-    ``captured`` (NCCL only) plans the step for a graph bucket, and captures ``run`` with its
-    collectives in a CUDA graph on every rank and replays it."""
-    os.environ["MSTAR_WORKSPACE_BUFFER_MB"] = "1"
+    ``captured`` (NCCL only) does what production does for a graph bucket: captures ``run`` with
+    its collectives on a step of exactly the bucket's tokens on every rank, then plans the step and
+    replays it."""
+    # FlashInfer's MLA plan needs ~17 MB on a GPU
+    os.environ["MSTAR_WORKSPACE_BUFFER_MB"] = "64" if backend == "nccl" else "1"
     dist.init_process_group(backend, init_method=f"file://{store}", rank=rank, world_size=world)
     torch.set_num_threads(1)
     cuda = backend == "nccl"
@@ -494,6 +520,7 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False)
         setattr(dist, name, record)
     group = CommGroup(rank, rank, list(range(world)))
     group.device_group, group.initialized = dist.group.WORLD, True
+    graph = None
     try:
         joint = (JointGroups(tp_group=CommGroup.trivial(), sp_group=group) if over_sp
                  else JointGroups(tp_group=group, sp_group=CommGroup.trivial()))
@@ -506,28 +533,35 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False)
         n = case.q.shape[0]
         pad = 8 if captured and rows == PREFILL_ROWS else 0
         bucket = BucketKey("w", bs=len(rows), num_tokens=n + pad) if captured else None
-        _plan(attn, case, bucket=bucket)
-        if pad:
-            # whatever the own-token part's buffers hold past this plan (an earlier, longer step's
-            # rows; NaN here): only plan's reset keeps the padding finite through the merge
-            own = next(iter(attn._cg_plan_states.values())).new
-            own._out_buf.fill_(math.nan)
-            own._lse_buf.fill_(math.nan)
-            _plan(attn, case, bucket=bucket)
+        heads = slice(None) if over_sp else slice(rank * Q_HEADS // world, (rank + 1) * Q_HEADS // world)
+        # the bucket's capture step: the step with the bucket's every token (FlashInfer's run refuses
+        # a q of another length than its plan; a replay runs none)
+        full = _Case.build((*rows[:-1], (rows[-1][0], rows[-1][1] + pad)), device, dtype, mla) if pad else case
+        _plan(attn, full, bucket=bucket)
         # a one-token-a-row step attends the pages alone, so a fused KV-write kernel can serve it
         assert attn.reads_step_kv() == (rows == PREFILL_ROWS)
-        heads = slice(None) if over_sp else slice(rank * Q_HEADS // world, (rank + 1) * Q_HEADS // world)
         if rows == PREFILL_ROWS:
             with pytest.raises(ValueError, match="got none"):
-                case.runner(attn, placement, heads, keys=False)()
+                full.runner(attn, placement, heads, keys=False)()
         tol = {"atol": 2e-2, "rtol": 2e-2} if cuda else {}
-        run = case.runner(attn, placement, heads, pad=pad)
+        inputs = full.inputs(placement, heads)
+        run = full.runner(attn, placement, inputs=inputs)
         out = run()
         if captured:
             torch.cuda.synchronize()
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 out = run()
+            own = next(iter(attn._cg_plan_states.values())).new
+            if pad:
+                # whatever the own-token part's buffers hold past the step's plan (the capture
+                # step's rows; NaN here): only plan's reset keeps the padding finite through the merge
+                own._out_buf.fill_(math.nan)
+                own._lse_buf.fill_(math.nan)
+            _plan(attn, case, bucket=bucket)
+            for into, step in zip(inputs, case.inputs(placement, heads, pad=pad, pages=inputs[-1].shape[0]),
+                                  strict=True):
+                into.copy_(step)
             # what the checks read is the replay's, the own-token part's real rows included
             out.fill_(math.nan)
             if pad:
@@ -552,6 +586,9 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, mla, captured=False)
         dist.all_gather_object(everyone, calls)
         assert calls and all(c == calls for c in everyone), everyone
     finally:
+        if graph is not None:
+            # a live graph holds its captured NCCL work, and destroy waits on it
+            graph.reset()
         # defensive: clear our reference so destroy drops the group's last one and joins gloo's
         # threads, whatever else holds the group
         group.device_group = None
@@ -601,23 +638,29 @@ def test_two_gpus_attend_a_placed_pool_like_one(tmp_path, over_sp, rows, capture
     mp.spawn(_over_ranks, args=(P, "nccl", str(tmp_path / "store"), over_sp, rows, mla, captured), nprocs=P)
 
 
-def test_a_captured_buckets_padding_merges_to_0_whatever_the_own_token_buffers_held(monkeypatch):
-    """The TP own-token part of a bucket larger than its step: the kernel writes only the planned
-    rows, and the padding's context partials are masked (out 0, lse -inf). So only the part's own
-    reset of the rest in ``plan`` keeps the padding finite (``_over_ranks`` captures this on GPU)."""
+def test_a_captured_buckets_padding_merges_to_0_and_reaches_no_real_row(monkeypatch):
+    """The own-token part of a bucket larger than its step: the kernel writes only the planned rows,
+    and the padding's context partials are masked (out 0, lse -inf). So only the part's own reset of
+    the rest in ``plan`` keeps the padding finite (``_over_ranks`` captures this on GPU). The
+    padding's keys are whatever the model's layers left in those rows, NaN included, and the kernel
+    reads past the plan (FA3), so only zeroing them keeps the real rows right."""
     monkeypatch.setitem(sys.modules, "flashinfer", _reference_flashinfer())
     own = FlashInferRaggedPrefillWrapper(
         torch.empty(8, dtype=torch.uint8), Q_HEADS, 1, HEAD_DIM, max_num_segments=2, max_total_tokens=16,
-        device=CPU, accelerator_graph=True, q_data_type=torch.float32, owns_lse=True,
+        device=CPU, accelerator_graph=True, q_data_type=torch.float32, owns_padding=True,
     )
     own._out_buf.fill_(math.nan)
     own._lse_buf.fill_(math.nan)
     own.plan(torch.tensor([0, 3, 5], dtype=torch.int32), causal=True)
     gen = torch.Generator().manual_seed(0)
-    out, lse = own.run(*(torch.randn(16, h, HEAD_DIM, generator=gen) for h in (Q_HEADS, 1, 1)), return_lse=True)
+    q, k, v = (torch.randn(16, h, HEAD_DIM, generator=gen) for h in (Q_HEADS, 1, 1))
+    k[5:], v[5:] = math.nan, math.nan
+    out, lse = own.run(q, k, v, return_lse=True)
     context = (torch.zeros_like(out), torch.full_like(lse, -math.inf))
     merged = merge(torch.stack([context[0], out]), torch.stack([context[1], lse]))
     assert torch.isfinite(merged).all() and not merged[5:].any()
+    want = torch.cat([_reference(q[a:b], k[a:b], v[a:b])[0] for a, b in ((0, 3), (3, 5))])
+    torch.testing.assert_close(merged[:5], want)
 
 
 def test_tp_placed_decode_runs_on_tensor_cores_whatever_decode_tensor_cores_says(monkeypatch):
