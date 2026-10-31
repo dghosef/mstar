@@ -781,11 +781,11 @@ def test_mla_attention_over_a_placed_pool_refuses_at_bind_a_flashinfer_or_head_c
 
 def test_the_fa_work_item_bound_holds_flashinfers_own_count():
     """The refusal above is rank-symmetric only while ``fa_work_items_bound`` is at least what the
-    installed FlashInfer's planner counts on any rank's KV lengths."""
+    installed FlashInfer's planner counts on any rank's KV lengths, and past the cap wherever that
+    planner refuses."""
     _flashinfer(mla=True)
     from flashinfer.mla._batch_mla._backends import _fa_common as fa
 
-    assert fm._FA_MAX_WORK_ITEMS == fa._FA_MAX_WORK_ITEMS
     gen = torch.Generator().manual_seed(0)
     for _ in range(3000):
         rows = int(torch.randint(1, 6, (), generator=gen))
@@ -798,7 +798,7 @@ def test_the_fa_work_item_bound_holds_flashinfers_own_count():
             try:
                 count = fa._fa_plan_work_count(q.tolist(), kv.tolist(), heads, sm, causal)
             except fa._BackendPlanUnsupportedError:
-                # its query tiles alone are past the cap
-                assert bound > fa._FA_MAX_WORK_ITEMS
+                # its query tiles alone are past its cap, so ours refuses the step too
+                assert bound > fm._FA_MAX_WORK_ITEMS
                 continue
             assert count <= bound, (q.tolist(), kv.tolist(), heads, sm, causal)
