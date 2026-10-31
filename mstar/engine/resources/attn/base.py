@@ -265,14 +265,17 @@ class AttentionManager(AttentionResource):
                 self.kv.write_kv(k, v, layer_idx=i, label=label)
             out = self.attn.run(q, label, kv.layer_view(i), k=k, v=v, layer_idx=i)
 
-        and stays correct whichever backend the spec named.
+        and stays correct whichever backend the spec named. Whether ``run`` also
+        reads ``k``/``v`` is ``reads_step_kv``, which a fused write path asks.
         """
         return True
 
+    @torch.compiler.disable
     def reads_step_kv(self, label: str | None = None) -> bool:
         """Whether this step's ``run`` under ``label`` attends the ``k``/``v`` it is passed rather
-        than only the pages. A layer whose fused kernel writes the K/V but leaves ``k`` unrotated
-        rotates it in place first when this is True.
+        than only the pages (whether the layer writes them is ``requires_kv_write``). A layer whose
+        fused kernel writes the K/V but leaves ``k`` unrotated rotates it in place first when this
+        is True.
 
         Every step of a backend that takes the fresh K/V straight into the kernel; on a paged
         backend over a context-parallel pool, a step that attends its own tokens apart from the
