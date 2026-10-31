@@ -432,7 +432,7 @@ on 2B and +1% on 4B, H100); the same ladder was not a win on 0.8B, whose
 prefill is launch-bound. The 2B, 4B, 9B and 9B TP2 configs also add 1152,
 1280, 1536 and 1792: a 1k-token prompt plus its chat template is just past
 1024 tokens and padded to 2048, which on 9B made one prompt's prefill twice
-the work (c=1 TTFT 58 -> 39 ms on 9B, 40 -> 29 ms on 4B, 43 -> 31 ms on 9B TP2,
+the work (c=1 TTFT 59 -> 39 ms on 9B, 40 -> 29 ms on 4B, 43 -> 31 ms on 9B TP2,
 H100). Each bucket adds captures and startup time.
 
 A captured decode step builds its rotary tables inside the graph from the
