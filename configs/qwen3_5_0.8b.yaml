@@ -3,7 +3,8 @@ max_seq_len: 32768
 # 0.8B's decode step is host-bound, so per-step Python is throughput. Raise
 # the gen-0 GC threshold: at CPython's 700 a 128-row step collects almost
 # every step and runs a full collection every few hundred. (kv_plan_cache
-# measured -2..-3% at concurrency 1 and no gain at 128 on top of this.)
+# measured -2..-3% at concurrency 1 alone, -4..-5% on top of this, and no
+# gain at 128.)
 knobs:
   gc_gen0_threshold: 50000
 node_groups:
