@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 
 sys.path.insert(0, ".")
 
+import numpy as np
 import pytest
 import torch
 import torch.distributed as dist
@@ -38,7 +39,14 @@ from mstar.engine.resources.kv.manager import KVManager
 from mstar.engine.resources.kv.plan import SINK_PAGE, KVPlanOutput, KVPlanOutputs, SequenceView, build_paged_indptrs
 from mstar.engine.resources.kv.transfer import KVReadInfo, ShmKVTransferEngine
 from mstar.engine.resources.spec import NodeResourceSpec, apply_yaml_overrides
-from mstar.engine.resources.step import BucketKey, Segment, SlotLease, StepContext
+from mstar.engine.resources.step import (
+    AdmitRuntimeError,
+    AllocationFailed,
+    BucketKey,
+    Segment,
+    SlotLease,
+    StepContext,
+)
 from mstar.model.qwen3_5.config import GDN_STATE, KV_CACHE
 
 P = 2
@@ -720,6 +728,35 @@ def test_mla_ranks_refuse_the_same_steps_past_the_fa_planners_work_item_cap(monk
     monkeypatch.setattr(fm.FlashInferMLAManager, "uses_kernel", property(lambda self: False))
     _plan(_cp_attention(JointGroups(tp_group=_group(0, P), sp_group=CommGroup.trivial()), CPU, torch.float32,
                         mla=True, flashinfer_backend="fa2")[0], case)
+
+
+def test_mla_attention_refuses_at_admit_a_step_past_the_fa_planners_cap_so_the_worker_retries_it_smaller(
+    monkeypatch,
+):
+    """A busy step that could take the FA planner past its cap is refused at admit, sized by the
+    requests that fit, rather than failing its whole batch at plan; a request that can't fit alone
+    is refused terminally, and alone."""
+    _fa_kernel(monkeypatch)
+    attn, _ = _cp_attention(JointGroups(tp_group=_group(0, P), sp_group=CommGroup.trivial()), CPU, torch.float32,
+                            mla=True, flashinfer_backend="fa2")
+    spans = (5, 3, 2, 1)
+    step = AttentionStep(segments=tuple(Segment(f"r{i}", "main", span) for i, span in enumerate(spans)))
+    ctx = StepContext(request_ids=tuple(seg.request_id for seg in step.segments), graph_walk="w", slot=0,
+                      capture=False)
+
+    def bound(rows):
+        return fm.fa_work_items_bound(np.cumsum([0, *rows]), attn._wrapper_kwargs["num_qo_heads"], 132)
+
+    def admit(cap):
+        monkeypatch.setattr(fm, "_FA_MAX_WORK_ITEMS", cap)
+        return attn.admit(step, ctx)
+
+    assert admit(bound(spans)).ok
+    refused = admit(bound(spans[:2])).reason
+    assert isinstance(refused, AllocationFailed)
+    assert (refused.rows_fit, refused.rows_fit_alone, refused.rows_sized, refused.request_id) == (2, 2, 4, "r2")
+    refused = admit(min(bound([span]) for span in spans) - 1).reason
+    assert isinstance(refused, AdmitRuntimeError) and refused.request_ids == {"r0", "r1", "r2", "r3"}
 
 
 @pytest.mark.parametrize("version, heads, refused", [

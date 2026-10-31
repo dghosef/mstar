@@ -29,7 +29,14 @@ from mstar.engine.resources.base import CGSlotKey
 from mstar.engine.resources.context_parallel import ContextParallel
 from mstar.engine.resources.kv.config import KVConfig, KVLayout
 from mstar.engine.resources.kv.plan import KVPlanOutputs
-from mstar.engine.resources.step import SlotLease, StepContext
+from mstar.engine.resources.step import (
+    ADMIT_OK,
+    AdmitOutcome,
+    AdmitRuntimeError,
+    AllocationFailed,
+    SlotLease,
+    StepContext,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,13 +63,13 @@ _FA_PLANNER_VERSION = "0.7.2"
 _FA_MAX_WORK_ITEMS = 16384
 
 
-def fa_work_items_bound(qo_indptr: torch.Tensor, num_heads: int, num_sm: int) -> int:
+def fa_work_items_bound(qo_indptr: np.ndarray | torch.Tensor, num_heads: int, num_sm: int) -> int:
     """At least the work items FlashInfer's FA MLA planner counts for a step, KV splits included,
     from its query lengths alone: one per (row, query tile), and at most one split per SM
     cluster past those, since a split is at least the average KV per cluster. Each rank of a
     context-parallel pool plans its own KV lengths, so the planner's count can differ by rank;
     this can't."""
-    q = np.diff(qo_indptr.numpy()).astype(np.int64)
+    q = np.diff(np.asarray(qo_indptr)).astype(np.int64)
     if not len(q):
         return 0
     # the planner's cluster and query tile
@@ -438,6 +445,57 @@ class FlashInferMLAManager(AttentionManager):
         # them to the device without blocking
         return True
 
+    def admit(self, step: AttentionStep, ctx: StepContext) -> AdmitOutcome:
+        """Over a placed pool on the FA planner, refuses a step its planner may not hold
+        (``_refuse_past_work_item_cap``) before it is planned, so the worker retries it smaller:
+        sized by how many of its requests, in its order, fit, or terminal for a request that
+        doesn't fit alone. The bound reads query lengths alone, so every rank refuses alike."""
+        if self._fa_sm_count is None or not step.segments:
+            return ADMIT_OK
+        # request -> label -> its queries this step
+        rows: dict[str, dict[str, int]] = {}
+        for segment in step.segments:
+            rows.setdefault(segment.request_id, {})[segment.label] = segment.span
+        spans = list(rows.values())
+        if self._fits(spans):
+            return ADMIT_OK
+        where = f"FlashInfer's FA MLA planner past its cap of {_FA_MAX_WORK_ITEMS} work items over " \
+                f"context-parallel KV pool {self._kv_cache_name!r}"
+        alone = frozenset(rid for rid, labels in rows.items() if not self._fits([labels]))
+        if alone:
+            return AdmitOutcome(ok=False, reason=AdmitRuntimeError(
+                message=f"The request's prompt takes {where} in one step; shorten it{self._cap_hint()}.",
+                request_ids=alone,
+            ))
+        fit = next(n for n in range(len(spans) - 1, 0, -1) if self._fits(spans[:n]))
+        return AdmitOutcome(ok=False, reason=AllocationFailed(
+            message=f"{len(spans)} requests' queries take {where}; {fit} of them fit",
+            # named for the KV cache's unit; work items are what is short here
+            pages_short=1,
+            label=step.segments[0].label,
+            request_id=list(rows)[fit],
+            rows_fit=fit,
+            rows_fit_alone=fit,
+            rows_sized=len(spans),
+        ))
+
+    def _fits(self, rows: list[dict[str, int]]) -> bool:
+        """Whether each label's plan over ``rows`` (label -> queries, a request each) stays within
+        the FA planner's work-item cap."""
+        labels = {label for row in rows for label in row}
+        heads = self._wrapper_kwargs["num_qo_heads"]
+        return all(
+            fa_work_items_bound(np.cumsum([0, *(row[label] for row in rows if label in row)]), heads,
+                                self._fa_sm_count) <= _FA_MAX_WORK_ITEMS
+            for label in labels
+        )
+
+    def _cap_hint(self) -> str:
+        if self._placement.over_sp:
+            return ""
+        return (f", or place positions over SP ranks: under TP placement each rank plans every partner's query "
+                f"heads, so a step reaches the cap {self._placement.size}x sooner")
+
     def plan(self, step: AttentionStep, ctx: StepContext):
         if step.context_only and self._placement is not None:
             raise ValueError(
@@ -485,7 +543,8 @@ class FlashInferMLAManager(AttentionManager):
     def _refuse_past_work_item_cap(self, qo_indptr: torch.Tensor) -> None:
         """Refuses, before FlashInfer can, a step its FA planner may not hold. The planner counts
         this rank's own KV lengths, so its refusal could come on one rank of the lockstep instance
-        alone; the bound reads the step's query lengths, the same on every rank."""
+        alone; the bound reads the step's query lengths, the same on every rank. ``admit`` refuses
+        such a step first; this sees what admit doesn't, a captured bucket's padding rows."""
         if self._fa_sm_count is None:
             return
         heads = self._wrapper_kwargs["num_qo_heads"]
@@ -494,9 +553,7 @@ class FlashInferMLAManager(AttentionManager):
             raise ValueError(
                 f"a step of {int(qo_indptr[-1])} query tokens at {heads} heads can take FlashInfer's FA MLA "
                 f"planner up to {bound} work items over context-parallel KV pool {self._kv_cache_name!r}, past "
-                f"its cap of {_FA_MAX_WORK_ITEMS}. Under TP placement each rank plans every partner's query "
-                f"heads, so a step reaches it {self._placement.size}x sooner than unplaced: batch fewer prompt "
-                "tokens a step (max_concurrent_requests) or place positions over SP ranks"
+                f"its cap of {_FA_MAX_WORK_ITEMS}{self._cap_hint()}"
             )
 
     def clear_preplan(self):

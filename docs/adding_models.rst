@@ -1937,9 +1937,10 @@ second MLA call over the latents the layer passes as ``k`` (``MLAAttention`` doe
 a multi-token step exchanges every head's queries and partials over the whole TP group each layer.
 It plans on FA3 (Hopper) or FA2 rather than ``auto``'s other fallbacks. That planner caps a plan's
 work items, which TP mode's widened heads reach ``P`` times sooner, and counts each rank's own KV
-lengths, so its own refusal could come on one rank alone. Instead a step is refused before it
-plans, on every rank alike, when a bound on its work items from its query lengths alone passes the
-cap. The bound copies FlashInfer 0.7.2's planner rules, so a placed MLA pool refuses any other
+lengths, so its own refusal could come on one rank alone. Instead admission refuses, on every
+rank alike, a step whose bound on its work items from its query lengths alone passes the cap, and
+the worker retries it with as many of its requests as fit; a request whose prompt passes the cap
+alone fails. The bound copies FlashInfer 0.7.2's planner rules, so a placed MLA pool refuses any other
 FlashInfer at load. That planner's causal tile-bound check can also refuse a causal plan at a head
 count that doesn't divide its query tile, which is 64 on a plan averaging few queries a row, so a
 placed MLA pool is refused at load unless each rank's head count divides 64, in TP mode too, where
