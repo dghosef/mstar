@@ -1006,10 +1006,17 @@ class CodecSubmodule(ARNodeSubmodule):
         fuse_snake_activations(decoder)
         self.incremental = IncrementalDecoder(decoder)
         blocks = self.incremental.state_blocks()
-        declared = codec_state_blocks(codec, next(decoder.parameters()).dtype)
+        dtype = next(decoder.parameters()).dtype
+        declared = codec_state_blocks(codec, dtype)
         if {n: (b.shape, b.dtype) for n, b in blocks.items()} != {n: (b.shape, b.dtype) for n, b in declared.items()}:
             raise ValueError("the codec decoder's state does not match the CODEC_STATE blocks its model declares")
         self.state_names = tuple(blocks)
+        # A bf16 codec lets cuDNN time its conv algorithms per captured shape:
+        # the heuristic pick for the bf16 channels-last convs can be several
+        # times slower. The float32 codec keeps the heuristic pick; its split
+        # configs share GPU 0 with the Talker and set no gpu_memory_fraction,
+        # which would leave the search's workspace uncapped beside it.
+        self.capture_cudnn_benchmark = dtype == torch.bfloat16
         # One compile for every capture rather than each config's own, and one
         # per chunk width: ``_decode`` marks the batch dimension dynamic.
         on_cuda = next(decoder.parameters()).is_cuda

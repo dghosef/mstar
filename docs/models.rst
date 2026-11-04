@@ -840,7 +840,10 @@ Qwen3-TTS notes
   direct kernel without tensor cores, about 100x slower on an H100. On a B300
   the bf16 codec measured slower while those convs still ran dilated; measure
   there before switching. The decode is compiled (Inductor) twice per chunk
-  width, batch 1 apart: its batch dimension is dynamic.
+  width, batch 1 apart: its batch dimension is dynamic. A bf16 codec lets
+  cuDNN time its conv algorithms once per captured shape at warm-up
+  (``NodeSubmodule.capture_cudnn_benchmark``), which adds to startup; the
+  float32 codec keeps cuDNN's heuristic pick.
 - Opt-in AudioSeal watermark on the codec's output (off by default; install
   ``pip install -e '.[audioseal]'``). Turn it on in the deployment YAML::
 

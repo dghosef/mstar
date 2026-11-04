@@ -1943,6 +1943,14 @@ def test_qwen3_tts_codec_declares_a_watermark_capture_per_schedule_length():
     assert all(c.capture_batch_sizes == CodecSubmodule.WATERMARK_BATCH_SIZES for c in configs.values())
 
 
+def test_qwen3_tts_codec_times_its_convs_only_in_bf16():
+    """cuDNN's conv search runs for a bf16 codec alone: the float32 split configs
+    share their GPU with the Talker and set no memory fraction to cap it."""
+    config = _tiny_model_config()
+    assert not _tiny_codec(config).capture_cudnn_benchmark
+    assert CodecSubmodule(_tiny_decoder(config).to(torch.bfloat16), config).capture_cudnn_benchmark
+
+
 def test_qwen3_tts_clone_reference_tail_is_the_first_windows_context():
     """A clone's stream leads with reference frames: primed as context, they
     ride the first chunk only (more of them than later chunks carry, which is
