@@ -10,8 +10,8 @@ node_groups:
   # A whole replica per GPU (text, images and video); the conductor sends
   # each request to the cheaper replica, by live requests and the prompt's
   # predicted prefix hit ("Data-parallel routing" in docs/serving.rst). For
-  # video traffic this beats TP2, whose vision encoder runs on one rank and
-  # stalls both.
+  # video traffic this beat TP2 when TP2's vision encoder ran on one rank and
+  # stalled both (see docs/models.rst).
   - node_names: [LLM, vision_encoder]
     ranks: [0, 1]
 resources:

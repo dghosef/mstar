@@ -436,10 +436,11 @@ default, which lowers the token count of short clips. Notes:
   GEMMs' shapes follow the step's total patches, so an image's
   embeddings can differ at the last bit with what it is batched beside.
 - On two GPUs, ``configs/qwen3_5_9b_dp2.yaml`` (a whole replica per GPU)
-  serves video traffic faster than ``configs/qwen3_5_9b_tp2.yaml``, whose
-  vision encoder runs on one rank while the other waits for it in the lockstep
+  served video traffic faster than ``configs/qwen3_5_9b_tp2.yaml`` when TP2's
+  vision encoder ran on one rank while the other waited for it in the lockstep
   LLM: 9B on 2xH200 with TP-async on, DP2 gave 12.5-44% more output tok/s on
-  30 s and 60 s videos at c=16 and c=32.
+  30 s and 60 s videos at c=16 and c=32. TP2 now runs an encoder replica on
+  each rank; DP2 against that layout is not yet measured.
 - A long video is one wide prefill: one 1-3 minute video is ~11-12k tokens,
   beyond the largest captured ``prefill_vision`` bucket (4096), so it runs
   eagerly.
