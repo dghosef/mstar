@@ -27,13 +27,15 @@ def test_prefill_ladder_from_model_kwargs():
     from mstar.model.qwen3_5.config import LLM_MIXED
     from mstar.model.qwen3_5.submodules import LLMSubmodule
     default = list(LLMSubmodule.PREFILL_TOKEN_BUCKETS)
+    # a batch that fills a power of two doesn't pad past it
+    assert {256, 512, 1024, 2048, 4096, 8192} <= set(default)
     sub = LLMSubmodule(None, SimpleNamespace(stop_token_ids=(1,)), prefill_token_buckets=[8192, 3072, 2048])
     assert sub.PREFILL_TOKEN_BUCKETS == [2048, 3072, 8192]
     # an instance override, not the class's
     assert LLMSubmodule.PREFILL_TOKEN_BUCKETS == default
     assert LLMSubmodule(None, SimpleNamespace(stop_token_ids=(1,))).PREFILL_TOKEN_BUCKETS == default
     # the ladders the text-prefill and mixed captures are taken on; a mixed
-    # step keeps only the powers of two past 2176
+    # step keeps only the ladder's powers of two and 2176
     configs = sub.get_accelerator_graph_configs(torch.device("cpu"))
     ladders = {c.capture_graph_walk: c.capture_token_lengths for c in configs if c.capture_graph_walk != "decode"}
     assert ladders["prefill_text"] == [2048, 3072, 8192]
@@ -54,15 +56,6 @@ def test_decode_ladder_knob(monkeypatch):
     assert m.LLMSubmodule.DECODE_CAPTURE_BATCH_SIZES == [1, 2, 4, 8, 16, 32]
     m = _reload(monkeypatch, "MSTAR_QWEN35_DECODE_BUCKETS", None)
     assert m.LLMSubmodule.DECODE_CAPTURE_BATCH_SIZES[-1] == 128
-
-
-def test_prefill_buckets_hold_near_power_of_two_batches(monkeypatch):
-    submodule = _reload(monkeypatch, "MSTAR_QWEN35_DECODE_BUCKETS", None).LLMSubmodule
-    buckets = submodule.PREFILL_TOKEN_BUCKETS
-    # a 16-row batch with a few prompts a couple of tokens long stays captured
-    assert 16 * 512 + 8 <= buckets[-1]
-    # a batch that fills a power of two doesn't pad past it
-    assert {256, 512, 1024, 2048, 4096, 8192} <= set(buckets)
 
 
 def _configs_with_prefill_ladders():

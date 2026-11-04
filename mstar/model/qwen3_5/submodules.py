@@ -95,9 +95,9 @@ def token_stop(stop_token_ids) -> TokenStop:
 
 
 def _mixed_token_buckets(prefill_buckets) -> list[int]:
-    """The prefill ladder up to 2176, then its powers of two (see
+    """The prefill ladder's powers of two and 2176 (see
     ``LLMSubmodule.MIXED_TOKEN_BUCKETS``)."""
-    return [b for b in prefill_buckets if b <= 2176 or b & (b - 1) == 0]
+    return [b for b in prefill_buckets if b & (b - 1) == 0 or b == 2176]
 
 
 class LLMSubmodule(ARNodeSubmodule):
@@ -105,22 +105,31 @@ class LLMSubmodule(ARNodeSubmodule):
     # graph per (bucket, batch size). A prompt past the top bucket prefills
     # eagerly, and an eager 8k prefill is launch-bound (~1,100 kernel
     # launches, the GPU idle half the time: 78 ms of wall for 36 ms of kernels
-    # on 0.8B), so the ladder runs past 8192. The powers of two stay, since a
-    # batch of prompts up to a power of two long fills one exactly. 2176, 4352
-    # and 8704 add 1/16 above them for the decode rows a mixed step carries
-    # beside four prompts and for batches a few tokens over, which would
-    # otherwise pad to twice the width. A deployment sets its own with
+    # on 0.8B), so the ladder runs to 8192. The powers of two stay, since a
+    # batch of prompts up to a power of two long fills one exactly. 2176 is
+    # slack for a step a few tokens over the 2048-token step budget (a logged
+    # overrun), kept until #1184 derives the ladder's top from each walk's
+    # budget. 1152-1792 sit between 1024 and 2048 because a 1024-token prompt
+    # plus its chat template lands just past 1024 and would otherwise prefill
+    # twice its tokens. They take the place of 4352 and 8704, slack rungs for
+    # batches a few tokens past 4096 and 8192, which keeps the ladder inside
+    # Dynamo's recompile limit: the 2048-token step budget never reaches them,
+    # and under a raised budget such a step pads to 8192 or, past it, runs
+    # eagerly. A deployment sets its own with
     # `model_kwargs.prefill_token_buckets` (static buffers are sized by the
     # largest bucket).
-    PREFILL_TOKEN_BUCKETS = [32, 64, 128, 256, 512, 1024, 2048, 2176, 4096, 4352, 8192, 8704]
+    PREFILL_TOKEN_BUCKETS = [
+        32, 64, 128, 256, 512, 1024, 1152, 1280, 1536, 1792, 2048, 2176, 4096, 8192,
+    ]
     PREFILL_CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16]
     # A mixed step carries the decode batch beside its prompt rows, so its
     # captures run to the decode batch: one capped below it splits the batch.
     MIXED_CAPTURE_BATCH_SIZES = [4, 16, 64, 128]
-    # Four prompts and their decode rows reach 2176, the only slack bucket a
-    # mixed step needs. Every (rows, tokens) pair here is one more recompile of
-    # the forward all these captures share, and past Dynamo's limit the buckets
-    # compiled last run uncompiled inside their graphs.
+    # A mixed step captures only the ladder's powers of two and 2176, the one
+    # slack bucket; it skips 1152-1792, which are for a lone prompt. Every
+    # (rows, tokens) pair here is one more recompile of the forward all these
+    # captures share, and past Dynamo's limit the buckets compiled last run
+    # uncompiled inside their graphs.
     MIXED_TOKEN_BUCKETS = _mixed_token_buckets(PREFILL_TOKEN_BUCKETS)
     # Capture rows and a replay's padding rows address the pool's sink and
     # hold no slot, so these buckets do not size `gdn_state.max_slots`; that is
