@@ -83,6 +83,11 @@ class Platform:
         ``/sys/bus/pci/devices``; None where the platform doesn't say."""
         return None
 
+    def is_gpu_slice(self, device: str) -> bool:
+        """Whether ``device`` (``cuda:0``) is a slice of a GPU, which reports
+        the whole GPU's PCI address; False where the platform doesn't say."""
+        return False
+
     def reachable_pci_addresses(self) -> frozenset[str]:
         """The PCI addresses of the GPUs this container can open, whatever
         ``CUDA_VISIBLE_DEVICES`` says; empty where the platform doesn't say.
@@ -150,6 +155,14 @@ class CudaPlatform(Platform):
 
     def pci_address(self, device_index: int) -> str | None:
         return _torch_pci_address(device_index)
+
+    def is_gpu_slice(self, device: str) -> bool:
+        # A MIG instance's name is expected to carry its profile ("... MIG 1g.10gb");
+        # not yet checked on a real slice.
+        try:
+            return "MIG" in torch.cuda.get_device_properties(device).name
+        except (AssertionError, AttributeError, RuntimeError):
+            return False
 
     def reachable_pci_addresses(self) -> frozenset[str]:
         return _nvidia_reachable()

@@ -527,6 +527,19 @@ def test_auto_takes_siblings_only_on_an_intel_host_whose_cores_sleep_deep(
     assert got == setting and why in said
 
 
+@pytest.mark.parametrize(("name", "setting"), [
+    ("NVIDIA H100 80GB HBM3", "siblings"),
+    ("NVIDIA H100 80GB HBM3 MIG 1g.10gb", "off"),
+])
+def test_auto_pins_nothing_on_a_slice_of_a_gpu(monkeypatch, name, setting):
+    """Slices of one GPU report its address, so servers in separate containers would take the same cores."""
+    from mstar import platforms
+
+    monkeypatch.setattr(interface.torch.cuda, "get_device_properties", lambda device: SimpleNamespace(name=name))
+    monkeypatch.setattr(platforms, "resolve_platform", CudaPlatform)
+    assert cpus.auto_setting(["cuda:0"], False)[0] == setting
+
+
 def test_auto_reads_the_servers_cpus_and_one_deep_cpu_is_enough(tmp_path, monkeypatch):
     root = _idle(tmp_path, range(0, 32), XEON)
     monkeypatch.setattr(cpus, "_CPU_ROOT", root)

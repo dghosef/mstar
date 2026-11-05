@@ -513,7 +513,11 @@ Worker scheduling
        ``cpus.deepest_idle``, ``cpus.DEEP_IDLE_US``), and pins nothing
        elsewhere, with a CPU worker, or while the server holds ``idle_hold``.
        It places over every GPU of the host only, so a mask too small for
-       them pins nothing. The API server decides (``cpus.auto_setting``), logs
+       them pins nothing, and so does a slice of a GPU (a MIG instance, by its
+       device name, ``Platform.is_gpu_slice``): servers on one GPU rank alike.
+       Time-slicing a GPU between pods can't be seen from inside one, so
+       those pods stack their threads on the same CPUs: set ``off`` there.
+       The API server decides (``cpus.auto_setting``), logs
        one line saying what and why, and passes the result to its workers in
        this variable. The vendor test rests on one AMD host, and the idle
        test on the hosts in :ref:`host-idle`.

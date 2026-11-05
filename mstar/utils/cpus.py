@@ -517,7 +517,11 @@ def deployment_plan(
 def auto_setting(devices: Sequence[str], holding: bool, mask: Collection[int] | None = None) -> tuple[str, str]:
     """What ``auto`` takes for workers on ``devices`` (``cuda:0``), and why,
     for the log: ``siblings`` on an Intel CPU whose cores in ``mask`` sleep
-    deep, else ``off``. ``holding``: this process holds the idle hold."""
+    deep, else ``off``. ``holding``: this process holds the idle hold. The
+    host's own checks come first, so a host that doesn't pin asks the platform
+    nothing about devices."""
+    from mstar.platforms import current_platform
+
     mask = frozenset(process_mask() if mask is None else mask)
     if not PINNABLE:
         return "off", "no sched_setaffinity here"
@@ -533,6 +537,8 @@ def auto_setting(devices: Sequence[str], holding: bool, mask: Collection[int] | 
         where = ("sysfs lists no idle state" if deepest is None
                  else f"the deepest idle state is {deepest.name} at {deepest.latency_us} µs")
         return "off", f"{where} on CPUs {format_cpu_list(mask)}, under {DEEP_IDLE_US} µs"
+    if any(current_platform.is_gpu_slice(device) for device in devices):
+        return "off", "a worker's device is a slice of a GPU, so another server's rank may be the same"
     return "siblings", f"an Intel CPU whose cores sleep deep ({deepest.name} at {deepest.latency_us} µs)"
 
 
