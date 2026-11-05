@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import torch
 
-from mstar.engine.accelerator_graph_runner import AcceleratorGraphRunner
+from mstar.engine.accelerator_graph_runner import AcceleratorGraphRunner, RunPart, output_named
 
 
 def replay_run(
@@ -40,6 +40,10 @@ def replay_run(
         packed_outputs={name: value for name, value in outputs.items() if name.startswith("__")},
     ))
     runner = AcceleratorGraphRunner.__new__(AcceleratorGraphRunner)
-    runner.slot_for = lambda lease: slot
-    stops, rows, _ = runner.repeat(None, carries, repeats, (), columns, iteration)
+    part = RunPart(
+        slot,
+        [(output_named(slot.static_outputs, pair.output), slot.static_inputs[pair.input]) for pair in carries.values()],
+        [(column, slot.static_inputs[name]) for name, column in (iteration or {}).items()],
+    )
+    stops, rows, _ = runner.repeat([part], repeats, columns)
     return stops, rows
