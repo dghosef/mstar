@@ -668,7 +668,6 @@ def _worker(rank, scenario, comm, graph, engine, tm, group):
     w.tp_async_sched, w.tp_async_nodes = False, None
     w._tp_broadcast_seq = 0
     w._tp_nospec = RecentSet(64)
-    w._tp_leader_gap_warned = False
     w.scheduler = MicroScheduler(w.engine_manager, parallel_leader_nodes=w.parallel_leader_nodes)
     w.scheduler.runtime = graph
     w._unprocessed_messages = {}

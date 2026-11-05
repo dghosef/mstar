@@ -478,6 +478,9 @@ class MicroScheduler:
         # the step's read check takes it out on every rank (see
         # ``Worker._drop_rows_whose_read_failed``).
         self.read_failed_rids: set[int] = set()
+        # Rows a raise dropped here with their step: on a TP follower, a step of
+        # the leader's naming one is a step this rank can no longer run.
+        self.dropped_rids: set[int] = set()
         self._warned_read_check = False
 
         # lockstep-parallel (TP / SP instance) scheduling
@@ -849,6 +852,9 @@ class MicroScheduler:
         head = self.peek_tp_follow()
         if head is None:
             return True
+        if self.dropped_rids and not self.dropped_rids.isdisjoint(self.tp_rids(head)):
+            # They never re-ready here, and the leader is waiting in this step.
+            raise SystemExit(f"TP ranks diverged: step seq {head.spec_seq} names a row this rank dropped")
         if not self._apply_delta_from_message(head):
             return False
         if not head.prefix_hits and not head.page_trails:
@@ -976,28 +982,35 @@ class MicroScheduler:
             self.warn_unchecked_read_failure(first_tp_node, rids)
             return
         request_to_worker_graph, input_edges, output_signals, request_walks, walk_signals = popped
-        if unread:
-            request_to_worker_graph, request_walks = self.with_unread_rows(
-                first_tp_node, rids, unread, request_to_worker_graph, request_walks,
+        try:
+            if unread:
+                request_to_worker_graph, request_walks = self.with_unread_rows(
+                    first_tp_node, rids, unread, request_to_worker_graph, request_walks,
+                )
+
+            self.pop_tp_follow_head()
+
+            batch = ScheduledBatch(
+                node_name=first_tp_node.node_name,
+                graph_walk=first_tp_node.graph_walk,
+                request_to_worker_graph=request_to_worker_graph,
+                input_edges=input_edges,
+                output_signals=output_signals,
+                tp_seq=first_tp_node.spec_seq,
+                request_walks=request_walks,
+                walk_output_signals=walk_signals,
+                read_check_rids=tuple(rids) if first_tp_node.read_check else None,
+                # the leader's chunks, so the chunk Loop ends on the same step here
+                chunk_ranges=chunk_ranges,
+                incomplete_node_rids=unfinished_chunk_rids(chunk_ranges),
             )
-
-        self.pop_tp_follow_head()
-
-        batch = ScheduledBatch(
-            node_name=first_tp_node.node_name,
-            graph_walk=first_tp_node.graph_walk,
-            request_to_worker_graph=request_to_worker_graph,
-            input_edges=input_edges,
-            output_signals=output_signals,
-            tp_seq=first_tp_node.spec_seq,
-            request_walks=request_walks,
-            walk_output_signals=walk_signals,
-            read_check_rids=tuple(rids) if first_tp_node.read_check else None,
-            # the leader's chunks, so the chunk Loop ends on the same step here
-            chunk_ranges=chunk_ranges,
-            incomplete_node_rids=unfinished_chunk_rids(chunk_ranges),
-        )
-        self.cap_chunk_loops(batch)
+            self.cap_chunk_loops(batch)
+        except Exception as exc:
+            # The rows are popped and the leader runs the step: dropping it here
+            # would leave the other ranks in its collectives.
+            raise SystemExit(
+                f"TP ranks diverged: could not take step seq {first_tp_node.spec_seq}: {exc}"
+            ) from exc
         return batch
 
     def unread_rows(self, head: ScheduleTPNode, rids: list[int]) -> set[int]:
@@ -2167,6 +2180,10 @@ class MicroScheduler:
         for rid in rids:
             self._drop_backlogged_rid(rid)
 
+    def drop_rows(self, rids: Iterable[int]) -> None:
+        """A raise dropped these rows with their step (``dropped_rids``)."""
+        self.dropped_rids.update(rids)
+
     def clear_rid(self, rid: int, rid_str: str) -> None:
         """Forget all per-request scheduler state; called on REMOVE_REQUEST.
 
@@ -2174,6 +2191,7 @@ class MicroScheduler:
         the wire string and everything else by the handle."""
         self.failed_rids.discard(rid)
         self.read_failed_rids.discard(rid)
+        self.dropped_rids.discard(rid)
         self.admit_errors.pop(rid, None)
         for key in [key for key in self.chunk_started if key[0] == rid]:
             del self.chunk_started[key]

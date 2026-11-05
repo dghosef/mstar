@@ -295,6 +295,20 @@ def test_a_follower_takes_a_step_whose_every_row_it_could_not_read():
     assert sched.peek_tp_follow() is None
 
 
+def test_a_follower_that_cannot_build_a_step_it_popped_stops(monkeypatch):
+    """The rows are off their queues and rank 0 runs the step, so this rank
+    can neither retry it nor drop it."""
+    sched, manager = _follower_scheduler(ready=["r0", "r1"])
+    sched.register_tp_follow(_head(read_check=False))
+
+    def raises(batch):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(sched, "cap_chunk_loops", raises)
+    with pytest.raises(SystemExit, match="seq 0"):
+        sched.get_next_batch(manager)
+
+
 def test_a_follower_waits_on_a_row_whose_read_is_still_running():
     sched, manager = _follower_scheduler(ready=["r0"])
     sched.register_tp_follow(_head(read_check=True))

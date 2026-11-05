@@ -707,7 +707,6 @@ class Worker:
         # Follower: leader steps that will NOT be followed by a head; the
         # leader said so (TPNoSpeculation) or this rank closed the step.
         self._tp_nospec: RecentSet[int] = RecentSet(self._TP_NOSPEC_KEEP)
-        self._tp_leader_gap_warned = False
         tp_async_on = sorted(n for n in self.parallel_nodes if self._tp_async_for(n))
         if tp_async_on:
             logger.info(
@@ -1494,67 +1493,81 @@ class Worker:
             request_id, body.partition_name, body.loop_stop_times,
         )
 
+    # What a raise in ``_process_message_list`` left unread, for the next pass.
+    _unread_messages: tuple[WorkerMessage, ...] = ()
+
     def _process_message_list(self, messages: list[WorkerMessage]):
+        # Snapshot: a REMOVE handled mid-iteration can re-buffer trailing
+        # signals onto this same list, and mutating it while iterating it would
+        # never terminate.
+        queue = deque(messages)
+        try:
+            while queue:
+                self._process_message(queue.popleft())
+        except Exception:
+            # The messages behind it are still owed: a decision of the leader's
+            # lost here would leave this rank out of step.
+            self._unread_messages = (*queue, *self._unread_messages)
+            raise
+
+    def _process_message(self, message: WorkerMessage) -> None:
         msg_types_needing_active_request = [
             WorkerMessageType.REMOVE_REQUEST,
             WorkerMessageType.INPUT_SIGNALS,
             WorkerMessageType.STOP_LOOPS
         ]
-        # Snapshot: a REMOVE handled mid-iteration can re-buffer trailing
-        # signals onto this same list, and mutating it while iterating it would
-        # never terminate.
-        for message in list(messages):
-            # per_request_info is handle-keyed, so resolve the wire string
-            # first; an unknown one has no handle and is parked the same way.
-            # The conductor's REMOVE is never parked: ``_remove_request``
-            # handles an id this worker does not hold.
-            if (
-                message.message_type in msg_types_needing_active_request and \
-                not (
-                    message.message_type == WorkerMessageType.REMOVE_REQUEST
-                    and message.body.source == MessageSource.CONDUCTOR
-                ) and \
-                self._rid(message.body.request_id)
-                not in self.request_state.per_request_info
-            ):
-                wire_rid = message.body.request_id
-                if wire_rid in self._removed_rids:
-                    self._drop_for_removed(message)
-                else:
-                    # got an out-of-order request
-                    self._unprocessed_messages.setdefault(
-                        wire_rid, []
-                    ).append(message)
-                continue
-            t0 = phase_start()
-            if message.message_type == WorkerMessageType.NEW_REQUEST:
-                self._add_new_request(message.body)
-            elif message.message_type == WorkerMessageType.DRAIN_REQUEST:
-                self._drain_request(message.body)
-            elif message.message_type == WorkerMessageType.REMOVE_REQUEST:
-                self._remove_request(message.body)
-            elif message.message_type == WorkerMessageType.INPUT_SIGNALS:
-                self._process_new_inputs(message.body)
-            elif message.message_type == WorkerMessageType.EDGE_ITEMS:
-                self._process_edge_items(message.body)
-            elif message.message_type == WorkerMessageType.TENSOR_RECEIVED:
-                self._handle_tensor_received(message.body)
-            elif message.message_type == WorkerMessageType.UNPERSIST_TENSORS:
-                self._unpersist_tensors(message.body)
-            elif message.message_type == WorkerMessageType.STOP_LOOPS:
-                self._stop_loops(message.body)
-            elif message.message_type == WorkerMessageType.SCHEDULE_TP:
-                self._register_tp_follow(message.body)
-            elif message.message_type == WorkerMessageType.TP_NO_SPEC:
-                self._register_tp_nospec(message.body)
-            elif message.message_type == WorkerMessageType.ENABLE_METRICS:
-                # sent only with metrics on, so _metrics is set
-                self._metrics.start_counting()
-            if t0 is not None:
-                phase_end(_MSG_SPANS[message.message_type], t0)
+        # per_request_info is handle-keyed, so resolve the wire string
+        # first; an unknown one has no handle and is parked the same way.
+        # The conductor's REMOVE is never parked: ``_remove_request``
+        # handles an id this worker does not hold.
+        if (
+            message.message_type in msg_types_needing_active_request and \
+            not (
+                message.message_type == WorkerMessageType.REMOVE_REQUEST
+                and message.body.source == MessageSource.CONDUCTOR
+            ) and \
+            self._rid(message.body.request_id)
+            not in self.request_state.per_request_info
+        ):
+            wire_rid = message.body.request_id
+            if wire_rid in self._removed_rids:
+                self._drop_for_removed(message)
+            else:
+                # got an out-of-order request
+                self._unprocessed_messages.setdefault(
+                    wire_rid, []
+                ).append(message)
+            return
+        t0 = phase_start()
+        if message.message_type == WorkerMessageType.NEW_REQUEST:
+            self._add_new_request(message.body)
+        elif message.message_type == WorkerMessageType.DRAIN_REQUEST:
+            self._drain_request(message.body)
+        elif message.message_type == WorkerMessageType.REMOVE_REQUEST:
+            self._remove_request(message.body)
+        elif message.message_type == WorkerMessageType.INPUT_SIGNALS:
+            self._process_new_inputs(message.body)
+        elif message.message_type == WorkerMessageType.EDGE_ITEMS:
+            self._process_edge_items(message.body)
+        elif message.message_type == WorkerMessageType.TENSOR_RECEIVED:
+            self._handle_tensor_received(message.body)
+        elif message.message_type == WorkerMessageType.UNPERSIST_TENSORS:
+            self._unpersist_tensors(message.body)
+        elif message.message_type == WorkerMessageType.STOP_LOOPS:
+            self._stop_loops(message.body)
+        elif message.message_type == WorkerMessageType.SCHEDULE_TP:
+            self._register_tp_follow(message.body)
+        elif message.message_type == WorkerMessageType.TP_NO_SPEC:
+            self._register_tp_nospec(message.body)
+        elif message.message_type == WorkerMessageType.ENABLE_METRICS:
+            # sent only with metrics on, so _metrics is set
+            self._metrics.start_counting()
+        if t0 is not None:
+            phase_end(_MSG_SPANS[message.message_type], t0)
 
     def _process_messages(self) -> None:
-        self._process_message_list(self.communicator.get_all_new_messages())
+        unread, self._unread_messages = self._unread_messages, ()
+        self._process_message_list([*unread, *self.communicator.get_all_new_messages()])
 
     # ------------------------------------------------------------------
     # Tensor readiness
@@ -3560,8 +3573,8 @@ class Worker:
         self.scheduler.register_tp_follow(message)
 
     def _close_tp_follow_step(self, pending: PendingBatch) -> None:
-        """This step's forward raised (symmetrically on the leader, which never
-        submitted its head): drop a queued head from it, and any arriving later."""
+        """The leader runs no head from this step: drop one queued, and any
+        arriving later."""
         self._tp_nospec.add(pending.tp_seq)
         head = self.scheduler.peek_tp_follow()
         if head is not None and head.speculative and head.spec_from_seq == pending.tp_seq:
@@ -3572,25 +3585,43 @@ class Worker:
     @staticmethod
     def _step_voids_head(pending: PendingBatch) -> str | None:
         """Why N's verdict voids a head built on it, or ``None``. Both fields are
-        final once N's future is done; the leader clears on exactly these two."""
+        final once N's result is taken (``_step_result``); the leader clears on exactly these two."""
         if pending.node_batch.admit_error is not None:
             return "admit_error"
         if pending.node_batch.failed_requests:
             return "failed rids"
         return None
 
+    def _step_result(self, pending: PendingBatch) -> BatchedModelOutput:
+        """N's outputs. A forward that raised becomes N's verdict instead: no
+        outputs and every row failed (``failed_requests``), which voids a head
+        built on N and lets a step independent of N run, on every rank alike.
+        Dropping such a step on one rank only would leave the others in its
+        collectives."""
+        try:
+            return pending.future.result()
+        except Exception as exc:
+            err, _ = client_error_text(
+                exc, f"Worker {self.worker_id} step {pending.node_name}/{pending.graph_walk} failed",
+                log=logger,
+            )
+            failed = pending.node_batch.failed_requests
+            for rid in pending.batch.request_to_worker_graph:
+                failed.setdefault(rid, f"Error in worker: {err}")
+            return BatchedModelOutput()
+
     def _await_tp_follow_step(
         self, pending: PendingBatch, arm: Callable[[Speculation], None],
-    ) -> tuple[dict[int, NameToTensorList] | None, Speculation | None]:
+    ) -> tuple[BatchedModelOutput | None, Speculation | None]:
         """Wait for step N and settle the leader's decision about N+1. Returns
         ``(outputs or None, armed head or None)``. Once N is done this never
         returns without a decision: going serial early strands the leader."""
         s = pending.tp_seq
-        outputs: dict[int, NameToTensorList] | None = None
+        outputs: BatchedModelOutput | None = None
         t_done = last_warn = 0.0
         while True:
             if outputs is None and pending.future.done():
-                outputs = pending.future.result()
+                outputs = self._step_result(pending)
                 t_done = last_warn = _time.perf_counter()
             if s in self._tp_nospec:
                 return outputs, None
@@ -3607,24 +3638,31 @@ class Worker:
                     return outputs, None
                 # With the prefix cache open, build the head even when N's verdict voids it, since the
                 # leader pre-plans every head it sends and this rank's pages must move as the leader's do.
-                spec = self._try_follow_speculation(pending)
-                if spec is not None:
-                    arm(spec)
-                    return outputs, spec
+                taken = self.scheduler.last_consumed_tp_seq
+                try:
+                    spec = self._try_follow_speculation(pending)
+                    if spec is not None:
+                        arm(spec)
+                        return outputs, spec
+                except Exception as exc:
+                    if self.scheduler.last_consumed_tp_seq != taken:
+                        # off the FIFO, so no pass will ever take it, and the leader runs it
+                        raise SystemExit(
+                            f"Worker {self.worker_id}: could not build head seq {head.spec_seq} "
+                            f"that the other ranks run ({exc!r})"
+                        ) from exc
+                    raise
                 # Not buildable yet (fresh rid / stream chunk): poll and retry.
             elif head is not None and head.spec_seq > s:
                 # Per-peer FIFO: a later message with no decision for s means
-                # none is coming (flag off on the leader). Go serial.
-                if not self._tp_leader_gap_warned:
-                    self._tp_leader_gap_warned = True
-                    logger.warning(
-                        "Worker %s: leader moved past step seq %d without a "
-                        "speculation decision (front: seq %d); treating as "
-                        "no-spec. Is MSTAR_TP_ASYNC_SCHED set on every rank?",
-                        self.worker_id, s, head.spec_seq,
-                    )
-                self._tp_nospec.add(s)
-                return outputs, None
+                # the leader dropped the step it built on s (the flag's
+                # agreement is checked at startup), while this rank may run it.
+                if outputs is None:
+                    self._step_result(pending)  # the GPU thread's step: not left behind
+                raise SystemExit(
+                    f"TP ranks diverged: the leader moved past step seq {s} "
+                    f"(front: seq {head.spec_seq}) without deciding the step after it"
+                )
             self.communicator.wait_for_work(20)
             self._process_messages()
             self._check_ready_tensors()
@@ -4723,7 +4761,7 @@ class Worker:
 
     def _drop_failed_rids(
         self, pending: PendingBatch,
-        outputs: dict[int, NameToTensorList],
+        outputs: BatchedModelOutput,
         failed_requests: Collection[int],
     ) -> None:
         """Excise ``failed_requests`` (rids, or a rid -> error map) from a finished batch.
@@ -4742,6 +4780,7 @@ class Worker:
             outputs.pop(rid, None)
             pending.batch.discard_rid(rid)
             pending.node_batch.per_request_info.pop(rid, None)
+            pending.node_batch.cached_rids.discard(rid)
             # Clear what we just reported, so a later stage that fails more
             # rids (check_stop, below the forward) can tell its own from these
             # and doesn't report them to the conductor twice.
@@ -4763,8 +4802,8 @@ class Worker:
     ) -> None:
         """Fail everything the crashed iteration touched and drain its futures.
 
-        Attribution is batch-granular here: a raise out of the forward, the
-        batch build, or output routing can't be pinned on one request (the
+        Attribution is batch-granular here: a raise out of the batch build or
+        output routing can't be pinned on one request (the
         stages that *can* attribute report through
         ``ExecutingBatch.failed_requests`` instead), so every rid this iteration
         touched fails together. Sequential retry of the batch — see the design
@@ -4774,10 +4813,8 @@ class Worker:
         The caller still has to clear its own in-flight state; see the main
         loop's handler.
         """
-        # The exception is usually surfacing out of ``pending.future.result()``,
-        # where the concurrent.futures machinery has already wrapped the
-        # engine's traceback. Report the leaf exception to the client and keep
-        # the full chain in the log.
+        # Report the leaf exception to the client and keep the full chain in
+        # the log. A forward's own raise doesn't come here (``_step_result``).
         err, _ = client_error_text(
             exc, f"Worker {self.worker_id} error in main loop", log=logger,
         )
@@ -4791,8 +4828,8 @@ class Worker:
             self._clear_in_flight_flag(stale.batch)
             # Drain before dropping the reference: the future owns engine state
             # on the GPU thread, and an abandoned one leaves that thread writing
-            # into a batch nobody will collect. Already-finished futures (the
-            # common case — one of them is what just raised) return at once.
+            # into a batch nobody will collect. Already-finished futures return
+            # at once.
             if stale.future is None:
                 continue
             try:
@@ -4843,6 +4880,7 @@ class Worker:
                     sb.node_name, list(fresh), list(fresh.values()),
                 )
 
+        self.scheduler.drop_rows(r for r in failed_rids if r in self.request_state.per_request_info)
         self._fail_requests({rid: f"Error in worker: {err}" for rid in failed_rids})
 
     def _fail_requests(self, errors: dict[int, str]) -> None:
@@ -4987,7 +5025,17 @@ class Worker:
                         exclude_target=yield_away_from_target,
                     )
                 if batch is not None:
-                    speculation = self._yield_away_speculation(batch)
+                    try:
+                        speculation = self._yield_away_speculation(batch)
+                    except Exception as exc:
+                        if batch.tp_seq >= 0:
+                            # a follower's step off the leader's FIFO, which the
+                            # leader runs: the loop's handler would drop it
+                            raise SystemExit(
+                                f"Worker {self.worker_id}: could not build lockstep step "
+                                f"seq {batch.tp_seq} that the other ranks run ({exc!r})"
+                            ) from exc
+                        raise
             if speculation is not None and speculation.is_yield_away:
                 # A leader stamps the seq it sends; a follower's
                 # batch keeps the one it came off the FIFO with.
@@ -5229,6 +5277,11 @@ class Worker:
             # The error handler owes the followers a marker for any other lead
             # step it drops.
             decided: PendingBatch | None = None
+            # The seq of a lockstep step this rank took (the leader broadcast
+            # it, or a follower took it from the leader) and has not submitted:
+            # the other ranks run it, unless N's verdict voids it on every rank,
+            # so a raise that drops it here must stop this rank (see the handler).
+            committed: int | None = None
             try:
                 batch = None
                 spec_pending = None
@@ -5297,6 +5350,8 @@ class Worker:
                     pending, consecutive_spec_steps, fair,
                 )
                 decided = pending
+                if speculation is not None and speculation.tp_seq >= 0:
+                    committed = speculation.tp_seq
                 # inclusive of `speculate` and `worker.schedule_yield_away`
                 laps.lap("build_speculation")
                 if speculation is not None:
@@ -5308,7 +5363,7 @@ class Worker:
                 # with GPU(N+1).
                 spec_pending = None
                 if pending is not None:
-                    outputs: dict[int, NameToTensorList] | None = None
+                    outputs: BatchedModelOutput | None = None
                     if speculation is None and self._is_tp_follow_pending(pending):
                         # Follower: watch for the head while N runs and settle
                         # the leader's decision before N is post-processed.
@@ -5318,6 +5373,8 @@ class Worker:
                         outputs, speculation = self._await_tp_follow_step(
                             pending, _arm_speculation,
                         )
+                        if speculation is not None:
+                            committed = speculation.tp_seq
                         if phase_period:
                             _phase_record("follow_await", _time.perf_counter() - _t0)
                         if self.enable_nvtx:
@@ -5327,7 +5384,7 @@ class Worker:
                         if self.enable_nvtx:
                             range_push("worker.await_gpu", synchronize=False)
                         _t0 = _time.perf_counter() if phase_period else 0.0
-                        outputs = pending.future.result()
+                        outputs = self._step_result(pending)
                         if phase_period:
                             _phase_record("await_gpu", _time.perf_counter() - _t0)
                         if self.enable_nvtx:
@@ -5340,7 +5397,7 @@ class Worker:
                     laps.lap("clear_in_flight")
 
                     def _maybe_clear_spec():
-                        nonlocal speculation
+                        nonlocal speculation, committed
                         # Speculation cleanup splits by kind:
                         #
                         # * Non-yield-away spec depended on pending's outputs
@@ -5376,6 +5433,7 @@ class Worker:
                                     [sb.request_to_worker_graph[r] for r in fresh],
                                 )
                                 speculation = None
+                                committed = None  # voided on every rank
 
                     if pending.node_batch.admit_error is not None:
                         # Admit refused pending, so no forward ran.
@@ -5442,6 +5500,7 @@ class Worker:
                             # from here; see _handle_main_loop_error
                             speculation.plan_future = None
                             speculation.submitted = True
+                            committed = None
                             if self.enable_nvtx:
                                 range_pop(synchronize=False)
                                 range_push("worker.gpu_submit_queued", synchronize=False)
@@ -5453,16 +5512,19 @@ class Worker:
                                 _phase_record("submit_spec", _time.perf_counter() - _t0)
                             if self.enable_nvtx:
                                 range_pop(synchronize=False)
-                        elif speculation.plan_future is not None:
-                            # All continuing rids were dropped, so no spec
-                            # batch was submitted. Drop the orphaned pre-plan
-                            # so the next step to lease that slot doesn't
-                            # promote it. Await first: this batch never reaches
-                            # the GPU thread, so nothing else joins the future,
-                            # and resetting under a running plan races it.
-                            speculation.plan_future.result()
-                            self._reset_skip_plan_flags(speculation.node_batch)
-                            speculation.plan_future = None
+                        else:
+                            # Every rank drops the same rows, so none runs it.
+                            committed = None
+                            if speculation.plan_future is not None:
+                                # All continuing rids were dropped, so no spec
+                                # batch was submitted. Drop the orphaned pre-plan
+                                # so the next step to lease that slot doesn't
+                                # promote it. Await first: this batch never reaches
+                                # the GPU thread, so nothing else joins the future,
+                                # and resetting under a running plan races it.
+                                speculation.plan_future.result()
+                                self._reset_skip_plan_flags(speculation.node_batch)
+                                speculation.plan_future = None
 
                     # Post-process N (routing stage) — runs concurrently with
                     # GPU(N+1) if we submitted one above. Skipped on any admit
@@ -5523,6 +5585,8 @@ class Worker:
                         )
                     if batch is None:
                         batch = self.scheduler.get_next_batch(self.request_state)
+                if batch is not None and batch.tp_seq >= 0:
+                    committed = batch.tp_seq  # a follower's, off the leader's FIFO
                 if batch is None:
                     if side_steps is not None and side_steps.pending is not None:
                         side_steps.finish(block=True)
@@ -5544,6 +5608,8 @@ class Worker:
                 # A leader stamps the seq it sends; a follower's batch keeps
                 # the one it came off the FIFO with; everyone else -1.
                 broadcast_seq = self.maybe_send_zmq_to_tp_followers(node_batch)
+                if broadcast_seq >= 0:
+                    committed = broadcast_seq
                 fallthrough_tp_seq = broadcast_seq if broadcast_seq >= 0 else batch.tp_seq
 
                 # Unlike the spec submit, this path doesn't hold off the GIL for
@@ -5553,6 +5619,7 @@ class Worker:
                     gpu_executor, batch, node_batch,
                     partition=batch_partition, tp_seq=fallthrough_tp_seq,
                 )
+                committed = None
                 logger.debug("Scheduling: %s %s", batch.node_name, node_batch.request_ids)
                 _set_pending(step)
                 # Same accounting as the speculative path above
@@ -5564,24 +5631,33 @@ class Worker:
                     _phase_flush()
             except Exception as e:
                 self._handle_main_loop_error(e, (pending, spec_pending), batch, speculation)
-                # Follower: a head from a step that raised must not sit at the
-                # FIFO front with failed rids.
-                if pending is not None and self._is_tp_follow_pending(pending):
-                    self._close_tp_follow_step(pending)
-                # Leader: a dropped step whose decision never went out (the
-                # raise came before or in the speculation build, or N+1 was
-                # already submitted) leaves the followers awaiting it, and a
-                # drain deferred behind it with them.
+                if committed is not None:
+                    # Failing the step's rows is all one rank can do: the other
+                    # ranks are in its collectives, or will be, so stop and let
+                    # the conductor fail the rest instead of the group hanging.
+                    raise SystemExit(
+                        f"Worker {self.worker_id}: dropped lockstep step seq {committed} "
+                        f"that the other ranks run ({e!r})"
+                    ) from e
+                tail = spec_pending or pending  # the last step this rank took
+                if tail is not None and self._is_tp_follow_pending(tail):
+                    # The leader runs no head from a step that raised or that
+                    # its verdict voids. Any other step the leader names a row
+                    # of, this rank can't run: ``drop_rows`` stops it there.
+                    if tail.future.exception() is not None or self._step_voids_head(tail):
+                        self._close_tp_follow_step(tail)
                 else:
+                    # Leader: a dropped step whose decision never went out (the
+                    # raise came before or in the speculation build, or N+1 was
+                    # already submitted) leaves the followers awaiting it, and a
+                    # drain deferred behind it with them.
                     for dropped in (pending, spec_pending if spec_pending is not pending else None):
                         if (
                             dropped is not None and dropped is not decided
                             and self._can_speculate(dropped.batch) and self._is_tp_lead_pending(dropped)
                         ):
                             self._broadcast_tp_nospec(dropped)
-                # Clear the in-flight step. Without this the next iteration
-                # calls .result() on the same completed-with-exception future
-                # and re-raises forever, wedging the worker on one bad batch.
+                # The steps are drained and their rows failed; nothing waits on them.
                 _set_pending(None)
                 consecutive_spec_steps = 0
                 sleep(0.01)

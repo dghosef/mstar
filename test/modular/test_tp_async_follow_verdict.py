@@ -36,10 +36,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from test_loop_turns import KEY as LOOP_KEY  # noqa: E402
 from test_loop_turns import _looping_worker, _Runtime, _scheduler, _StopLoopError  # noqa: E402
 
 from mstar.engine.resources.step import FULL_ADMIT_OK  # noqa: E402
-from mstar.model.submodule_base import StepOrder  # noqa: E402
+from mstar.model.submodule_base import BatchedModelOutput, StepOrder  # noqa: E402
 from mstar.utils.containers import RecentSet  # noqa: E402
 from mstar.utils.ipc_format import ScheduleTPNode, TPNoSpeculation  # noqa: E402
 from mstar.worker.micro_scheduler import MicroScheduler  # noqa: E402
@@ -51,6 +52,7 @@ from mstar.worker.worker import (  # noqa: E402
 
 NODE = "LLM"
 WALK = "decode"
+NODE_OF_LOOP, WALK_OF_LOOP = LOOP_KEY
 
 
 class _FakeEngineManager:
@@ -92,7 +94,6 @@ def _stub(cache_open: bool = False):
     stub.tp_async_nodes = None
     stub._tp_async_for = lambda n: Worker._tp_async_for(stub, n)
     stub._tp_nospec = RecentSet(Worker._TP_NOSPEC_KEEP)
-    stub._tp_leader_gap_warned = False
     stub.engine_manager = _FakeEngineManager(cache_open)
     stub.scheduler = MicroScheduler(
         engine_manager=stub.engine_manager, parallel_leader_nodes=set(),
@@ -128,6 +129,7 @@ def _stub(cache_open: bool = False):
         lambda p, arm: Worker._await_tp_follow_step(stub, p, arm)
     )
     stub._step_voids_head = Worker._step_voids_head
+    stub._step_result = lambda p: Worker._step_result(stub, p)
     stub._prefix_cache_open = lambda node: Worker._prefix_cache_open(stub, node)
     return stub
 
@@ -263,14 +265,11 @@ def test_only_the_leader_of_a_lockstep_node_owes_a_marker():
     assert not ld._tp_lead_needs_marker(_pending(4), None)
 
 
-@pytest.mark.parametrize("raise_in", ["build", "finish_step"])
-def test_a_leader_sends_the_marker_for_a_step_it_drops_before_its_decision(monkeypatch, raise_in):
-    """The real run loop on a TP leader: step 0 runs and the yield-away step 1
-    is built beside it. Then building step 1's successor raises (``build``),
-    or post-processing step 0 raises with step 1 already submitted
-    (``finish_step``). Either way no decision for step 1 went out, so its
-    marker must, or the followers await step 1 for good (and a drain deferred
-    behind it with them)."""
+def _tp_loop(monkeypatch, follower=False, forward_raises=()):
+    """The real ``Worker.run`` on one rank of a TP instance (``_looping_worker``),
+    rows 0 and 1 ready and one row per step. Step 0's seq is 0. Records the
+    rows each forward ran, the markers sent, the rows failed and what reached
+    the loop's error handler. A forward of a row in ``forward_raises`` raises."""
     runtime = _Runtime()
     sched, state = _scheduler(runtime, StepOrder.TURNS)
     for rid in (0, 1):
@@ -280,33 +279,378 @@ def test_a_leader_sends_the_marker_for_a_step_it_drops_before_its_decision(monke
     w = _looping_worker(monkeypatch, sched, state)
     node = next(iter(sched.parallel_leader_nodes))
     w.tp_async_sched, w.tp_async_nodes = True, None
-    w.parallel_nodes, w.parallel_leader_nodes = {node}, {node}
-    w._graph_runtime = types.SimpleNamespace(is_async_schedulable=lambda node, walk: True)
+    w.parallel_nodes, w.parallel_leader_nodes = {node}, set() if follower else {node}
+    w.is_tp_follower = follower
+    w._tp_nospec = RecentSet(Worker._TP_NOSPEC_KEEP)
+    w._graph_runtime = types.SimpleNamespace(
+        is_async_schedulable=lambda node, walk: True, push_back_node=lambda *a: None,
+    )
     w._settle_speculation = lambda *a, **k: None
-    w.maybe_send_zmq_to_tp_followers = lambda node_batch, **k: 0  # step 0's seq
-    markers, errors = [], []
-    w._broadcast_tp_nospec = lambda pending: markers.append(pending.tp_seq)
-    w._handle_main_loop_error = lambda exc, *a: errors.append(exc)
+    w.maybe_send_zmq_to_tp_followers = lambda node_batch, **k: 0
+    rec = types.SimpleNamespace(ran=[], markers=[], failed={}, errors=[])
+    w._broadcast_tp_nospec = lambda pending: rec.markers.append(pending.tp_seq)
+    w._handle_main_loop_error = lambda exc, *a: rec.errors.append(exc)
+    w._fail_requests = rec.failed.update
+    forward = w._execute_on_gpu_thread
+
+    def gpu(batch, node_batch, plan_future):
+        rids = list(batch.request_to_worker_graph)
+        rec.ran.append(rids)
+        if set(rids) & set(forward_raises):
+            raise RuntimeError("CUDA error")
+        return forward(batch, node_batch, plan_future)
+
+    w._execute_on_gpu_thread = gpu
+    return w, sched, state, rec
+
+
+def _builds_step_1(w, sched, state, head=False):
+    """``_build_speculation`` on a leader: from step 0, step 1 (row 1), sent
+    as seq 1, as a head or a yield-away; nothing after that."""
+    def build(pending, consecutive, fair):
+        if pending is None or pending.tp_seq != 0:
+            return None, None
+        spec = w._yield_away_speculation(sched.get_next_batch(state))
+        spec.is_yield_away = not head
+        spec.tp_seq = 1
+        return spec, None
+    return build
+
+
+@pytest.mark.parametrize("raise_in", ["build", "finish_step"])
+def test_a_leader_sends_the_marker_for_a_step_it_drops_before_its_decision(monkeypatch, raise_in):
+    """The real run loop on a TP leader: step 0 runs and the yield-away step 1
+    is built beside it. Then building step 1's successor raises (``build``),
+    or post-processing step 0 raises with step 1 already submitted
+    (``finish_step``). Either way no decision for step 1 went out, so its
+    marker must, or the followers await step 1 for good (and a drain deferred
+    behind it with them)."""
+    w, sched, state, rec = _tp_loop(monkeypatch)
+    build_step_1 = _builds_step_1(w, sched, state)
 
     def finish_step(pending, outputs):
         if raise_in == "finish_step":
             raise RuntimeError("boom")
 
     def build(pending, consecutive, fair):
-        if pending is None:
-            return None, None
-        if pending.tp_seq == 0:
-            spec = w._yield_away_speculation(sched.get_next_batch(state))
-            spec.tp_seq = 1  # broadcast as step 1, after step 0's marker
-            return spec, None
-        raise RuntimeError("boom")
+        if pending is not None and pending.tp_seq == 1:
+            raise RuntimeError("boom")
+        return build_step_1(pending, consecutive, fair)
 
     w._finish_step, w._build_speculation = finish_step, build
     with pytest.raises(_StopLoopError):
         w.run()
 
-    assert [str(e) for e in errors] == ["boom"]
-    assert markers == [1]
+    assert [str(e) for e in rec.errors] == ["boom"]
+    assert rec.markers == [1]
+
+
+def _raises(*a, **k):
+    raise RuntimeError("boom")
+
+
+def _raises_once(after=0):
+    """Raises on call ``after + 1`` only."""
+    calls = []
+
+    def call(*a, **k):
+        calls.append(None)
+        if len(calls) == after + 1:
+            raise RuntimeError("boom")
+    return call
+
+
+@pytest.mark.parametrize("raise_at", ["threading", "clearing N's flag", "settling"])
+def test_a_leader_that_drops_a_step_after_its_head_went_out_stops(monkeypatch, raise_at):
+    """Head 1 went out during step 0, step 0 ran clean, and something on the
+    leader alone raises before step 1 is submitted. The follower runs step 1,
+    so the leader can't drop it and go on: its next step would wait on a rank
+    that waits on step 1's collectives (#1171's live test). It stops."""
+    w, sched, state, rec = _tp_loop(monkeypatch)
+    w._build_speculation = _builds_step_1(w, sched, state, head=True)
+    if raise_at == "threading":
+        w._thread_outputs_to_speculative = _raises
+    else:
+        w._thread_outputs_to_speculative = lambda *a: None
+    if raise_at == "clearing N's flag":
+        w._clear_in_flight_flag = _raises_once()
+    if raise_at == "settling":
+        w._settle_speculation = _raises
+    with pytest.raises(SystemExit, match="seq 1"):
+        w.run()
+    assert rec.ran == [[0]]
+
+
+def test_a_leader_that_drops_a_step_it_broadcast_on_the_serial_path_stops(monkeypatch):
+    w, sched, state, rec = _tp_loop(monkeypatch)
+    w._build_speculation = lambda *a: (None, None)
+    w._submit_step = _raises
+    with pytest.raises(SystemExit, match="seq 0"):
+        w.run()
+
+
+@pytest.mark.parametrize("head", [False, True], ids=["yield-away", "head"])
+def test_a_forward_that_raised_fails_its_rows_and_the_loop_goes_on(monkeypatch, head):
+    """Step 0's forward raises on every rank alike. Its rows fail as its
+    verdict, which voids a head built on it on every rank, while a yield-away
+    step (independent of step 0, and run by the followers whatever its
+    verdict) still runs. Nothing reaches the error handler or stops."""
+    w, sched, state, rec = _tp_loop(monkeypatch, forward_raises={0})
+    w._build_speculation = _builds_step_1(w, sched, state, head=head)
+    with pytest.raises(_StopLoopError):
+        w.run()
+    assert rec.errors == []
+    assert set(rec.failed) == {0}
+    assert rec.ran == ([[0]] if head else [[0], [1]])
+
+
+def test_a_leader_goes_on_after_a_raise_past_a_head_every_rank_voided(monkeypatch):
+    """Step 0 failed a row, so no rank runs head 1, and the raise that follows
+    in post-processing costs step 0's rows alone."""
+    w, sched, state, rec = _tp_loop(monkeypatch, forward_raises={0})
+    w._build_speculation = _builds_step_1(w, sched, state, head=True)
+    w._finish_step = _raises
+    with pytest.raises(_StopLoopError):
+        w.run()
+    assert [str(e) for e in rec.errors] == ["boom"]
+
+
+def _follower(monkeypatch):
+    """A follower of ``_tp_loop``, with the real head-closing and row check."""
+    w, sched, state, rec = _tp_loop(monkeypatch, follower=True)
+    w.engine_manager.get_engine = _FakeEngineManager().get_engine
+    w._close_tp_follow_step = lambda p: Worker._close_tp_follow_step(w, p)
+    w._prefix_cache_open = lambda node: False
+    w._handle_main_loop_error = lambda exc, in_flight, *a: (
+        rec.errors.append(exc),
+        sched.drop_rows(r for p in in_flight if p is not None for r in p.batch.request_to_worker_graph),
+    )
+    return w, sched, state, rec
+
+
+def _raising_on_the_pass_after_step_0(w, deliver=lambda: None):
+    """This rank alone raises reading its messages, with step 0 in flight,
+    once ``deliver`` has put the leader's decision on the FIFO."""
+    passes = []
+
+    def process_messages():
+        passes.append(None)
+        if len(passes) == 2:
+            deliver()
+            raise RuntimeError("boom")
+
+    w._process_messages = process_messages
+
+
+def _step_naming(rid, seq, from_seq=None):
+    return ScheduleTPNode(
+        NODE_OF_LOOP, WALK_OF_LOOP, [str(rid)], spec_seq=seq,
+        speculative=from_seq is not None, spec_from_seq=-1 if from_seq is None else from_seq,
+    )
+
+
+def _with_wire_ids(w, sched):
+    """Wire ids are the rows' handles as strings here."""
+    sched.tp_rids = lambda message: [int(r) for r in message.request_ids]
+
+
+def test_a_follower_stops_when_the_leader_names_a_row_it_dropped(monkeypatch):
+    """This rank raised on its own and dropped step 0, whose rows never ready
+    again here. The leader knows nothing of it and goes on to name row 0 in a
+    step it then waits in, so this rank stops rather than leave it there."""
+    w, sched, state, rec = _follower(monkeypatch)
+    _with_wire_ids(w, sched)
+    _raising_on_the_pass_after_step_0(w, lambda: sched.register_tp_follow(_step_naming(0, seq=1)))
+    with pytest.raises(SystemExit, match="seq 1"):
+        w.run()
+
+
+def test_a_follower_goes_on_when_the_leader_names_only_other_rows(monkeypatch):
+    """One bad request must not stop the deployment: a raise on every rank, or
+    a row that was ending anyway, leaves the leader naming only rows this rank
+    still has, and those run."""
+    w, sched, state, rec = _follower(monkeypatch)
+    _with_wire_ids(w, sched)
+    _raising_on_the_pass_after_step_0(w, lambda: sched.register_tp_follow(_step_naming(1, seq=1)))
+    w._tp_nospec.add(1)  # nothing follows it
+    with pytest.raises(_StopLoopError):
+        w.run()
+    assert [str(e) for e in rec.errors] == ["boom"]
+    assert len(rec.ran) == 2  # the leader's step ran here too
+
+
+def test_a_message_that_raises_leaves_the_ones_behind_it_for_the_next_pass():
+    """They may hold the leader's decision, and were already off the socket."""
+    w = Worker.__new__(Worker)
+    handled = []
+
+    def process(message):
+        if message == "bad":
+            raise RuntimeError("boom")
+        handled.append(message)
+
+    w._process_message = process
+    batches = [["a", "bad", "b"], ["c"], []]
+    w.communicator = types.SimpleNamespace(get_all_new_messages=lambda: batches.pop(0))
+    with pytest.raises(RuntimeError, match="boom"):
+        w._process_messages()
+    w._process_messages()
+    assert handled == ["a", "b", "c"]
+
+
+def test_a_follower_drops_a_head_its_steps_verdict_voids_after_its_own_raise(monkeypatch):
+    """Step 0 failed a row, so the leader clears head 1 on its verdict: the
+    head must leave the FIFO here too, not stop this rank or reach the serial path."""
+    w, sched, state, rec = _follower(monkeypatch)
+    _with_wire_ids(w, sched)
+    forward = w._execute_on_gpu_thread
+
+    def gpu(batch, node_batch, plan_future):
+        if 0 in batch.request_to_worker_graph:
+            node_batch.failed_requests[0] = "row 0 failed"
+        return forward(batch, node_batch, plan_future)
+
+    w._execute_on_gpu_thread = gpu
+    _raising_on_the_pass_after_step_0(w, lambda: sched.register_tp_follow(_step_naming(0, seq=1, from_seq=0)))
+    with pytest.raises(_StopLoopError):
+        w.run()
+    assert [str(e) for e in rec.errors] == ["boom"]
+    assert sched.peek_tp_follow() is None and 0 in w._tp_nospec
+
+
+def test_a_step_that_raised_closes_its_head_when_the_follower_raises_too(monkeypatch):
+    w, sched, state, rec = _follower(monkeypatch)
+    forward = w._execute_on_gpu_thread
+
+    def gpu(batch, node_batch, plan_future):
+        if 0 in batch.request_to_worker_graph:
+            raise RuntimeError("CUDA error")
+        return forward(batch, node_batch, plan_future)
+
+    w._execute_on_gpu_thread = gpu
+    _raising_on_the_pass_after_step_0(w)
+    with pytest.raises(_StopLoopError):
+        w.run()
+    assert 0 in w._tp_nospec
+
+
+def _follower_with_head_1(monkeypatch):
+    """A follower that takes head 1 from step 0."""
+    w, sched, state, rec = _follower(monkeypatch)
+    _with_wire_ids(w, sched)
+
+    def follow(pending, arm):
+        spec = w._yield_away_speculation(sched.get_next_batch(state))
+        spec.is_yield_away, spec.tp_seq = False, 1
+        return BatchedModelOutput(), spec
+
+    w._await_tp_follow_step = follow
+    return w, sched, rec
+
+
+def test_a_follower_that_drops_a_head_it_took_stops(monkeypatch):
+    """Naomi's case on this side: the leader runs head 1, and threading step
+    0's outputs into it raises here alone."""
+    w, sched, rec = _follower_with_head_1(monkeypatch)
+    w._thread_outputs_to_speculative = _raises
+    with pytest.raises(SystemExit, match="seq 1"):
+        w.run()
+
+
+def test_a_follower_stops_when_the_leader_builds_on_a_step_it_drained(monkeypatch):
+    """Head 1 is submitted, then post-processing step 0 raises here alone. The
+    handler drains step 1 and never post-processes it, while the leader's head
+    2 from step 1 names its row."""
+    w, sched, rec = _follower_with_head_1(monkeypatch)
+    w._thread_outputs_to_speculative = lambda *a: None
+
+    def finish(step, outputs):
+        sched.register_tp_follow(_step_naming(1, seq=2, from_seq=1))
+        raise RuntimeError("boom")
+
+    w._finish_step = finish
+    with pytest.raises(SystemExit, match="seq 2"):
+        w.run()
+    assert rec.ran == [[0], [1]]
+
+
+def test_a_follower_drops_the_head_of_a_step_it_drained_when_that_steps_verdict_voids_it(monkeypatch):
+    """Head 1 is submitted and fails a row, so the leader clears head 2 on that
+    verdict. Post-processing step 0 raises here alone: head 2 must not stop this rank."""
+    w, sched, rec = _follower_with_head_1(monkeypatch)
+    w._thread_outputs_to_speculative = lambda *a: None
+    forward = w._execute_on_gpu_thread
+
+    def gpu(batch, node_batch, plan_future):
+        if 1 in batch.request_to_worker_graph:
+            node_batch.failed_requests[1] = "row 1 failed"
+        return forward(batch, node_batch, plan_future)
+
+    def finish(step, outputs):
+        sched.register_tp_follow(_step_naming(1, seq=2, from_seq=1))
+        raise RuntimeError("boom")
+
+    w._execute_on_gpu_thread, w._finish_step = gpu, finish
+    with pytest.raises(_StopLoopError):
+        w.run()
+    assert sched.peek_tp_follow() is None
+
+
+def test_a_follower_goes_on_after_a_raise_past_an_all_dropped_head(monkeypatch):
+    """Every row of head 1 was dropped on every rank, as a request's last step
+    routinely does, so nothing runs: only step 0's row is lost."""
+    w, sched, rec = _follower_with_head_1(monkeypatch)
+
+    def thread(speculation, outputs):
+        for rid in list(speculation.scheduled_batch.request_to_worker_graph):
+            speculation.scheduled_batch.discard_rid(rid)
+
+    w._thread_outputs_to_speculative = thread
+    w._finish_step = _raises
+    with pytest.raises(_StopLoopError):
+        w.run()
+    assert [str(e) for e in rec.errors] == ["boom"]
+
+
+def test_a_follower_stops_when_it_cannot_build_a_step_off_the_fifo(monkeypatch):
+    w, sched, state, rec = _tp_loop(monkeypatch, follower=True)
+    take = sched.get_next_batch
+
+    def fifo_step(*a, **k):
+        batch = take(*a, **k)
+        if batch is not None:
+            batch.tp_seq = 0
+        return batch
+
+    sched.get_next_batch = fifo_step
+    w._build_executing_batch = _raises
+    with pytest.raises(SystemExit, match="seq 0"):
+        w.run()
+
+
+@pytest.mark.parametrize("raise_in", ["build", "arm"])
+def test_a_follower_stops_when_it_cannot_finish_a_head_it_popped(raise_in):
+    """Off the FIFO, no later pass can take the head, and the leader runs it."""
+    s = _stub()
+    s.scheduler.register_tp_follow(_head(["r0"], seq=5, from_seq=4))
+
+    def pops_then_maybe_raises(pending):
+        s.scheduler.pop_tp_follow_head()
+        if raise_in == "build":
+            raise RuntimeError("boom")
+        return object()
+
+    s._try_follow_speculation = pops_then_maybe_raises
+    with pytest.raises(SystemExit, match="seq 5"):
+        _await(s, _pending(4, _future(s, _output())), arm=_raises)
+
+
+def test_a_head_that_raises_before_it_is_popped_stays_for_the_handler():
+    s = _stub()
+    s.scheduler.register_tp_follow(_head(["r0"], seq=5, from_seq=4))
+    s._try_follow_speculation = _raises
+    with pytest.raises(RuntimeError, match="boom"):
+        _await(s, _pending(4, _future(s, _output())))
 
 
 # ------------------------------------------------------------- registration
@@ -505,28 +849,40 @@ def test_await_retries_until_the_head_is_buildable():
     assert s.communicator.waits == 2
 
 
-def test_await_goes_serial_when_the_leader_moved_past_the_step():
+@pytest.mark.parametrize("later", [
+    ScheduleTPNode(NODE, WALK, ["r0"], spec_seq=6),     # a plain step
+    _head(["r9"], seq=9, from_seq=8),                    # or a later head
+])
+def test_await_stops_the_rank_when_the_leader_moved_past_the_step(later):
     """The decision about s is sent before anything the leader broadcasts
-    after s (per-peer FIFO). A later message at the FIFO front with no
-    decision recorded therefore means none is coming — e.g. the leader runs
-    with the flag off — so the follower goes serial instead of spinning."""
+    after s (per-peer FIFO), and the flag's agreement is checked at startup.
+    A later message at the FIFO front with no decision for s therefore means
+    the leader dropped the step it built on s, which this rank may be running:
+    going serial would leave the ranks in different collectives."""
     s = _stub()
-    later = ScheduleTPNode(NODE, WALK, ["r0"], spec_seq=6)   # plain, later
     s.scheduler.register_tp_follow(later)
-    out = _output()
-    assert _await(s, _pending(4, _future(s, out))) == (out, None)
-    assert s.communicator.waits == 0
-    assert s.scheduler.peek_tp_follow() is later   # left for the serial path
-    assert 4 in s._tp_nospec
+    drained = []
+    future = types.SimpleNamespace(done=lambda: False, result=lambda: drained.append(True))
+    with pytest.raises(SystemExit, match="moved past step seq 4"):
+        _await(s, _pending(4, future))
+    assert drained  # the GPU thread's step isn't left to hold the process up
 
 
-def test_await_treats_a_later_head_at_the_front_the_same_way():
+def test_a_forward_that_raised_is_the_steps_verdict_and_voids_its_head():
+    """N's forward raised: every row of N fails and the head built on N is
+    dropped, as the leader drops it on the same verdict, instead of the raise
+    reaching the loop's handler."""
     s = _stub()
-    later = _head(["r9"], seq=9, from_seq=8)
-    s.scheduler.register_tp_follow(later)
-    got = _await(s, _pending(4, _future(s, _output(), done_after=10)))
-    assert got == (None, None)                     # N still runs; caller awaits it
-    assert s.scheduler.peek_tp_follow() is later
+    s.scheduler.register_tp_follow(_head(["r0"], seq=5, from_seq=4))
+
+    def raises():
+        raise RuntimeError("CUDA error")
+
+    p = _pending(4, types.SimpleNamespace(done=lambda: True, result=raises))
+    outputs, spec = _await(s, p)
+    assert spec is None and not outputs.per_rid_outputs
+    assert set(p.node_batch.failed_requests) == {"r0"}
+    assert s.scheduler.peek_tp_follow() is None
 
 
 def test_await_never_returns_without_a_decision_once_N_finished():
