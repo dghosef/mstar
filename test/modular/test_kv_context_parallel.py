@@ -717,6 +717,92 @@ def test_two_gpus_attend_a_placed_pool_like_one(tmp_path, over_sp, rows, capture
     )
 
 
+def _glm_mla_over_ranks(rank, world, store):
+    """One rank of an SP placement running a GLM-5.2 MLA layer, its fused latent prep on, through
+    two prefill steps (the second over stored context) and a decode step, against the same layer
+    over an unplaced pool on this rank. A step that isn't one token a row attends its own latents
+    from ``run``'s ``k``, so it must take the op-by-op prep (``MLAAttention._attends_step_latents``);
+    the decode step keeps the fused one."""
+    import copy
+
+    from mstar.engine.resources import AttentionStep, Segment, SubmoduleStep
+    from mstar.engine.resources.position.manager import RopeManager
+    from mstar.engine.resources.runner import StepRunner
+    from mstar.model.glm52.components.attention import Glm52MLAAttention
+    from mstar.model.glm52.config import ATTN_RESOURCE, KV_RESOURCE, POS_RESOURCE, Glm52ModelConfig
+
+    os.environ["MSTAR_WORKSPACE_BUFFER_MB"] = "64"
+    dist.init_process_group("nccl", init_method=f"file://{store}", rank=rank, world_size=world)
+    device = torch.device("cuda", rank)
+    torch.cuda.set_device(device)
+    manager_mod.KVTransferManager = _StubTransfer
+    group = CommGroup(rank, rank, list(range(world)))
+    group.device_group, group.initialized = dist.group.WORLD, True
+    try:
+        cfg = Glm52ModelConfig(num_hidden_layers=1, num_attention_heads=8)
+        torch.manual_seed(0)
+        with device:
+            layer = Glm52MLAAttention(cfg, layer_idx=0).to(torch.bfloat16).requires_grad_(False)
+        with torch.no_grad():
+            for lin in (layer.q_a_proj, layer.q_b_proj, layer.kv_a_proj_with_mqa, layer.kv_b_proj, layer.o_proj):
+                lin.weight.normal_(0, 0.02)
+            for norm in (layer.q_a_layernorm, layer.kv_a_layernorm):
+                norm.weight.normal_(1.0, 0.1)
+        layer.process_weights_after_loading()
+        assert layer.mla_fused_prep
+        reference = copy.deepcopy(layer)
+
+        def build(joint):
+            kv_cfg = PagedKVConfig(
+                num_layers=1, num_kv_heads=1, head_dim=cfg.cache_latent_dim, max_seq_len=cfg.max_seq_len,
+                max_num_pages=16, page_size=128, num_qo_heads=cfg.num_attention_heads, layout=KVLayout.MLA,
+                kv_lora_rank=cfg.kv_lora_rank, qk_rope_head_dim=cfg.qk_rope_head_dim,
+                context_parallel=joint is not None,
+            )
+            kv = KVManager(cfg=kv_cfg, name=KV_RESOURCE, joint_comm_group=joint, transfer_engine_info=None,
+                           device=device, dtype=torch.bfloat16)
+            attn = fm.FlashInferMLAManager(kv_cache=KV_RESOURCE, device=device, dtype=torch.bfloat16,
+                                           kv_config=kv_cfg, sm_scale=cfg.softmax_scale)
+            resources = {KV_RESOURCE: kv, ATTN_RESOURCE: attn,
+                         POS_RESOURCE: RopeManager(cfg.position_config(), device, max_seq_len=cfg.max_seq_len)}
+            attn.bind_dependencies(resources)
+            runner = StepRunner(resources, node_resources={NODE: list(resources)})
+            runner.ingest_request("r0")
+            return resources, runner
+
+        g = torch.Generator(device=device).manual_seed(1)
+        h = torch.randn(341, cfg.hidden_size, generator=g, device=device).to(torch.bfloat16)
+        outs = []
+        for mla, joint in ((reference, None), (layer, JointGroups(tp_group=CommGroup.trivial(), sp_group=group))):
+            resources, runner = build(joint)
+            mla.bind_resources(resources)
+            got = []
+            for start, end in ((0, 300), (300, 340), (340, 341)):
+                step = SubmoduleStep(
+                    segments=[Segment("r0", "main", end - start)],
+                    steps={KV_RESOURCE: KVStep(), ATTN_RESOURCE: AttentionStep(causal=True)},
+                )
+                step.set_ctx(StepContext(request_ids=("r0",), graph_walk="w", slot=0, capture=False))
+                assert runner.admit(step).ok
+                runner.plan(step)
+                # the fused prep serves the one-token step alone over the placed pool
+                assert mla._attends_step_latents() == (joint is not None and end - start > 1)
+                with torch.no_grad():
+                    got.append(mla(h[start:end], torch.arange(start, end, device=device)))
+                runner.commit(step)
+            outs.append(torch.cat(got))
+        torch.testing.assert_close(outs[1].float(), outs[0].float(), atol=2e-2, rtol=2e-2)
+    finally:
+        group.device_group = None
+        dist.destroy_process_group()
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs 2 GPUs")
+def test_two_gpus_run_a_glm52_mla_layer_over_a_placed_pool_like_one(tmp_path):
+    _flashinfer(mla=True)
+    mp.spawn(_glm_mla_over_ranks, args=(P, str(tmp_path / "store")), nprocs=P)
+
+
 # a replay's padding rows after the step's, as `KVManager` plans them: none (the bucket's tokens past
 # the step alone), two of 2 tokens, and two of none
 @pytest.mark.parametrize("padding", [(0, 0), (2, 2), (2, 0)], ids=["tail", "rows", "span-0-rows"])
