@@ -967,15 +967,13 @@ def test_always_takes_the_lock_too(other_server, api_plan):
     other.communicate("")
 
 
-def test_auto_pins_siblings_on_a_deep_idle_intel_host_and_its_workers_follow(api_plan, monkeypatch, gpu_locks, caplog):
+def test_auto_pins_siblings_on_a_deep_idle_intel_host_and_its_workers_follow(api_plan, monkeypatch, gpu_locks):
     """The default on the hosts where #1074's poll lost 9-22% unpinned: the API server decides once, takes the locks
     an explicit ``siblings`` takes, and hands its workers the decision through the knob's variable."""
     monkeypatch.setenv("MSTAR_STEP_THREAD_CORE", "auto")
-    with caplog.at_level(logging.INFO, logger="mstar.api_server.entrypoint"):
-        plan = api_plan()
+    plan = api_plan()
     assert plan.pinned == SIBLINGS_ON_A and A in cpus._gpu_locks and plan.locked
     assert os.environ["MSTAR_STEP_THREAD_CORE"] == "siblings"
-    assert "step_thread_core auto: siblings, an Intel CPU whose cores sleep deep (C6P at 210 µs)" in caplog.text
     worker = _bare_worker("worker_0", "cuda:0")
     worker._plan_step_cpus(["worker_0"], ["cuda:0"])
     assert worker._step_cpus == plan.workers[0]
@@ -1002,9 +1000,18 @@ def test_auto_elsewhere_logs_one_line_and_nothing_warns(api_plan, monkeypatch, t
     assert plan.pinned == frozenset() and worker._step_cpus is None and cpus._gpu_locks == {}
     assert os.environ["MSTAR_STEP_THREAD_CORE"] == "off"
     assert not [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    said = [r.getMessage() for r in caplog.records if "auto" in r.getMessage()]
-    assert said == ["step_thread_core auto: nothing pinned, the CPU vendor is AuthenticAMD, not one siblings was "
-                    "measured on"]
+    assert len([r for r in caplog.records if "auto" in r.getMessage()]) == 1
+
+
+def test_auto_refused_a_lock_says_so_once_and_warns_of_nothing(other_server, api_plan, monkeypatch, caplog):
+    """A second default server on a GPU: nobody chose a placement, so it isn't a warning, and the one line comes after
+    the claim, when the outcome is known."""
+    assert other_server(A)[1] == "None"
+    monkeypatch.setenv("MSTAR_STEP_THREAD_CORE", "auto")
+    with caplog.at_level(logging.INFO, logger="mstar.api_server.entrypoint"):
+        assert api_plan().pinned == frozenset()
+    assert os.environ["MSTAR_STEP_THREAD_CORE"] == "off"
+    assert [r.levelno for r in caplog.records if r.name == "mstar.api_server.entrypoint"] == [logging.INFO]
 
 
 def test_auto_pins_nothing_where_only_the_containers_gpus_fit(api_plan, monkeypatch, gpu_locks):

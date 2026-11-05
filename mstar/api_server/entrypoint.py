@@ -2768,18 +2768,51 @@ async def shutdown_event():
 # CLI entry point
 # ------------------------------------------------------------------
 
+def _locked(plan: cpus.CpuPlan, setting: str | int, devices: list[str]) -> cpus.CpuPlan:
+    """``plan`` with its locks held: placing by rank (``always``, ``siblings``)
+    takes the GPUs', and any plan that pins its cores', moving to the next core
+    set the mask holds when one is held. With a GPU held, or no set free, a
+    plan that pins nothing and says why."""
+    refused = cpus.claim_gpus(cpus.device_addresses(devices)) if setting in cpus.PLACED else None
+    if refused is not None:
+        return cpus.CpuPlan(plan.mask, plan.usable, why=f"not pinned: {refused}")
+    plan = cpus.claim_cores(plan, lambda slot: cpus.devices_plan(setting, devices, slot=slot))
+    if plan.pinned:
+        os.environ[cpus.CORE_SET_ENV] = str(plan.slot)
+    return plan
+
+
+def _auto_plan(devices: list[str], holding: bool) -> cpus.CpuPlan:
+    """What ``auto`` comes to (``cpus.auto_setting``), as ``siblings`` placed
+    over the host's GPUs or ``off``, with the knob's variable written for the
+    workers. Logged once, at info whatever the outcome: nobody asked for it."""
+    setting, why = cpus.auto_setting(devices, holding)
+    # Its workers read the result and build the same plan without host_wide,
+    # which only refuses plans (``cpus.deployment_plan``).
+    plan = cpus.devices_plan(setting, devices, slot=0, host_wide=True)
+    if any(step and len(step.cpus) == 1 for step in plan.workers):
+        plan = cpus.CpuPlan(plan.mask, plan.usable, why="not pinned: a worker's step threads would share one CPU")
+    if plan.pinned:
+        plan = _locked(plan, setting, devices)
+    if plan.pinned:
+        logger.info("step_thread_core auto: siblings, %s", why)
+    else:
+        logger.info("step_thread_core auto: nothing pinned, %s",
+                    why if setting == "off" else plan.why.removeprefix("not pinned: "))
+        setting = "off"
+    # the workers read the knob when they build their plan
+    os.environ[knobs.KNOBS["step_thread_core"]] = setting
+    return plan
+
+
 def deployment_cpu_plan(config: dict) -> cpus.CpuPlan:
     """The deployment's CPU plan, as each worker builds it from the conductor's
     device list: the config's ``step_thread_core`` and ``deployment_workers``.
     ``idle_hold: qos`` is taken first, whatever the placement. ``auto`` is
-    decided here (``cpus.auto_setting``), as ``siblings`` placed over the
-    host's GPUs or ``off``, and the result written to the knob's variable for
-    the workers. Placing by rank (``always``, ``siblings``) also takes the
-    GPUs' locks, and any plan that pins takes its cores' locks, moving to the
-    next core set the mask holds when one is held; a server that finds a GPU
-    held, or no set free, pins nothing, here or in its workers. A bad knob
-    value is left for the conductor's deployment check to report; a CPU number
-    the mask can't honour raises ``CpuPlanError``."""
+    decided here (``_auto_plan``). A plan that pins takes its locks
+    (``_locked``); a server that can't have them pins nothing, here or in its
+    workers. A bad knob value is left for the conductor's deployment check to
+    report; a CPU number the mask can't honour raises ``CpuPlanError``."""
     try:
         knobs.configure(config.get("knobs"))
     except ValueError:
@@ -2790,35 +2823,15 @@ def deployment_cpu_plan(config: dict) -> cpus.CpuPlan:
         return cpus.deployment_plan(setting, [])
     devices = deployment_workers(config, accelerator_type()).devices
     if setting == "auto":
-        setting, why = cpus.auto_setting(devices, holding)
-        # Its workers read the result and build the same plan without host_wide,
-        # which only refuses plans (``cpus.deployment_plan``).
-        plan = cpus.devices_plan(setting, devices, slot=0, host_wide=True)
-        if any(step and len(step.cpus) == 1 for step in plan.workers):
-            plan = cpus.CpuPlan(plan.mask, plan.usable, why="not pinned: a worker's step threads would share one CPU")
-        if not plan.pinned:
-            logger.info("step_thread_core auto: nothing pinned, %s", why if setting == "off" else plan.why)
-            setting = "off"
-        else:
-            logger.info("step_thread_core auto: siblings, %s", why)
-        # the workers read the knob when they build their plan
-        os.environ[knobs.KNOBS["step_thread_core"]] = setting
-        if setting == "off":
-            return plan
-    else:
-        plan = cpus.devices_plan(setting, devices, slot=0)
+        return _auto_plan(devices, holding)
+    plan = cpus.devices_plan(setting, devices, slot=0)
     if not plan.pinned:
         return plan
-    refused = cpus.claim_gpus(cpus.device_addresses(devices)) if setting in cpus.PLACED else None
-    if refused is None:
-        plan = cpus.claim_cores(plan, lambda slot: cpus.devices_plan(setting, devices, slot=slot))
-        if plan.pinned:
-            os.environ[cpus.CORE_SET_ENV] = str(plan.slot)
-            return plan
-        refused = plan.why.removeprefix("not pinned: ")
-    logger.warning("step_thread_core %s: nothing pinned, %s", setting, refused)
-    os.environ[knobs.KNOBS["step_thread_core"]] = "off"
-    return cpus.CpuPlan(plan.mask, plan.usable, why=f"not pinned: {refused}")
+    plan = _locked(plan, setting, devices)
+    if not plan.pinned:
+        logger.warning("step_thread_core %s: nothing pinned, %s", setting, plan.why.removeprefix("not pinned: "))
+        os.environ[knobs.KNOBS["step_thread_core"]] = "off"
+    return plan
 
 
 def _uvicorn_config(app, host: str, port: int, config: dict) -> uvicorn.Config:
