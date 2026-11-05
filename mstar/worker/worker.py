@@ -132,6 +132,7 @@ from mstar.worker.speculation import (
 )
 from mstar.worker.step_repeats import (
     StepRepeats,
+    loop_runs,
     parse_step_repeats,
     walk_edges,
 )
@@ -929,9 +930,10 @@ class Worker(RepeatingSteps):
                 (model_config or {}).get("step_repeats"),
                 {node for section in walk_graphs.values() for node in section.get_nodes()},
             ),
-            walk_edges(
-                walk_graphs, [(node, walk) for walk, node in self._innermost_loop_by_node if (node, walk) in my_walks],
-            ),
+            walk_edges(walk_graphs, looped := [
+                (node, walk) for walk, node in self._innermost_loop_by_node if (node, walk) in my_walks
+            ]),
+            loop_runs(walk_graphs, looped),
         )
 
         if status_interval_s is not None:
@@ -5310,6 +5312,9 @@ class Worker(RepeatingSteps):
                 },
                 self.engine_manager.engine.repeat_note,
             )
+            for key, members in self._step_repeats.runs.items():
+                if self._step_repeats.may_repeat(*key):
+                    self.engine_manager.engine.join_run(*key, members)
             self.streams.windows = self._step_repeats.windows()
             # a run on the device, which a row turning ready can end early (``_await_run``)
             self._device_runs = frozenset(

@@ -341,7 +341,16 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
        at most a KV page's worth of iterations. Each edge of the
        node in its Loop must be one a run serves: a loop-back (carried between replays),
        a constant input, a Loop output, an iteration input, a stream window, or a
-       per-iteration output to the client, a stream or an accumulated output. Its
+       per-iteration output to the client, a stream or an accumulated output. In a Loop of
+       several nodes (BAGEL's split CFG), name the node its iteration closes on (the one every
+       other node runs before, ``combine_cfg``): its step's run takes in the Loop's other
+       nodes, its members. Each member runs the run's first iteration as its own step, and
+       the closer's run then replays every member's capture and its own in turn, copying each
+       signal from the node that makes it into the node that reads it. A member is captured,
+       planned on the host with a plan that serves every replay, on the closer's worker and
+       outside TP, stopped by its Loop's count alone, and makes only what the run reads. The
+       closer doesn't chain. A run is one iteration when another step has leased a member's
+       slot since that member's step. Its
        resources can refuse the walk (``Resource.repeat_refusal``): fa3 or cuDNN FlashInfer
        decode, or a sampler without the in-graph scatter. A walk that asks for repeats gets
        tensor-core captured decode wrappers whatever ``decode_tensor_cores`` says; the line
