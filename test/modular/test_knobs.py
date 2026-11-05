@@ -49,7 +49,7 @@ def test_the_in_graph_sampler_scatter_is_on_by_default(monkeypatch):
 def test_step_thread_core_from_the_config_and_the_environment(monkeypatch):
     assert knobs.step_thread_core() == "auto"
     # yaml reads a bare off as False
-    for value, expected in ((False, "off"), (True, "auto"), ("auto", "auto"), ("always", "always"),
+    for value, expected in ((False, "off"), ("auto", "auto"), ("always", "always"),
                             ("Siblings", "siblings"), ("OFF", "off"), (12, 12)):
         knobs.configure({"step_thread_core": value})
         assert knobs.step_thread_core() == expected
@@ -62,7 +62,7 @@ def test_step_thread_core_from_the_config_and_the_environment(monkeypatch):
         knobs.step_thread_core()
 
 
-@pytest.mark.parametrize("value", [-1, "on", "3-4", 1.5])
+@pytest.mark.parametrize("value", [-1, "on", "3-4", 1.5, True])
 def test_a_bad_step_thread_core_fails_the_startup_check(value):
     with pytest.raises(ValueError, match="step_thread_core"):
         knobs.check({"step_thread_core": value})

@@ -71,10 +71,10 @@ def _resident_planning_value(value: object) -> str:
 
 
 def _step_thread_core_value(value: object) -> str:
-    # yaml reads a bare ``off`` as False
-    if isinstance(value, bool):
-        return "auto" if value else "off"
-    if isinstance(value, int) and value >= 0:
+    # yaml reads a bare ``off`` as False; ``true`` names no layout, so it is refused
+    if value is False:
+        return "off"
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
         return str(value)
     if isinstance(value, str) and value.strip().lower() in ("auto", "always", "siblings", "off"):
         return value.strip().lower()
