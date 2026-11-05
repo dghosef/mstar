@@ -323,6 +323,7 @@ Qwen3.5-0.8B tok/s at c=1 / 8, `benchmark.runner` at `-O2`, the server `taskset`
 | 2x H100, Xeon 8470 (SMT, C6 290 µs, `schedutil`), `-O1`, a shared pod | 179 / 1291 | 216 / 1442 | 786 / 4832 | not measured |
 | H100 VM without deep idle states (a handoff 22 µs), 32-CPU mask | 529 (c=1) / 6520 (c=16) | not measured | 419 / 5526 (an earlier `auto`, the same layout) | not measured |
 | H200, 2-socket AMD EPYC (C2 800 µs), 16-CPU mask | 634 / 3617 | not measured | 506 / 3103 (an earlier `auto`, the same layout) | not measured |
+| H200 with SMT, CPU unconfirmed | not recorded | not measured | 13-26% below no pin at c=1-32 | not measured |
 
 The 8470 row is the median of eight passes per arm, with another job on the pod's other socket and the pod's CPU quota throttling it at times. That moved no pin and `always` a lot (c=1 163-434 and 185-449, overlapping) and `siblings` little (749-823), so read it as `siblings` ahead, not as the size of the gain: the one no-pin session with no throttling read 355 / 1800 against 816 / 4832 for `siblings`.
 

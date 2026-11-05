@@ -835,6 +835,11 @@ to 8 cores (with their siblings where the CPU has SMT), medians over server sess
      - not measured
      - 506 / 3103 (an earlier ``auto``, the same layout)
      - not measured
+   * - H200 with SMT, CPU unconfirmed
+     - not recorded
+     - not measured
+     - 13-26% below no pin at c=1-32
+     - not measured
 
 The 8470 row is the median of eight passes per arm, with another job on the pod's
 other socket and the pod's CPU quota throttling it at times. That moved no pin and

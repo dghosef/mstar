@@ -522,7 +522,9 @@ Worker scheduling
        The API server decides (``cpus.auto_setting``), logs
        one line saying what and why, and passes the result to its workers in
        this variable. The vendor test rests on one AMD host, and the idle
-       test on the hosts in :ref:`host-idle`.
+       test on the hosts in :ref:`host-idle`. The second H200 host there lost
+       to no pin, and its CPU vendor and idle states are unknown, so this rule
+       may not place it.
        A number names the first worker's core (its hardware threads in the
        mask); the next workers take the next cores up and the API server the
        last core of the mask. A number outside the mask, or too near its top
