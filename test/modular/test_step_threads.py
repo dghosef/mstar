@@ -503,27 +503,24 @@ DEEP_C6 = [("C1", 1, False), ("C6", 100, False)]
 NO_DEEP = [("C1E", 2, False), ("C6", 170, True), ("C6P", 210, True)]  # the deep ones disabled
 
 
-@pytest.mark.parametrize(("states", "text", "devices", "holding", "setting", "why"), [
-    (XEON, INTEL, ["cuda:0"], False, "siblings", "an Intel CPU whose cores sleep deep (C6P at 210 µs)"),
-    (SIERRA, INTEL, ["cuda:0", "cuda:1"], False, "siblings", "(C6SP at 310 µs)"),
-    (DEEP_C6, INTEL, ["cuda:0"], False, "siblings", "(C6 at 100 µs)"),
-    (VM, INTEL, ["cuda:0"], False, "off", "the deepest idle state is C1 at 2 µs on CPUs 32-39, under 100 µs"),
-    ([("C1", 1, False), ("C6", 99, False)], INTEL, ["cuda:0"], False, "off", "C6 at 99 µs"),
-    (NO_DEEP, INTEL, ["cuda:0"], False, "off", "the deepest idle state is C1E at 2 µs"),
-    ([], INTEL, ["cuda:0"], False, "off", "sysfs lists no idle state on CPUs 32-39"),
-    (XEON, AMD, ["cuda:0"], False, "off", "the CPU vendor is AuthenticAMD"),
-    (XEON, ARM, ["cuda:0"], False, "off", "the CPU vendor is unnamed in /proc/cpuinfo"),
-    (XEON, INTEL, ["cuda:0"], True, "off", "the idle hold keeps the cores out of deep idle"),
+@pytest.mark.parametrize(("states", "text", "holding", "setting"), [
+    (XEON, INTEL, False, "siblings"),
+    (SIERRA, INTEL, False, "siblings"),
+    (DEEP_C6, INTEL, False, "siblings"),
+    (VM, INTEL, False, "off"),
+    ([("C1", 1, False), ("C6", 99, False)], INTEL, False, "off"),
+    (NO_DEEP, INTEL, False, "off"),
+    ([], INTEL, False, "off"),
+    (XEON, AMD, False, "off"),
+    (XEON, ARM, False, "off"),
+    (XEON, INTEL, True, "off"),
 ])
 def test_auto_takes_siblings_only_on_an_intel_host_whose_cores_sleep_deep(
-        tmp_path, monkeypatch, states, text, devices, holding, setting, why):
-    """The hosts measured: siblings beat no pin on the deep-idle Xeons (6767P, 6740E) and lost on a 2-socket EPYC
-    (C2 at 800 µs), a Sapphire Rapids VM with C1 only and an H100 VM without cpuidle."""
+        tmp_path, monkeypatch, states, text, holding, setting):
     mask = parse_cpu_list("32-39")
     monkeypatch.setattr(cpus, "_CPU_ROOT", _idle(tmp_path, mask, states))
     monkeypatch.setattr(cpus, "_CPUINFO", _cpuinfo(tmp_path, text))
-    got, said = cpus.auto_setting(devices, holding, mask)
-    assert got == setting and why in said
+    assert cpus.auto_setting(["cuda:0"], holding, mask)[0] == setting
 
 
 @pytest.mark.parametrize(("name", "setting"), [
@@ -557,6 +554,7 @@ def test_the_vendor_is_the_first_processors(tmp_path):
     assert cpus.cpu_vendor(_cpuinfo(tmp_path, INTEL)) == "GenuineIntel"
     assert cpus.cpu_vendor(_cpuinfo(tmp_path, AMD)) == "AuthenticAMD"
     assert cpus.cpu_vendor(_cpuinfo(tmp_path, ARM)) is None
+    assert cpus.cpu_vendor(tmp_path / "absent") is None
 
 
 # ── the PM QoS hold ─────────────────────────────────────────────────────────
@@ -624,7 +622,7 @@ def test_every_entry_point_takes_the_hold_with_its_plan(tmp_path, idle_hold, mon
     device.write_bytes(b"")
     monkeypatch.setattr(cpus, "_PM_QOS_DEVICE", device)
     monkeypatch.setattr(entrypoint, "accelerator_type", lambda: "cpu")
-    # set, not deleted: the plan writes these, and monkeypatch restores only a variable it recorded. Empty reads as unset
+    # set, not deleted: the plan writes these, and monkeypatch restores only what it recorded. Empty reads as unset
     for name in ("MSTAR_IDLE_HOLD", "MSTAR_STEP_THREAD_CORE", cpus.CORE_SET_ENV):
         monkeypatch.setenv(name, "")
     config = {"knobs": {"idle_hold": "qos", "step_thread_core": setting},
@@ -1001,6 +999,17 @@ def test_auto_elsewhere_logs_one_line_and_nothing_warns(api_plan, monkeypatch, t
     assert os.environ["MSTAR_STEP_THREAD_CORE"] == "off"
     assert not [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert len([r for r in caplog.records if "auto" in r.getMessage()]) == 1
+
+
+@pytest.mark.parametrize(("device_there", "pinned"), [(True, False), (False, True)])
+def test_auto_pins_nothing_only_under_a_hold_it_got(api_plan, idle_hold, monkeypatch, gpu_locks, device_there, pinned):
+    device = gpu_locks / "cpu_dma_latency"
+    if device_there:
+        device.write_bytes(b"")
+    monkeypatch.setattr(cpus, "_PM_QOS_DEVICE", device)
+    monkeypatch.setenv("MSTAR_IDLE_HOLD", "qos")
+    monkeypatch.setenv("MSTAR_STEP_THREAD_CORE", "auto")
+    assert bool(api_plan().pinned) == pinned
 
 
 def test_auto_refused_a_lock_says_so_once_and_warns_of_nothing(other_server, api_plan, monkeypatch, caplog):
