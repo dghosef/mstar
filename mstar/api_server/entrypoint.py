@@ -2791,9 +2791,9 @@ def deployment_cpu_plan(config: dict) -> cpus.CpuPlan:
     devices = deployment_workers(config, accelerator_type()).devices
     if setting == "auto":
         setting, why = cpus.auto_setting(devices, holding)
-        # Only placement over every GPU of the host: under a mask too small for
-        # them, servers in separate containers would take the same cores.
-        plan = cpus.deployment_plan(setting, cpus.device_addresses(devices) if setting != "off" else [])
+        # Its workers read the result and build the same plan without host_wide,
+        # which only refuses plans (``cpus.deployment_plan``).
+        plan = cpus.devices_plan(setting, devices, slot=0, host_wide=True)
         if not plan.pinned:
             logger.info("step_thread_core auto: nothing pinned, %s", why if setting == "off" else plan.why)
             setting = "off"

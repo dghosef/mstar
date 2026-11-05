@@ -514,7 +514,6 @@ NO_DEEP = [("C1E", 2, False), ("C6", 170, True), ("C6P", 210, True)]  # the deep
     (XEON, AMD, ["cuda:0"], False, "off", "the CPU vendor is AuthenticAMD"),
     (XEON, ARM, ["cuda:0"], False, "off", "the CPU vendor is unnamed in /proc/cpuinfo"),
     (XEON, INTEL, ["cuda:0"], True, "off", "the idle hold keeps the cores out of deep idle"),
-    (XEON, INTEL, ["cuda:0", "cpu"], False, "off", "a worker runs on the CPU"),
 ])
 def test_auto_takes_siblings_only_on_an_intel_host_whose_cores_sleep_deep(
         tmp_path, monkeypatch, states, text, devices, holding, setting, why):
@@ -985,6 +984,13 @@ def test_auto_pins_siblings_on_a_deep_idle_intel_host_and_its_workers_follow(api
 def test_auto_elsewhere_logs_one_line_and_nothing_warns(api_plan, monkeypatch, tmp_path, gpu_locks, caplog):
     from api_server_helpers import make_test_api_server
 
+    from mstar import platforms
+
+    def no_device_query(*args):
+        raise AssertionError("a host that doesn't pin asked about its devices")
+
+    monkeypatch.setattr(cpus, "device_addresses", no_device_query)
+    monkeypatch.setattr(platforms.current_platform, "is_gpu_slice", no_device_query, raising=False)
     monkeypatch.setattr(cpus, "_CPUINFO", _cpuinfo(tmp_path, AMD))
     monkeypatch.setenv("MSTAR_STEP_THREAD_CORE", "auto")
     with caplog.at_level(logging.INFO):
@@ -1017,6 +1023,17 @@ def test_auto_pins_nothing_where_only_the_containers_gpus_fit(api_plan, monkeypa
     monkeypatch.setattr(cpus, "deployment_plan", placed)
     monkeypatch.setattr(platforms.current_platform, "reachable_pci_addresses", lambda: frozenset({A}), raising=False)
     monkeypatch.setattr(platforms.current_platform, "visible_pci_addresses", lambda: frozenset({A}), raising=False)
+    monkeypatch.setenv("MSTAR_STEP_THREAD_CORE", "auto")
+    assert api_plan().pinned == frozenset() and os.environ["MSTAR_STEP_THREAD_CORE"] == "off"
+    monkeypatch.setenv("MSTAR_STEP_THREAD_CORE", "siblings")
+    assert api_plan().pinned
+
+
+@pytest.mark.parametrize("address", [None, "0000:ff:00.0"])
+def test_auto_pins_nothing_on_a_device_sysfs_does_not_list(api_plan, monkeypatch, gpu_locks, address):
+    """A device with no PCI address, as on XPU, or one sysfs lacks has no rank, so its server would take the mask's
+    first cores whatever another server took. An explicit ``siblings`` takes that risk; the default doesn't."""
+    monkeypatch.setattr(cpus, "device_addresses", lambda devices: [address] * len(devices))
     monkeypatch.setenv("MSTAR_STEP_THREAD_CORE", "auto")
     assert api_plan().pinned == frozenset() and os.environ["MSTAR_STEP_THREAD_CORE"] == "off"
     monkeypatch.setenv("MSTAR_STEP_THREAD_CORE", "siblings")

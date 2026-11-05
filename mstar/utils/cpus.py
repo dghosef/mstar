@@ -462,13 +462,19 @@ def deployment_plan(
     reachable: Collection[str] = (),
     own: Collection[str] = (),
     slot: int = 0,
+    host_wide: bool = False,
 ) -> CpuPlan:
     """The plan for a deployment whose workers' devices sit at PCI
     ``addresses``, in the conductor's worker order (None for a device sysfs
     doesn't place, such as a CPU worker; only ``always`` and ``siblings``
     read them), ``reachable`` the GPUs this container can open, ``own`` the
     ones this process was given, and ``slot`` the core set to take when the
-    mask holds more than one (``claim_cores``).
+    mask holds more than one (``claim_cores``). ``host_wide`` places by rank
+    among every GPU of the host or not at all, as ``auto`` does: the rules
+    that fall back to ``reachable`` or ``own``, and a device sysfs doesn't
+    list, take cores that a server in another container, which no lock
+    reaches, may take too. A plan it allows is the plan the same call without
+    it gives, since those GPUs rank first either way.
 
     ``off`` pins nothing, and so does ``auto``, which only the API server
     resolves (``auto_setting``): its workers read the result. A CPU number
@@ -497,7 +503,7 @@ def deployment_plan(
         else:
             layout = _Layout(_spread, f"{STEP_CORES + 1} ({STEP_CORES} for its worker's step threads, 1 for its API "
                                       "server)")
-        placed = _by_rank(setting, addresses, mask, cores_of, layout, pci_root, reachable, own, slot)
+        placed = _by_rank(setting, addresses, mask, cores_of, layout, pci_root, reachable, own, slot, host_wide)
         if isinstance(placed, str):
             return CpuPlan(mask, usable, why=f"not pinned: {placed}")
         workers, result, why, sets = placed
@@ -525,8 +531,6 @@ def auto_setting(devices: Sequence[str], holding: bool, mask: Collection[int] | 
     mask = frozenset(process_mask() if mask is None else mask)
     if not PINNABLE:
         return "off", "no sched_setaffinity here"
-    if any(device.partition(":")[0] == "cpu" for device in devices):
-        return "off", "a worker runs on the CPU"
     if holding:
         return "off", "the idle hold keeps the cores out of deep idle"
     vendor = cpu_vendor()
@@ -603,12 +607,16 @@ def _gpu_pools(gpus, mask, cores_of, layout, sets=1, slot=0) -> dict[str, _Pool]
     return pools
 
 
-def _by_rank(setting, addresses, mask, cores_of, layout, pci_root, reachable, own=(), slot=0):
+def _by_rank(setting, addresses, mask, cores_of, layout, pci_root, reachable, own=(), slot=0, host_wide=False):
     """``(workers, result, why, sets)``, or why nothing can be pinned."""
     cores = cores_of(mask)
     if not cores or not addresses:
         return "no CPU or no worker to place"
     gpus = next((found for a in addresses if a and (found := host_gpus(a, pci_root))), [])
+    if host_wide:
+        if not set(addresses) <= {gpu.address for gpu in gpus}:
+            return "a worker's device is not a GPU this host's sysfs lists"
+        reachable = own = ()
     unplaced = _Pool(cores, 0, 1, "no sysfs entry for its device, so over the process mask")
 
     def short_of_cores(group, sets=1, slot=0):
@@ -673,7 +681,8 @@ def device_addresses(devices: Sequence[str]) -> list[str | None]:
     return addresses
 
 
-def devices_plan(setting: str | int, devices: Sequence[str], slot: int | None = None) -> CpuPlan:
+def devices_plan(setting: str | int, devices: Sequence[str], slot: int | None = None,
+                 host_wide: bool = False) -> CpuPlan:
     """``deployment_plan`` for the workers' device strings, in the conductor's
     worker order: the same call in the API server and in every worker. A
     worker takes the core set its API server locked (``CORE_SET_ENV``)."""
@@ -686,7 +695,7 @@ def devices_plan(setting: str | int, devices: Sequence[str], slot: int | None = 
         slot = int(inherited) if inherited.isdigit() else 0
     return deployment_plan(setting, device_addresses(devices),
                            reachable=current_platform.reachable_pci_addresses(),
-                           own=current_platform.visible_pci_addresses(), slot=slot)
+                           own=current_platform.visible_pci_addresses(), slot=slot, host_wide=host_wide)
 
 
 # ── one server per GPU ──────────────────────────────────────────────────────

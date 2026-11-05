@@ -511,9 +511,10 @@ Worker scheduling
        or more on a CPU of the process mask
        (``/sys/devices/system/cpu/cpu*/cpuidle/state*/latency``,
        ``cpus.deepest_idle``, ``cpus.DEEP_IDLE_US``), and pins nothing
-       elsewhere, with a CPU worker, or while the server holds ``idle_hold``.
-       It places over every GPU of the host only, so a mask too small for
-       them pins nothing, and so does a slice of a GPU (a MIG instance, by its
+       elsewhere or while the server holds ``idle_hold``.
+       It places over every GPU of the host only, so a worker on a device
+       sysfs doesn't list (a CPU worker, or an XPU, which reports no PCI
+       address) or a mask too small for them pins nothing, and so does a slice of a GPU (a MIG instance, by its
        device name, ``Platform.is_gpu_slice``): servers on one GPU rank alike.
        Time-slicing a GPU between pods can't be seen from inside one, so
        those pods stack their threads on the same CPUs: set ``off`` there.
