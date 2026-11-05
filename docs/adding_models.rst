@@ -2478,7 +2478,9 @@ FlashInfer attention (``flashinfer``, ``flashinfer_mla``) with ``flashinfer_back
 the recurrent state pool (GDN, KDA; the same state on every SP partner) do; dense, flex and XPU
 attention, cross-attention, DSA and ``sliding_window`` don't, and a ring or bounded KV pool can't
 set the key. A decode/prefill ``splits`` and ``decode_fmha`` are ignored over a placed pool, and
-a node over one plans on the host rather than resident (``resident_planning``).
+a node over one plans on the host rather than resident (``resident_planning``). MLA's fused latent
+prep (``mla_fused_prep``) serves only a step of one token a row there, so under MTP, whose decode
+steps are several tokens a row, every step takes the op-by-op prep.
 
 A step of one token a row attends the pages after its KV write (in TP mode on tensor cores
 whatever ``decode_tensor_cores`` says). Any other step attends its stored context on the pages

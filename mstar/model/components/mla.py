@@ -272,7 +272,8 @@ class MLAAttention(nn.Module):
     def _attends_step_latents(self) -> bool:
         """Whether this step attends its own latents from the ``k`` passed to ``run``, which the
         fused prep writes to the cache without handing back: a step that isn't one token a row
-        over a context-parallel pool (``AttentionManager.reads_step_kv``)."""
+        over a context-parallel pool (``AttentionManager.reads_step_kv``). That is every step
+        under MTP, whose decode steps are several tokens a row."""
         return self._kv.placement is not None and self._attn.reads_step_kv(**self._label)
 
     def _out(self, attn_latent: torch.Tensor) -> torch.Tensor:
