@@ -411,19 +411,19 @@ def test_a_step_with_no_capture_for_its_batch_runs_one_iteration(captured):
     assert batch.step_context.repeats == (4 if captured else 1)
 
 
-def _raw_backend(slot):
-    """A backend whose raw launch replays ``slot``'s graph and whose 2D copy
-    moves bytes on the host, through the C entry points the Rust loop calls;
-    and the calls it took, in order."""
+def _raw_backend(*slots):
+    """A backend whose raw launch of graph exec ``i + 1`` replays ``slots[i]``'s
+    graph and whose 2D copy moves bytes on the host, through the C entry
+    points the Rust loop calls; and the calls it took, in order."""
     from mstar.engine.accelerator_graph_backend import RawLaunch
 
     calls = []
 
     @ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
     def launch(graph_exec, stream):
-        assert (graph_exec, stream) == (1, 2)
+        assert stream == 2
         calls.append("launch")
-        slot.graph.replay()
+        slots[graph_exec - 1].graph.replay()
         return 0
 
     @ctypes.CFUNCTYPE(
@@ -438,7 +438,10 @@ def _raw_backend(slot):
         return 0
 
     addresses = [ctypes.cast(fn, ctypes.c_void_p).value for fn in (launch, copy)]
-    backend = SimpleNamespace(raw_launch=lambda graph: RawLaunch(*addresses, 1, 2), keep=(launch, copy))
+    execs = {id(slot.graph): i + 1 for i, slot in enumerate(slots)}
+    backend = SimpleNamespace(
+        raw_launch=lambda graph: RawLaunch(*addresses, execs[id(graph)], 2), keep=(launch, copy),
+    )
     return backend, calls
 
 
@@ -478,7 +481,7 @@ def test_a_repeat_carries_every_loop_back_signal_and_keeps_a_column_per_replay(r
     runner.slot_for = lambda lease: slot
     runner._graph_backend, calls = _raw_backend(slot)
     landing = TokenStream(2, 3, torch.device("cpu"))
-    wide, rows, _ = runner.repeat(None, carries, 3, (), ["frame"], stream=(landing, "new_token"))
+    wide, rows, _ = runner.repeat([runner.run_part(None, carries)], 3, ["frame"], stream=(landing, "new_token"))
     if raw:
         # each replay's columns out, then the next one's carries in and its launch
         assert calls == ["copy"] * 4 + (["copy"] * 3 + ["launch"] + ["copy"] * 4) * 2
@@ -492,11 +495,48 @@ def test_a_repeat_carries_every_loop_back_signal_and_keeps_a_column_per_replay(r
     assert rows["frame"].tolist() == [[[5, -5], [6, -6], [7, -7]], [[7, -7], [8, -8], [9, -9]]]
 
 
+@pytest.mark.parametrize("raw", [False, True], ids=["host_loop", "rust_loop"])
+def test_a_run_of_two_nodes_replays_each_in_turn_with_what_the_other_left(raw):
+    """A Loop of a producer and the node that closes its iteration (BAGEL's
+    branch and combine_cfg): each round, the producer reads the closer's last
+    output and the closer reads the producer's, as N passes of the two would."""
+    from mstar.engine.accelerator_graph_runner import RunPart
+
+    x_in, v, v_in, x = torch.zeros(1), torch.zeros(1), torch.zeros(1), torch.tensor([1.0])
+    order = []
+
+    class Producer:
+        def replay(self):
+            order.append("p")
+            v.copy_(x_in * 10)
+
+    class Closer:
+        def replay(self):
+            order.append("c")
+            x.copy_(x_in + v_in)
+
+    producer = SimpleNamespace(graph=Producer(), raw_launch=raw)
+    closer = SimpleNamespace(
+        graph=Closer(), raw_launch=raw, static_inputs={},
+        static_outputs=SimpleNamespace(check_stop_buffers={}, row_outputs={"x": x}, output_spans=None),
+    )
+    runner = AcceleratorGraphRunner.__new__(AcceleratorGraphRunner)
+    runner._graph_backend, calls = _raw_backend(producer, closer)
+    # the closer's x feeds both nodes' x_in (one buffer here), the producer's v the closer's v_in
+    parts = [RunPart(producer, [(x, x_in)], []), RunPart(closer, [(v, v_in)], [])]
+    wide, rows, _ = runner.repeat(parts, 3, ["x"])
+    # replay 0 ran before the run (x = 1); then p, c twice: v = 10, x = 11; v = 110, x = 121
+    assert order == ["p", "c"] * 2
+    if raw:
+        assert calls.count("launch") == 4
+    assert rows["x"].tolist() == [[1.0, 11.0, 121.0]]
+
+
 def test_a_run_a_copy_of_which_casts_stays_on_the_hosts_loop():
     from mstar.engine.accelerator_graph_runner import _launch_words
 
-    assert _launch_words([None, (torch.zeros(2), torch.zeros(2))]) is not None
-    assert _launch_words([None, (torch.zeros(2), torch.zeros(2, dtype=torch.long))]) is None
+    assert _launch_words([7, (torch.zeros(2), torch.zeros(2))])[:2] == [0, 7]
+    assert _launch_words([7, (torch.zeros(2), torch.zeros(2, dtype=torch.long))]) is None
 
 
 def test_a_capture_that_draws_from_a_torch_generator_keeps_the_hosts_loop():
@@ -2917,7 +2957,7 @@ def test_a_run_stages_each_replays_iteration_input_before_it():
     columns = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
     cond_in.copy_(columns[:, 0])  # the first replay's, staged with the step
     seen.append(cond_in.tolist())
-    runner.repeat(None, {}, 3, iteration={"cond": columns})
+    runner.repeat([runner.run_part(None, {}, iteration={"cond": columns})], 3)
     assert seen == [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]]
 
 
