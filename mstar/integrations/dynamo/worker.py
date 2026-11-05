@@ -76,7 +76,7 @@ def build_server(args) -> tuple[APIServer, mp.process.BaseProcess, str]:
         **{**model_init_kwargs(model_name), **yaml_model_kwargs},
     )
 
-    # before the workers exist: under ``auto`` this takes the GPUs' locks
+    # before the workers exist: it takes the idle hold and the GPUs' and cores' locks
     try:
         cpus.install(deployment_cpu_plan(config))
     except cpus.CpuPlanError as e:

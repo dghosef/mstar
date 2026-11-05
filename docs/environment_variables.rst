@@ -573,8 +573,10 @@ Worker scheduling
      - ``qos`` has the API server open ``/dev/cpu_dma_latency``, write a
        10 µs latency and keep the fd open for its life, which keeps every CPU
        of the host out of idle states slower than that (C1 and C1E stay
-       allowed). The log says what happened, and a device that is absent or
-       not writable only costs the hold: startup carries on. Containers
+       allowed). It is taken with the CPU plan (``deployment_cpu_plan``), so
+       ``mstar serve`` and the Dynamo worker both hold it, whatever
+       ``step_thread_core`` says. A device that is absent or not writable logs a
+       warning and costs only the hold: startup carries on. Containers
        usually hide the device. The request is host-wide and holds cores awake
        whether or not the server is busy, so it spends power on idle hosts; it
        is off by default. ``auto`` placement stands down while it is set:

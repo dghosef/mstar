@@ -2775,13 +2775,16 @@ def deployment_cpu_plan(config: dict) -> cpus.CpuPlan:
     Placing by rank (``always``, ``siblings``) also takes the GPUs' locks, and
     any plan that pins takes its cores' locks, moving to the next core set
     the mask holds when one is held; a server that finds a GPU held, or no set
-    free, pins nothing, here or in its workers. A bad knob value is left for the
+    free, pins nothing, here or in its workers. ``idle_hold: qos`` is taken
+    first, whatever the placement. A bad knob value is left for the
     conductor's deployment check to report; a CPU number the mask can't honour
     raises ``CpuPlanError``."""
     try:
         knobs.configure(config.get("knobs"))
     except ValueError:
         return cpus.plan()
+    if knobs.idle_hold() == "qos":
+        cpus.hold_idle()
     setting = knobs.step_thread_core()
     if setting == "off":
         return cpus.deployment_plan(setting, [])
@@ -2961,8 +2964,6 @@ def main(argv: list[str] | None = None):
         cpus.install(deployment_cpu_plan(config))
     except cpus.CpuPlanError as e:
         raise SystemExit(f"mstar: {e}") from None
-    if knobs.idle_hold() == "qos":
-        logger.info(cpus.hold_idle())
     _set_preprocess_threads(model, config)
 
     global api_server

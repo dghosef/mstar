@@ -632,33 +632,38 @@ def idle_hold():
     cpus._idle_hold_fd = None
 
 
-def test_the_hold_writes_the_latency_and_keeps_the_fd_open(tmp_path, idle_hold):
+def test_the_hold_writes_the_latency_and_keeps_the_fd_open(tmp_path, idle_hold, caplog):
     device = tmp_path / "cpu_dma_latency"
     device.write_bytes(b"")
-    said = cpus.hold_idle(device)
+    with caplog.at_level(logging.INFO, logger="mstar.utils.cpus"):
+        assert cpus.hold_idle(device)
     assert int.from_bytes(device.read_bytes(), sys.byteorder) == cpus.IDLE_HOLD_US == 10
     assert len(device.read_bytes()) == 4, "the device takes a 32-bit value"
-    assert f"holding {device} at 10 µs" in said
+    assert f"holding {device} at 10 µs" in caplog.text
     fd = cpus._idle_hold_fd
     assert os.readlink(f"/proc/self/fd/{fd}") == str(device), "the request lasts as long as the fd"
-    assert "already holding" in cpus.hold_idle(device) and cpus._idle_hold_fd == fd
 
 
-def test_the_hold_says_when_the_device_is_absent(tmp_path, idle_hold):
-    device = tmp_path / "cpu_dma_latency"
-    said = cpus.hold_idle(device)
-    assert "nothing held" in said and "is absent" in said and cpus._idle_hold_fd is None
+def _refused_hold(caplog, device, *said):
+    with caplog.at_level(logging.WARNING, logger="mstar.utils.cpus"):
+        assert not cpus.hold_idle(device)
+    assert cpus._idle_hold_fd is None
+    assert [r.levelno for r in caplog.records] == [logging.WARNING]
+    assert all(part in caplog.text for part in ("nothing held", *said))
 
 
-def test_the_hold_says_when_the_device_is_not_writable(tmp_path, idle_hold, monkeypatch):
+def test_the_hold_warns_when_the_device_is_absent(tmp_path, idle_hold, caplog):
+    _refused_hold(caplog, tmp_path / "cpu_dma_latency", "is absent")
+
+
+def test_the_hold_warns_when_the_device_is_not_writable(tmp_path, idle_hold, monkeypatch, caplog):
     def refuse(*args):
         raise PermissionError(13, "Permission denied")
     monkeypatch.setattr(cpus.os, "open", refuse)
-    said = cpus.hold_idle(tmp_path / "cpu_dma_latency")
-    assert "nothing held" in said and "Permission denied" in said and cpus._idle_hold_fd is None
+    _refused_hold(caplog, tmp_path / "cpu_dma_latency", "Permission denied")
 
 
-def test_a_refused_write_closes_the_fd(tmp_path, idle_hold, monkeypatch):
+def test_a_refused_write_closes_the_fd(tmp_path, idle_hold, monkeypatch, caplog):
     device = tmp_path / "cpu_dma_latency"
     device.write_bytes(b"")
     closed = []
@@ -668,8 +673,30 @@ def test_a_refused_write_closes_the_fd(tmp_path, idle_hold, monkeypatch):
         raise OSError(22, "Invalid argument")
     monkeypatch.setattr(cpus.os, "write", refuse)
     monkeypatch.setattr(cpus.os, "close", lambda fd: (closed.append(fd), real_close(fd))[1])
-    said = cpus.hold_idle(device)
-    assert "nothing held" in said and "Invalid argument" in said and cpus._idle_hold_fd is None and closed
+    _refused_hold(caplog, device, "Invalid argument")
+    assert closed
+
+
+@pytest.mark.parametrize("setting", ["off", "auto", "siblings"])
+def test_every_entry_point_takes_the_hold_with_its_plan(tmp_path, idle_hold, monkeypatch, setting):
+    """``deployment_cpu_plan`` is what ``mstar serve`` and the Dynamo worker both call, so the hold is
+    there, whatever the placement setting."""
+    from mstar.api_server import entrypoint
+
+    device = tmp_path / "cpu_dma_latency"
+    device.write_bytes(b"")
+    monkeypatch.setattr(cpus, "_PM_QOS_DEVICE", device)
+    monkeypatch.setattr(entrypoint, "accelerator_type", lambda: "cpu")
+    for name in ("MSTAR_IDLE_HOLD", "MSTAR_STEP_THREAD_CORE"):
+        monkeypatch.delenv(name, raising=False)
+    config = {"knobs": {"idle_hold": "qos", "step_thread_core": setting},
+              "node_groups": [{"node_names": ["llm"], "ranks": [0]}]}
+    try:
+        entrypoint.deployment_cpu_plan(config)
+    finally:
+        entrypoint.knobs.configure(None)
+        cpus.install(None)
+    assert cpus._idle_hold_fd is not None and os.readlink(f"/proc/self/fd/{cpus._idle_hold_fd}") == str(device)
 
 
 # ── a CPU number, and off ───────────────────────────────────────────────────

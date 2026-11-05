@@ -428,28 +428,31 @@ def deepest_idle(cpus: Iterable[int], root: Path = _CPU_ROOT) -> IdleState | Non
 _idle_hold_fd: int | None = None
 
 
-def hold_idle(device: Path = _PM_QOS_DEVICE) -> str:
+def hold_idle(device: Path | None = None) -> bool:
     """Hold a PM QoS CPU latency request of ``IDLE_HOLD_US`` for the life of
-    this process, and say what happened, for the log. The kernel keeps every
-    CPU of the host out of idle states slower than that while the fd stays
-    open, and drops the request however the process exits. Failing to get it
-    costs only the hold, so this never raises."""
+    this process, and log what happened. The kernel keeps every CPU of the
+    host out of idle states slower than that while the fd stays open, and
+    drops the request however the process exits. Failing to get it costs only
+    the hold, so this warns rather than raises."""
     global _idle_hold_fd
-    if _idle_hold_fd is not None:
-        return f"idle_hold qos: already holding {device}"
+    device = device or _PM_QOS_DEVICE
     try:
         fd = os.open(device, os.O_WRONLY)
     except FileNotFoundError:
-        return f"idle_hold qos: nothing held, {device} is absent (a container often hides it)"
+        logger.warning("idle_hold qos: nothing held, %s is absent (a container often hides it)", device)
+        return False
     except OSError as e:
-        return f"idle_hold qos: nothing held, can't open {device}: {e.strerror}"
+        logger.warning("idle_hold qos: nothing held, can't open %s: %s", device, e.strerror)
+        return False
     try:
         os.write(fd, IDLE_HOLD_US.to_bytes(4, sys.byteorder))
     except OSError as e:
         os.close(fd)
-        return f"idle_hold qos: nothing held, can't write {device}: {e.strerror}"
+        logger.warning("idle_hold qos: nothing held, can't write %s: %s", device, e.strerror)
+        return False
     _idle_hold_fd = fd
-    return f"idle_hold qos: holding {device} at {IDLE_HOLD_US} µs for this server's life"
+    logger.info("idle_hold qos: holding %s at %d µs for this server's life", device, IDLE_HOLD_US)
+    return True
 
 
 # ── building it ─────────────────────────────────────────────────────────────
