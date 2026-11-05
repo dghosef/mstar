@@ -545,8 +545,8 @@ Worker scheduling
        too small for that across the host may do for the GPUs this container
        has a device node for, and those rank instead, which assumes the
        container has its cpuset to itself: two containers under one cpuset,
-       with separate ``/tmp``, take the same CPUs (NVIDIA only; a 2-GPU slice of an 8-GPU host fits an 8-core mask
-       this way). Short of that, the GPUs this process was given
+       with separate ``/tmp``, take the same CPUs (NVIDIA only; a 2-GPU slice
+       of an 8-GPU host fits an 8-core mask this way). Short of that, the GPUs this process was given
        (``CUDA_VISIBLE_DEVICES``, which ``--gpus`` sets) rank, and the mask is
        cut into as many core sets as it holds for them: a one-GPU server under
        an 8-core job mask on a node of four GPUs gets three cores and an API

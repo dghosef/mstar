@@ -32,9 +32,9 @@ finds a set held takes the next.
 
 Pinning can pay where a thread woken on an idle core waits for that core to
 leave a deep idle state, and costs throughput where it doesn't, since the
-threads only queue on their CPUs. ``siblings`` has beaten no pin on the two
-deep-idle Xeons it was measured on and lost on every other host, so ``auto``
-(``auto_setting``) takes it on an Intel CPU whose cores sleep deep
+threads only queue on their CPUs. ``siblings`` has beaten no pin on deep-idle
+Xeons and lost on other hosts (``docs/serving.rst``, under "Host idle states"),
+so ``auto`` (``auto_setting``) takes it on an Intel CPU whose cores sleep deep
 (``deepest_idle``, ``DEEP_IDLE_US``) and pins nothing elsewhere. The API server
 decides once and hands its workers the result through the knob's variable.
 """
@@ -78,8 +78,8 @@ PLACED = ("always", "siblings")
 STEP_CORES = 3
 # CPU latency the idle hold asks for: admits C1 and C1E, refuses the C6 class
 IDLE_HOLD_US = 10
-# ``/proc/cpuinfo`` vendors ``siblings`` was measured to win on (Xeon 6767P and
-# 6740E); it lost on the one AMD host measured, whose idle state was deep too
+# ``/proc/cpuinfo`` vendors ``siblings`` was measured to win on (``docs/serving.rst``);
+# it lost on the one AMD host measured, whose idle state was deep too
 AUTO_VENDORS = ("GenuineIntel",)
 
 

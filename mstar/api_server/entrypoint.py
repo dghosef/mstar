@@ -569,7 +569,8 @@ class APIServer:
             logger.info("API server: message thread and frontend bridge on CPU %d (%s%s; mask %s)",
                         plan.result, plan.why, locked, cpus.format_cpu_list(plan.mask))
         elif knobs.step_thread_core() not in ("off", "auto"):
-            # asked for a placement and didn't get it; ``auto`` logged its own line
+            # asked for a placement and didn't get it; the knob reads ``auto`` here
+            # only after a bad ``knobs:`` block, which the conductor reports
             logger.warning("API server: result threads not pinned (%s)", plan.why)
 
     def pin_result_thread(self) -> None:
