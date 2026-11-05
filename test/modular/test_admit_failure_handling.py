@@ -710,7 +710,7 @@ class _FakeMgmt:
     def next_slot(self) -> int:
         return self._next_slot
 
-    def lease_slot(self) -> int:
+    def lease_slot(self, holder=None) -> int:
         slot = self._next_slot
         self._next_slot = (self._next_slot + 1) % self.num_slots
         return slot
