@@ -75,9 +75,10 @@ def _unpack(pieces: list[torch.Tensor], gather_dim: int) -> list[torch.Tensor]:
 @cache
 def _compiled(layout_copy: Callable) -> Callable:
     """``layout_copy`` compiled on its own: `all_to_all` runs outside any compiled graph, where
-    eager takes a slower strided kernel per tensor. Dynamic, so token counts share a graph: it
-    compiles a few times in the warm-ups, for each tensor count and rank, a count of 1, and once
-    more if the first count happens to equal another extent, but not per count.
+    eager takes a slower strided kernel per tensor. Dynamic, so sizes share a graph: it compiles
+    in the warm-ups once per number of tensors, per layout (packed or ``[B, S, ...]``) and per
+    extent of 1 (a single token, or B=1), plus once if the first sizes happen to equal another
+    extent, but not per token count.
 
     Gated on the device as the engine's compiles are, not on a node's
     ``disable_torch_compile``: that opts a forward out of being compiled whole, and Cosmos3 sets
