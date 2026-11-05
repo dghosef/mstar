@@ -568,9 +568,8 @@ class APIServer:
             locked = f"; lock held on cores {plan.locked}" if plan.locked else ""
             logger.info("API server: message thread and frontend bridge on CPU %d (%s%s; mask %s)",
                         plan.result, plan.why, locked, cpus.format_cpu_list(plan.mask))
-        elif plan.declined:
-            logger.info("API server: result threads not pinned (%s)", plan.why)
-        elif knobs.step_thread_core() != "off":
+        elif knobs.step_thread_core() not in ("off", "auto"):
+            # asked for a placement and didn't get it; ``auto`` logged its own line
             logger.warning("API server: result threads not pinned (%s)", plan.why)
 
     def pin_result_thread(self) -> None:
@@ -2772,35 +2771,50 @@ async def shutdown_event():
 def deployment_cpu_plan(config: dict) -> cpus.CpuPlan:
     """The deployment's CPU plan, as each worker builds it from the conductor's
     device list: the config's ``step_thread_core`` and ``deployment_workers``.
-    Placing by rank (``always``, ``siblings``) also takes the GPUs' locks, and
-    any plan that pins takes its cores' locks, moving to the next core set
-    the mask holds when one is held; a server that finds a GPU held, or no set
-    free, pins nothing, here or in its workers. ``idle_hold: qos`` is taken
-    first, whatever the placement. A bad knob value is left for the
-    conductor's deployment check to report; a CPU number the mask can't honour
-    raises ``CpuPlanError``."""
+    ``idle_hold: qos`` is taken first, whatever the placement. ``auto`` is
+    decided here (``cpus.auto_setting``), as ``siblings`` placed over the
+    host's GPUs or ``off``, and the result written to the knob's variable for
+    the workers. Placing by rank (``always``, ``siblings``) also takes the
+    GPUs' locks, and any plan that pins takes its cores' locks, moving to the
+    next core set the mask holds when one is held; a server that finds a GPU
+    held, or no set free, pins nothing, here or in its workers. A bad knob
+    value is left for the conductor's deployment check to report; a CPU number
+    the mask can't honour raises ``CpuPlanError``."""
     try:
         knobs.configure(config.get("knobs"))
     except ValueError:
         return cpus.plan()
-    if knobs.idle_hold() == "qos":
-        cpus.hold_idle()
+    holding = knobs.idle_hold() == "qos" and cpus.hold_idle()
     setting = knobs.step_thread_core()
     if setting == "off":
         return cpus.deployment_plan(setting, [])
     devices = deployment_workers(config, accelerator_type()).devices
-    plan = cpus.devices_plan(setting, devices, knobs.idle_hold(), slot=0)
+    if setting == "auto":
+        setting, why = cpus.auto_setting(devices, holding)
+        # Only placement over every GPU of the host: under a mask too small for
+        # them, servers in separate containers would take the same cores.
+        plan = cpus.deployment_plan(setting, cpus.device_addresses(devices) if setting != "off" else [])
+        if not plan.pinned:
+            logger.info("step_thread_core auto: nothing pinned, %s", why if setting == "off" else plan.why)
+            setting = "off"
+        else:
+            logger.info("step_thread_core auto: siblings, %s", why)
+        # the workers read the knob when they build their plan
+        os.environ[knobs.KNOBS["step_thread_core"]] = setting
+        if setting == "off":
+            return plan
+    else:
+        plan = cpus.devices_plan(setting, devices, slot=0)
     if not plan.pinned:
         return plan
     refused = cpus.claim_gpus(cpus.device_addresses(devices)) if setting in cpus.PLACED else None
     if refused is None:
-        plan = cpus.claim_cores(plan, lambda slot: cpus.devices_plan(setting, devices, knobs.idle_hold(), slot=slot))
+        plan = cpus.claim_cores(plan, lambda slot: cpus.devices_plan(setting, devices, slot=slot))
         if plan.pinned:
             os.environ[cpus.CORE_SET_ENV] = str(plan.slot)
             return plan
         refused = plan.why.removeprefix("not pinned: ")
     logger.warning("step_thread_core %s: nothing pinned, %s", setting, refused)
-    # the workers read the knob when they build their plan
     os.environ[knobs.KNOBS["step_thread_core"]] = "off"
     return cpus.CpuPlan(plan.mask, plan.usable, why=f"not pinned: {refused}")
 

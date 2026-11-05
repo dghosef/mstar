@@ -32,12 +32,11 @@ finds a set held takes the next.
 
 Pinning can pay where a thread woken on an idle core waits for that core to
 leave a deep idle state, and costs throughput where it doesn't, since the
-threads only queue on their CPUs. Which layout pays depends on the host: on a
-deep-idle Xeon one core's hardware threads beat no pin and separate cores lost
-to it, while one core's hardware threads lost on two H200 hosts. So ``auto``
-pins nothing and logs why (``_auto_declines``): the reason names the idle hold,
-a CPU vendor other than Intel, idle states under ``DEEP_IDLE_US``
-(``deepest_idle``), or what the separate cores measured.
+threads only queue on their CPUs. ``siblings`` has beaten no pin on the two
+deep-idle Xeons it was measured on and lost on every other host, so ``auto``
+(``auto_setting``) takes it on an Intel CPU whose cores sleep deep
+(``deepest_idle``, ``DEEP_IDLE_US``) and pins nothing elsewhere. The API server
+decides once and hands its workers the result through the knob's variable.
 """
 from __future__ import annotations
 
@@ -68,9 +67,8 @@ logger = logging.getLogger(__name__)
 
 PINNABLE = hasattr(os, "sched_setaffinity")
 
-# Exit latency, in µs, from which a handoff to a sleeping core costs more than
-# queueing on a pinned one. VM-exposed and C1-class states sit well below it,
-# the C6 class well above.
+# Exit latency, in µs, from which ``auto`` counts a host as deep-idle: VM-exposed
+# and C1-class states sit well below it, the C6 class well above.
 DEEP_IDLE_US = 100
 # settings that place by the GPU's rank
 PLACED = ("always", "siblings")
@@ -80,8 +78,8 @@ PLACED = ("always", "siblings")
 STEP_CORES = 3
 # CPU latency the idle hold asks for: admits C1 and C1E, refuses the C6 class
 IDLE_HOLD_US = 10
-# ``/proc/cpuinfo`` vendors ``auto``'s measurements come from (Xeon 6767P and
-# 6740E hosts); elsewhere its reason says so rather than quote them
+# ``/proc/cpuinfo`` vendors ``siblings`` was measured to win on (Xeon 6767P and
+# 6740E); it lost on the one AMD host measured, whose idle state was deep too
 AUTO_VENDORS = ("GenuineIntel",)
 
 
@@ -175,8 +173,6 @@ class CpuPlan:
     workers: tuple[StepCpus | None, ...] = ()
     result: int | None = None
     why: str = "step_thread_core off"
-    # auto chose not to pin here, which is no fault of the deployment's
-    declined: bool = False
     # the disjoint core sets the mask holds for this deployment, and the one taken
     sets: int = 1
     slot: int = 0
@@ -374,7 +370,7 @@ def _siblings(cores: list[tuple[int, ...]], cluster: Callable[[int], frozenset[i
     ``SCHED_IDLE`` spinner holding the 6767P's cores awake it lost at c=1, 753
     against 906 with no pin. On two H200 hosts with SMT it lost to no pin: c=1
     506 against 634 on a 2-socket AMD EPYC (C2 at 800 µs), 13-26% at c=1-32 on
-    the other. So ``auto`` never takes it."""
+    the other. ``auto`` takes it on deep-idle Intel hosts only (``auto_setting``)."""
     return [_Unit(unit, tuple(core for core in cores if core[0] in unit)) for unit in _paired(cores, cluster)]
 
 
@@ -406,10 +402,11 @@ class IdleState(NamedTuple):
     latency_us: int
 
 
-def deepest_idle(cpus: Iterable[int], root: Path = _CPU_ROOT) -> IdleState | None:
+def deepest_idle(cpus: Iterable[int], root: Path | None = None) -> IdleState | None:
     """The idle state of ``cpus`` with the longest exit latency, leaving out
     states disabled in sysfs; None where sysfs lists none (a VM that exposes
     no cpuidle)."""
+    root = root or _CPU_ROOT
     deepest = None
     for cpu in cpus:
         try:
@@ -466,12 +463,9 @@ def deployment_plan(
     pci_root: Path = _PCI_DEVICES,
     siblings: Callable[[int], frozenset[int]] = smt_siblings,
     cluster: Callable[[int], frozenset[int]] = l2_cluster,
-    cpu_root: Path = _CPU_ROOT,
     reachable: Collection[str] = (),
     own: Collection[str] = (),
     slot: int = 0,
-    cpuinfo: Path | None = None,
-    idle_hold: str = "off",
 ) -> CpuPlan:
     """The plan for a deployment whose workers' devices sit at PCI
     ``addresses``, in the conductor's worker order (None for a device sysfs
@@ -480,7 +474,8 @@ def deployment_plan(
     ones this process was given, and ``slot`` the core set to take when the
     mask holds more than one (``claim_cores``).
 
-    ``off`` pins nothing, and ``auto`` pins nothing and says why. A CPU number
+    ``off`` pins nothing, and so does ``auto``, which only the API server
+    resolves (``auto_setting``): its workers read the result. A CPU number
     is the first worker's core; the next workers take the next cores above it,
     and the API server the last core of the mask; a number outside the mask,
     or too near its top for every worker, raises ``CpuPlanError``. ``always``
@@ -490,13 +485,10 @@ def deployment_plan(
     """
     mask = frozenset(process_mask() if mask is None else mask)
     usable = usable_cpus() if usable is None else usable
-    if setting == "off":
-        return CpuPlan(mask, usable, why="step_thread_core off")
+    if setting in ("off", "auto"):
+        return CpuPlan(mask, usable, why=f"step_thread_core {setting}")
     if not PINNABLE:
         return CpuPlan(mask, usable, why="not pinned: no sched_setaffinity here")
-    if setting == "auto":
-        declined = _auto_declines(idle_hold, cpu_vendor(cpuinfo), mask, cpu_root)
-        return CpuPlan(mask, usable, why=f"not pinned: {declined}", declined=True)
     cores = _cores(mask, siblings)
     if setting in PLACED:
         def cores_of(cpus: Collection[int]) -> list[tuple[int, ...]]:
@@ -526,36 +518,26 @@ def deployment_plan(
     return out
 
 
-def _auto_declines(idle_hold: str, vendor: str | None, mask: frozenset[int], cpu_root: Path) -> str:
-    """Why ``auto`` leaves this host's threads alone. No host it can tell
-    apart has a measurement in which its layout beats no pin yet, so the
-    answer is never None; the reason names what the host has."""
-    anyway = "step_thread_core always pins anyway"
-    if idle_hold != "off":
-        return (f"idle_hold {idle_hold} keeps the cores out of deep idle, where pinning measured no faster than none "
-                f"({anyway})")
+def auto_setting(devices: Sequence[str], holding: bool, mask: Collection[int] | None = None) -> tuple[str, str]:
+    """What ``auto`` takes for workers on ``devices`` (``cuda:0``), and why,
+    for the log: ``siblings`` on an Intel CPU whose cores in ``mask`` sleep
+    deep, else ``off``. ``holding``: this process holds the idle hold."""
+    mask = frozenset(process_mask() if mask is None else mask)
+    if not PINNABLE:
+        return "off", "no sched_setaffinity here"
+    if any(device.partition(":")[0] == "cpu" for device in devices):
+        return "off", "a worker runs on the CPU"
+    if holding:
+        return "off", "the idle hold keeps the cores out of deep idle"
+    vendor = cpu_vendor()
     if vendor not in AUTO_VENDORS:
-        this = f"this host's is {vendor}" if vendor else "/proc/cpuinfo names no vendor here"
-        return f"auto is measured on Intel hosts only and {this} ({anyway})"
-    shallow = _no_deep_idle(mask, cpu_root)
-    if shallow is not None:
-        return shallow
-    return (f"on an Intel host whose cores sleep deep, the step threads on {STEP_CORES} cores of their own measured "
-            f"no faster than no pin; step_thread_core siblings, one core's hardware threads, measured faster there "
-            f"but lost on other hosts ({anyway})")
-
-
-def _no_deep_idle(mask: frozenset[int], cpu_root: Path) -> str | None:
-    """Why the mask's CPUs don't pay for pinning; None when they do."""
-    deepest = deepest_idle(mask, cpu_root)
-    if deepest is None:
-        where = "sysfs lists no idle state"
-    elif deepest.latency_us < DEEP_IDLE_US:
-        where = f"the deepest idle state is {deepest.name} at {deepest.latency_us} µs"
-    else:
-        return None
-    return (f"{where} on CPUs {format_cpu_list(mask)}, under the {DEEP_IDLE_US} µs from which pinning could pay "
-            "(step_thread_core always pins anyway)")
+        return "off", f"the CPU vendor is {vendor or 'unnamed in /proc/cpuinfo'}, not one siblings was measured on"
+    deepest = deepest_idle(mask)
+    if deepest is None or deepest.latency_us < DEEP_IDLE_US:
+        where = ("sysfs lists no idle state" if deepest is None
+                 else f"the deepest idle state is {deepest.name} at {deepest.latency_us} µs")
+        return "off", f"{where} on CPUs {format_cpu_list(mask)}, under {DEEP_IDLE_US} µs"
+    return "siblings", f"an Intel CPU whose cores sleep deep ({deepest.name} at {deepest.latency_us} µs)"
 
 
 def _explicit(first: int, n: int, mask: frozenset[int], cores: list[tuple[int, ...]]):
@@ -689,20 +671,18 @@ def device_addresses(devices: Sequence[str]) -> list[str | None]:
     return addresses
 
 
-def devices_plan(setting: str | int, devices: Sequence[str], idle_hold: str = "off",
-                 slot: int | None = None) -> CpuPlan:
+def devices_plan(setting: str | int, devices: Sequence[str], slot: int | None = None) -> CpuPlan:
     """``deployment_plan`` for the workers' device strings, in the conductor's
     worker order: the same call in the API server and in every worker. A
     worker takes the core set its API server locked (``CORE_SET_ENV``)."""
-    # auto, which pins nothing, never asks torch about the devices
     if setting not in PLACED:
-        return deployment_plan(setting, [None] * len(devices), idle_hold=idle_hold)
+        return deployment_plan(setting, [None] * len(devices))
     from mstar.platforms import current_platform
 
     if slot is None:
         inherited = os.environ.get(CORE_SET_ENV, "")
         slot = int(inherited) if inherited.isdigit() else 0
-    return deployment_plan(setting, device_addresses(devices), idle_hold=idle_hold,
+    return deployment_plan(setting, device_addresses(devices),
                            reachable=current_platform.reachable_pci_addresses(),
                            own=current_platform.visible_pci_addresses(), slot=slot)
 

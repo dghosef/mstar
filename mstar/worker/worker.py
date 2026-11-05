@@ -2309,15 +2309,13 @@ class Worker:
         """
         devices = local_worker_devices or [str(self.device)]
         slot = worker_ids.index(self.worker_id) if local_worker_devices else 0
-        plan = cpus.devices_plan(knobs.step_thread_core(), devices, knobs.idle_hold())
+        plan = cpus.devices_plan(knobs.step_thread_core(), devices)
         cpus.install(plan)
         self._process_cpus = plan.mask
         self._step_cpus = plan.workers[slot] if plan.workers else None
         step = self._step_cpus
         if step is None:
-            # a host that doesn't call for pinning is the API server's one line
-            if not plan.declined:
-                logger.info("Worker %s: step threads not pinned (%s)", self.worker_id, plan.why)
+            logger.info("Worker %s: step threads not pinned (%s)", self.worker_id, plan.why)
         else:
             logger.info(
                 "Worker %s: step threads (main, GPU, plan) on CPUs %s (%s; %s, worker %d of %d, mask %s)",
