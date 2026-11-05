@@ -19,7 +19,6 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from flashinfer_reference import reference_attention
-from torch._dynamo.testing import CompileCounter
 
 from mstar.distributed.communication import CommGroup, JointGroups, _compiled, _pack, _unpack, sp_seq_split
 from mstar.engine.resources.base import EngineResourceInfo
@@ -116,23 +115,35 @@ def test_all_to_all_of_several_tensors_matches_one_at_a_time(tmp_path, world, to
 
 
 def test_all_to_all_layout_copies_compile_once_for_every_token_count(monkeypatch):
-    """CPU runs them eager, so nothing else here sees `_compiled` start recompiling per token
-    count: on an accelerator, a compile stall at each new size of an uncaptured step, and the
-    recompile limit."""
-    frames = CompileCounter()
-    monkeypatch.setattr(torch, "compile", functools.partial(torch.compile, backend=frames))
+    """CPU runs them eager, so nothing else here sees `_compiled` change what it compiles: once per
+    token count (a compile stall at each new size of an uncaptured step, then the recompile
+    limit), again inside autocast, or with the head extents dynamic too, which on an H100 made
+    the pack 24x slower."""
+    graphs = []
+
+    def backend(gm, example_inputs):
+        graphs.append([
+            tuple(isinstance(size, torch.SymInt) for size in node.meta["example_value"].shape)
+            for node in gm.graph.find_nodes(op="placeholder")
+            if isinstance(node.meta["example_value"], torch.Tensor)
+        ])
+        return gm.forward
+
+    monkeypatch.setattr(torch, "compile", functools.partial(torch.compile, backend=backend))
     torch._dynamo.reset()
     _compiled.cache_clear()
     try:
-        for tokens in (64, 96, 7):
+        for tokens, autocast in ((64, False), (96, False), (7, True)):
             blocks = [torch.zeros(tokens, heads, 4).unflatten(1, (2, -1)).movedim(1, 0) for heads in (8, 2)]
             numels = [blk[0].numel() for blk in blocks]
-            recv = _compiled(_pack)(blocks)
-            pieces = [piece.view(blk.shape) for blk, piece in zip(blocks, recv.split(numels, dim=1), strict=True)]
-            _compiled(_unpack)(pieces, 0)
+            with torch.autocast("cpu", enabled=autocast):
+                recv = _compiled(_pack)(blocks, (1,))
+                pieces = [piece.view(blk.shape) for blk, piece in zip(blocks, recv.split(numels, dim=1), strict=True)]
+                _compiled(_unpack)(pieces, (1,), 0)
     finally:
         _compiled.cache_clear()
-    assert frames.frame_count == 2
+    # one graph each, of [P, tokens, heads / P, head_dim] blocks dynamic in the token count only
+    assert graphs == [[(False, True, False, False)] * 2] * 2
 
 
 def _sharded_keys(rank, world, total):

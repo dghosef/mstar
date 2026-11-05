@@ -57,9 +57,17 @@ def _all_to_all_single(
     return recv
 
 
-def _pack(blocks: list[torch.Tensor]) -> torch.Tensor:
+def _same_tokens(tensors: list[torch.Tensor], token_dims: tuple[int, ...]) -> None:
+    # one token count per exchange: compiled, the tensors share its symbol and index by it alike
+    for x in tensors[1:]:
+        for d in token_dims:
+            torch._check(x.size(d) == tensors[0].size(d))
+
+
+def _pack(blocks: list[torch.Tensor], token_dims: tuple[int, ...]) -> torch.Tensor:
     """The ``[P, ..]`` ``blocks`` as one ``[P, n]`` send buffer: row r is each block's r-th piece
     in turn, so each tensor unpacks contiguous."""
+    _same_tokens(blocks, token_dims)
     numels = [blk[0].numel() for blk in blocks]
     send = blocks[0].new_empty(blocks[0].size(0), sum(numels))
     for blk, piece in zip(blocks, send.split(numels, dim=1), strict=True):
@@ -67,23 +75,41 @@ def _pack(blocks: list[torch.Tensor]) -> torch.Tensor:
     return send
 
 
-def _unpack(pieces: list[torch.Tensor], gather_dim: int) -> list[torch.Tensor]:
+def _unpack(pieces: list[torch.Tensor], token_dims: tuple[int, ...], gather_dim: int) -> list[torch.Tensor]:
     """Each ``[P, ..]`` piece with its P blocks joined along ``gather_dim``."""
+    _same_tokens(pieces, token_dims)
     return [piece.movedim(0, gather_dim).flatten(gather_dim, gather_dim + 1) for piece in pieces]
 
 
 @cache
 def _compiled(layout_copy: Callable) -> Callable:
     """``layout_copy`` compiled on its own: `all_to_all` runs outside any compiled graph, where
-    eager takes a slower strided kernel per tensor. Dynamic, so sizes share a graph: it compiles
-    in the warm-ups once per number of tensors, per layout (packed or ``[B, S, ...]``) and per
-    extent of 1 (a single token, or B=1), plus once if the first sizes happen to equal another
-    extent, but not per token count.
+    eager takes a slower strided kernel per tensor.
+
+    Only the ``token_dims`` are dynamic. Every other extent and stride stays a constant, so the
+    kernel indexes with constants but for the token count. All-dynamic, the pack ran 24x as long
+    on an H100 as one compiled with static shapes, its per-element index math on runtime sizes.
+    It compiles in the warm-ups once per number of tensors, per layout (packed or
+    ``[B, S, ...]``) and per extent of 1 (a single token, or B=1), but not per token count.
+    Autocast is off around it, so a warm-up outside autocast and a step inside it share a
+    compile.
 
     Gated on the device as the engine's compiles are, not on a node's
     ``disable_torch_compile``: that opts a forward out of being compiled whole, and Cosmos3 sets
     it while compiling its denoise step itself."""
-    return with_inductor_overrides(torch.compile(layout_copy, dynamic=True))
+    compiled = with_inductor_overrides(torch.compile(layout_copy))
+
+    def run(tensors: list[torch.Tensor], token_dims: tuple[int, ...], *args):
+        for x in tensors:
+            for d in token_dims:
+                torch._dynamo.maybe_mark_dynamic(x, d)
+        device_type = tensors[0].device.type
+        if not torch.is_autocast_enabled(device_type):
+            return compiled(tensors, token_dims, *args)
+        with torch.autocast(device_type, enabled=False):
+            return compiled(tensors, token_dims, *args)
+
+    return run
 
 
 class ArFusionWorkspace(NamedTuple):
@@ -347,15 +373,18 @@ class CommGroup:
             pack, unpack = _pack, _unpack
         # per tensor [.., N, ..] -> [P, .., N/P, ..], rank r's block at index r
         blocks = [x.unflatten(scatter_dim, (world_size, -1)).movedim(scatter_dim, 0) for x in tensors]
+        # a block's dims before the head dim (the later of the two): tokens, and a [B, S, ...] layout's
+        # rows, which change from step to step; the head dims after them are the model's own
+        token_dims = tuple(range(1, max(scatter_dim, gather_dim) + 1))
         numels = [blk[0].numel() for blk in blocks]
         one_buffer = len(blocks) == 1 and blocks[0].is_contiguous()
-        send = blocks[0].view(world_size, numels[0]) if one_buffer else pack(blocks)
+        send = blocks[0].view(world_size, numels[0]) if one_buffer else pack(blocks, token_dims)
         if gather_sizes is None or len(set(gather_sizes)) == 1:
             # the block received from rank r has this rank's own block's layout
             recv = _all_to_all_single(self.device_group, send, torch.empty_like(send))
             outs = unpack(
                 [piece.view(blk.shape) for blk, piece in zip(blocks, recv.split(numels, dim=1), strict=True)],
-                gather_dim,
+                token_dims, gather_dim,
             )
         else:
             # rank r's block: each tensor's piece with the gathered dim at rank r's extent
