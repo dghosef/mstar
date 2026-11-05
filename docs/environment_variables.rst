@@ -511,7 +511,8 @@ Worker scheduling
        or more on a CPU of the process mask
        (``/sys/devices/system/cpu/cpu*/cpuidle/state*/latency``,
        ``cpus.deepest_idle``, ``cpus.DEEP_IDLE_US``), and pins nothing
-       elsewhere or while the server holds ``idle_hold``.
+       elsewhere or while the server holds ``idle_hold``. It sees only this
+       server's hold: beside another server's it still takes ``siblings``.
        It places over every GPU of the host only, so a worker on a device
        sysfs doesn't list (a CPU worker, or an XPU, which reports no PCI
        address), a mask too small for them, or a worker left on one CPU pins
