@@ -18,8 +18,9 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from flashinfer_reference import reference_attention
+from torch._dynamo.testing import CompileCounter
 
-from mstar.distributed.communication import CommGroup, JointGroups, sp_seq_split
+from mstar.distributed.communication import CommGroup, JointGroups, _pack, _unpack, sp_seq_split
 from mstar.engine.resources.base import EngineResourceInfo
 from mstar.engine.resources.context_parallel import gather_merge, merge
 from mstar.engine.resources.kv.config import KVSpec, KVStep, PagedKVConfig
@@ -88,7 +89,8 @@ def _exchanges(rank, world, total, batched, negative):
 @pytest.mark.parametrize("negative", [False, True], ids=["dims", "negative-dims"])
 @pytest.mark.parametrize("batched", [False, True], ids=["SHD", "BSHD"])
 @pytest.mark.parametrize(
-    "world,total", [(2, 6), (2, 7), (3, 9), (3, 11)], ids=["2-even", "2-uneven", "3-even", "3-uneven"],
+    # 2-uneven's second rank holds one token, whose block needs no copy to send
+    "world,total", [(2, 6), (2, 3), (3, 9), (3, 11)], ids=["2-even", "2-uneven", "3-even", "3-uneven"],
 )
 def test_all_to_all_exchanges(tmp_path, world, total, batched, negative):
     _run(_exchanges, world, tmp_path / "store", total, batched, negative)
@@ -110,6 +112,21 @@ def _several_at_once(rank, world, total, batched):
 @pytest.mark.parametrize("world,total", [(2, 6), (3, 11)], ids=["2-even", "3-uneven"])
 def test_all_to_all_of_several_tensors_matches_one_at_a_time(tmp_path, world, total, batched):
     _run(_several_at_once, world, tmp_path / "store", total, batched)
+
+
+def test_all_to_all_layout_copies_compile_once_for_every_token_count():
+    """CPU runs them eager, so nothing else here sees a change that makes them recompile per
+    size: a stall on an accelerator, and a dropped graph if it comes up inside a capture."""
+    torch._dynamo.reset()
+    packs, unpacks = CompileCounter(), CompileCounter()
+    pack = torch.compile(_pack, dynamic=True, fullgraph=True, backend=packs)
+    unpack = torch.compile(_unpack, dynamic=True, fullgraph=True, backend=unpacks)
+    for tokens in (64, 96, 7):
+        blocks = [torch.zeros(tokens, heads, 4).unflatten(1, (2, -1)).movedim(1, 0) for heads in (8, 2)]
+        numels = [blk[0].numel() for blk in blocks]
+        recv = pack(blocks)
+        unpack([piece.view(blk.shape) for blk, piece in zip(blocks, recv.split(numels, dim=1), strict=True)], 0)
+    assert (packs.frame_count, unpacks.frame_count) == (1, 1)
 
 
 def _sharded_keys(rank, world, total):
