@@ -503,10 +503,9 @@ Worker scheduling
        of one core instead (two cores of one L2 cluster,
        ``topology/cluster_cpus_list``, where a core has one CPU in the mask).
        A core with no such partner in the mask leaves all three on one CPU,
-       where they queue, and the worker warns. ``cpus._siblings`` has its
-       numbers. What ``auto`` did before #1126 is now ``siblings``. On a deep-idle Xeon 6767P it beat
-       no pin and three separate cores; on two H200 hosts with SMT it lost to
-       no pin.
+       where they queue, and the worker warns. What ``auto`` did before #1126
+       is now ``siblings``. On a deep-idle Xeon 6767P it beat no pin and three
+       separate cores; on two H200 hosts with SMT it lost to no pin.
        ``auto`` takes ``siblings`` on an Intel CPU (``cpus.AUTO_VENDORS``, by
        ``/proc/cpuinfo``'s ``vendor_id``) with an enabled idle state of 100 µs
        or more on a CPU of the process mask

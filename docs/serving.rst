@@ -819,6 +819,11 @@ to 8 cores (with their siblings where the CPU has SMT), medians over server sess
      - not measured
      - 527 / 3635 (two cores of a cluster)
      - 636 / 4251, no pin
+   * - 2x H100, Xeon 8470 (SMT, C6 290 µs, ``schedutil``), ``-O1``, a shared pod
+     - 179 / 1291
+     - 216 / 1442
+     - 786 / 4832
+     - not measured
    * - H100 VM without deep idle states (a handoff 22 µs), 32-CPU mask
      - 529 (c=1) / 6520 (c=16)
      - not measured
@@ -829,6 +834,12 @@ to 8 cores (with their siblings where the CPU has SMT), medians over server sess
      - not measured
      - 506 / 3103 (an earlier ``auto``, the same layout)
      - not measured
+
+The 8470 row is the median of eight passes per arm, with another job on the pod's
+other socket and the pod's CPU quota throttling it at times. That moved no pin and
+``always`` a lot (c=1 163-434 and 185-449, overlapping) and ``siblings`` little
+(749-823), so read it as ``siblings`` ahead, not as the size of the gain: the one no-pin
+session with no throttling read 355 / 1800 against 816 / 4832 for ``siblings``.
 
 The last column is a ``SCHED_IDLE`` spinner on each server CPU, a stand-in for
 ``idle_hold: qos`` where the device is hidden: the hold itself has not been measured.

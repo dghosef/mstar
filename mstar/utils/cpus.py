@@ -365,14 +365,8 @@ def _siblings(cores: list[tuple[int, ...]], cluster: Callable[[int], frozenset[i
     sibling, no second core of its cluster) leaves them on one CPU, where they
     queue behind each other, and the worker warns.
 
-    Qwen3.5-0.8B tok/s at c=1 / c=8 on 8 cores of the server's mask: Xeon
-    6767P (SMT, an L2 per core, C6 at 170 µs) 808 / 5670 against 548 / 3939
-    with no pin and 526 / 3851 on three cores of their own; Xeon 6740E (no SMT,
-    four cores to an L2 cluster) 527 / 3635 against 371 / 2688. With a
-    ``SCHED_IDLE`` spinner holding the 6767P's cores awake it lost at c=1, 753
-    against 906 with no pin. On two H200 hosts with SMT it lost to no pin: c=1
-    506 against 634 on a 2-socket AMD EPYC (C2 at 800 µs), 13-26% at c=1-32 on
-    the other. ``auto`` takes it on deep-idle Intel hosts only (``auto_setting``)."""
+    ``auto`` takes it on deep-idle Intel hosts only (``auto_setting``); the
+    measurements are in ``docs/serving.rst`` under "Host idle states"."""
     return [_Unit(unit, tuple(core for core in cores if core[0] in unit)) for unit in _paired(cores, cluster)]
 
 

@@ -194,7 +194,7 @@ def test_always_takes_three_cores_at_the_gpus_rank_on_its_node(tmp_path):
 @pytest.mark.parametrize(("mask", "wide"), [
     (HOST, True), (parse_cpu_list("32-39,160-167"), False), (parse_cpu_list("32-39"), False),
     (parse_cpu_list("32-63,160-191"), True), (parse_cpu_list("0-7,32-47,128-135,160-175"), True)])
-def test_no_two_pinned_threads_share_a_core(tmp_path, mask, wide):
+def test_no_two_pinned_cpus_share_a_core(tmp_path, mask, wide):
     """Whatever the mask holds of each core; on a wide mask also across GPUs and a split config's workers."""
     root = _sysfs(tmp_path)
     wider = [["0000:40:00.0", "0000:62:00.0"], ["0000:73:00.0", "0000:73:00.0"]]
