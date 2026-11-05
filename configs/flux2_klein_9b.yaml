@@ -5,6 +5,10 @@ model: "flux2_klein_9b"
 # not Apache-2.0; check the license before deploying.
 max_seq_len: 512
 
+# As the 4B config; not measured on this model
+knobs:
+  step_thread_core: off
+
 model_kwargs:
   # sdpa (cuDNN on H100) is the reference kernel; flashinfer stays available
   attention_backend: sdpa

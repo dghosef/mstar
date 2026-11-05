@@ -4,6 +4,10 @@ model: "flux2_klein"
 # only satisfies the conductor's config check (the 512-token prompt).
 max_seq_len: 512
 
+# Pinned step threads cost klein about 12% at c=1 on a deep-idle Xeon ("Host idle states" in docs/serving.rst)
+knobs:
+  step_thread_core: off
+
 # FLUX.2 [klein] 4B, single GPU, all four nodes colocated. Serving knobs (forwarded to
 # Flux2KleinModel.__init__): attention_backend sdpa|flashinfer, torch.compile of the
 # transformer per shape, CUDA-graph capture of the denoise step for the listed

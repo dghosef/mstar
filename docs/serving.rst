@@ -849,8 +849,9 @@ level with it, so ``auto`` pins nothing while the server holds it.
 
 Pinning has other costs. ``siblings`` on the 6740E raised 0.8B's time to first token
 at high concurrency (c=64 67 → 86 ms) while raising its throughput, and FLUX.2 klein
-at c=1 lost about 12% there (c=8 level). ``auto`` takes those costs on such a host, so
-a low-duty model with eager host work should set ``off``.
+at c=1 lost about 12% there (c=8 level). ``auto`` accepts the first cost on such a host
+for the throughput. The second is the model's to refuse: a low-duty model with eager host
+work should set ``off``, as both shipped klein configs do.
 
 Details are in :doc:`environment_variables` under ``MSTAR_STEP_THREAD_CORE``.
 
