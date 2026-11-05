@@ -2322,6 +2322,12 @@ class Worker:
                 self.worker_id, cpus.format_cpu_list(step.cpus), step.why,
                 self.device, slot + 1, len(devices), cpus.format_cpu_list(plan.mask),
             )
+            if len(step.cpus) == 1:
+                logger.warning(
+                    "Worker %s: main, GPU and plan threads all on CPU %s, so they queue behind each other: its core's "
+                    "sibling or a second core of its L2 cluster isn't in the mask",
+                    self.worker_id, cpus.format_cpu_list(step.cpus),
+                )
 
     def _pin_step_thread(self) -> None:
         if self._step_cpus is not None:

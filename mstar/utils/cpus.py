@@ -361,7 +361,9 @@ def _siblings(cores: list[tuple[int, ...]], cluster: Callable[[int], frozenset[i
     threads of one core, or on two cores of an L2 cluster where a core has one
     CPU in the mask. The core (or cluster) stays awake while any of the three
     runs, so a handoff rarely waits for it to leave a deep idle state, but the
-    three share its execution units.
+    three share its execution units. A core with no partner in the mask (no
+    sibling, no second core of its cluster) leaves them on one CPU, where they
+    queue behind each other, and the worker warns.
 
     Qwen3.5-0.8B tok/s at c=1 / c=8 on 8 cores of the server's mask: Xeon
     6767P (SMT, an L2 per core, C6 at 170 µs) 808 / 5670 against 548 / 3939

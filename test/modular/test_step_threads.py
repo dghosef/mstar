@@ -1504,6 +1504,16 @@ def test_the_api_message_thread_and_the_bridge_move_to_the_result_cpu(monkeypatc
     make_test_api_server().pin_result_thread()
 
 
+def test_a_worker_left_on_one_cpu_warns(monkeypatch, caplog):
+    mask = parse_cpu_list("32-39")
+    monkeypatch.setattr(cpus, "devices_plan", lambda setting, devices: CpuPlan(mask, 8, (_one(32),), 39, "siblings: x"))
+    worker = _bare_worker("worker_0", "cuda:0")
+    with caplog.at_level(logging.WARNING, logger="mstar.worker.worker"):
+        worker._plan_step_cpus(["worker_0"], ["cuda:0"])
+    assert "all on CPU 32, so they queue behind each other" in caplog.text
+    cpus.install(None)
+
+
 def test_the_api_server_takes_its_cpu_from_the_plan_and_logs_it(monkeypatch, caplog):
     from api_server_helpers import make_test_api_server
 
