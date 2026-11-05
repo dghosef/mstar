@@ -1159,9 +1159,9 @@ class LLMSubmodule(ARNodeSubmodule):
         )
 
     def repeat_carry(self, graph_walk: str, signals) -> dict[str, CarryPair]:
-        # a denoise step's latents go back in as its input_embeds
+        # a denoise step's latents go back in as its input_embeds, a branch's too
         pairs = super().repeat_carry(graph_walk, signals)
-        if graph_walk in SINGLE_NODE_DENOISE_WALKS and "latents" in pairs:
+        if graph_walk in DENOISE_WALKS and "latents" in pairs:
             pairs["latents"] = CarryPair("latents", "input_embeds")
         return pairs
 

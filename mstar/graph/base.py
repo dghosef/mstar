@@ -780,12 +780,30 @@ class LoopEdges(NamedTuple):
         )
 
 
+def innermost_loop(section: GraphSection, node_name: str) -> Loop | None:
+    """The innermost Loop of ``section`` that runs ``node_name``, or None."""
+    loops = [loop for loop in section.get_loops().values() if node_name in loop.get_nodes()]
+    return next((loop for loop in loops if not set(loop.section.get_loops()) & {lp.name for lp in loops}), None)
+
+
+def iteration_closer(loop: Loop) -> str | None:
+    """The node an iteration of ``loop`` closes on: the one whose every edge to
+    a node of the Loop loops back, so every other node runs before it. None
+    where no single node is (two nodes that each end the iteration)."""
+    nodes = loop.get_nodes()
+    back = loop._loop_back_inputs or set()
+    sinks = [
+        name for name, node in nodes.items()
+        if all((edge.name, edge.next_node) in back for edge in node.outputs if edge.next_node in nodes)
+    ]
+    return sinks[0] if len(sinks) == 1 else None
+
+
 def loop_edges(section: GraphSection, node_name: str) -> LoopEdges | None:
     """The kinds of ``node_name``'s edges in its innermost Loop in ``section``,
     or None outside any Loop. The kind belongs to the edge: one signal can loop
     back and go to the client at once."""
-    loops = [loop for loop in section.get_loops().values() if node_name in loop.get_nodes()]
-    inner = next((loop for loop in loops if not set(loop.section.get_loops()) & {lp.name for lp in loops}), None)
+    inner = innermost_loop(section, node_name)
     if inner is None:
         return None
     nodes = inner.get_nodes()

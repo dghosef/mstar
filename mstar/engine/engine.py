@@ -22,6 +22,7 @@ from mstar.engine.accelerator_graph_runner import (
     AcceleratorGraphRunner,
     CapturePlan,
     PiecewiseAcceleratorGraphRunner,
+    RunPart,
     autocast_scope,
     fail_if_graphs_required,
     output_named,
@@ -232,6 +233,8 @@ class SubmoduleManagement:
     run_columns: dict[str, frozenset[str]] = field(default_factory=dict)
     # walk -> how a step that repeats carries each loop-back signal between replays
     carries: dict[str, dict[str, CarryPair]] = field(default_factory=dict)
+    # walk -> carried signal -> the node of its run whose output it is, where not this one
+    carry_makers: dict[str, dict[str, str]] = field(default_factory=dict)
     # walk -> why its preprocess can't be skipped between replays (checked at load)
     carry_refusals: dict[str, str] = field(default_factory=dict)
     # walk -> the step its widest capture declares, for each walk that may repeat
@@ -260,6 +263,9 @@ class SubmoduleManagement:
     _slot_lock: threading.Lock = field(
         init=False, default_factory=threading.Lock, repr=False
     )
+    # slot -> the step that last leased it, which a run's closing node reads
+    # the slot's state for (``Engine._gather_run``)
+    holders: dict[int, Any] = field(init=False, default_factory=dict, repr=False)
 
     # label -> PiecewiseCudaGraphRunner for inner-loop capture; spread into
     # ModelInputsFromEngine so the submodule's forward can look them up
@@ -319,10 +325,13 @@ class SubmoduleManagement:
         which is gated on the previous batch's ``commit_done``."""
         return self._next_slot
 
-    def lease_slot(self) -> int:
+    def lease_slot(self, holder: "ExecutingBatch | None" = None) -> int:
+        """The next slot of the rotation, which ``holder`` now holds: each
+        per-step buffer keyed by the slot is its until the next lease of it."""
         with self._slot_lock:
             slot = self._next_slot
             self._next_slot = (self._next_slot + 1) % self._num_slots
+            self.holders[slot] = holder
             return slot
 
     def set_piecewise_slot(self, slot: int) -> None:
@@ -502,6 +511,10 @@ class ExecutingBatch:
     kept_rows: list[bool] | None = None
     # where a run streaming its tokens leaves them as they land
     token_stream: TokenStream | None = None
+    # a run's other nodes, each with the slot its step of the run's first
+    # iteration replayed on, for the step of the node the run closes on
+    # (``Engine._gather_run``)
+    run_leases: dict[str, SlotLease] = field(default_factory=dict)
     # streamed signal -> rid -> the ring position its first item of the step took,
     # and the positions each took (``Engine._reserve_rings``)
     ring_bases: dict[str, dict[int, int]] = field(default_factory=dict)
@@ -638,6 +651,8 @@ class Engine:
     # node -> its lane, for nodes off the chain, and each such lane's stream;
     # set at construction and load, empty for an engine with no lanes
     _walk_lanes: Mapping[tuple[str, str], int] = MappingProxyType({})
+    # (closer, walk) -> the run's other nodes, for a run of several (``join_run``)
+    _runs: Mapping[tuple[str, str], tuple[str, ...]] = MappingProxyType({})
     _node_lanes: Mapping[str, int] = MappingProxyType({})
     _stage_lock: "threading.Lock | None" = None
     # (node, walk) -> the Loop it runs in; set at warmup
@@ -2205,6 +2220,11 @@ class Engine:
             )
         laps.lap("pad")
 
+        if lease is not None and batch.step_context.repeats > 1 and self._runs.get(
+            (batch.node_name, batch.step_context.graph_walk)
+        ):
+            self._gather_run(batch)
+
         try:
             admit, batch.step = self._declare_and_admit(
                 # padded: `inputs` was padded to the bucket above, and the
@@ -2330,7 +2350,7 @@ class Engine:
                 slot=slot, capture=False,
             )
             if i != len(batch.request_ids) - 1:
-                slot = submodule_mgmt.lease_slot()
+                slot = submodule_mgmt.lease_slot(batch)
             # declare (here) and drive (below) are separate loops, so the
             # region runners are pointed at the slot in both
             submodule_mgmt.set_piecewise_slot(ctxs[rid].slot)
@@ -2725,13 +2745,15 @@ class Engine:
                 )
             elif ctx.repeats > 1:
                 columns = submodule_mgmt.run_columns.get(graph_walk, frozenset())
-                # a signal in the rows moves through them, in the graph
-                carries = {s: pair for s, pair in submodule_mgmt.carries[graph_walk].items() if s not in slot.row_heads}
-                part = cg_runner.run_part(
-                    lease, carries, self._runner.replay_columns(step, ctx.repeats), batch.iteration_columns,
-                )
+                leases = {**batch.run_leases, batch.node_name: lease}
+                parts = [self._run_part(node, graph_walk, leases) for node in batch.run_leases]
+                iteration = (batch.iteration_columns or {}).items()
+                parts.append(self._run_part(batch.node_name, graph_walk, leases, [
+                    *((column, slot.static_inputs[name]) for name, column in iteration),
+                    *self._runner.replay_columns(step, ctx.repeats),
+                ]))
                 stops, rows, spans = cg_runner.repeat(
-                    [part], ctx.repeats, columns,
+                    parts, ctx.repeats, columns,
                     None if batch.token_stream is None else (batch.token_stream, streamed[0]),
                 )
                 out = dataclasses.replace(
@@ -2759,6 +2781,74 @@ class Engine:
         if isinstance(out, BatchedModelOutput):
             return out
         return BatchedModelOutput.coerce({request_ids[0]: out})
+
+    def join_run(self, closer: str, graph_walk: str, members: Sequence[str]) -> None:
+        """A step of ``closer`` on ``graph_walk`` that repeats runs the other
+        nodes of its Loop too (``members``, in the iteration's order): settled
+        at load (``Worker._members_refusal``)."""
+        self._runs = {**self._runs, (closer, graph_walk): tuple(members)}
+
+    def _gather_run(self, batch: ExecutingBatch) -> None:
+        """For a step of a node a run of several nodes closes on: the slot each
+        other node's step of this iteration replayed on, where it still holds
+        that step (no step has leased it since) and that step's plan serves
+        every round (no resource has a column a replay for it). Else the step
+        is one iteration, as each of theirs was."""
+        ctx = batch.step_context
+        rows = tuple(batch.request_ids)
+        leases: dict[str, SlotLease] = {}
+        for node in self._runs[(batch.node_name, ctx.graph_walk)]:
+            mgmt = self._submodules[node]
+            held = next((
+                holder for holder in list(mgmt.holders.values())
+                if holder is not None and tuple(holder.request_ids) == rows
+                and holder.step_context.graph_walk == ctx.graph_walk
+                and holder.step_context.slot_lease is not None and holder.admit_error is None
+            ), None)
+            if held is None or (held.step is not None and self._runner.replay_columns(held.step, ctx.repeats)):
+                ctx.repeats = 1
+                batch.run_leases = {}
+                return
+            leases[node] = held.step_context.slot_lease
+        leases[batch.node_name] = ctx.slot_lease
+        for node in leases:
+            if node != batch.node_name and not self._carries_fit(node, ctx.graph_walk, leases):
+                ctx.repeats = 1
+                return
+        if not self._carries_fit(batch.node_name, ctx.graph_walk, leases):
+            ctx.repeats = 1
+            return
+        del leases[batch.node_name]
+        batch.run_leases = leases
+
+    def _carries_fit(self, node: str, graph_walk: str, leases: Mapping[str, SlotLease]) -> bool:
+        """Whether each carry into ``node``'s slot is the size of its input:
+        two nodes' captures, which load could only check apart."""
+        return all(
+            source.numel() == target.numel()
+            for source, target in self._run_part(node, graph_walk, leases).copies
+        )
+
+    def _run_part(
+        self, node: str, graph_walk: str, leases: Mapping[str, SlotLease],
+        columns: Sequence[tuple[torch.Tensor, torch.Tensor]] = (),
+    ) -> RunPart:
+        """``node``'s part of a run whose nodes replay on ``leases``: the slot
+        it replays, and before each replay after its first, each carried
+        signal copied from the output of the node that makes it (itself, for
+        its own loop-back) into its input. A signal the capture reads off the
+        node's rows moves through them, in the graph."""
+        mgmt = self._submodules[node]
+        slot = mgmt.accelerator_graph_runner.slot_for(leases[node])
+        makers = mgmt.carry_makers.get(graph_walk, {})
+        copies = []
+        for signal, pair in mgmt.carries[graph_walk].items():
+            if signal in slot.row_heads:
+                continue
+            maker = makers.get(signal, node)
+            source = self._submodules[maker].accelerator_graph_runner.slot_for(leases[maker])
+            copies.append((output_named(source.static_outputs, pair.output), slot.static_inputs[pair.input]))
+        return RunPart(slot, copies, list(columns))
 
     def postprocess_batch(
         self, batch: ExecutingBatch, outputs: BatchedModelOutput,
@@ -3436,11 +3526,16 @@ class Engine:
         if refusal is not None:
             mgmt.carry_refusals[walk] = f"node: {refusal}"
 
-    def repeat_refusal(self, node_name: str, graph_walk: str, signals: Collection[str] = ()) -> str | None:
+    def repeat_refusal(
+        self, node_name: str, graph_walk: str, signals: Collection[str] = (),
+        made_by: Mapping[str, str] = MappingProxyType({}),
+    ) -> str | None:
         """Why a step of this walk can't replay with no host work between, or
         None if it may: the deployment, the walk's step, its capture and every
-        resource of the node each answer. ``signals``: the walk's loop-back
-        signals, each carried between replays (``NodeSubmodule.repeat_carry``).
+        resource of the node each answer. ``signals``: the inputs a run carries
+        into it between replays (``NodeSubmodule.repeat_carry``): its own
+        loop-back signals, and those another node of its run makes
+        (``made_by``: signal -> that node, whose output the carry copies).
         After capture, which some resources decide at."""
         mgmt = self._submodules[node_name]
         runner = mgmt.accelerator_graph_runner
@@ -3456,7 +3551,14 @@ class Engine:
         if (refusal := mgmt.carry_refusals.get(graph_walk)) is not None:
             return refusal
         carries = mgmt.submodule.repeat_carry(graph_walk, signals)
-        if runner is not None and (refusal := runner.carry_refusal(graph_walk, carries)) is not None:
+        for signal, maker in made_by.items():
+            # the maker's output, into this node's input
+            output = self._submodules[maker].submodule.repeat_carry(graph_walk, {signal})[signal].output
+            maker_runner = self._submodules[maker].accelerator_graph_runner
+            if maker_runner is None or maker_runner.captured_output(output) is None:
+                return f"node {maker!r}: its capture holds no {output!r} to carry into {node_name!r}"
+            carries[signal] = CarryPair(output, carries[signal].input)
+        if runner is not None and (refusal := runner.carry_refusal(graph_walk, carries, made_by)) is not None:
             return f"runner: {refusal}"
         for key, resource in mgmt.resources.items():
             part = None if host_step is None else host_step.get(key)
@@ -3465,6 +3567,7 @@ class Engine:
             if (refusal := resource.repeat_refusal(graph_walk, part)) is not None:
                 return f"resource {key!r}: {refusal}"
         mgmt.carries[graph_walk] = carries
+        mgmt.carry_makers[graph_walk] = dict(made_by)
         return None
 
     def repeat_note(self, node_name: str, graph_walk: str) -> str | None:
@@ -3594,7 +3697,7 @@ class Engine:
             batch.step_context.repeats = 1
             return None
         if batch.slot is None:
-            batch.set_slot(submodule_mgmt.lease_slot())
+            batch.set_slot(submodule_mgmt.lease_slot(batch))
 
         cg_runner = submodule_mgmt.accelerator_graph_runner
         if cg_runner is None:

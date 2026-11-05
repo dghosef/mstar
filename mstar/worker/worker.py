@@ -135,7 +135,8 @@ from mstar.worker.speculation import (
 from mstar.worker.step_repeats import (
     StepRepeats,
     edge_refusal,
-    loop_back,
+    loop_runs,
+    member_refusal,
     parse_step_repeats,
     run_columns,
     walk_edges,
@@ -923,9 +924,10 @@ class Worker:
                 (model_config or {}).get("step_repeats"),
                 {node for section in walk_graphs.values() for node in section.get_nodes()},
             ),
-            walk_edges(
-                walk_graphs, [(node, walk) for walk, node in self._innermost_loop_by_node if (node, walk) in my_walks],
-            ),
+            walk_edges(walk_graphs, looped := [
+                (node, walk) for walk, node in self._innermost_loop_by_node if (node, walk) in my_walks
+            ]),
+            loop_runs(walk_graphs, looped),
         )
 
         if status_interval_s is not None:
@@ -3101,14 +3103,56 @@ class Worker:
             # a count stop is the loop's cap, which a run never passes (`loop_room`)
             return "node: the runtime doesn't check its stop: its own check_stop decides"
         edges = self._step_repeats.edges[(node_name, graph_walk)]
-        refusal = edge_refusal(edges, engine.streamed_iteration_inputs(node_name), node_name in self.parallel_nodes)
+        run = self._step_repeats.run_nodes(node_name, graph_walk)
+        refusal = edge_refusal(
+            edges, engine.streamed_iteration_inputs(node_name), node_name in self.parallel_nodes, run,
+        )
+        if refusal is None and len(run) > 1:
+            refusal = self._members_refusal(node_name, graph_walk, edges)
         if refusal is None:
             # the client's copy of a token rides the step's token column
             inline = (
                 engine.inline_client_signals(node_name, graph_walk) if self._graph_runtime.supports_inline_emit else {}
             )
             refusal = engine.keep_run_columns(node_name, graph_walk, run_columns(edges, inline))
-        return refusal if refusal is not None else engine.repeat_refusal(node_name, graph_walk, loop_back(edges))
+        if refusal is not None:
+            return refusal
+        return engine.repeat_refusal(node_name, graph_walk, *self._carried_into(node_name, graph_walk))
+
+    def _carried_into(self, node_name: str, graph_walk: str) -> tuple[frozenset[str], dict[str, str]]:
+        """The inputs a run carries into this node between replays, and the
+        node of the run that makes each one made by another."""
+        signals = self._step_repeats.in_run(node_name, graph_walk)
+        made_by = self._step_repeats.edges[(node_name, graph_walk)].made_by
+        return signals, {s: made_by[s] for s in signals if made_by[s] != node_name}
+
+    def _members_refusal(self, closer: str, graph_walk: str, edges) -> str | None:
+        """Why the run this node closes can't take in its Loop's other nodes,
+        or None. Each member's own step runs the iteration the closer's run
+        starts at, as an ordinary step; the closer's run then replays every
+        member's capture of it in each later round. So a member is captured,
+        host-planned, here, stopped by its Loop's count alone, and makes only
+        what the run reads."""
+        if edges.chained:
+            return "node: it chains (async scheduling), but the other nodes of its run make its inputs"
+        engine = self.engine_manager.get_engine(closer)
+        run = self._step_repeats.run_nodes(closer, graph_walk)
+        for member in self._step_repeats.runs[(closer, graph_walk)]:
+            key = (member, graph_walk)
+            if key not in self._step_repeats.edges:
+                return f"member {member!r}: it is on another worker"
+            if member in self.parallel_nodes or closer in self.parallel_nodes:
+                return f"TP: member {member!r}'s rounds would run on the closer's rank alone"
+            why = member_refusal(self._step_repeats.edges[key], run)
+            if why is None and self._stop_token_signal.get(key, "") is not None:
+                why = "its stop isn't its Loop's count alone, and a run's later rounds check no stop of it"
+            if why is None and engine.resident_refusal(*key) is None:
+                why = "it is resident-planned, so a later round would read another step's plan"
+            if why is None:
+                why = engine.repeat_refusal(member, graph_walk, *self._carried_into(member, graph_walk))
+            if why is not None:
+                return f"member {member!r}: {why}"
+        return None
 
     def _rows_refusal(self, node_name: str, graph_walk: str) -> str | None:
         """Why this walk's loop-back values can't stay in the node's device
@@ -5753,6 +5797,9 @@ class Worker:
                 },
                 self.engine_manager.engine.repeat_note,
             )
+            for key, members in self._step_repeats.runs.items():
+                if self._step_repeats.may_repeat(*key):
+                    self.engine_manager.engine.join_run(*key, members)
             self.streams.windows = self._step_repeats.windows()
             # a run on the device, which an arrival can end early (``_await_run``)
             self._device_runs = frozenset(

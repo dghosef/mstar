@@ -1949,24 +1949,6 @@ class AcceleratorGraphRunner:
             profiler.range_pop()
         return slot.static_outputs
 
-    def run_part(
-        self, lease: SlotLease, carries: Mapping[str, CarryPair],
-        replay_columns: Collection[tuple[torch.Tensor, torch.Tensor]] = (),
-        iteration: Mapping[str, torch.Tensor] | None = None,
-    ) -> RunPart:
-        """This step's part of a run: every loop-back signal's output copied
-        into the static input it feeds (``carries``) before each replay after
-        the first, each iteration input's column for that replay into its own
-        (``iteration``, ``[rows, repeats, ...]``), and the resources' into
-        theirs (``replay_columns``, column then target)."""
-        slot = self.slot_for(lease)
-        copies = [
-            (output_named(slot.static_outputs, pair.output), slot.static_inputs[pair.input])
-            for pair in carries.values()
-        ]
-        stage = [(column, slot.static_inputs[name]) for name, column in (iteration or {}).items()]
-        return RunPart(slot, copies, [*stage, *replay_columns])
-
     def repeat(
         self, parts: Sequence[RunPart], repeats: int, columns: Collection[str] = (),
         stream: tuple[TokenStream, str] | None = None,
@@ -2072,17 +2054,25 @@ class AcceleratorGraphRunner:
                     slot.raw_launch = True
         return None
 
-    def carry_refusal(self, walk: str, carries: Mapping[str, CarryPair]) -> str | None:
-        """Why a run of ``walk``'s captures can't carry each loop-back signal
-        between replays, or None: its output and the static input it feeds
-        must both be buffers the capture holds, the same size."""
+    def carry_refusal(
+        self, walk: str, carries: Mapping[str, CarryPair], made_elsewhere: Collection[str] = (),
+    ) -> str | None:
+        """Why a run of ``walk``'s captures can't carry each signal between
+        replays, or None: its output and the static input it feeds must both
+        be buffers the capture holds, the same size. Of one another node of the
+        run makes (``made_elsewhere``) only the input is this capture's; the
+        run checks the sizes when it takes the two in."""
         for bucket in self._buckets.values():
             if bucket.config.capture_graph_walk != walk:
                 continue
             for slot in bucket.slots:
                 for signal, pair in sorted(carries.items()):
-                    source = output_named(slot.static_outputs, pair.output)
                     target = slot.static_inputs.get(pair.input)
+                    if signal in made_elsewhere:
+                        if not isinstance(target, torch.Tensor):
+                            return f"its capture holds no {pair.input!r} to carry {signal!r} into"
+                        continue
+                    source = output_named(slot.static_outputs, pair.output)
                     if source is None or not isinstance(target, torch.Tensor):
                         return f"its capture holds no {pair.output!r} -> {pair.input!r} to carry loop-back {signal!r}"
                     if source.numel() != target.numel():
