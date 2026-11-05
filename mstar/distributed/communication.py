@@ -14,6 +14,7 @@ from torch.distributed.distributed_c10d import _set_pg_timeout
 from mstar.distributed.all_reduce import AllReduce
 from mstar.distributed.utils import resolve_dist_timeout
 from mstar.platforms.compile import with_inductor_overrides
+from mstar.utils.device import DeviceCapability
 
 
 def default_group_timeout(backend: str) -> timedelta:
@@ -74,8 +75,13 @@ def _unpack(pieces: list[torch.Tensor], gather_dim: int) -> list[torch.Tensor]:
 @cache
 def _compiled(layout_copy: Callable) -> Callable:
     """``layout_copy`` compiled on its own: `all_to_all` runs outside any compiled graph, where
-    eager takes a slower strided kernel per tensor. Dynamic, so one compile serves every token
-    count, and a capture, whose warm-up compiled it, replays without recompiling."""
+    eager takes a slower strided kernel per tensor. Dynamic, so token counts share a graph: it
+    compiles a few times in the warm-ups, for each tensor count and rank, a count of 1, and once
+    more if the first count happens to equal another extent, but not per count.
+
+    Gated on the device as the engine's compiles are, not on a node's
+    ``disable_torch_compile``: that opts a forward out of being compiled whole, and Cosmos3 sets
+    it while compiling its denoise step itself."""
     return with_inductor_overrides(torch.compile(layout_copy, dynamic=True))
 
 
@@ -333,9 +339,11 @@ class CommGroup:
             assert len(tensors) == 1, "all_to_all: several tensors need an even scatter"
             out = self._all_to_all_uneven_scatter(tensors[0], scatter_dim, gather_dim, scatter_sizes, gather_sizes)
             return out if isinstance(input_, torch.Tensor) else (out,)
-        # the CPU path (gloo) stays eager: no compile to pay for, and no C++ toolchain to need
-        on_cpu = tensors[0].device.type == "cpu"
-        pack, unpack = (_pack, _unpack) if on_cpu else (_compiled(_pack), _compiled(_unpack))
+        # eager off an accelerator, as the engine compiles nothing there (CPU tests over gloo)
+        if DeviceCapability.of(tensors[0].device).is_available:
+            pack, unpack = _compiled(_pack), _compiled(_unpack)
+        else:
+            pack, unpack = _pack, _unpack
         # per tensor [.., N, ..] -> [P, .., N/P, ..], rank r's block at index r
         blocks = [x.unflatten(scatter_dim, (world_size, -1)).movedim(scatter_dim, 0) for x in tensors]
         numels = [blk[0].numel() for blk in blocks]
