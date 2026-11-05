@@ -490,29 +490,34 @@ Worker scheduling
    * - ``MSTAR_STEP_THREAD_CORE``
      - config's ``knobs: step_thread_core``, else ``auto``
      - Pin each worker's main, GPU and plan threads, and the API server's
-       message thread and Rust frontend bridge on a CPU of their own. A step
+       message thread and Rust frontend bridge. A step
        hands work between the three worker threads several times and every
        step's tokens pass from the message thread to the bridge; on a host
        whose idle cores drop into deep C-states, each handoff to a sleeping
        core waits for it to wake. ``off`` pins nothing.
        ``always`` gives each worker ``cpus.STEP_CORES`` (3) cores, one
        hardware thread of each, and the API server one core; no two pinned
-       threads share a core and the siblings of the CPUs taken stay unpinned.
+       CPUs share a core, the worker's three threads float over its three CPUs,
+       and the siblings of the CPUs taken stay unpinned.
        ``siblings`` puts each worker's three threads on all hardware threads
        of one core instead (two cores of one L2 cluster,
-       ``topology/cluster_cpus_list``, where a core has one CPU in the mask);
-       ``cpus._siblings`` has its numbers. On a deep-idle Xeon 6767P it beat
+       ``topology/cluster_cpus_list``, where a core has one CPU in the mask).
+       A core with no such partner in the mask leaves all three on one CPU,
+       where they queue, and the worker warns. ``cpus._siblings`` has its
+       numbers. What ``auto`` did before #1126 is now ``siblings``. On a deep-idle Xeon 6767P it beat
        no pin and three separate cores; on two H200 hosts with SMT it lost to
        no pin.
-       ``auto`` pins nothing and logs one line saying why for this host, since
-       no host it can tell apart has a measurement in which a layout beats no
-       pin: ``idle_hold`` is set (with the cores held awake pinning measured
-       no faster), the CPU vendor isn't Intel (``cpus.AUTO_VENDORS``, by
-       ``/proc/cpuinfo``'s ``vendor_id``), no enabled idle state of 100 µs or
-       more shows on a CPU of the process mask
+       ``auto`` takes ``siblings`` on an Intel CPU (``cpus.AUTO_VENDORS``, by
+       ``/proc/cpuinfo``'s ``vendor_id``) with an enabled idle state of 100 µs
+       or more on a CPU of the process mask
        (``/sys/devices/system/cpu/cpu*/cpuidle/state*/latency``,
-       ``cpus.deepest_idle``, ``cpus.DEEP_IDLE_US``), or, on a deep-idle Intel
-       host, three separate cores measured no faster than no pin.
+       ``cpus.deepest_idle``, ``cpus.DEEP_IDLE_US``), and pins nothing
+       elsewhere, with a CPU worker, or while the server holds ``idle_hold``.
+       It places over every GPU of the host only, so a mask too small for
+       them pins nothing. The API server decides (``cpus.auto_setting``), logs
+       one line saying what and why, and passes the result to its workers in
+       this variable. The vendor test rests on one AMD host, and the idle
+       test on the hosts in :ref:`host-idle`.
        A number names the first worker's core (its hardware threads in the
        mask); the next workers take the next cores up and the API server the
        last core of the mask. A number outside the mask, or too near its top
@@ -530,8 +535,9 @@ Worker scheduling
        node-local GPUs leave. Under ``always`` the cores a GPU picks from must
        hold four per GPU that picks from them (two under ``siblings``). A mask
        too small for that across the host may do for the GPUs this container
-       has a device node for, since only those can share it, and those rank
-       instead (NVIDIA only; a 2-GPU slice of an 8-GPU host fits an 8-core mask
+       has a device node for, and those rank instead, which assumes the
+       container has its cpuset to itself: two containers under one cpuset,
+       with separate ``/tmp``, take the same CPUs (NVIDIA only; a 2-GPU slice of an 8-GPU host fits an 8-core mask
        this way). Short of that, the GPUs this process was given
        (``CUDA_VISIBLE_DEVICES``, which ``--gpus`` sets) rank, and the mask is
        cut into as many core sets as it holds for them: a one-GPU server under
@@ -579,10 +585,11 @@ Worker scheduling
        warning and costs only the hold: startup carries on. Containers
        usually hide the device. The request is host-wide and holds cores awake
        whether or not the server is busy, so it spends power on idle hosts; it
-       is off by default. ``auto`` placement stands down while it is set:
-       with every server core held awake by a ``SCHED_IDLE`` spinner (the
-       stand-in where the device is hidden), one core's hardware threads lost
-       to no pin and three separate cores were level with it. Read by
+       is off by default. ``auto`` pins nothing while the server holds it:
+       with every server core held awake by a ``SCHED_IDLE`` spinner (a
+       stand-in, since the hold itself has not been measured), one core's
+       hardware threads lost to no pin and three separate cores were level
+       with it. Read by
        ``knobs.idle_hold``, applied by ``cpus.hold_idle``.
    * - ``MSTAR_DECODE_BUCKETS``
      - ``1,2,4,8,16,32,48,64,96,128``

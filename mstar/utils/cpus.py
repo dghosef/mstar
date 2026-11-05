@@ -20,10 +20,10 @@ at its first device's rank from the top of the node's allowed CPUs, and a worker
 the step unit at its device's rank from the bottom of the cores below the API
 servers'. Under ``always`` a unit is ``STEP_CORES`` cores, one hardware thread
 of each, so the cores a GPU picks from must hold four per GPU, and no two pinned
-threads share a core; ``siblings`` (``_siblings``) puts a worker on one core's
+CPUs share a core; ``siblings`` (``_siblings``) puts a worker on one core's
 hardware threads instead. A mask too small across the host may still do for the
-GPUs this container can open, which are the only ones that can share it, so those
-rank instead. Failing that, the GPUs this process was given rank, and the mask
+GPUs this container can open, so those rank instead, which assumes the container
+has its cpuset to itself. Failing that, the GPUs this process was given rank, and the mask
 is cut into as many core sets as it holds for them. Servers on one GPU can't be
 told apart by rank, so the first holds a lock on it (``claim_gpus``) and the next
 pins nothing. Under the last rule servers on different GPUs can't either, so
@@ -72,9 +72,9 @@ PINNABLE = hasattr(os, "sched_setaffinity")
 DEEP_IDLE_US = 100
 # settings that place by the GPU's rank
 PLACED = ("always", "siblings")
-# Physical cores one worker's main, GPU and plan threads share under ``always``,
-# one hardware thread of each: a woken step thread finds a CPU of its own, and
-# none of them shares a core's execution units with another.
+# Physical cores one worker's main, GPU and plan threads float over under
+# ``always``, one hardware thread of each, so none of the three CPUs shares a
+# core's execution units with another.
 STEP_CORES = 3
 # CPU latency the idle hold asks for: admits C1 and C1E, refuses the C6 class
 IDLE_HOLD_US = 10

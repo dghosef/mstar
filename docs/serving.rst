@@ -785,10 +785,12 @@ host time spent waking CPUs. Two knobs deal with it:
 - ``step_thread_core`` pins those threads. ``always`` gives each worker three cores,
   one hardware thread of each, and the API server a core of its own. ``siblings``
   puts a worker's three threads on one core's hardware threads (two cores of an L2
-  cluster where there is no SMT), which keeps that core awake. ``auto`` pins nothing
-  and logs one line saying why for this host, since neither layout has beaten no pin
-  on every host it was measured on (table below). ``off`` never pins, a number names
-  the first worker's core. Under a job's mask too small for every GPU the container
+  cluster where there is no SMT), which keeps that core awake; without such a partner
+  in the mask the three share one CPU and the worker warns. ``auto``, the default,
+  takes ``siblings`` on an Intel CPU with an enabled idle state of 100 µs or more and
+  pins nothing elsewhere, and logs one line saying which and why. What ``auto`` did
+  before #1126 is now ``siblings``. ``off`` never pins, a number names the first
+  worker's core. Under a job's mask too small for every GPU the container
   can open (8 cores on a node of four GPUs), ``always`` and ``siblings`` size by the
   GPUs the server was given, and a lock per core keeps servers that share ``/tmp``
   on different cores.
@@ -817,7 +819,7 @@ to 8 cores (with their siblings where the CPU has SMT), medians over server sess
      - not measured
      - 527 / 3635 (two cores of a cluster)
      - 636 / 4251, no pin
-   * - H100 VM without deep idle states (a handoff 22 µs)
+   * - H100 VM without deep idle states (a handoff 22 µs), 32-CPU mask
      - 529 (c=1) / 6520 (c=16)
      - not measured
      - 419 / 5526 (an earlier ``auto``, the same layout)
@@ -831,12 +833,12 @@ to 8 cores (with their siblings where the CPU has SMT), medians over server sess
 The last column is a ``SCHED_IDLE`` spinner on each server CPU, a stand-in for
 ``idle_hold: qos`` where the device is hidden: the hold itself has not been measured.
 With the cores held awake, ``siblings`` loses to no pin and three separate cores are
-level with it, so ``auto`` names the hold first when it is set.
+level with it, so ``auto`` pins nothing while the server holds it.
 
 Pinning has other costs. ``siblings`` on the 6740E raised 0.8B's time to first token
 at high concurrency (c=64 67 → 86 ms) while raising its throughput, and FLUX.2 klein
-at c=1 lost about 12% there (c=8 level). A low-duty model with eager host work can
-leave it ``off``.
+at c=1 lost about 12% there (c=8 level). ``auto`` takes those costs on such a host, so
+a low-duty model with eager host work should set ``off``.
 
 Details are in :doc:`environment_variables` under ``MSTAR_STEP_THREAD_CORE``.
 

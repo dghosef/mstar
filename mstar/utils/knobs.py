@@ -216,11 +216,11 @@ def pre_plan_enabled() -> bool:
 def step_thread_core() -> str | int:
     """``step_thread_core`` / ``MSTAR_STEP_THREAD_CORE`` (default ``auto``):
     pin each worker's main, GPU and plan threads, and the API server's result
-    threads, to CPUs of their own. ``always`` places them by the GPU's rank on
-    its NUMA node, a worker's three on three cores of their own;
-    ``siblings`` places them the same way with a worker's three on one core's
-    hardware threads; a number is the first worker's core. ``auto`` pins
-    nothing and logs why for this host (see ``mstar.utils.cpus``)."""
+    threads. ``always`` places them by the GPU's rank on its NUMA node, a
+    worker's three on three cores of their own; ``siblings`` places them the
+    same way with a worker's three on one core's hardware threads; a number is
+    the first worker's core. ``auto`` is ``siblings`` on a deep-idle Intel host
+    and ``off`` elsewhere (``cpus.auto_setting``)."""
     value = _setting("step_thread_core", "auto").strip().lower()
     if value in ("auto", "always", "siblings", "off"):
         return value
