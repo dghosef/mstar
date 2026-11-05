@@ -363,7 +363,7 @@ def _siblings(cores: list[tuple[int, ...]], cluster: Callable[[int], frozenset[i
     runs, so a handoff rarely waits for it to leave a deep idle state, but the
     three share its execution units. A core with no partner in the mask (no
     sibling, no second core of its cluster) leaves them on one CPU, where they
-    queue behind each other, and the worker warns.
+    queue behind each other: the worker warns, and ``auto`` pins nothing.
 
     ``auto`` takes it on deep-idle Intel hosts only (``auto_setting``); the
     measurements are in ``docs/serving.rst`` under "Host idle states"."""

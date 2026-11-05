@@ -2794,6 +2794,8 @@ def deployment_cpu_plan(config: dict) -> cpus.CpuPlan:
         # Its workers read the result and build the same plan without host_wide,
         # which only refuses plans (``cpus.deployment_plan``).
         plan = cpus.devices_plan(setting, devices, slot=0, host_wide=True)
+        if any(step and len(step.cpus) == 1 for step in plan.workers):
+            plan = cpus.CpuPlan(plan.mask, plan.usable, why="not pinned: a worker's step threads would share one CPU")
         if not plan.pinned:
             logger.info("step_thread_core auto: nothing pinned, %s", why if setting == "off" else plan.why)
             setting = "off"

@@ -503,7 +503,7 @@ Worker scheduling
        of one core instead (two cores of one L2 cluster,
        ``topology/cluster_cpus_list``, where a core has one CPU in the mask).
        A core with no such partner in the mask leaves all three on one CPU,
-       where they queue, and the worker warns. What ``auto`` did before #1126
+       where they queue, and the worker warns (``auto`` doesn't take it). What ``auto`` did before #1126
        is now ``siblings``. On a deep-idle Xeon 6767P it beat no pin and three
        separate cores; on two H200 hosts with SMT it lost to no pin.
        ``auto`` takes ``siblings`` on an Intel CPU (``cpus.AUTO_VENDORS``, by
@@ -514,7 +514,8 @@ Worker scheduling
        elsewhere or while the server holds ``idle_hold``.
        It places over every GPU of the host only, so a worker on a device
        sysfs doesn't list (a CPU worker, or an XPU, which reports no PCI
-       address) or a mask too small for them pins nothing, and so does a slice of a GPU (a MIG instance, by its
+       address), a mask too small for them, or a worker left on one CPU pins
+       nothing, and so does a slice of a GPU (a MIG instance, by its
        device name, ``Platform.is_gpu_slice``): servers on one GPU rank alike.
        Time-slicing a GPU between pods can't be seen from inside one, so
        those pods stack their threads on the same CPUs: set ``off`` there.

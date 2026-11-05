@@ -786,7 +786,8 @@ host time spent waking CPUs. Two knobs deal with it:
   one hardware thread of each, and the API server a core of its own. ``siblings``
   puts a worker's three threads on one core's hardware threads (two cores of an L2
   cluster where there is no SMT), which keeps that core awake; without such a partner
-  in the mask the three share one CPU and the worker warns. ``auto``, the default,
+  in the mask the three share one CPU and the worker warns, and ``auto`` pins nothing.
+  ``auto``, the default,
   takes ``siblings`` on an Intel CPU with an enabled idle state of 100 µs or more and
   pins nothing elsewhere, and logs one line saying which and why. What ``auto`` did
   before #1126 is now ``siblings``. ``off`` never pins, a number names the first

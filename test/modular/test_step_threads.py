@@ -1029,6 +1029,23 @@ def test_auto_pins_nothing_where_only_the_containers_gpus_fit(api_plan, monkeypa
     assert api_plan().pinned
 
 
+def test_auto_pins_nothing_where_a_workers_three_threads_would_share_one_cpu(api_plan, monkeypatch, gpu_locks):
+    """A mask of one hardware thread per core, on a core with no L2 partner. Measured on a deep-idle Xeon, that layout
+    took Qwen3-TTS's first audio from 23.5 to 34.6 ms, so only an explicit ``siblings`` gets it."""
+    root = _sysfs(gpu_locks / "host")
+    plan = deployment_plan
+
+    def placed(setting, addresses, **kw):
+        return plan(setting, addresses, mask=parse_cpu_list("32-63"), usable=32, pci_root=root, siblings=smt,
+                    cluster=one_cpu_cluster, **kw)
+
+    monkeypatch.setattr(cpus, "deployment_plan", placed)
+    monkeypatch.setenv("MSTAR_STEP_THREAD_CORE", "auto")
+    assert api_plan().pinned == frozenset() and os.environ["MSTAR_STEP_THREAD_CORE"] == "off"
+    monkeypatch.setenv("MSTAR_STEP_THREAD_CORE", "siblings")
+    assert [len(step.cpus) for step in api_plan().workers] == [1]
+
+
 @pytest.mark.parametrize("address", [None, "0000:ff:00.0"])
 def test_auto_pins_nothing_on_a_device_sysfs_does_not_list(api_plan, monkeypatch, gpu_locks, address):
     """A device with no PCI address, as on XPU, or one sysfs lacks has no rank, so its server would take the mask's
