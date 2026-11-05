@@ -603,7 +603,7 @@ def test_a_refused_write_closes_the_fd(tmp_path, idle_hold, monkeypatch, caplog)
 
 
 @pytest.mark.parametrize("setting", ["off", "auto", "siblings"])
-def test_every_entry_point_takes_the_hold_with_its_plan(tmp_path, idle_hold, monkeypatch, setting):
+def test_every_entry_point_takes_the_hold_with_its_plan(tmp_path, idle_hold, monkeypatch, gpu_locks, setting):
     """``deployment_cpu_plan`` is what ``mstar serve`` and the Dynamo worker both call, so the hold is
     there, whatever the placement setting."""
     from mstar.api_server import entrypoint
@@ -612,8 +612,9 @@ def test_every_entry_point_takes_the_hold_with_its_plan(tmp_path, idle_hold, mon
     device.write_bytes(b"")
     monkeypatch.setattr(cpus, "_PM_QOS_DEVICE", device)
     monkeypatch.setattr(entrypoint, "accelerator_type", lambda: "cpu")
-    for name in ("MSTAR_IDLE_HOLD", "MSTAR_STEP_THREAD_CORE"):
-        monkeypatch.delenv(name, raising=False)
+    # set, not deleted: the plan writes these, and monkeypatch restores only a variable it recorded. Empty reads as unset
+    for name in ("MSTAR_IDLE_HOLD", "MSTAR_STEP_THREAD_CORE", cpus.CORE_SET_ENV):
+        monkeypatch.setenv(name, "")
     config = {"knobs": {"idle_hold": "qos", "step_thread_core": setting},
               "node_groups": [{"node_names": ["llm"], "ranks": [0]}]}
     try:
