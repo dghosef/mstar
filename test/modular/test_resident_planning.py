@@ -743,11 +743,16 @@ def test_an_input_another_node_of_the_loop_makes_each_iteration_is_not_constant(
     assert edge_refusal(edges, run={"b", "c"}) is None
 
 
-@pytest.mark.parametrize("placed", [("b", "c"), ("c",)], ids=["one_worker", "branch_elsewhere"])
-def test_a_loop_of_two_nodes_repeats_as_one_run_its_last_node_closes(placed):
+@pytest.mark.parametrize(("placed", "groups", "why"), [
+    (("b", "c"), 1, None),
+    (("b", "c"), 2, "member 'b': it is in another node group, whose copy of the Loop keeps its own count"),
+    (("c",), 1, "member 'b': it is on another worker"),
+], ids=["one_group", "two_groups", "branch_elsewhere"])
+def test_a_loop_of_two_nodes_repeats_as_one_run_its_last_node_closes(placed, groups, why):
     """The run of "c" (the node every other one of its Loop runs before) takes
-    in "b": its step carries "x" into both and "v" from "b" into "c". With "b"
-    on another worker, the line says so."""
+    in "b": its step carries "x" into both and "v" from "b" into "c". A Loop
+    across node groups is a copy in each that counts its own nodes' completions,
+    so a run's stride would leave "b"'s behind and its walk would never end."""
     from mstar.worker.step_repeats import loop_runs, walk_edges
 
     walks, pairs = {WALK: _split_loop()}, [(node, WALK) for node in placed]
@@ -757,14 +762,14 @@ def test_a_loop_of_two_nodes_repeats_as_one_run_its_last_node_closes(placed):
     worker = Worker.__new__(Worker)
     worker._step_repeats, worker.parallel_nodes = repeats, set()
     worker._stop_token_signal = {(node, WALK): None for node in placed}
+    worker._worker_graph_of = {(node, WALK): i % groups for i, node in enumerate(placed)}
     asked = []
     engine = SimpleNamespace(
         resident_refusal=lambda *key: "host", repeat_refusal=lambda *args: asked.append(args) and None,
     )
     worker.engine_manager = SimpleNamespace(get_engine=lambda node: engine)
-    why = worker._members_refusal("c", WALK, repeats.edges[("c", WALK)])
-    assert why == (None if "b" in placed else "member 'b': it is on another worker")
-    assert asked == ([("b", WALK, frozenset({"x"}), {"x": "c"})] if "b" in placed else [])
+    assert worker._members_refusal("c", WALK, repeats.edges[("c", WALK)]) == why
+    assert asked == ([] if why else [("b", WALK, frozenset({"x"}), {"x": "c"})])
 
 
 @pytest.mark.parametrize("stolen", [False, True])

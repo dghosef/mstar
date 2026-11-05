@@ -204,8 +204,8 @@ class RepeatingSteps:
         or None. Each member's own step runs the iteration the closer's run
         starts at, as an ordinary step; the closer's run then replays every
         member's capture of it in each later round. So a member is captured,
-        host-planned, here, stopped by its Loop's count alone, and makes only
-        what the run reads."""
+        host-planned, in the closer's worker graph, stopped by its Loop's count
+        alone, and makes only what the run reads."""
         if edges.chained:
             return "node: it chains (async scheduling), but the other nodes of its run make its inputs"
         engine = self.engine_manager.get_engine(closer)
@@ -214,6 +214,10 @@ class RepeatingSteps:
             key = (member, graph_walk)
             if key not in self._step_repeats.edges:
                 return f"member {member!r}: it is on another worker"
+            if self._worker_graph_of[key] != self._worker_graph_of[(closer, graph_walk)]:
+                # a Loop across node groups is a copy in each, which counts its own
+                # nodes' completions: the run's stride never reaches this one
+                return f"member {member!r}: it is in another node group, whose copy of the Loop keeps its own count"
             if member in self.parallel_nodes or closer in self.parallel_nodes:
                 return f"TP: member {member!r}'s rounds would run on the closer's rank alone"
             why = member_refusal(self._step_repeats.edges[key], run)

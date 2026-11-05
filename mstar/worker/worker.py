@@ -925,6 +925,11 @@ class Worker(RepeatingSteps):
         walk_graphs = self._walk_graphs = model.get_graph_walk_graphs() if model else {}
         # (node, walk) -> the stop, signal and modality of what it streams
         self._streamed: dict[tuple[str, str], tuple] = {}
+        # (node, walk) -> the worker graph that runs it here
+        self._worker_graph_of = {
+            (node, walk): wg.worker_graph_id
+            for wg in my_worker_graphs for node in wg.section.get_nodes() for walk in wg.graph_walks
+        }
         self._step_repeats = StepRepeats(
             parse_step_repeats(
                 (model_config or {}).get("step_repeats"),
