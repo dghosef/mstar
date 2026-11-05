@@ -570,7 +570,9 @@ Worker scheduling
        (``mstar.utils.threads``), and the API server's intra-op and encode
        pools and FFmpeg's per-decode threads
        (``media_limits.video_decode_threads``) are sized from the CPUs the pins
-       leave (``CpuPlan`` in ``mstar.utils.cpus``). Each worker and the API
+       leave (``CpuPlan`` in ``mstar.utils.cpus``). Pinned CPUs come out of
+       those budgets under a CPU quota too, so a default server on a host where
+       ``auto`` pins gets smaller media pools under a tight quota. Each worker and the API
        server log their CPUs and why. See :ref:`host-idle` for measurements.
        Read by ``knobs.step_thread_core``; no effect where
        ``os.sched_setaffinity`` is missing (macOS, Windows).
