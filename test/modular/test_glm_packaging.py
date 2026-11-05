@@ -5,8 +5,10 @@ from pathlib import Path
 
 import pytest
 from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
 
 from mstar.cli.main import DEFAULT_CONFIGS, _resolve_config
+from mstar.engine.resources.attn.flashinfer_mla import _FA_PLANNER_VERSION
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -25,6 +27,8 @@ def _extras(path: Path) -> dict:
 def test_the_glm_extra_installs_what_the_models_import():
     glm = {Requirement(raw).name: Requirement(raw) for raw in _extras(ROOT / "pyproject.toml")["glm"]}
     assert {"flashinfer-python", "huggingface-hub", "safetensors", "transformers", "triton"} <= set(glm)
-    assert str(glm["flashinfer-python"].specifier) == "==0.7.2"
+    # the FlashInfer whose FA planner rules a context-parallel MLA pool copies (it refuses any
+    # other at load): a bump updates those rules too
+    assert glm["flashinfer-python"].specifier == SpecifierSet(f"=={_FA_PLANNER_VERSION}")
     for alias in ("mstar-serve", "mstar-project"):
         assert _extras(ROOT / "packaging" / "aliases" / alias / "pyproject.toml")["glm"] == ["mstar-ai[glm]"]
