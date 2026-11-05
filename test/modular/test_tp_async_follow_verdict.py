@@ -42,7 +42,12 @@ from test_loop_turns import _looping_worker, _Runtime, _scheduler, _StopLoopErro
 from mstar.engine.resources.step import FULL_ADMIT_OK  # noqa: E402
 from mstar.model.submodule_base import BatchedModelOutput, StepOrder  # noqa: E402
 from mstar.utils.containers import RecentSet  # noqa: E402
-from mstar.utils.ipc_format import ScheduleTPNode, TPNoSpeculation  # noqa: E402
+from mstar.utils.ipc_format import (  # noqa: E402
+    ScheduleTPNode,
+    TPNoSpeculation,
+    WorkerMessage,
+    WorkerMessageType,
+)
 from mstar.worker.micro_scheduler import MicroScheduler  # noqa: E402
 from mstar.worker.worker import (  # noqa: E402
     Worker,
@@ -289,7 +294,7 @@ def _tp_loop(monkeypatch, follower=False, forward_raises=()):
     w.maybe_send_zmq_to_tp_followers = lambda node_batch, **k: 0
     rec = types.SimpleNamespace(ran=[], markers=[], failed={}, errors=[])
     w._broadcast_tp_nospec = lambda pending: rec.markers.append(pending.tp_seq)
-    w._handle_main_loop_error = lambda exc, *a: rec.errors.append(exc)
+    w._handle_main_loop_error = lambda exc, *a: rec.errors.append(exc) or set()
     w._fail_requests = rec.failed.update
     forward = w._execute_on_gpu_thread
 
@@ -422,8 +427,8 @@ def _follower(monkeypatch):
     w._close_tp_follow_step = lambda p: Worker._close_tp_follow_step(w, p)
     w._prefix_cache_open = lambda node: False
     w._handle_main_loop_error = lambda exc, in_flight, *a: (
-        rec.errors.append(exc),
-        sched.drop_rows(r for p in in_flight if p is not None for r in p.batch.request_to_worker_graph),
+        rec.errors.append(exc)
+        or {r for p in in_flight if p is not None for r in p.batch.request_to_worker_graph}
     )
     return w, sched, state, rec
 
@@ -484,18 +489,22 @@ def test_a_message_that_raises_leaves_the_ones_behind_it_for_the_next_pass():
     w = Worker.__new__(Worker)
     handled = []
 
-    def process(message):
-        if message == "bad":
+    def nospec(body):
+        if body.spec_from_seq == 1:
             raise RuntimeError("boom")
-        handled.append(message)
+        handled.append(body.spec_from_seq)
 
-    w._process_message = process
-    batches = [["a", "bad", "b"], ["c"], []]
+    w._register_tp_nospec = nospec
+
+    def marker(seq):
+        return WorkerMessage(message_type=WorkerMessageType.TP_NO_SPEC, body=_nospec(seq))
+
+    batches = [[marker(0), marker(1), marker(2)], [marker(3)], []]
     w.communicator = types.SimpleNamespace(get_all_new_messages=lambda: batches.pop(0))
     with pytest.raises(RuntimeError, match="boom"):
         w._process_messages()
     w._process_messages()
-    assert handled == ["a", "b", "c"]
+    assert handled == [0, 2, 3]
 
 
 def test_a_follower_drops_a_head_its_steps_verdict_voids_after_its_own_raise(monkeypatch):

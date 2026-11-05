@@ -1496,74 +1496,75 @@ class Worker:
     # What a raise in ``_process_message_list`` left unread, for the next pass.
     _unread_messages: tuple[WorkerMessage, ...] = ()
 
-    def _process_message_list(self, messages: list[WorkerMessage]):
-        # Snapshot: a REMOVE handled mid-iteration can re-buffer trailing
-        # signals onto this same list, and mutating it while iterating it would
-        # never terminate.
-        queue = deque(messages)
-        try:
-            while queue:
-                self._process_message(queue.popleft())
-        except Exception:
-            # The messages behind it are still owed: a decision of the leader's
-            # lost here would leave this rank out of step.
-            self._unread_messages = (*queue, *self._unread_messages)
-            raise
+    # What a raise in ``_process_message_list`` left unread, for the next pass.
+    _unread_messages: tuple[WorkerMessage, ...] = ()
 
-    def _process_message(self, message: WorkerMessage) -> None:
+    def _process_message_list(self, messages: list[WorkerMessage]):
         msg_types_needing_active_request = [
             WorkerMessageType.REMOVE_REQUEST,
             WorkerMessageType.INPUT_SIGNALS,
             WorkerMessageType.STOP_LOOPS
         ]
-        # per_request_info is handle-keyed, so resolve the wire string
-        # first; an unknown one has no handle and is parked the same way.
-        # The conductor's REMOVE is never parked: ``_remove_request``
-        # handles an id this worker does not hold.
-        if (
-            message.message_type in msg_types_needing_active_request and \
-            not (
-                message.message_type == WorkerMessageType.REMOVE_REQUEST
-                and message.body.source == MessageSource.CONDUCTOR
-            ) and \
-            self._rid(message.body.request_id)
-            not in self.request_state.per_request_info
-        ):
-            wire_rid = message.body.request_id
-            if wire_rid in self._removed_rids:
-                self._drop_for_removed(message)
-            else:
-                # got an out-of-order request
-                self._unprocessed_messages.setdefault(
-                    wire_rid, []
-                ).append(message)
-            return
-        t0 = phase_start()
-        if message.message_type == WorkerMessageType.NEW_REQUEST:
-            self._add_new_request(message.body)
-        elif message.message_type == WorkerMessageType.DRAIN_REQUEST:
-            self._drain_request(message.body)
-        elif message.message_type == WorkerMessageType.REMOVE_REQUEST:
-            self._remove_request(message.body)
-        elif message.message_type == WorkerMessageType.INPUT_SIGNALS:
-            self._process_new_inputs(message.body)
-        elif message.message_type == WorkerMessageType.EDGE_ITEMS:
-            self._process_edge_items(message.body)
-        elif message.message_type == WorkerMessageType.TENSOR_RECEIVED:
-            self._handle_tensor_received(message.body)
-        elif message.message_type == WorkerMessageType.UNPERSIST_TENSORS:
-            self._unpersist_tensors(message.body)
-        elif message.message_type == WorkerMessageType.STOP_LOOPS:
-            self._stop_loops(message.body)
-        elif message.message_type == WorkerMessageType.SCHEDULE_TP:
-            self._register_tp_follow(message.body)
-        elif message.message_type == WorkerMessageType.TP_NO_SPEC:
-            self._register_tp_nospec(message.body)
-        elif message.message_type == WorkerMessageType.ENABLE_METRICS:
-            # sent only with metrics on, so _metrics is set
-            self._metrics.start_counting()
-        if t0 is not None:
-            phase_end(_MSG_SPANS[message.message_type], t0)
+        # Snapshot: a REMOVE handled mid-iteration can re-buffer trailing
+        # signals onto this same list, and mutating it while iterating it would
+        # never terminate. A raise leaves the messages behind it unread: they
+        # are still owed, and a decision of the leader's lost here would leave
+        # this rank out of step.
+        queue = deque(messages)
+        try:
+            while queue:
+                message = queue.popleft()
+                # per_request_info is handle-keyed, so resolve the wire string
+                # first; an unknown one has no handle and is parked the same way.
+                # The conductor's REMOVE is never parked: ``_remove_request``
+                # handles an id this worker does not hold.
+                if (
+                    message.message_type in msg_types_needing_active_request and \
+                    not (
+                        message.message_type == WorkerMessageType.REMOVE_REQUEST
+                        and message.body.source == MessageSource.CONDUCTOR
+                    ) and \
+                    self._rid(message.body.request_id)
+                    not in self.request_state.per_request_info
+                ):
+                    wire_rid = message.body.request_id
+                    if wire_rid in self._removed_rids:
+                        self._drop_for_removed(message)
+                    else:
+                        # got an out-of-order request
+                        self._unprocessed_messages.setdefault(
+                            wire_rid, []
+                        ).append(message)
+                    continue
+                t0 = phase_start()
+                if message.message_type == WorkerMessageType.NEW_REQUEST:
+                    self._add_new_request(message.body)
+                elif message.message_type == WorkerMessageType.DRAIN_REQUEST:
+                    self._drain_request(message.body)
+                elif message.message_type == WorkerMessageType.REMOVE_REQUEST:
+                    self._remove_request(message.body)
+                elif message.message_type == WorkerMessageType.INPUT_SIGNALS:
+                    self._process_new_inputs(message.body)
+                elif message.message_type == WorkerMessageType.EDGE_ITEMS:
+                    self._process_edge_items(message.body)
+                elif message.message_type == WorkerMessageType.TENSOR_RECEIVED:
+                    self._handle_tensor_received(message.body)
+                elif message.message_type == WorkerMessageType.UNPERSIST_TENSORS:
+                    self._unpersist_tensors(message.body)
+                elif message.message_type == WorkerMessageType.STOP_LOOPS:
+                    self._stop_loops(message.body)
+                elif message.message_type == WorkerMessageType.SCHEDULE_TP:
+                    self._register_tp_follow(message.body)
+                elif message.message_type == WorkerMessageType.TP_NO_SPEC:
+                    self._register_tp_nospec(message.body)
+                elif message.message_type == WorkerMessageType.ENABLE_METRICS:
+                    # sent only with metrics on, so _metrics is set
+                    self._metrics.start_counting()
+                if t0 is not None:
+                    phase_end(_MSG_SPANS[message.message_type], t0)
+        except Exception:
+            self._unread_messages = (*queue, *self._unread_messages)
+            raise
 
     def _process_messages(self) -> None:
         unread, self._unread_messages = self._unread_messages, ()
@@ -4799,8 +4800,9 @@ class Worker:
         in_flight: "tuple[PendingBatch | None, ...]",
         batch: ScheduledBatch | None,
         speculation: "Speculation | None" = None,
-    ) -> None:
-        """Fail everything the crashed iteration touched and drain its futures.
+    ) -> set[int]:
+        """Fail everything the crashed iteration touched and drain its futures;
+        returns the rows it failed.
 
         Attribution is batch-granular here: a raise out of the batch build or
         output routing can't be pinned on one request (the
@@ -4880,8 +4882,8 @@ class Worker:
                     sb.node_name, list(fresh), list(fresh.values()),
                 )
 
-        self.scheduler.drop_rows(r for r in failed_rids if r in self.request_state.per_request_info)
         self._fail_requests({rid: f"Error in worker: {err}" for rid in failed_rids})
+        return failed_rids
 
     def _fail_requests(self, errors: dict[int, str]) -> None:
         """Report requests this worker can no longer serve to the conductor.
@@ -5630,7 +5632,9 @@ class Worker:
                     phase_iter[0] += 1
                     _phase_flush()
             except Exception as e:
-                self._handle_main_loop_error(e, (pending, spec_pending), batch, speculation)
+                failed = self._handle_main_loop_error(e, (pending, spec_pending), batch, speculation)
+                if self.is_tp_follower:
+                    self.scheduler.drop_rows(failed)
                 if committed is not None:
                     # Failing the step's rows is all one rank can do: the other
                     # ranks are in its collectives, or will be, so stop and let
