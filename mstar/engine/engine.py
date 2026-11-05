@@ -2751,9 +2751,11 @@ class Engine:
                 columns = submodule_mgmt.run_columns.get(graph_walk, frozenset())
                 # a signal in the rows moves through them, in the graph
                 carries = {s: pair for s, pair in submodule_mgmt.carries[graph_walk].items() if s not in slot.row_heads}
+                part = cg_runner.run_part(
+                    lease, carries, self._runner.replay_columns(step, ctx.repeats), batch.iteration_columns,
+                )
                 stops, rows, spans = cg_runner.repeat(
-                    lease, carries, ctx.repeats,
-                    self._runner.replay_columns(step, ctx.repeats), columns, batch.iteration_columns,
+                    [part], ctx.repeats, columns,
                     None if batch.token_stream is None else (batch.token_stream, streamed[0]),
                 )
                 out = dataclasses.replace(
