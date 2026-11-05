@@ -2309,7 +2309,8 @@ class Worker:
         """
         devices = local_worker_devices or [str(self.device)]
         slot = worker_ids.index(self.worker_id) if local_worker_devices else 0
-        plan = cpus.devices_plan(knobs.step_thread_core(), devices)
+        setting = knobs.step_thread_core()
+        plan = cpus.devices_plan(setting, devices)
         cpus.install(plan)
         self._process_cpus = plan.mask
         self._step_cpus = plan.workers[slot] if plan.workers else None
@@ -2322,7 +2323,7 @@ class Worker:
                 self.worker_id, cpus.format_cpu_list(step.cpus), step.why,
                 self.device, slot + 1, len(devices), cpus.format_cpu_list(plan.mask),
             )
-            if len(step.cpus) == 1:
+            if setting == "siblings" and len(step.cpus) == 1:
                 logger.warning(
                     "Worker %s: main, GPU and plan threads all on CPU %s, so they queue behind each other: its core's "
                     "sibling or a second core of its L2 cluster isn't in the mask",

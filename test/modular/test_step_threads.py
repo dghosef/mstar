@@ -1568,13 +1568,16 @@ def test_the_api_message_thread_and_the_bridge_move_to_the_result_cpu(monkeypatc
     make_test_api_server().pin_result_thread()
 
 
-def test_a_worker_left_on_one_cpu_warns(monkeypatch, caplog):
+@pytest.mark.parametrize(("setting", "warned"), [("siblings", True), ("32", False)])
+def test_a_worker_left_on_one_cpu_by_siblings_warns(monkeypatch, caplog, setting, warned):
+    """A CPU number gives each worker one core, one CPU of it without SMT, which is what it asked for."""
     mask = parse_cpu_list("32-39")
-    monkeypatch.setattr(cpus, "devices_plan", lambda setting, devices: CpuPlan(mask, 8, (_one(32),), 39, "siblings: x"))
+    monkeypatch.setattr(cpus, "devices_plan", lambda setting, devices: CpuPlan(mask, 8, (_one(32),), 39, "x"))
+    monkeypatch.setenv("MSTAR_STEP_THREAD_CORE", setting)
     worker = _bare_worker("worker_0", "cuda:0")
     with caplog.at_level(logging.WARNING, logger="mstar.worker.worker"):
         worker._plan_step_cpus(["worker_0"], ["cuda:0"])
-    assert "all on CPU 32, so they queue behind each other" in caplog.text
+    assert bool(caplog.records) == warned
     cpus.install(None)
 
 
