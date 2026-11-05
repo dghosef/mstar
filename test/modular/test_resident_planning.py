@@ -19,7 +19,7 @@ import torch
 
 sys.path.insert(0, ".")
 
-from mstar.engine.accelerator_graph_runner import AcceleratorGraphRunner  # noqa: E402
+from mstar.engine.accelerator_graph_runner import AcceleratorGraphRunner, RunPart, output_named  # noqa: E402
 from mstar.engine.device_run import RunState, TokenStream  # noqa: E402
 from mstar.engine.resources import resident as resident_mod  # noqa: E402
 from mstar.engine.resources import runner as runner_mod  # noqa: E402
@@ -485,7 +485,10 @@ def test_a_repeat_carries_every_loop_back_signal_and_keeps_a_column_per_replay(r
     runner.slot_for = lambda lease: slot
     runner._graph_backend, calls = _raw_backend(slot)
     landing = TokenStream(2, 3, torch.device("cpu"))
-    wide, rows, _ = runner.repeat([runner.run_part(None, carries)], 3, ["frame"], stream=(landing, "new_token"))
+    copies = [
+        (output_named(slot.static_outputs, pair.output), slot.static_inputs[pair.input]) for pair in carries.values()
+    ]
+    wide, rows, _ = runner.repeat([RunPart(slot, copies, [])], 3, ["frame"], stream=(landing, "new_token"))
     if raw:
         # each replay's columns out, then the next one's carries in and its launch
         assert calls == ["copy"] * 4 + (["copy"] * 3 + ["launch"] + ["copy"] * 4) * 2
@@ -504,8 +507,6 @@ def test_a_run_of_two_nodes_replays_each_in_turn_with_what_the_other_left(raw):
     """A Loop of a producer and the node that closes its iteration (BAGEL's
     branch and combine_cfg): each round, the producer reads the closer's last
     output and the closer reads the producer's, as N passes of the two would."""
-    from mstar.engine.accelerator_graph_runner import RunPart
-
     x_in, v, v_in, x = torch.zeros(1), torch.zeros(1), torch.zeros(1), torch.tensor([1.0])
     order = []
 
@@ -626,7 +627,8 @@ def test_the_startup_line_names_the_owner_that_refuses_each_capability(caplog, l
         resident=SimpleNamespace(walks={WALK} - refused.keys()), resident_refusals=refused,
         joint_comm_group=SimpleNamespace(world_size=1),
         submodule=SimpleNamespace(repeat_carry=lambda walk, signals: {}),
-        resources=resources, carry_refusals={}, carries={}, accelerator_graph_runner=None, template_steps={},
+        resources=resources, carry_refusals={}, carries={}, carry_makers={}, accelerator_graph_runner=None,
+        template_steps={},
         row_signals={},
     ) for node, resources, refused in (
         ("a", {"kv": willing}, {}), ("b", {"kv": willing, "pool": ResidentHooks()}, {}),
@@ -714,22 +716,103 @@ def test_a_walk_repeats_only_if_a_run_serves_each_of_its_edges(loop, why):
     assert refusal is None if why is None else refusal.startswith(why)
 
 
-def test_an_input_another_node_of_the_loop_makes_each_iteration_is_not_constant():
-    """BAGEL's split CFG: combine_cfg reads each branch's velocity once an
-    iteration. A run of combine alone would replay on the first velocity while
-    its count skipped the branch's iterations, so it doesn't repeat alone."""
-    from mstar.graph.base import GraphEdge, GraphNode, Loop, Parallel, Sequential, loop_edges
-    from mstar.worker.step_repeats import edge_refusal
+def _split_loop():
+    """BAGEL's split CFG in small: branch "b" reads "x" and makes "v" for
+    "c", which reads both and loops "x" back to both."""
+    from mstar.graph.base import GraphEdge, GraphNode, Loop, Parallel, Sequential
 
     branch = GraphNode(name="b", input_names=["x"], outputs=[GraphEdge("c", "v")], enable_async_scheduling=False)
     combine = GraphNode(
         name="c", input_names=["v", "x"], outputs=[GraphEdge("b", "x"), GraphEdge("c", "x")],
         enable_async_scheduling=False,
     )
-    edges = loop_edges(Loop(section=Sequential([Parallel([branch]), combine]), max_iters=8, outputs=[], name="l"), "c")
+    return Loop(section=Sequential([Parallel([branch]), combine]), max_iters=8, outputs=[], name="l")
+
+
+def test_an_input_another_node_of_the_loop_makes_each_iteration_is_not_constant():
+    """combine_cfg reads each branch's velocity once an iteration. A run of
+    combine alone would replay on the first velocity while its count skipped
+    the branch's iterations, so it repeats only in a run with the branch."""
+    from mstar.graph.base import loop_edges
+    from mstar.worker.step_repeats import edge_refusal
+
+    edges = loop_edges(_split_loop(), "c")
     assert edges.inputs == {"v": EdgeKind.PER_ITERATION, "x": EdgeKind.LOOP_BACK}
     assert edges.made_by == {"v": "b", "x": "c"} and edges.streamed == frozenset()
     assert edge_refusal(edges) == "graph runtime: its input 'v' is made by 'b' once an iteration"
+    assert edge_refusal(edges, run={"b", "c"}) is None
+
+
+@pytest.mark.parametrize("placed", [("b", "c"), ("c",)], ids=["one_worker", "branch_elsewhere"])
+def test_a_loop_of_two_nodes_repeats_as_one_run_its_last_node_closes(placed):
+    """The run of "c" (the node every other one of its Loop runs before) takes
+    in "b": its step carries "x" into both and "v" from "b" into "c". With "b"
+    on another worker, the line says so."""
+    from mstar.worker.step_repeats import loop_runs, walk_edges
+
+    walks, pairs = {WALK: _split_loop()}, [(node, WALK) for node in placed]
+    repeats = StepRepeats({"c": RepeatConfig(max=4)}, walk_edges(walks, pairs), loop_runs(walks, pairs))
+    assert repeats.runs == {("c", WALK): ("b",)}
+    assert repeats.carried() == {("c", WALK): {"v", "x"}, **({("b", WALK): {"x"}} if "b" in placed else {})}
+    worker = Worker.__new__(Worker)
+    worker._step_repeats, worker.parallel_nodes = repeats, set()
+    worker._stop_token_signal = {(node, WALK): None for node in placed}
+    asked = []
+    engine = SimpleNamespace(
+        resident_refusal=lambda *key: "host", repeat_refusal=lambda *args: asked.append(args) and None,
+    )
+    worker.engine_manager = SimpleNamespace(get_engine=lambda node: engine)
+    why = worker._members_refusal("c", WALK, repeats.edges[("c", WALK)])
+    assert why == (None if "b" in placed else "member 'b': it is on another worker")
+    assert asked == ([("b", WALK, frozenset({"x"}), {"x": "c"})] if "b" in placed else [])
+
+
+@pytest.mark.parametrize("stolen", [False, True])
+def test_a_run_closer_replays_its_members_slots_only_while_they_hold_its_rows(stolen):
+    """The closer's step takes in the slot its member's step of the same rows
+    replayed on, and carries each signal from the node that makes it. Once
+    another step has leased that slot since, the closer runs one iteration."""
+    from mstar.engine.engine import Engine
+    from mstar.model.submodule_base import CarryPair
+
+    def slot(inputs, outputs):
+        return SimpleNamespace(
+            static_inputs=inputs, row_heads={},
+            static_outputs=SimpleNamespace(row_outputs=outputs, check_stop_buffers={}, packed_outputs={}),
+        )
+
+    x, x_in, v, v_in, x_b = (torch.zeros(1) for _ in range(5))
+    slots = {"b": slot({"input_embeds": x_b}, {"v": v}), "c": slot({"v": v_in, "x": x_in}, {"x": x})}
+    lease = {node: SimpleNamespace(slot=0, node=node) for node in slots}
+    runner = {node: SimpleNamespace(slot_for=lambda lease: slots[lease.node]) for node in slots}
+
+    def batch(node, rows):
+        ctx = SimpleNamespace(graph_walk=WALK, slot_lease=lease[node], repeats=4)
+        return SimpleNamespace(
+            node_name=node, request_ids=rows, step_context=ctx, admit_error=None, step=None, run_leases={},
+        )
+
+    held = batch("b", [7])
+    engine = Engine.__new__(Engine)
+    engine._runs = {("c", WALK): ("b",)}
+    engine._submodules = {
+        "b": SimpleNamespace(
+            holders={0: batch("b", [8]) if stolen else held}, accelerator_graph_runner=runner["b"],
+            carries={WALK: {"x": CarryPair("x", "input_embeds")}}, carry_makers={WALK: {"x": "c"}},
+        ),
+        "c": SimpleNamespace(
+            accelerator_graph_runner=runner["c"],
+            carries={WALK: {"v": CarryPair("v", "v"), "x": CarryPair("x", "x")}}, carry_makers={WALK: {"v": "b"}},
+        ),
+    }
+    closer = batch("c", [7])
+    engine._gather_run(closer)
+    assert closer.step_context.repeats == (1 if stolen else 4)
+    assert closer.run_leases == ({} if stolen else {"b": lease["b"]})
+    if not stolen:
+        part = engine._run_part("c", WALK, {**closer.run_leases, "c": lease["c"]})
+        assert [(s is v, t is v_in) for s, t in part.copies][0] == (True, True)
+        assert engine._run_part("b", WALK, {**closer.run_leases, "c": lease["c"]}).copies == [(x, x_b)]
 
 
 @pytest.mark.parametrize(("parallel", "why"), [(False, None), (True, "TP: each rank's window")])
@@ -3048,7 +3131,7 @@ def test_a_host_planned_walk_repeats_only_if_its_step_keeps_nothing():
         engine._submodules = {"n": SimpleNamespace(
             resident=None, resident_refusals={WALK: "not asked for"}, template_steps={WALK: step},
             joint_comm_group=SimpleNamespace(world_size=1), submodule=SimpleNamespace(repeat_carry=lambda w, s: {}),
-            resources={"kv": res["kv"], "rope": res["rope"]}, carry_refusals={}, carries={},
+            resources={"kv": res["kv"], "rope": res["rope"]}, carry_refusals={}, carries={}, carry_makers={},
             accelerator_graph_runner=None,
         )}
         return engine.repeat_refusal("n", WALK)
@@ -3111,7 +3194,7 @@ def test_a_run_stages_each_replays_iteration_input_before_it():
     columns = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
     cond_in.copy_(columns[:, 0])  # the first replay's, staged with the step
     seen.append(cond_in.tolist())
-    runner.repeat([runner.run_part(None, {}, iteration={"cond": columns})], 3)
+    runner.repeat([RunPart(slot, [], [(columns, cond_in)])], 3)
     assert seen == [[1.0, 4.0], [2.0, 5.0], [3.0, 6.0]]
 
 
@@ -3161,6 +3244,7 @@ def test_a_captured_preprocess_that_reads_the_loop_counter_keeps_its_walk_from_r
     engine = Engine.__new__(Engine)
     mgmt = SimpleNamespace(
         submodule=SimpleNamespace(repeat_carry=lambda walk, signals: {}), template_steps={}, carry_refusals={},
+        carry_makers={},
     )
     engine._submodules = {"n": mgmt}
     engine._probe_carries("n", runner, WALK, ())

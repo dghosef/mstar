@@ -23,7 +23,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, ClassVar
 
 from mstar.engine.resources.resident import NOT_ASKED
-from mstar.graph.base import EdgeKind, LoopEdges, loop_edges
+from mstar.graph.base import EdgeKind, LoopEdges, innermost_loop, iteration_closer, loop_edges
 from mstar.graph.special_destinations import EMIT_TO_CLIENT, EMPTY_DESTINATION
 from mstar.utils.profiler import phase_record
 
@@ -126,16 +126,21 @@ def parse_step_repeats(block: object, nodes: Collection[str]) -> dict[str, Repea
     return {node: RepeatConfig.parse(node, settings) for node, settings in block.items()}
 
 
-def edge_refusal(edges: LoopEdges, windowed: Collection[str] = (), parallel: bool = False) -> str | None:
-    """Why a run can't serve one of ``edges``, or None. A loop-back signal is
-    carried between replays (``NodeSubmodule.repeat_carry``), a streamed input
-    the node reads an item an iteration of (``windowed``: a streamed
-    ``IterationInput``) is a window of its ready items, and a per-iteration
-    output is served by a column per replay (``run_columns``), as items of its
-    own. Under TP (``parallel``) a window is what reached each rank, so ranks
-    would feed different items into the same collectives."""
+def edge_refusal(
+    edges: LoopEdges, windowed: Collection[str] = (), parallel: bool = False, run: Collection[str] = (),
+) -> str | None:
+    """Why a run can't serve one of ``edges``, or None. A signal one node of the
+    run (``run``: its nodes) makes for another, or loops back, is carried
+    between replays (``NodeSubmodule.repeat_carry``), a streamed input the node
+    reads an item an iteration of (``windowed``: a streamed ``IterationInput``)
+    is a window of its ready items, and a per-iteration output is served by a
+    column per replay (``run_columns``), as items of its own. Under TP
+    (``parallel``) a window is what reached each rank, so ranks would feed
+    different items into the same collectives."""
     for name, kind in sorted(edges.inputs.items()):
         if kind is EdgeKind.PER_ITERATION and name in edges.made_by:
+            if edges.made_by[name] in run:
+                continue
             return f"graph runtime: its input {name!r} is made by {edges.made_by[name]!r} once an iteration"
         if kind is EdgeKind.PER_ITERATION and name not in windowed:
             return f"node: its streamed input {name!r} isn't an iteration input it reads an item of a replay"
@@ -144,6 +149,24 @@ def edge_refusal(edges: LoopEdges, windowed: Collection[str] = (), parallel: boo
     for (signal, dest), kind in sorted(edges.outputs.items()):
         if kind is EdgeKind.PER_ITERATION and dest != EMPTY_DESTINATION and (signal, dest) not in edges.items:
             return f"graph runtime: {signal!r} -> {dest!r} is read once an iteration by its node"
+    return None
+
+
+def member_refusal(edges: LoopEdges, run: Collection[str]) -> str | None:
+    """Why a node can't be one of a run's members (the nodes of its Loop
+    before the one it closes on), or None. The closer's step replays the
+    member's capture with what the run carries into it, so every input the
+    member reads each iteration is made in the run, and everything it makes
+    goes to the run; and its next step is the scheduler's, not speculated
+    from its own output."""
+    if edges.chained:
+        return "it chains (async scheduling), but the run's other nodes make its inputs"
+    for name, kind in sorted(edges.inputs.items()):
+        if kind is not EdgeKind.CONSTANT and edges.made_by.get(name) not in run:
+            return f"its input {name!r} comes from outside the run once an iteration"
+    for signal, dest in sorted(edges.outputs):
+        if dest not in run:
+            return f"its output {signal!r} -> {dest!r} leaves the run"
     return None
 
 
@@ -208,9 +231,16 @@ class StepRepeats:
     worker's (node, walk) pairs whose walk runs the node in a Loop, with the
     node's edges there."""
 
-    def __init__(self, configs: Mapping[str, RepeatConfig], edges: Mapping[tuple[str, str], LoopEdges]):
+    def __init__(
+        self, configs: Mapping[str, RepeatConfig], edges: Mapping[tuple[str, str], LoopEdges],
+        runs: Mapping[tuple[str, str], tuple[str, ...]] = MappingProxyType({}),
+    ):
         self._configs = configs
         self.edges = edges
+        # (closer, walk) -> the other nodes of its Loop, in the iteration's
+        # order, for a Loop of several nodes (``loop_runs``); a Loop of one
+        # node has none
+        self.runs = runs
         self._walks: set[tuple[str, str]] = set()
         # (node, walk) -> its run length, for a node whose config asks for auto
         self.auto: dict[tuple[str, str], AutoRepeats] = {}
@@ -249,19 +279,37 @@ class StepRepeats:
 
     def kept_rows(self, resident: Collection[str]) -> dict[tuple[str, str], frozenset[str]]:
         """The loop-back signals of each walk of a node asked for resident
-        planning (``resident``) or repeats, kept in device rows between its steps. Not one that
-        also leaves the Loop (a terminal edge): its last value has to be a
-        tensor the Loop's next node reads, which a step kept on the device
-        doesn't hand on."""
+        planning (``resident``) or repeats, kept in device rows between its
+        steps. Not one that also leaves the Loop (a terminal edge) or goes to
+        another node: its value has to be a tensor that node reads, which a
+        step kept on the device doesn't hand on."""
         return {
-            key: loop_back(edges) - edges.leaving
+            key: loop_back(edges) - edges.leaving - {
+                s for (s, dest), kind in edges.outputs.items() if kind is EdgeKind.LOOP_BACK and dest != key[0]
+            }
             for key, edges in self.edges.items() if key[0] in resident or self.limit(key[0]) > 1
         }
 
+    def run_nodes(self, node: str, walk: str) -> frozenset[str]:
+        """The nodes of the run ``node`` is in on ``walk``: its closer and the
+        closer's members, or the node alone."""
+        for (closer, run_walk), members in self.runs.items():
+            if run_walk == walk and (node == closer or node in members):
+                return frozenset((closer, *members))
+        return frozenset((node,))
+
+    def in_run(self, node: str, walk: str) -> frozenset[str]:
+        """The inputs of ``node`` a run carries into it between replays: what a
+        node of its run makes (its own loop-back signals, in a run of one)."""
+        run = self.run_nodes(node, walk)
+        return frozenset(name for name, maker in self.edges[(node, walk)].made_by.items() if maker in run)
+
     def carried(self) -> dict[tuple[str, str], frozenset[str]]:
-        """The loop-back signals of each walk asked to repeat, which a run
-        carries between replays."""
-        return {key: loop_back(edges) for key, edges in self.edges.items() if self.limit(key[0]) > 1}
+        """The inputs a run carries into each node between replays, for each
+        walk asked to repeat (its closer's config) and its run's members here."""
+        asked = [key for key in self.edges if self.limit(key[0]) > 1]
+        members = [(node, walk) for closer, walk in asked for node in self.runs.get((closer, walk), ())]
+        return {key: self.in_run(*key) for key in [*asked, *members] if key in self.edges}
 
     def settle(
         self, resident_refusal: Callable[[str, str], str | None], repeat_refusal: Callable[[str, str], str | None],
@@ -371,4 +419,17 @@ def walk_edges(walks: Mapping[str, object], pairs: Iterable[tuple[str, str]]) ->
         edges = None if section is None else loop_edges(section, node)
         if edges is not None:
             out[(node, walk)] = edges
+    return out
+
+
+def loop_runs(walks: Mapping[str, object], pairs: Iterable[tuple[str, str]]) -> dict[tuple[str, str], tuple[str, ...]]:
+    """(closer, walk) -> the Loop's other nodes in the iteration's order, for
+    each (node, walk) of ``pairs`` whose node closes the iteration of a Loop of
+    several nodes (``iteration_closer``)."""
+    out = {}
+    for node, walk in pairs:
+        section = walks.get(walk)
+        loop = None if section is None else innermost_loop(section, node)
+        if loop is not None and len(loop.get_nodes()) > 1 and iteration_closer(loop) == node:
+            out[(node, walk)] = tuple(name for name in loop.get_nodes() if name != node)
     return out
