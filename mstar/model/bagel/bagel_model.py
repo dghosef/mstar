@@ -148,12 +148,16 @@ ROLE_TURNS = "role_turns"
 
 VLM_THINK_SYSTEM_PROMPT = (
     "You should first think about the reasoning process in the mind "
-    "and then provide the user with the answer."
+    "and then provide the user with the answer. \n"
+    "The reasoning process is enclosed within <think> </think> tags, "
+    "i.e. <think> reasoning process here </think> answer here"
 )
 
 GEN_THINK_SYSTEM_PROMPT = (
     "You should first think about the planning process in the mind "
-    "and then generate the image."
+    "and then generate the image. \n"
+    "The planning process is enclosed within <think> </think> tags, "
+    "i.e. <think> planning process here </think> image here"
 )
 
 
