@@ -31,12 +31,14 @@ class SharedTensor:
 
     def open(self) -> torch.Tensor:
         (
-            storage_device, storage_handle, storage_size_bytes, storage_offset_bytes,
+            _storage_device, storage_handle, storage_size_bytes, storage_offset_bytes,
             ref_counter_handle, ref_counter_offset, event_handle, event_sync_required,
         ) = self.cuda_share
+        # Import into the receiving stream's device context. Importing on the
+        # exporter's device permits peer copies but not local stream word ops.
         return rebuild_cuda_tensor(
             torch.Tensor, self.size, self.stride, self.offset, torch.UntypedStorage,
-            getattr(torch, self.dtype.split(".")[-1]), storage_device, storage_handle, storage_size_bytes,
+            getattr(torch, self.dtype.split(".")[-1]), torch.cuda.current_device(), storage_handle, storage_size_bytes,
             storage_offset_bytes, self.requires_grad, ref_counter_handle, ref_counter_offset, event_handle,
             event_sync_required,
         )

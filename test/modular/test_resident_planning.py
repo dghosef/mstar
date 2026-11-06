@@ -578,6 +578,28 @@ def test_a_mailbox_needs_peer_access_and_stream_word_ops(device, peer_access, cu
     assert (mailbox_refusal(torch.device(device), torch.device("cuda:1")) is not None) == refused
 
 
+def test_a_mailbox_opens_peer_storage_on_the_receiving_gpu(monkeypatch):
+    from mstar.engine.run_mailbox import MailboxShare, RunMailbox
+    from mstar.utils import cuda_share
+
+    shared = cuda_share.SharedTensor(
+        (3, b"handle", 16, 0, b"refs", 0, b"event", False),
+        (4,), (1,), 0, "torch.int32", False,
+    )
+    opened = []
+
+    def rebuild(*args):
+        assert args[6] == 1  # local stream's device, not the exporter's GPU 3
+        tensor = torch.zeros(4, dtype=torch.int32)
+        opened.append(tensor)
+        return tensor
+
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 1)
+    monkeypatch.setattr(cuda_share, "rebuild_cuda_tensor", rebuild)
+    mailbox = RunMailbox.open(MailboxShare(shared, shared))
+    assert mailbox.data is opened[0] and mailbox.word is opened[1]
+
+
 def test_a_run_a_copy_of_which_casts_stays_on_the_hosts_loop():
     from mstar.engine.accelerator_graph_runner import _launch_words
 
