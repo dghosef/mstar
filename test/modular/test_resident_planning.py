@@ -772,11 +772,15 @@ def test_a_loop_of_two_nodes_repeats_as_one_run_its_last_node_closes(placed, gro
     assert asked == ([] if why else [("b", WALK, frozenset({"x"}), {"x": "c"})])
 
 
-@pytest.mark.parametrize("stolen", [False, True])
-def test_a_run_closer_replays_its_members_slots_only_while_they_hold_its_rows(stolen):
+@pytest.mark.parametrize("since", [None, "leased", "handle_reused", "offloaded"])
+def test_a_run_closer_replays_its_members_slots_only_while_they_hold_its_rows(since, monkeypatch):
     """The closer's step takes in the slot its member's step of the same rows
-    replayed on, and carries each signal from the node that makes it. Once
-    another step has leased that slot since, the closer runs one iteration."""
+    replayed on, and carries each signal from the node that makes it. It runs
+    one iteration once another step has leased that slot since, once the
+    handle is another request's, or once a row's streams were offloaded: the
+    member's step no longer holds them, so its plan would read another
+    request's pages."""
+    stolen = since is not None
     from mstar.engine.engine import Engine
     from mstar.model.submodule_base import CarryPair
 
@@ -791,18 +795,20 @@ def test_a_run_closer_replays_its_members_slots_only_while_they_hold_its_rows(st
     lease = {node: SimpleNamespace(slot=0, node=node) for node in slots}
     runner = {node: SimpleNamespace(slot_for=lambda lease: slots[lease.node]) for node in slots}
 
-    def batch(node, rows):
+    def batch(node, rows, request="r7"):
         ctx = SimpleNamespace(graph_walk=WALK, slot_lease=lease[node], repeats=4)
         return SimpleNamespace(
             node_name=node, request_ids=rows, step_context=ctx, admit_error=None, step=None, run_leases={},
+            per_request_info={rid: SimpleNamespace(request_id=request) for rid in rows},
         )
 
-    held = batch("b", [7])
+    held = {"leased": batch("b", [8], "r8"), "handle_reused": batch("b", [7], "r-earlier")}.get(since, batch("b", [7]))
     engine = Engine.__new__(Engine)
     engine._runs = {("c", WALK): ("b",)}
+    monkeypatch.setattr(engine, "is_offloaded", lambda node, rid: since == "offloaded", raising=False)
     engine._submodules = {
         "b": SimpleNamespace(
-            holders={0: batch("b", [8]) if stolen else held}, accelerator_graph_runner=runner["b"],
+            holders={0: held}, accelerator_graph_runner=runner["b"],
             carries={WALK: {"x": CarryPair("x", "input_embeds")}}, carry_makers={WALK: {"x": "c"}},
         ),
         "c": SimpleNamespace(

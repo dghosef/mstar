@@ -2815,21 +2815,29 @@ class Engine:
     def _gather_run(self, batch: ExecutingBatch) -> None:
         """For a step of a node a run of several nodes closes on: the slot each
         other node's step of this iteration replayed on, where it still holds
-        that step (no step has leased it since) and that step's plan serves
-        every round (no resource has a column a replay for it). Else the step
-        is one iteration, as each of theirs was."""
+        that step (no step has leased it since, for these requests: a handle
+        is reused once its request is gone), that step's plan serves every
+        round (no resource has a column a replay for it), and what it planned
+        is still on the device (no row of it offloaded since its step, which no
+        longer holds its streams). Else the step is one iteration, as each of
+        theirs was."""
         ctx = batch.step_context
         rows = tuple(batch.request_ids)
+        requests = [batch.per_request_info[rid].request_id for rid in rows]
         leases: dict[str, SlotLease] = {}
         for node in self._runs[(batch.node_name, ctx.graph_walk)]:
             mgmt = self._submodules[node]
             held = next((
                 holder for holder in list(mgmt.holders.values())
                 if holder is not None and tuple(holder.request_ids) == rows
+                and [holder.per_request_info[rid].request_id for rid in rows] == requests
                 and holder.step_context.graph_walk == ctx.graph_walk
                 and holder.step_context.slot_lease is not None and holder.admit_error is None
             ), None)
-            if held is None or (held.step is not None and self._runner.replay_columns(held.step, ctx.repeats)):
+            if (
+                held is None or any(self.is_offloaded(node, rid) for rid in rows)
+                or (held.step is not None and self._runner.replay_columns(held.step, ctx.repeats))
+            ):
                 ctx.repeats = 1
                 batch.run_leases = {}
                 return
