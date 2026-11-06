@@ -117,6 +117,11 @@ class AcceleratorGraphBackend(ABC):
         """What ``mstar_rust.launch_run`` needs to launch ``graph`` on the current stream."""
         raise NotImplementedError(self.launch_refusal())
 
+    def stream_words(self) -> tuple[int, int]:
+        """``cuStreamWaitValue32``'s and ``cuStreamWriteValue32``'s addresses, for a
+        run with a part on another GPU."""
+        raise NotImplementedError(f"{type(self).__name__} has no stream words")
+
     def generator_offset(self) -> int:
         """Where the device's RNG generator stands: an eager step that moves
         it draws from it, which a graph's raw launch wouldn't advance."""
@@ -237,6 +242,13 @@ class CUDAGraphBackend(_TorchGraphBackend):
         return RawLaunch(
             self._runtime_entry("cudaGraphLaunch"), self._runtime_entry("cudaMemcpy2DAsync"),
             int(graph.raw_cuda_graph_exec()), self.raw_stream(),
+        )
+
+    def stream_words(self) -> tuple[int, int]:
+        lib = ctypes.CDLL("libcuda.so.1")
+        return tuple(
+            ctypes.cast(getattr(lib, name), ctypes.c_void_p).value
+            for name in ("cuStreamWaitValue32_v2", "cuStreamWriteValue32_v2")
         )
 
     def raw_stream(self) -> int:
