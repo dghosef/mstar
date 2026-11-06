@@ -807,10 +807,46 @@ def test_a_loop_of_two_nodes_repeats_as_one_run_its_last_node_closes(placed, gro
     asked = []
     engine = SimpleNamespace(
         resident_refusal=lambda *key: "host", repeat_refusal=lambda *args: asked.append(args) and None,
+        run_refusal=lambda *args: None,
     )
     worker.engine_manager = SimpleNamespace(get_engine=lambda node: engine)
     assert worker._members_refusal("c", WALK, repeats.edges[("c", WALK)]) == why
     assert asked == ([] if why else [("b", WALK, frozenset({"x"}), {"x": "c"})])
+
+
+@pytest.mark.parametrize(("labels", "lanes", "refused"), [
+    (("main", "main"), {}, True),
+    (("branch", "closer"), {}, False),
+    (("branch", "closer"), {"b": 1}, True),
+    (("branch", "closer"), {"c": 1}, True),
+    ((None, "closer"), {}, True),
+])
+def test_a_run_does_not_replay_over_another_parts_plan(labels, lanes, refused, monkeypatch):
+    from mstar.engine.engine import Engine
+    from mstar.engine.resources.step import ResourceStep, Segment, SubmoduleStep
+
+    engine = Engine.__new__(Engine)
+    engine._node_lanes = lanes
+    engine._submodules = {
+        node: SimpleNamespace(template_steps={WALK: SubmoduleStep({
+            "attention": ResourceStep(segments=None if label is None else (Segment(7, label, 1),)),
+        })})
+        for node, label in zip(("b", "c"), labels, strict=True)
+    }
+    from mstar.worker.step_repeats import loop_runs, walk_edges
+
+    walks, pairs = {WALK: _split_loop()}, [(node, WALK) for node in ("b", "c")]
+    worker = Worker.__new__(Worker)
+    worker._step_repeats = StepRepeats(
+        {"c": RepeatConfig(max=4)}, walk_edges(walks, pairs), loop_runs(walks, pairs),
+    )
+    worker.parallel_nodes = set()
+    worker._stop_token_signal = {key: None for key in pairs}
+    worker._worker_graph_of = {key: 0 for key in pairs}
+    worker.engine_manager = SimpleNamespace(get_engine=lambda node: engine)
+    monkeypatch.setattr(engine, "resident_refusal", lambda *args: "host")
+    monkeypatch.setattr(engine, "repeat_refusal", lambda *args: None)
+    assert (worker._members_refusal("c", WALK, worker._step_repeats.edges[("c", WALK)]) is not None) == refused
 
 
 @pytest.mark.parametrize("since", [None, "leased", "handle_reused", "offloaded", "no_record"])

@@ -229,7 +229,7 @@ class RepeatingSteps:
                 why = engine.repeat_refusal(member, graph_walk, *self._carried_into(member, graph_walk))
             if why is not None:
                 return f"member {member!r}: {why}"
-        return None
+        return engine.run_refusal((*self._step_repeats.runs[(closer, graph_walk)], closer), graph_walk)
 
     def _rows_refusal(self, node_name: str, graph_walk: str) -> str | None:
         """Why this walk's loop-back values can't stay in the node's device

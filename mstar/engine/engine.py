@@ -2815,6 +2815,26 @@ class Engine:
             return out
         return BatchedModelOutput.coerce({request_ids[0]: out})
 
+    def run_refusal(self, nodes: Sequence[str], graph_walk: str) -> str | None:
+        """A run keeps every part's plan live between replays. Parts cannot
+        share a resource's plan label or execute on a separate lane."""
+        held: dict[str, tuple[str, set[str] | None]] = {}
+        for node in nodes:
+            if self._node_lanes.get(node, 0):
+                return f"node {node!r}: it runs on a separate lane"
+            step = self._submodules[node].template_steps.get(graph_walk)
+            if step is None:
+                continue
+            for key, part in step.steps.items():
+                labels = None if part.segments is None else {s.label for s in part.segments}
+                if key in held:
+                    other, previous = held[key]
+                    if labels is None or previous is None or labels & previous:
+                        return f"nodes {other!r} and {node!r}: their plans share resource {key!r} labels"
+                    labels |= previous
+                held[key] = (node, labels)
+        return None
+
     def join_run(self, closer: str, graph_walk: str, members: Sequence[str]) -> None:
         """A step of ``closer`` on ``graph_walk`` that repeats runs the other
         nodes of its Loop too (``members``, in the iteration's order): settled
