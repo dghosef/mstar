@@ -676,12 +676,36 @@ def _copy_words(target: torch.Tensor, source: torch.Tensor) -> list[int] | None:
     ]
 
 
-def _launch_words(ops: Sequence[tuple[torch.Tensor, torch.Tensor] | int]) -> list[int] | None:
+@dataclass(frozen=True)
+class WordWait:
+    """A run's stream waits here until the 32-bit word at ``address`` reaches
+    ``value`` (a cyclic compare, so a counter may wrap). Another process's
+    stream writes it, which no event can order: a wait takes the last record at
+    enqueue, and two processes enqueue on their own. ``flags``: the driver's."""
+    address: int
+    value: int
+    flags: int = 0
+
+
+@dataclass(frozen=True)
+class WordWrite:
+    """A run's stream writes ``value`` to the 32-bit word at ``address``, behind
+    what it has done so far (the driver's memory barrier, unless ``flags`` says
+    otherwise)."""
+    address: int
+    value: int
+    flags: int = 0
+
+
+def _launch_words(ops: Sequence[tuple[torch.Tensor, torch.Tensor] | int | WordWait | WordWrite]) -> list[int] | None:
     """``ops`` as ``mstar_rust.launch_run`` takes them: a launch is its graph
     exec's address, a copy its target and source. None if a copy can't be
     said (that run stays on the host's loop)."""
     words: list[int] = []
     for op in ops:
+        if isinstance(op, (WordWait, WordWrite)):
+            words.extend((2 if isinstance(op, WordWait) else 3, op.address, op.value, op.flags))
+            continue
         if not isinstance(op, tuple):
             words.extend((0, op))
             continue
@@ -744,6 +768,10 @@ class AcceleratorGraphSlot:
     # loop-back signal -> the static input this capture reads it into, off the
     # node's rows, at its head
     row_heads: Mapping[str, str] = MappingProxyType({})
+
+
+# a run's op: a launch (its slot), a copy (target, source), or a word op
+RunOp = "tuple[torch.Tensor, torch.Tensor] | AcceleratorGraphSlot | WordWait | WordWrite"
 
 
 class RunPart(NamedTuple):
@@ -1973,7 +2001,7 @@ class AcceleratorGraphRunner:
         unique.update((id(t), t) for t in (*rows_out.values(), *spans_out.values()))
         wide = {key: t.new_empty(t.shape[0], repeats, *t.shape[1:]) for key, t in unique.items()}
         # the run, in order: a launch is its slot, a copy its target and source
-        ops: list[tuple[torch.Tensor, torch.Tensor] | AcceleratorGraphSlot] = []
+        ops: list[RunOp] = []
         for i in range(repeats):
             if i:
                 for part in parts:
@@ -2016,21 +2044,28 @@ class AcceleratorGraphRunner:
             slot.token_stream = TokenStream(rows, limit, self._device)
         return slot.token_stream
 
-    def _run(self, ops: Sequence[tuple[torch.Tensor, torch.Tensor] | AcceleratorGraphSlot]) -> None:
-        """A run's launches (a slot, its graph) and copies (target, source), in
-        order: from one Rust call with the GIL released where every slot it
-        launches can (``mstar_rust.launch_run``), else here."""
-        raw = all(op.raw_launch for op in ops if not isinstance(op, tuple))
-        launches = {
-            id(op): self._graph_backend.raw_launch(op.graph) for op in ops if raw and not isinstance(op, tuple)
-        }
-        words = _launch_words([op if isinstance(op, tuple) else launches[id(op)].exec for op in ops]) if raw else None
+    def _run(self, ops: Sequence[RunOp]) -> None:
+        """A run's launches (a slot, its graph), copies (target, source) and
+        word ops, in order: from one Rust call with the GIL released where
+        every slot it launches can (``mstar_rust.launch_run``), else here. Word
+        ops have no form on the host's loop."""
+        words_in_run = any(isinstance(op, (WordWait, WordWrite)) for op in ops)
+        not_launches = (tuple, WordWait, WordWrite)
+        slots = [op for op in ops if not isinstance(op, not_launches)]
+        raw = all(slot.raw_launch for slot in slots)
+        launches = {id(slot): self._graph_backend.raw_launch(slot.graph) for slot in slots} if raw else {}
+        words = _launch_words([
+            op if isinstance(op, not_launches) else launches[id(op)].exec for op in ops
+        ]) if raw else None
         if words is not None and launches:
             import mstar_rust
 
             first = next(iter(launches.values()))
-            mstar_rust.launch_run(first.graph_launch, first.memcpy_2d, first.stream, words)
+            entries = self._graph_backend.stream_words() if words_in_run else ()
+            mstar_rust.launch_run(first.graph_launch, first.memcpy_2d, first.stream, words, *entries)
             return
+        if words_in_run:
+            raise RuntimeError(f"{self._submodule_name}: a run across GPUs launches raw; load should have refused it")
         for op in ops:
             if isinstance(op, tuple):
                 op[0].copy_(op[1], non_blocking=True)

@@ -21,10 +21,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
 import torch
-from torch.multiprocessing.reductions import rebuild_cuda_tensor
 
 from mstar.engine.resources.kv.cache import KVCache, KVLayout
 from mstar.engine.resources.kv.page_copier import make_page_copier
+from mstar.utils.cuda_share import SharedTensor
 from mstar.utils.threads import ThreadPool
 
 if TYPE_CHECKING:
@@ -205,15 +205,14 @@ class CudaIpcKVTransferEngine(KVTransferEngine):
         max_workers=3
     ):
         tensor = kv_cache.tensor
-        storage = tensor.untyped_storage()
-        cuda_share = storage._share_cuda_()
+        shared = SharedTensor.of(tensor)
         self._transfer_info = CudaIpcKVTransferInfo(
-            cuda_share=cuda_share,
-            size=tensor.size(),
-            stride=tensor.stride(),
-            offset=tensor.storage_offset(),
-            dtype=str(tensor.dtype),
-            requires_grad=tensor.requires_grad,
+            cuda_share=shared.cuda_share,
+            size=shared.size,
+            stride=shared.stride,
+            offset=shared.offset,
+            dtype=shared.dtype,
+            requires_grad=shared.requires_grad,
             layout=kv_cache.layout
         )
         self._device = kv_cache.device
@@ -287,41 +286,16 @@ class CudaIpcKVTransferEngine(KVTransferEngine):
             f"remote KV layout {remote_kv_info.layout} != "
             f"local layout {self._kv_cache.layout}"
         )
-        dtype = getattr(torch, remote_kv_info.dtype.split(".")[-1])
-        (
-            storage_device,
-            storage_handle,
-            storage_size_bytes,
-            storage_offset_bytes,
-            ref_counter_handle,
-            ref_counter_offset,
-            event_handle,
-            event_sync_required,
-        ) = remote_kv_info.cuda_share
-
         # Note: as this is a zero-copy operation and not allocating memory
         # (just building a reference to underlying storage on the sending device),
         # it is ok that this is rebuilding the whole kv cache. What matters is that,
         # in the rest of the function, we are only copying the right pages to
-        # self._device. In fact, in testing, we see it is faster to call
-        # rebuild_cuda_tensor on the whole KV cache instead of just the slice we need.
-        tensor = rebuild_cuda_tensor(
-            torch.Tensor,
-            remote_kv_info.size,
-            remote_kv_info.stride,
-            remote_kv_info.offset,
-            torch.UntypedStorage,
-            dtype,
-            storage_device,
-            storage_handle,
-            storage_size_bytes,
-            storage_offset_bytes,
-            remote_kv_info.requires_grad,
-            ref_counter_handle,
-            ref_counter_offset,
-            event_handle,
-            event_sync_required,
-        )
+        # self._device. In fact, in testing, we see it is faster to rebuild
+        # the whole KV cache instead of just the slice we need.
+        tensor = SharedTensor(
+            remote_kv_info.cuda_share, remote_kv_info.size, remote_kv_info.stride, remote_kv_info.offset,
+            remote_kv_info.dtype, remote_kv_info.requires_grad,
+        ).open()
 
         stream = self._copy_stream
         stream.wait_event(event)

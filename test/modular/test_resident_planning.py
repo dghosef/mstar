@@ -441,10 +441,20 @@ def _raw_backend(*slots):
             ctypes.memmove(dst + row * dst_pitch, src + row * src_pitch, width)
         return 0
 
+    def word_entry(name):
+        @ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint32, ctypes.c_uint32)
+        def entry(stream, address, value, flags):
+            assert stream == 2
+            calls.append((name, address, value, flags))
+            return 0
+        return entry
+
+    wait, write = word_entry("wait"), word_entry("write")
     addresses = [ctypes.cast(fn, ctypes.c_void_p).value for fn in (launch, copy)]
     execs = {id(slot.graph): i + 1 for i, slot in enumerate(slots)}
     backend = SimpleNamespace(
-        raw_launch=lambda graph: RawLaunch(*addresses, execs[id(graph)], 2), keep=(launch, copy),
+        raw_launch=lambda graph: RawLaunch(*addresses, execs[id(graph)], 2), keep=(launch, copy, wait, write),
+        stream_words=lambda: tuple(ctypes.cast(fn, ctypes.c_void_p).value for fn in (wait, write)),
     )
     return backend, calls
 
@@ -535,6 +545,37 @@ def test_a_run_of_two_nodes_replays_each_in_turn_with_what_the_other_left(raw):
     if raw:
         assert calls.count("launch") == 4
     assert rows["x"].tolist() == [[1.0, 11.0, 121.0]]
+
+
+@pytest.mark.parametrize("raw", [True, False], ids=["rust_loop", "host_loop"])
+def test_a_run_with_a_part_on_another_gpu_orders_its_stream_by_words(raw):
+    """A word wait and write go out in the run's order, from the one launch call.
+    The host's loop has no form of them, so such a run never takes it."""
+    from mstar.engine.accelerator_graph_runner import WordWait, WordWrite
+
+    slot = SimpleNamespace(graph=SimpleNamespace(replay=lambda: None), raw_launch=raw)
+    runner = AcceleratorGraphRunner.__new__(AcceleratorGraphRunner)
+    runner._submodule_name = "n"
+    runner._graph_backend, calls = _raw_backend(slot)
+    ops = [WordWait(0x10, 3, 1 << 30), slot, WordWrite(0x20, 0xFFFFFFFF)]
+    if not raw:
+        with pytest.raises(RuntimeError, match="launches raw"):
+            runner._run(ops)
+        return
+    runner._run(ops)
+    assert calls == [("wait", 0x10, 3, 1 << 30), "launch", ("write", 0x20, 0xFFFFFFFF, 0)]
+
+
+@pytest.mark.parametrize(("device", "peer_access", "cuda", "refused"), [
+    ("cpu", True, "12.4", True), ("cuda:0", False, "12.4", True), ("cuda:0", True, "11.8", True),
+    ("cuda:0", True, "12.4", False),
+], ids=["no_gpu", "no_peer_access", "old_cuda", "served"])
+def test_a_mailbox_needs_peer_access_and_stream_word_ops(device, peer_access, cuda, refused, monkeypatch):
+    from mstar.engine.run_mailbox import mailbox_refusal
+
+    monkeypatch.setattr(torch.version, "cuda", cuda)
+    monkeypatch.setattr(torch.cuda, "can_device_access_peer", lambda a, b: peer_access)
+    assert (mailbox_refusal(torch.device(device), torch.device("cuda:1")) is not None) == refused
 
 
 def test_a_run_a_copy_of_which_casts_stays_on_the_hosts_loop():
