@@ -19,6 +19,7 @@ from mstar.model.base import Model, node_moe_parallel_configs, parse_autocast_dt
 from mstar.model.submodule_base import NodeSubmodule
 from mstar.utils.device import DeviceCapability
 from mstar.utils.streams import reset_device_scheduling
+from mstar.worker.step_repeats import loop_runs
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +194,7 @@ def _refuse_unservable_lanes(
     return placed
 
 
+
 def _row_nodes(model: Model, model_config: Mapping, submodules: Mapping) -> set[str]:
     """The nodes whose config asks to keep loop-back values in device rows:
     those it asks to repeat, or a node in a Loop that resident planning asks."""
@@ -205,6 +207,18 @@ def _row_nodes(model: Model, model_config: Mapping, submodules: Mapping) -> set[
         return repeating
     loops = (loop for section in model.get_graph_walk_graphs().values() for loop in section.get_loops().values())
     return repeating | (resident & {node for loop in loops for node in loop.get_nodes()})
+
+
+def _member_nodes(model: Model, model_config: Mapping) -> set[str]:
+    """The nodes a run asked for may take in as members: the other nodes of a
+    Loop whose iteration closes on a node the config asks to repeat."""
+    asked = {
+        node for node, block in (model_config.get("step_repeats") or {}).items()
+        if isinstance(block, Mapping) and block.get("max", 1) != 1
+    }
+    walks = model.get_graph_walk_graphs()
+    pairs = [(node, walk) for walk, section in walks.items() for node in section.get_nodes() if node in asked]
+    return {member for members in loop_runs(walks, pairs).values() for member in members}
 
 
 def _tp_group_of(sharding: ShardingConfig, node: str, walk: str) -> ShardingGroup | None:
@@ -342,6 +356,7 @@ class EngineManager:
             kv_cache_type=autocast_dtype,
             model=model,
             row_nodes=_row_nodes(model, model_config, submodules),
+            member_nodes=_member_nodes(model, model_config),
         )
         budgets = model_config.get("max_batch_tokens") or {}
         override_mixed = model_config.get("can_override_mixed_max_tokens") or {}

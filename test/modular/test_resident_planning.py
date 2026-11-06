@@ -772,16 +772,17 @@ def test_a_loop_of_two_nodes_repeats_as_one_run_its_last_node_closes(placed, gro
     assert asked == ([] if why else [("b", WALK, frozenset({"x"}), {"x": "c"})])
 
 
-@pytest.mark.parametrize("since", [None, "leased", "handle_reused", "offloaded"])
-def test_a_run_closer_replays_its_members_slots_only_while_they_hold_its_rows(since, monkeypatch):
-    """The closer's step takes in the slot its member's step of the same rows
-    replayed on, and carries each signal from the node that makes it. It runs
-    one iteration once another step has leased that slot since, once the
-    handle is another request's, or once a row's streams were offloaded: the
+@pytest.mark.parametrize("since", [None, "leased", "handle_reused", "offloaded", "no_record"])
+def test_a_run_closer_stages_its_members_again_from_their_records(since, monkeypatch):
+    """The closer's step stages each member's step of the same rows again, on
+    a slot of the member's it leases, from the member's run record, and
+    carries each signal from the node that makes it. Another request's step
+    on the member's own slot since costs nothing. It runs one iteration once
+    the handle is another request's, once a row's streams were offloaded (the
     member's step no longer holds them, so its plan would read another
-    request's pages."""
-    stolen = since is not None
+    request's pages), or with no record."""
     from mstar.engine.engine import Engine
+    from mstar.engine.resources.run_records import RunRecord, RunRecords
     from mstar.model.submodule_base import CarryPair
 
     def slot(inputs, outputs):
@@ -790,40 +791,82 @@ def test_a_run_closer_replays_its_members_slots_only_while_they_hold_its_rows(si
             static_outputs=SimpleNamespace(row_outputs=outputs, check_stop_buffers={}, packed_outputs={}),
         )
 
-    x, x_in, v, v_in, x_b = (torch.zeros(1) for _ in range(5))
-    slots = {"b": slot({"input_embeds": x_b}, {"v": v}), "c": slot({"v": v_in, "x": x_in}, {"x": x})}
-    lease = {node: SimpleNamespace(slot=0, node=node) for node in slots}
-    runner = {node: SimpleNamespace(slot_for=lambda lease: slots[lease.node]) for node in slots}
+    x, x_in, v, v_in, x_b, pos_b = (torch.zeros(1) for _ in range(6))
+    slots = {"b": [slot({"input_embeds": x_b, "pos": pos_b}, {"v": v}) for _ in range(2)],
+             "c": [slot({"v": v_in, "x": x_in}, {"x": x})]}
+    staged, planned = [], []
 
-    def batch(node, rows, request="r7"):
-        ctx = SimpleNamespace(graph_walk=WALK, slot_lease=lease[node], repeats=4)
-        return SimpleNamespace(
-            node_name=node, request_ids=rows, step_context=ctx, admit_error=None, step=None, run_leases={},
-            per_request_info={rid: SimpleNamespace(request_id=request) for rid in rows},
-        )
+    class Runner:
+        def __init__(self, node):
+            self.node = node
 
-    held = {"leased": batch("b", [8], "r8"), "handle_reused": batch("b", [7], "r-earlier")}.get(since, batch("b", [7]))
+        def slot_for(self, lease):
+            return slots[lease.node][lease.slot]
+
+        def lease_slot(self, graph_walk, bs, slot, num_tokens=None, cg_key_info=None):
+            assert (graph_walk, bs, cg_key_info) == (WALK, 1, "key")
+            return SimpleNamespace(node=self.node, slot=slot)
+
+        def _stage(self, lease, preprocessed):
+            staged.append((lease.slot, dict(preprocessed)))
+
+    rotation = iter([1])
+    closer_lease = SimpleNamespace(node="c", slot=0)
+    from mstar.engine.resources.step import StepContext
+
+    step = SimpleNamespace(
+        ctx=StepContext(request_ids=(7,), graph_walk=WALK, slot=0, capture=False),
+        set_ctx=lambda ctx: setattr(step, "ctx", ctx),
+    )
     engine = Engine.__new__(Engine)
     engine._runs = {("c", WALK): ("b",)}
+    engine._runner = SimpleNamespace(replay_columns=lambda step, n: [], plan=lambda step: planned.append(step.ctx))
+    engine._order_after_pre_plans = lambda node: None
     monkeypatch.setattr(engine, "is_offloaded", lambda node, rid: since == "offloaded", raising=False)
+    records = RunRecords()
+    if since != "no_record":
+        records.keep([7], RunRecord(
+            requests=("r-earlier",) if since == "handle_reused" else ("r7",), step=step, cg_key_info="key",
+            graph_walk=WALK, bs=1, num_tokens=None, staged={"pos": torch.ones(1)},
+        ))
     engine._submodules = {
         "b": SimpleNamespace(
-            holders={0: held}, accelerator_graph_runner=runner["b"],
+            run_records=records, accelerator_graph_runner=Runner("b"), lease_slot=lambda: next(rotation),
             carries={WALK: {"x": CarryPair("x", "input_embeds")}}, carry_makers={WALK: {"x": "c"}},
         ),
         "c": SimpleNamespace(
-            accelerator_graph_runner=runner["c"],
+            accelerator_graph_runner=Runner("c"),
             carries={WALK: {"v": CarryPair("v", "v"), "x": CarryPair("x", "x")}}, carry_makers={WALK: {"v": "b"}},
         ),
     }
-    closer = batch("c", [7])
+    ctx = SimpleNamespace(graph_walk=WALK, slot_lease=closer_lease, repeats=4)
+    closer = SimpleNamespace(
+        node_name="c", request_ids=[7], step_context=ctx, run_leases={},
+        per_request_info={7: SimpleNamespace(request_id="r7")},
+    )
     engine._gather_run(closer)
-    assert closer.step_context.repeats == (1 if stolen else 4)
-    assert closer.run_leases == ({} if stolen else {"b": lease["b"]})
-    if not stolen:
-        part = engine._run_part("c", WALK, {**closer.run_leases, "c": lease["c"]})
-        assert [(s is v, t is v_in) for s, t in part.copies][0] == (True, True)
-        assert engine._run_part("b", WALK, {**closer.run_leases, "c": lease["c"]}).copies == [(x, x_b)]
+    ran = since in (None, "leased")
+    assert closer.step_context.repeats == (4 if ran else 1)
+    if ran:
+        # planned and staged on the slot it leased, its carried input left to the rounds
+        assert closer.run_leases["b"].slot == 1 and planned[0].slot == 1
+        assert [(s, list(inputs)) for s, inputs in staged] == [(1, ["pos"])]
+        leases = {**closer.run_leases, "c": closer_lease}
+        assert [(s is v, t is v_in) for s, t in engine._run_part("c", WALK, leases).copies][0] == (True, True)
+        assert engine._run_part("b", WALK, leases).copies == [(x, slots["b"][1].static_inputs["input_embeds"])]
+    else:
+        assert closer.run_leases == {} and not staged
+
+
+def test_a_run_record_goes_with_its_request():
+    """A removed request leaves no record a later request's handle could match."""
+    from mstar.engine.resources.run_records import RunRecord, RunRecords
+
+    records = RunRecords()
+    record = RunRecord(requests=("r7",), step=None, cg_key_info=None, graph_walk=WALK, bs=1, num_tokens=None, staged={})
+    records.keep([7], record)
+    records.remove_request(7)
+    assert records.take([7], WALK, ["r7"]) is None
 
 
 @pytest.mark.parametrize(("parallel", "why"), [(False, None), (True, "TP: each rank's window")])
