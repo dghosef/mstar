@@ -349,8 +349,10 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
        signal from the node that makes it into the node that reads it. A member is captured,
        planned on the host with a plan that serves every replay, in the closer's node group
        (a Loop across groups is a copy in each, with its own count) and outside TP, stopped
-       by its Loop's count alone, and makes only what the run reads. The closer doesn't chain. A run is one iteration when another step has leased a member's
-       slot since that member's step. Its
+       by its Loop's count alone, and makes only what the run reads. The closer doesn't chain. The closer stages each member's step again on a slot it leases,
+       from what the member's step kept (``run_records``), so other requests' steps on the
+       member's node in between cost nothing; a run is one iteration when a member's row was
+       offloaded since its step. Its
        resources can refuse the walk (``Resource.repeat_refusal``): fa3 or cuDNN FlashInfer
        decode, or a sampler without the in-graph scatter. A walk that asks for repeats gets
        tensor-core captured decode wrappers whatever ``decode_tensor_cores`` says; the line
