@@ -1159,7 +1159,7 @@ class LLMSubmodule(ARNodeSubmodule):
         return BatchedAcceleratorGraphConfig(
             capture_graph_walk=walk, single_request_inputs=single,
             additional_key_info=self._denoise_key(walk, (), tokens),
-            compile=False, capture_batch_sizes=[1], caps_eager_batch_size=False,
+            compile=False, capture_batch_sizes=[1],
             total_tokens_multiplier=1 if DENOISE_WALKS[walk].split else DENOISE_WALKS[walk].branches,
         )
 
@@ -2192,7 +2192,7 @@ class CombineCFGSubmodule(NodeSubmodule):
         return BatchedAcceleratorGraphConfig(
             capture_graph_walk=walk, single_request_inputs=single,
             additional_key_info=denoise_key(self.config, (), tokens, combines=True),
-            compile=False, capture_batch_sizes=[1], caps_eager_batch_size=False,
+            compile=False, capture_batch_sizes=[1],
         )
 
     def cg_key_info(self, graph_walk: str, per_request_info: dict[str, CurrentForwardPassInfo], **kwargs):

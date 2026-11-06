@@ -174,6 +174,16 @@ def _llm() -> LLMSubmodule:
     )
 
 
+def _rows_a_step_takes(config) -> int | None:
+    """The scheduler's cap for a walk with this capture: a denoise step takes one
+    row, so two ready requests are two captured steps, not one eager step of two."""
+    from mstar.engine.accelerator_graph_runner import AcceleratorGraphRunner
+
+    runner = AcceleratorGraphRunner.__new__(AcceleratorGraphRunner)
+    runner._capture_configs = [config]
+    return runner.max_batch_size_for(config.capture_graph_walk)
+
+
 def _info(graph_walk: str = "image_gen", **fields) -> CurrentForwardPassInfo:
     return CurrentForwardPassInfo(request_id="r0", graph_walk=graph_walk, fwd_index=0, random_seed=0, max_tokens=0,
                                   **fields)
@@ -393,7 +403,7 @@ def test_a_guided_request_publishes_only_the_kv_its_cfg_walk_reads(kwargs, cfg_p
     ("LLM", "image_gen"), ("LLM", "image_gen_head"), ("LLM", "image_gen_guided2"), ("LLM", "image_gen_guided3"),
     ("LLM", "image_gen_cfg2"), ("LLM_cfg_text", "image_gen_cfg2"), ("LLM_cfg_img", "image_gen_cfg3"),
 ])
-def test_a_denoise_step_leases_and_declares_the_bucket_its_capture_was_made_under(node, walk):
+def test_a_denoise_step_leases_and_declares_the_bucket_its_capture_was_made_under(node, walk, monkeypatch):
     """With denoise captures asked for (``denoise_capture_sizes``), a request at a
     captured size and the default guidance lands on the capture's key from
     ``cg_key_info`` and from its own ``declare_step``; other guidance lands on
@@ -418,6 +428,9 @@ def test_a_denoise_step_leases_and_declares_the_bucket_its_capture_was_made_unde
     assert walk in llm._denoise_walks
     if not DENOISE_WALKS[walk].split:
         assert llm.repeat_carry(walk, {"latents", "time_index"})["latents"] == CarryPair("latents", "input_embeds")
+    monkeypatch.setattr(type(llm), "_latent_dtype", torch.float32)
+    monkeypatch.setattr(type(llm), "_sentinel_frame", lambda self, n, dtype, device: torch.zeros(n + 2, 1))
+    assert _rows_a_step_takes(llm._denoise_capture_config(walk, 256, 256, "cpu")) == 1
     llm.config = CONFIG
     assert llm.cg_key_info(walk, rows) is False
 
@@ -485,6 +498,7 @@ def test_a_captured_combine_step_is_keyed_by_its_guidance_and_hands_on_the_eager
     meta = {"height": 256, "width": 256}
     configs = {c.capture_graph_walk: c for c in combine.get_accelerator_graph_configs("cpu")}
     assert set(configs) == set(CFG_WALKS)
+    assert _rows_a_step_takes(configs[walk]) == 1
     rows = {0: _info(walk, step_metadata=meta)}
     assert combine.cg_key_info(walk, rows) == configs[walk].additional_key_info
     assert combine.cg_key_info(walk, {0: _info(walk, step_metadata={**meta, "cfg_text_scale": 7.5})}) \
