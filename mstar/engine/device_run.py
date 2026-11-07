@@ -55,7 +55,7 @@ extern "C" __global__ void run_stop(
 ) {
     int done = 0;
     long long at = *index;
-    for (int row = 0; row < rows; ++row) {
+    for (int row = threadIdx.x; row < rows; row += warpSize) {
         bool executed = active ? active[row] : !marks[row];
         long long identity = identities && executed ? identities[row] : 0;
         if (descriptors) descriptors[row * width + at] = identity;
@@ -69,15 +69,23 @@ extern "C" __global__ void run_stop(
         }
         done += marks[row] || (active && counts[row] >= *limit);
     }
-    long long next = at + 1;
-    *index = next;
     if (host_tokens) {
         __threadfence_system();
-        *landed = (int)next;
     }
-    bool go = done < rows && (active || next < *limit) && *generation > *yield_until
-              && (*refill == 0 || done < *refill);
-    *continuation = go ? 1 : 0;
+    for (int offset = warpSize / 2; offset; offset /= 2) {
+        done += __shfl_down_sync(0xffffffff, done, offset);
+    }
+    // Every writer fences its own host payload. A shuffle is not a memory
+    // barrier: all row writes and index reads precede lane zero's publication.
+    __syncwarp();
+    if (threadIdx.x == 0) {
+        long long next = at + 1;
+        *index = next;
+        if (host_tokens) *landed = (int)next;
+        bool go = done < rows && (active || next < *limit) && *generation > *yield_until
+                  && (*refill == 0 || done < *refill);
+        *continuation = go ? 1 : 0;
+    }
 }
 
 extern "C" __global__ void run_start(
@@ -414,7 +422,7 @@ class CudaWhile:
         ]
         args = (ctypes.c_void_p * len(values))(*(ctypes.cast(ctypes.byref(v), ctypes.c_void_p) for v in values))
         self._driver_call(
-            "cuLaunchKernel", self._load_kernels()[0], 1, 1, 1, 1, 1, 1, 0, ctypes.c_void_p(stream), args, None,
+            "cuLaunchKernel", self._load_kernels()[0], 1, 1, 1, 32, 1, 1, 0, ctypes.c_void_p(stream), args, None,
         )
 
     def node_refusal(self, step_graph: int) -> str | None:

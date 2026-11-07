@@ -1940,6 +1940,56 @@ def test_independent_row_capture_refuses_uncovered_effects(monkeypatch, unsuppor
     assert run is None and WALK in runner._run_failures
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA row stop and publication")
+def test_stop_tail_counts_and_publishes_rows_beyond_one_warp():
+    from mstar.engine.accelerator_graph_backend import CUDAGraphBackend
+    from mstar.engine.accelerator_graph_runner import capture_into_graph
+    from mstar.engine.resources.run_rows import RunRows
+
+    device = torch.device("cuda", 0)
+    backend = CUDAGraphBackend(device)
+    cuda = backend.while_runtime()
+    cuda._load_kernels()
+    membership = RunRows(device, rows=65, capacity=65, binding_width=2)
+    stream = TokenStream(65, 4, device, membership=True)
+    buffers = SimpleNamespace(rows=torch.arange(65, device=device), slots=torch.arange(65, device=device))
+    state = RunState(65, "token", {-1}, device, dropping=buffers, stream=stream,
+                     membership=membership, width=4)
+    state.identities.copy_(torch.arange(1, 66, device=device))
+    # A nonunit row stride must survive the native argument binding.
+    storage = torch.zeros((65, 3), dtype=torch.long, device=device)
+    tokens = storage[:, 1:2]
+    graph, _ = capture_into_graph(lambda: cuda.stop(state, tokens, backend.raw_stream()),
+                                  backend.graph_pool_handle(), device, None, keep_graph=True)
+    state.stage(64, [True] + [False] * 63, 4, refill_at=0.5)
+    expected_columns, expected_identities = [], []
+    try:
+        for iteration in range(2):
+            values = torch.arange(65) + 100 * (iteration + 1)
+            values[::2] = -1
+            if iteration:
+                values[63] = -1
+            tokens.copy_(values[:, None])
+            graph.replay()
+            backend.synchronize()
+            counts = [1 + int(iteration and (row == 0 or row % 2)) for row in range(64)] + [0]
+            identities = [row + 1 if row < 64 and (not iteration or row == 0 or row % 2) else 0
+                          for row in range(65)]
+            expected_columns.append(values)
+            expected_identities.append(torch.tensor(identities))
+            assert state.counts.tolist() == counts
+            assert state.marks.sum().item() == 32 + iteration
+            assert state.index.item() == stream.landed.item() == iteration + 1
+            assert state.continuation.item() == 1 - iteration
+            assert torch.equal(stream.tokens[:, :iteration + 1], torch.stack(expected_columns, dim=1))
+            expected = torch.stack(expected_identities, dim=1)
+            assert torch.equal(stream.identities[:, :iteration + 1], expected)
+            assert torch.equal(state.descriptors[:, :iteration + 1].cpu(), expected)
+    finally:
+        backend.synchronize()
+        graph.reset()
+
+
 @pytest.mark.parametrize("budget", [4, 1])
 def test_independent_row_masks_execute_in_a_real_conditional_capture(budget):
     from mstar.engine.accelerator_graph_backend import CUDAGraphBackend
@@ -1950,22 +2000,26 @@ def test_independent_row_masks_execute_in_a_real_conditional_capture(budget):
     device = torch.device("cuda", 0)
     backend = CUDAGraphBackend(device)
     cuda = backend.while_runtime()
-    buffers = SimpleNamespace(rows=torch.tensor([1, 2, 3], device=device),
-                              slots=torch.tensor([1, 2, 3], device=device))
-    state = RunState(3, "token", {9}, device, dropping=buffers, independent_rows=True)
+    selected = torch.tensor([0, 31, 32], device=device)
+    buffers = SimpleNamespace(rows=torch.arange(1, 34, device=device),
+                              slots=torch.arange(1, 34, device=device))
+    state = RunState(33, "token", {9}, device, dropping=buffers, independent_rows=True)
     run = DeviceRun(state, {}, lambda: None, 4)
     run.last_outputs = frozenset({"last"})
-    masks = torch.tensor([[1, 0, 0], [0, 1, 0], [1, 1, 0], [0, 1, 0]], dtype=torch.bool, device=device)
-    lengths = torch.tensor([2, 3, 1], device=device)
-    owner = torch.zeros(4, dtype=torch.long, device=device)
-    token = torch.zeros(3, dtype=torch.long, device=device)
-    last = torch.zeros(3, dtype=torch.long, device=device)
+    masks = torch.zeros((4, 33), dtype=torch.bool, device=device)
+    masks[:, selected] = torch.tensor([[1, 0, 0], [0, 1, 0], [1, 1, 0], [0, 1, 0]],
+                                     dtype=torch.bool, device=device)
+    lengths = torch.ones(33, dtype=torch.long, device=device)
+    lengths[selected] = torch.tensor([2, 3, 1], device=device)
+    owner = torch.zeros(34, dtype=torch.long, device=device)
+    token = torch.zeros(33, dtype=torch.long, device=device)
+    last = torch.zeros(33, dtype=torch.long, device=device)
     run.keep({"frame": token, "last": last}, run.rows)
     run.keep({"token": token}, run.stops)
     run.sealed = True
 
     def body():
-        state.eligible.copy_(masks.index_select(0, state.index).reshape(3))
+        state.eligible.copy_(masks.index_select(0, state.index).reshape(33))
         state.select_rows()
         state.head()
         owner.index_add_(0, buffers.slots, torch.ones_like(token))
@@ -1984,24 +2038,27 @@ def test_independent_row_masks_execute_in_a_real_conditional_capture(budget):
     entry, _ = capture_into_graph(lambda: cuda.start(state, backend.raw_stream()), pool, device, None, keep_graph=True)
     composed = backend.compose((entry, GraphConditional("while", state.continuation, (graph,))))
     owner.zero_()
-    state.stage(3, [False] * 3, budget)
+    state.stage(33, [False] * 33, budget)
     composed.replay()
     stops, values, _ = run.results(budget)
     backend.synchronize()
-    assert stops[RUN_COUNTS].tolist() == ([2, 3, 0] if budget == 4 else [1, 1, 0])
-    assert stops[RUN_REPLAYS].tolist() == [3 if budget == 4 else 1] * 3
-    assert owner[1:].tolist() == ([2, 3, 0] if budget == 4 else [1, 1, 0])
-    assert values["frame"].tolist() == ([[1, 9, 9, 9], [1, 2, 9, 9], [0, 0, 0, 0]] if budget == 4
-                                        else [[1], [1], [0]])
-    assert values["last"].tolist() == ([102, 103, 0] if budget == 4 else [100, 101, 0])
-    assert state.marks.tolist() == ([True, True, False] if budget == 4 else [False] * 3)
+    selected_cpu = selected.cpu()
+    assert stops[RUN_COUNTS][selected_cpu].tolist() == ([2, 3, 0] if budget == 4 else [1, 1, 0])
+    assert torch.count_nonzero(stops[RUN_COUNTS]).item() == 2
+    assert stops[RUN_REPLAYS].tolist() == [3 if budget == 4 else 1] * 33
+    assert owner[selected + 1].tolist() == ([2, 3, 0] if budget == 4 else [1, 1, 0])
+    assert torch.count_nonzero(owner[1:]).item() == 2
+    assert values["frame"][selected_cpu].tolist() == ([[1, 9, 9, 9], [1, 2, 9, 9], [0, 0, 0, 0]] if budget == 4
+                                                      else [[1], [1], [0]])
+    assert values["last"][selected_cpu].tolist() == ([102, 103, 0] if budget == 4 else [100, 101, 0])
+    assert state.marks[selected].tolist() == ([True, True, False] if budget == 4 else [False] * 3)
     # Entry resets must be captured operations even when the body never runs.
     state.eligible.zero_()
-    state.stage(3, [False] * 3, 4)
+    state.stage(33, [False] * 33, 4)
     state.request_yield()
     composed.replay()
     stops, values, _ = run.results(4)
     backend.synchronize()
-    assert state.eligible.tolist() == [True, True, True]
-    assert stops[RUN_COUNTS].tolist() == [0, 0, 0]
+    assert state.eligible.tolist() == [True] * 33
+    assert stops[RUN_COUNTS].tolist() == [0] * 33
     assert not values["frame"].any() and not values["last"].any()
