@@ -77,8 +77,8 @@ class PinnedStager:
 
     def __init__(self, dtype: torch.dtype, numel: int = 256, depth: int = 8):
         self.dtype = dtype
-        self._np_dtype = torch.empty((), dtype=dtype).numpy().dtype
-        self._itemsize = self._np_dtype.itemsize
+        self.np_dtype = torch.empty((), dtype=dtype).numpy().dtype
+        self._itemsize = self.np_dtype.itemsize
         self._depth = depth
         self._seg_numel = 0
         self._seg = 0  # the segment the cursor is in
@@ -156,7 +156,7 @@ class PinnedStager:
         if total == 0:
             return
         if mirror is not None:
-            values = np.asarray(values, dtype=self._np_dtype)
+            values = np.asarray(values, dtype=self.np_dtype)
             key = (total, pad_value)
         # raw bytes only into a destination laid out as the arena is; the torch
         # copy converts a dtype and refuses a strided destination

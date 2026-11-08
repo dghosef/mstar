@@ -666,6 +666,54 @@ def test_higgs_loopback_decode_prep_copies_no_pageable_index(monkeypatch):
     assert out["input_ids"].shape == (2,)
 
 
+def _eager_sampler(monkeypatch, device):
+    from mstar.engine.resources.sampler import utils as sampler_utils
+
+    drawn = {}
+
+    def sample_tokens(logits, **kwargs):
+        drawn.update(kwargs)
+        return torch.zeros(logits.shape[0], dtype=torch.long, device=logits.device)
+
+    monkeypatch.setattr(sampler_utils, "sample_tokens", sample_tokens)
+    sampler = sampler_utils.Sampler(device=torch.device(device))
+    for rid in ("a", "b"):
+        sampler.add_request(rid)
+    return sampler, drawn
+
+
+def test_eager_sample_copies_no_pageable_settings(monkeypatch):
+    """An eager step's per-request settings and slot rows go up pinned: a pageable
+    copy would block the GPU thread on the stream's queued work every prefill. The
+    meta device stands in for the accelerator, so the stager takes its host branch."""
+    from mstar.engine.resources.sampler.utils import SamplerBuffers
+    from mstar.utils.h2d import PinnedStager
+
+    sampler, _ = _eager_sampler(monkeypatch, "meta")
+    buffers = SimpleNamespace(
+        last_token=SimpleNamespace(master=torch.empty(3, dtype=torch.long, device="meta")),
+        _rid_to_slot={"a": 1, "b": 2}, _slots_stager=PinnedStager(torch.long),
+    )
+    with _PageableH2D() as h2d_copies:
+        sampler.sample(["a", "b"], torch.empty(2, 8, device="meta"))
+        SamplerBuffers._slots_of(buffers, ["a", "b"])
+    assert h2d_copies.copies == []
+
+
+def test_eager_sample_stages_settings_exactly(monkeypatch):
+    """Seeds and offsets stay exact past float32's 2**24, and an integer setting keeps its dtype."""
+    sampler, drawn = _eager_sampler(monkeypatch, "cpu")
+    sampler.set_config("a", temperature=0.5, top_k=7, seed=2**40 + 1)
+    sampler.set_config("b", temperature=1.0, top_k=9, seed=2**40 + 3)
+    sampler._step_offset["b"] = 2**33 + 1
+    sampler.sample(["a", "b"], torch.zeros(2, 8))
+    assert drawn["seed"].tolist() == [2**40 + 1, 2**40 + 3]
+    assert drawn["rand_offset"].tolist() == [0, 2**33 + 1]
+    assert drawn["top_k"].dtype == torch.int32 and drawn["top_k"].tolist() == [7, 9]
+    assert drawn["temperature"].tolist() == [0.5, 1.0]
+    assert drawn["min_p"] is None
+
+
 def test_higgs_encoder_prep_reads_no_tensor():
     """The audio encoder's per-chunk embedding counts come from the step
     metadata ``process_prompt`` filled, not off a lengths tensor."""

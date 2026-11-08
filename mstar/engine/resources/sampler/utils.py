@@ -1283,7 +1283,7 @@ class Sampler(BaseSampler):
     # The last ``sample``'s sampled-token log-probs, NaN in a row that did not
     # ask; None when no row asked.
     logprobs: torch.Tensor | None = None
-    _settings_stager: PinnedStager | None = None
+    _stagers: dict[torch.dtype, PinnedStager] = field(default_factory=dict)
 
     def add_request(self, request_id: str):
         self._sampling_config[request_id] = SamplingConfig()
@@ -1353,27 +1353,27 @@ class Sampler(BaseSampler):
         configs = [self._sampling_config[rid] for rid in request_ids]
         history, rows = self._gather_history(request_ids, configs)
         order = self._gather_filter(configs)
-        temperature = torch.tensor([c.temperature for c in configs], device=logits.device)
-        top_k = torch.tensor([c.top_k if apply_filters else 0 for c in configs],
-                             device=logits.device, dtype=torch.int32)
-        top_p = torch.tensor([c.top_p if apply_filters else 1.0 for c in configs], device=logits.device)
         if self.history is not None:
             # a windowed request's penalty is in ``history``, not the mask
             penalties = [c.presence_penalty for c in configs]
         else:
             penalties = [c.repetition_penalty for c in configs]
-        r_pen = torch.tensor(penalties, device=logits.device)
-        min_p = (
-            torch.tensor([c.min_p for c in configs], device=logits.device)
-            if any(c.min_p > 0 for c in configs) else None
-        )
-        seed = torch.tensor([c.seed for c in configs], device=logits.device, dtype=torch.long)
+        temperature, top_p, r_pen, min_p = self._stage([
+            [c.temperature for c in configs],
+            [c.top_p if apply_filters else 1.0 for c in configs],
+            penalties,
+            [c.min_p for c in configs],
+        ])
+        min_p = min_p if any(c.min_p > 0 for c in configs) else None
+        top_k = self._stage([[c.top_k if apply_filters else 0 for c in configs]], torch.int32)[0]
         own_offsets = rand_offset is None
         if own_offsets:
-            rand_offset = torch.tensor(
+            seed, rand_offset = self._stage([
+                [c.seed for c in configs],
                 [self._step_offset.get(rid, 0) for rid in request_ids],
-                device=logits.device, dtype=torch.long,
-            )
+            ], torch.long)
+        else:
+            seed = self._stage([[c.seed for c in configs]], torch.long)[0]
 
         any_rep_pen = apply_penalty and any(p != 1.0 for p in penalties)
         any_greedy = any(c.temperature == 0 for c in configs)
@@ -1469,14 +1469,14 @@ class Sampler(BaseSampler):
 
         return tokens
 
-    def _stage(self, rows: list[list[float]]) -> torch.Tensor:
-        """Per-request settings ``[len(rows), B]`` on the device in one pinned H2D
-        (float32 holds every int a setting can take exactly)."""
-        values = np.asarray(rows, dtype=np.float32)
-        if self._settings_stager is None:
-            self._settings_stager = PinnedStager(torch.float32, numel=values.size)
-        dev = torch.empty(values.shape, dtype=torch.float32, device=self.device)
-        self._settings_stager.copy_(dev, values.reshape(-1))
+    def _stage(self, rows: list[list], dtype: torch.dtype = torch.float32) -> torch.Tensor:
+        """Per-request settings ``[len(rows), B]`` on the device in one pinned H2D."""
+        stager = self._stagers.get(dtype)
+        values = np.asarray(rows, dtype=stager.np_dtype if stager else torch.empty((), dtype=dtype).numpy().dtype)
+        if stager is None:
+            stager = self._stagers[dtype] = PinnedStager(dtype, numel=values.size)
+        dev = torch.empty(values.shape, dtype=dtype, device=self.device)
+        stager.copy_(dev, values.reshape(-1))
         return dev
 
     def _gather_history(
@@ -2481,6 +2481,7 @@ class SamplerBuffers:
     )
     # Slot bookkeeping (CPU-only).
     _rid_to_slot: dict[str, int] = field(default_factory=dict, repr=False)
+    _slots_stager: PinnedStager = field(default_factory=lambda: PinnedStager(torch.long), repr=False)
     _free_slots: list[int] = field(default_factory=list, repr=False)
     # Slots awaiting init, consumed by the next gather so the rows are written
     # on the gathering thread rather than racing it from the main one.
@@ -3145,7 +3146,9 @@ class SamplerBuffers:
             else self._rid_to_slot[rid]
             for rid in request_ids
         ]
-        return torch.tensor(slots, dtype=torch.long, device=self.last_token.master.device)
+        dev = torch.empty(len(slots), dtype=torch.long, device=self.last_token.master.device)
+        self._slots_stager.copy_(dev, slots)
+        return dev
 
     def write_last_tokens(
         self, request_ids: list[str], tokens: torch.Tensor,
