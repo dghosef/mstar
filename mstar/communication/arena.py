@@ -69,8 +69,8 @@ from mstar.communication.tensors import (
     _default_shm_dir,
     _nullcontext,
     _read_tensor_file,
-    _serialize_tensor,
     _sweep_dead_namespaces,
+    _tensor_bytes_view,
 )
 from mstar.graph.base import GraphEdge, TensorPointerInfo
 from mstar.platforms import current_platform
@@ -881,7 +881,7 @@ class ArenaShmCommunicationManager(SharedMemoryCommunicationManager):
             # Arena saturated: spill THIS tensor to the per-uuid file protocol
             # (infos keep shm_segment=None — the consumer falls back to the
             # file read for exactly those).
-            data = _serialize_tensor(t)
+            data = _tensor_bytes_view(t)
             path = self._shm_path(self.my_entity_id, uuid)
             self._write_shm_file(path, data)
             self._shm_files[uuid] = path
@@ -1113,10 +1113,9 @@ class ArenaShmCommunicationManager(SharedMemoryCommunicationManager):
                 self._h2d_stream)
             # The producer reclaims the slot when an edge is ACKed, and the
             # source is its live mapping — so the edge must not report ready
-            # until its copies have completed (the file path's f.read() made
-            # this implicit). One event covers the batch: all copies were
-            # queued on the h2d stream in program order. get_ready_tensors
-            # polls it — no host block here.
+            # until its copies have completed. One event covers the batch: all
+            # copies were queued on the h2d stream in program order.
+            # get_ready_tensors polls it — no host block here.
             future = _CudaEventFuture(self._h2d_stream)
         for fp in reads:
             fp.future = future

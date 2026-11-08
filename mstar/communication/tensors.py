@@ -2447,10 +2447,10 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
 
 
 # ---------------------------------------------------------------------------
-# Shared-memory tensor serialization helpers
+# Shared-memory tensor file helpers
 # ---------------------------------------------------------------------------
 
-def _serialize_tensor(tensor: torch.Tensor) -> memoryview:
+def _tensor_bytes_view(tensor: torch.Tensor) -> memoryview:
     """A view of a tensor's raw bytes on the host, which the caller writes before the tensor can change."""
     t = tensor.detach().contiguous().cpu()
     # reshape(-1) so 0-dim (scalar) tensors can be byte-viewed: PyTorch
@@ -2466,7 +2466,7 @@ _MAX_PINNED_READ_BYTES = 256 << 20
 
 
 def _read_tensor_file(path: str, info: TensorPointerInfo, device: str, non_blocking: bool) -> torch.Tensor:
-    """Read a tensor written by ``_serialize_tensor`` directly into the buffer its H2D copy reads.
+    """Read a tensor written by ``_tensor_bytes_view`` directly into the buffer its H2D copy reads.
 
     ``non_blocking`` is for a caller whose copy stream's event gates the read: the copy is then a true
     async DMA, and torch's caching host allocator holds the pinned block until it finishes.
@@ -2846,7 +2846,7 @@ class SharedMemoryCommunicationManager(TensorCommunicationManager):
             return
         tensor = self._send_source(uuid)
         t0 = time.perf_counter()
-        data = _serialize_tensor(tensor)
+        data = _tensor_bytes_view(tensor)
         path = self._shm_path(self.my_entity_id, uuid)
         self._write_shm_file(path, data)
         self._shm_files[uuid] = path
