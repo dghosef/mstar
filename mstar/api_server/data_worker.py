@@ -1986,12 +1986,18 @@ class PreprocessWorkerThread:
         try:
             if self.timing_requested.is_set():
                 profile = self._start_profile(pre_input)
-            if self._prepare_pool is not None:
+            if self._prepare_pool is not None and self._uses_pool(pre_input):
                 self._submit_prepare(pre_input, profile)
             else:
                 self._process_input(pre_input, profile)
         except Exception as exc:  # noqa: BLE001 — any failure must reach the client
             self._input_failed(pre_input, profile, exc)
+
+    def _uses_pool(self, pre_input: PreprocessInput) -> bool:
+        """A prompt with no media is a short tokenize, which an inline run
+        finishes sooner than a trip through the pool. Behind a request still
+        preparing it queues on the pool too, to keep arrival order."""
+        return bool(pre_input.file_paths or pre_input.raw_inputs or self._preparing)
 
     def _input_failed(
         self, pre_input: PreprocessInput, profile: DataWorkerProfile | None, exc: Exception,

@@ -14,7 +14,7 @@ import torch
 from mstar.api_server.data_worker import InlineTokens, PreprocessWorkerThread, ResultQueue
 from mstar.api_server.request_types import PreprocessInput
 from mstar.communication.event import EventWakeup
-from mstar.model.base import ProcessPromptOutput
+from mstar.model.base import ProcessPromptOutput, TensorAndMetadata
 from mstar.testing_utils.model import StubModel
 from mstar.utils import cpus
 from mstar.utils.ipc_format import ConductorMessageType
@@ -31,6 +31,9 @@ class _Model(StubModel):
         self.overlap = 0
         self._running = 0
         self._lock = threading.Lock()
+
+    def load_image(self, filepath, device):
+        return TensorAndMetadata(torch.zeros(1))
 
     def gate(self, text: str) -> threading.Event:
         return self.gates.setdefault(text, threading.Event())
@@ -129,9 +132,9 @@ def worker(monkeypatch):
     wt._encode_pool.shutdown(wait=True)
 
 
-def _input(request_id: str, text: str | None = None) -> PreprocessInput:
+def _input(request_id: str, text: str | None = None, media: bool = True) -> PreprocessInput:
     return PreprocessInput(
-        request_id=request_id, text=text or request_id, file_paths=None,
+        request_id=request_id, text=text or request_id, file_paths={"image": ["x.png"]} if media else None,
         input_modalities=["text"], output_modalities=["text"], model_kwargs={},
     )
 
@@ -237,6 +240,20 @@ def test_requests_overlap_and_reach_the_conductor_in_arrival_order(worker):
     worker.model.gate("a").set()
     assert _release_until(worker, 3) == ["a", "b", "c"]
     assert all(name.startswith("mstar-prepare") for name in worker.model.threads.values())
+
+
+def test_a_prompt_with_no_media_skips_the_pool_unless_it_would_pass_a_request(worker):
+    worker.model.gate("text").set()
+    worker._process_waiting_input(_input("text", media=False))
+    assert worker.model.threads["text"] == threading.current_thread().name
+    assert _sent(worker) == ["text"]
+
+    worker.model.gate("late").set()
+    worker._process_waiting_input(_input("media"))
+    worker._process_waiting_input(_input("late", media=False))
+    assert worker.model.threads["late"].startswith("mstar-prepare")
+    worker.model.gate("media").set()
+    assert _release_until(worker, 3) == ["text", "media", "late"]
 
 
 def test_the_request_is_stored_and_sent_on_the_data_workers_thread(worker):
