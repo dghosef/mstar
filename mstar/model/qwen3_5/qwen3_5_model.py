@@ -61,6 +61,7 @@ logger = logging.getLogger(__name__)
 # TODO: implement MoE variants
 class Qwen3_5DenseModel(MultimodalDecoderModel):
     NAME = "Qwen3.5"
+    PREPROCESS_PARALLEL = True
     METADATA_FILES = (
         "config.json",
         "preprocessor_config.json",
@@ -242,6 +243,12 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
             if i is not None and i != self.tokenizer.unk_token_id:
                 ids[modality] = i
         return ids
+
+    def warmup_preprocess(self) -> None:
+        """Builds the image processor, which `PREPROCESS_PARALLEL` would otherwise
+        have requests race to build."""
+        if self.vision_config is not None:
+            self.image_processor  # noqa: B018
 
     @property
     def image_processor(self):
