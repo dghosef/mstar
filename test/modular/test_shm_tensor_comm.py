@@ -104,7 +104,7 @@ def _make_manager(
 def _roundtrip(t: torch.Tensor, tmp_path) -> torch.Tensor:
     path = tmp_path / "tensor"
     path.write_bytes(_serialize_tensor(t))
-    return _read_tensor_file(str(path), _stub_info(t), "cpu", pin=False)
+    return _read_tensor_file(str(path), _stub_info(t), "cpu", non_blocking=False)
 
 
 def test_read_tensor_file_reads_a_slice_and_refuses_a_short_file(tmp_path):
@@ -113,10 +113,45 @@ def test_read_tensor_file_reads_a_slice_and_refuses_a_short_file(tmp_path):
     path.write_bytes(_serialize_tensor(t))
     info = _stub_info(t[2:5])
     info.offset = 2 * t.element_size()
-    assert torch.equal(_read_tensor_file(str(path), info, "cpu", pin=False), t[2:5])
+    assert torch.equal(_read_tensor_file(str(path), info, "cpu", non_blocking=False), t[2:5])
     info.offset = 6 * t.element_size()
     with pytest.raises(RuntimeError, match="expected 12"):
-        _read_tensor_file(str(path), info, "cpu", pin=False)
+        _read_tensor_file(str(path), info, "cpu", non_blocking=False)
+
+
+def _fake_gpu(monkeypatch) -> list:
+    """Make a host a device that takes pinned memory; returns what each read asked of torch."""
+    seen, real_empty = [], torch.empty
+
+    def empty(*args, pin_memory=False, **kwargs):
+        seen.append(pin_memory)
+        return real_empty(*args, **kwargs)
+
+    def to(self, *args, non_blocking=False, **kwargs):
+        seen.append(non_blocking)
+        return self
+
+    monkeypatch.setattr(torch, "empty", empty)
+    monkeypatch.setattr(torch.Tensor, "to", to)
+    monkeypatch.setattr(tensors_mod, "DeviceCapability", SimpleNamespace(
+        of=lambda device: SimpleNamespace(pin_memory=True)))
+    return seen
+
+
+def test_a_read_with_no_event_to_wait_on_is_pinned_but_blocking(monkeypatch, tmp_path):
+    """The base manager reports a read ready as soon as it returns, so its copy must have landed by
+    then; a pinned buffer still serves that blocking copy."""
+    prod = _make_manager(str(tmp_path), entity_id="w0", request_id="r")
+    cons = _make_manager(str(tmp_path), entity_id="w1", request_id="r")
+    x = torch.arange(4, dtype=torch.int32)
+    [info] = prod.store_and_return_tensor_info("r", {"x": [x]})["x"]
+    prod.register_for_send("r", [info])
+    cons.device, cons._h2d_stream = "cuda", object()
+    monkeypatch.setattr(torch.cuda, "stream", lambda stream: tensors_mod._nullcontext())
+    monkeypatch.setattr(torch.cuda, "default_stream", lambda device: SimpleNamespace(wait_stream=lambda s: None))
+    seen = _fake_gpu(monkeypatch)
+    cons.start_read_tensors("r", [GraphEdge(next_node="B", name="x", tensor_info=[info])])
+    assert seen == [True, False]
 
 
 @pytest.mark.parametrize("dtype", [

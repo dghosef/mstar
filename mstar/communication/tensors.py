@@ -50,6 +50,7 @@ from mstar.communication.communicator import (
 from mstar.communication.tensor_uuid import _DATA_WORKER as _DATA_WORKER_ENTITY
 from mstar.communication.tensor_uuid import TensorUuidMinter
 from mstar.graph.base import GraphEdge, NodeAndGraphWalk, TensorPointerInfo
+from mstar.utils.device import DeviceCapability
 from mstar.utils.ipc_format import TensorReceived, WorkerMessage, WorkerMessageType
 from mstar.utils.profiler import PHASE_PERIOD, phase_record
 
@@ -2457,16 +2458,16 @@ def _serialize_tensor(tensor: torch.Tensor) -> memoryview:
     return memoryview(t.reshape(-1).view(torch.uint8).numpy())
 
 
-def _read_tensor_file(path: str, info: TensorPointerInfo, device: str, pin: bool) -> torch.Tensor:
+def _read_tensor_file(path: str, info: TensorPointerInfo, device: str, non_blocking: bool) -> torch.Tensor:
     """Read a tensor written by ``_serialize_tensor`` directly into the buffer its H2D copy reads.
 
-    ``pin`` is for a caller whose copy stream's event gates the read: the copy is then a true async
-    DMA, and torch's caching host allocator holds the pinned block until it finishes.
+    ``non_blocking`` is for a caller whose copy stream's event gates the read: the copy is then a true
+    async DMA, and torch's caching host allocator holds the pinned block until it finishes.
     """
     if info.nbytes == 0:
         t = torch.empty(info.dims, dtype=info.dtype)
         return t.to(device) if device != "cpu" else t
-    pin = pin and device != "cpu"
+    pin = DeviceCapability.of(device).pin_memory
     host = torch.empty(info.nbytes, dtype=torch.uint8, pin_memory=pin)
     with open(path, "rb") as f:
         f.seek(info.offset)
@@ -2474,7 +2475,7 @@ def _read_tensor_file(path: str, info: TensorPointerInfo, device: str, pin: bool
     if got != info.nbytes:
         raise RuntimeError(f"tensor file {path} held {got} bytes at offset {info.offset}, expected {info.nbytes}")
     t = host.view(info.dtype).reshape(info.dims)
-    return t.to(device, non_blocking=pin) if device != "cpu" else t
+    return t.to(device, non_blocking=non_blocking and pin) if device != "cpu" else t
 
 
 # Docker gives a container 64 MB of /dev/shm, and one video or audio tensor can outgrow that
@@ -2895,7 +2896,8 @@ class SharedMemoryCommunicationManager(TensorCommunicationManager):
                             "ArenaShmCommunicationManager reads; this manager "
                             "reads the per-uuid files the arena spills")
                     path = self._shm_path(info.source_entity, producer_uuid)
-                    tensor = _read_tensor_file(path, info, self.device, pin=self._h2d_stream is not None)
+                    # blocking: this manager has no event, so a read counts as done at once
+                    tensor = _read_tensor_file(path, info, self.device, non_blocking=False)
                     h2d_did_work = True
                     self.tensor_store.put_tensor(request_id, info.uuid, tensor, info)
                     self.tensor_store.set_metadata(info.uuid, mem_registered=False)
