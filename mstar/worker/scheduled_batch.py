@@ -133,6 +133,8 @@ class ScheduledBatch:
     # How many iterations of its Loop this step stands for: the speculator's
     # ceiling until the step has admitted, then what it runs.
     repeats: int = 1
+    # this step is the run ready rows waited for (``ready_waits``)
+    owed_run: bool = False
 
 
     def walk_of(self, rid: int) -> str:

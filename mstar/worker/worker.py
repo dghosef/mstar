@@ -1515,7 +1515,7 @@ class Worker:
         it at admit, and `_await_admit_settled` takes the answer. ``owes_run``:
         the step is the run ready rows wait for, which needs no turn in the chain."""
         batch = speculation.scheduled_batch
-        speculation.node_batch.step_context.owed_run = owes_run
+        batch.owed_run = owes_run
         batch.repeats = speculation.node_batch.step_context.repeats = self._step_repeats.ceiling(
             speculation, max(in_chain, int(owes_run)),
             lambda: self._graph_runtime.loop_room(
@@ -3463,7 +3463,7 @@ class Worker:
             # walk with no token budget runs its prompts whole and keeps
             # main's order.
             owes_run = self._step_repeats is not None and self._step_repeats.owes_run(
-                pending.node_name, pending.node_batch.step_context.repeats, pending.node_batch.step_context.owed_run,
+                pending.node_name, pending.node_batch.step_context.repeats, pending.batch.owed_run,
             )
             other_ready = (
                 fair.peek and not owes_run
