@@ -916,7 +916,7 @@ class Conductor:
         # are more than a pipe holds and which it reads after importing mstar:
         # seconds, and one by one each rank would wait for all those before it
         try:
-            with ThreadPool(max(len(workers), 1), thread_name_prefix="worker-start") as pool:
+            with ThreadPool(len(workers), thread_name_prefix="worker-start") as pool:
                 starts = [pool.submit(p.start) for p in workers]
         finally:
             # shutdown joins these, and a process that never started can't be joined

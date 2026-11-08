@@ -3,6 +3,7 @@ model that asks: every other model paid the nvcc build, or hung on its lock."""
 import sys
 import types
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 
@@ -15,10 +16,10 @@ def test_only_a_model_that_asks_builds_the_op(monkeypatch, prebuild):
     align = types.ModuleType("mstar.utils.fused_moe.align")
     align._cuda_op_available = lambda: built.append(1)
     monkeypatch.setitem(sys.modules, "mstar.utils.fused_moe.align", align)
-    monkeypatch.setattr(Conductor, "shutdown", lambda self: None)  # its atexit hook
-    conductor = object.__new__(Conductor)
-    conductor.model = SimpleNamespace(prebuild_fused_moe=prebuild) if prebuild else object()
-    conductor._sorted_ranks, conductor.worker_ids, conductor._worker_devices = [], [], []
-    conductor._mps_requested = False
-    conductor._launch_workers()
+    monkeypatch.setattr("mstar.conductor.conductor.mp.get_context", lambda _method: SimpleNamespace(
+        Process=lambda **_kw: SimpleNamespace(pid=1, start=lambda: None)))
+    monkeypatch.setattr("mstar.conductor.conductor.atexit.register", lambda _fn: None)
+    model = SimpleNamespace(prebuild_fused_moe=prebuild) if prebuild else object()
+    conductor = mock.MagicMock(model=model, worker_ids=["worker_0"], _worker_devices=["cpu"], _mps_requested=False)
+    Conductor._launch_workers(conductor)
     assert built == ([1] if prebuild else [])
