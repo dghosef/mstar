@@ -709,8 +709,8 @@ def test_eager_sample_copies_no_pageable_settings(monkeypatch):
 def test_eager_sample_stages_settings_exactly(monkeypatch):
     """Seeds and offsets stay exact past float32's 2**24, and an integer setting keeps its dtype."""
     sampler, drawn = _eager_sampler(monkeypatch, "cpu")
-    sampler.set_config("a", temperature=0.5, top_k=7, seed=2**40 + 1)
-    sampler.set_config("b", temperature=1.0, top_k=9, seed=2**40 + 3)
+    sampler.set_config("a", temperature=0.5, top_k=7, _seed=2**40 + 1)
+    sampler.set_config("b", temperature=1.0, top_k=9, _seed=2**40 + 3)
     sampler._step_offset["b"] = 2**33 + 1
     sampler.sample(["a", "b"], torch.zeros(2, 8))
     assert drawn["seed"].tolist() == [2**40 + 1, 2**40 + 3]
