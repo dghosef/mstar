@@ -112,9 +112,10 @@ def _layout_copy(copy: Callable, tensors: list[torch.Tensor], token_dims: tuple[
     constant, so the kernel indexes with constants but for the token count. All-dynamic, the pack
     ran 24x as long on an H100 as one compiled with static shapes. ``dynamic=False`` keeps it that way when a
     second head count or layout recompiles the same function, which would otherwise make every
-    extent that differed dynamic. It compiles in the warm-ups once per number of tensors, per
-    geometry (head counts and layout, packed or ``[B, S, ...]``) and per extent of 0 or 1 (a single
-    token, or B=1), but not per token count. Autocast is off around it, so a warm-up outside
+    extent that differed dynamic. It compiles once per number of tensors, per geometry (head
+    counts and layout, packed or ``[B, S, ...]``) and per extent of 0 or 1 (a single token, or
+    B=1), but not per token count: in the warm-ups where a captured bucket exchanges, else on the
+    first eager step that does. Autocast is off around it, so a warm-up outside
     autocast and a step inside it share a compile.
 
     Gated on the device as the engine's compiles are, not on a node's ``disable_torch_compile``:
