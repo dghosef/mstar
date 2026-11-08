@@ -25,6 +25,7 @@ from mstar.engine.resources.base import CGSlotKey
 from mstar.engine.resources.kv.config import PagedKVConfig
 from mstar.engine.resources.kv.keys import fingerprint
 from mstar.engine.resources.kv.plan import KVPlanOutputs
+from mstar.engine.resources.resident_hooks import ANY_REPEATS
 from mstar.engine.resources.spec import CombinedSplit
 from mstar.engine.resources.step import SlotLease, StepContext
 from mstar.utils.profiler import PhaseLaps
@@ -100,9 +101,25 @@ class FlashInferManager(AttentionManager):
         self._sm_scale = sm_scale
 
         self._workspaces = WorkspacePool(device, owner=kv_cache)
+        # walk -> whether its captured decode kernels see a row's length per replay
+        self._repeat_walks: dict[str, bool] = {}
 
     def depends_on(self):
         return {self._kv_cache_name}
+
+    def max_repeats(self, step, ctx) -> int:
+        """A kernel that reads the tables sees each replay's lengths. So does a
+        tensor-core one planned for the step's last replay, whose lengths its
+        capture reads off the tables (`resident_gather`)."""
+        walk = ctx.graph_walk
+        allowed = self._repeat_walks.get(walk)
+        if allowed is None:
+            wrappers = [w for key, w in self._cg_plan_states.items() if key.bucket.graph_walk == walk]
+            allowed = self._repeat_walks[walk] = bool(wrappers) and all(
+                isinstance(w, FmhaDecodeWrapper) or (isinstance(w, FlashInferDecodeWrapper) and w.lengths_move)
+                for w in wrappers
+            )
+        return ANY_REPEATS if allowed else 1
 
     def resident_refusal(self) -> str | None:
         if self._window_left >= 0:
@@ -117,8 +134,11 @@ class FlashInferManager(AttentionManager):
             table = step.block_tables[pool]
             wrapper.gather_resident(step.store, step.slots, step.buffers.kv_len[pool], table.stride, table.col)
             step.reads_tables = True
-        else:
-            step.host_planned = True
+            return
+        step.host_planned = True
+        if step.repeats and isinstance(wrapper, FlashInferDecodeWrapper) and wrapper.lengths_move and not stream.reads:
+            # one host plan serves every replay; each replay's lengths move in the graph
+            wrapper.gather_lengths(step.buffers.kv_len[pool])
 
     def _check_layer(self, layer_idx: int) -> None:
         """Over a pool of more than one group, ``layer_idx`` must be a layer this attention runs,
@@ -308,6 +328,8 @@ class FlashInferManager(AttentionManager):
                 wrapper = self._eager_wrapper(label, is_decode, ctx.slot)
 
             kwargs = indptrs.to_kwargs_dict()
+            if lease is not None and isinstance(wrapper, FlashInferDecodeWrapper) and wrapper.reads_lengths:
+                wrapper.stage_page_base(kwargs["paged_kv_indptr"])
             laps.lap("wrapper")
             # TODO: cache the latest plan state
             wrapper.plan(

@@ -641,6 +641,16 @@ class DummyRowPool:
             self.reset(rids, free=True)
 
 
+def _carried(slot: "AcceleratorGraphSlot", name: str) -> torch.Tensor | None:
+    """The buffer a replay leaves ``name`` in: a stop buffer, else a row output."""
+    outputs = slot.static_outputs
+    for buffers in (outputs.check_stop_buffers, outputs.row_outputs):
+        value = (buffers or {}).get(name)
+        if isinstance(value, torch.Tensor):
+            return value
+    return None
+
+
 @dataclass
 class AcceleratorGraphSlot:
     """One captured graph + the buffers its replay reads and writes.
@@ -1596,6 +1606,41 @@ class AcceleratorGraphRunner:
         if self._enable_nvtx:
             profiler.range_pop()
         return slot.static_outputs
+
+    def repeat(self, lease: SlotLease, carries: Mapping[str, str], repeats: int) -> dict[str, torch.Tensor]:
+        """The rest of a step that repeats, after its first replay: before each
+        further replay every loop-back signal's output is copied into the
+        static input it feeds (``carries``, output -> input). Returns the stop
+        buffers with a column per replay: a replay overwrites what the last
+        one left, so each is copied out on the stream before the next."""
+        slot = self.slot_for(lease)
+        buffers = slot.static_outputs.check_stop_buffers
+        copies = [(_carried(slot, output), slot.static_inputs[target]) for output, target in carries.items()]
+        unique = {id(t): t for t in buffers.values()}
+        columns = {key: t.new_empty(t.shape[0], repeats) for key, t in unique.items()}
+        for i in range(repeats):
+            if i:
+                for source, target in copies:
+                    target.copy_(source.reshape(target.shape))
+                slot.graph.replay()
+            for key, tensor in unique.items():
+                columns[key][:, i].copy_(tensor.reshape(-1))
+        return {name: columns[id(tensor)] for name, tensor in buffers.items()}
+
+    def carry_refusal(self, walk: str, carries: Mapping[str, str]) -> str | None:
+        """Why a capture of ``walk`` can't carry each loop-back output into the
+        static input it feeds, or None: both must be buffers it holds, one size."""
+        for bucket in self._buckets.values():
+            if bucket.config.capture_graph_walk != walk:
+                continue
+            for slot in bucket.slots:
+                for output, target in sorted(carries.items()):
+                    source, into = _carried(slot, output), slot.static_inputs.get(target)
+                    if source is None or not isinstance(into, torch.Tensor):
+                        return f"its capture holds no {output!r} -> {target!r} to carry between replays"
+                    if source.numel() != into.numel():
+                        return f"its capture's {output!r} and {target!r} differ in size"
+        return None
 
     def run_forward(
         self, lease: SlotLease, preprocessed: dict[str, Any],

@@ -461,6 +461,9 @@ class FlashInferDecodeWrapper:
         accelerator_graph: if True, pre-allocate static buffers for graph capture
     """
 
+    # the tokens of each row's pages before its last (``gather_lengths``)
+    _page_base: torch.Tensor | None = None
+
     def __init__(
         self,
         workspace_buffer: Workspace,
@@ -599,6 +602,34 @@ class FlashInferDecodeWrapper:
         self.dtype = dtype
         if self.accelerator_graph and kv_lens is not None:
             self._planner_args = self._direct_planner_args(n_req)
+
+    @property
+    def lengths_move(self) -> bool:
+        """Whether a plan for longer rows still serves shorter ones, the lengths
+        moving between replays: the tensor-core kernel takes a row's length off
+        ``last_page_len`` at run time and clamps each planned chunk to it. A plan
+        fixes only pages and chunks. The CUDA-core kernel's chunk size underflows
+        on a chunk past the row's end."""
+        return _decode_direct_variant(self.attn_wrapper) == _TENSOR_CORE_DECODE
+
+    def stage_page_base(self, paged_kv_indptr: torch.Tensor) -> None:
+        """The tokens of each row's pages before its last, on the plan's pages:
+        what ``gather_lengths`` takes off a stored length."""
+        pages = paged_kv_indptr[1:] - paged_kv_indptr[:-1]
+        self._page_base[:pages.shape[0]].copy_((pages - 1) * self.page_size, non_blocking=True)
+
+    def gather_lengths(self, kv_len: torch.Tensor) -> None:
+        """Inside a capture: ``last_page_len`` off each row's stored length, so
+        a plan made for a longer row reads what's there this replay."""
+        if self._page_base is None:
+            self._page_base = torch.zeros_like(self._paged_kv_last_page_len_buf)
+        rows = kv_len.numel()
+        self._paged_kv_last_page_len_buf[:rows].copy_(kv_len + 1 - self._page_base[:rows])
+
+    @property
+    def reads_lengths(self) -> bool:
+        """Whether this wrapper's capture reads its lengths off the tables."""
+        return self._page_base is not None
 
     def _direct_planner_args(self, n_req: int) -> list | None:
         """FlashInfer's planner arguments for this wrapper, fixed but for the

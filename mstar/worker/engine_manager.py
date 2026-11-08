@@ -1,6 +1,7 @@
 import logging
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 import torch
 
@@ -354,10 +355,10 @@ class EngineManager:
 
         return cls(engine=engine, node_names=set(node_names), side_keys=side_keys)
 
-    def warmup_all(self) -> None:
+    def warmup_all(self, repeat_walks: Mapping[str, Collection[str]] = MappingProxyType({})) -> None:
         """CUDA graph capture, for the whole forward and any piecewise region."""
         with torch.no_grad():
-            self.engine.warmup()
+            self.engine.warmup(repeat_walks)
         # warmup ran side-stream work beside graph replays; start serving from
         # a clean scheduling state (see reset_device_scheduling)
         reset_device_scheduling(self.engine._device)

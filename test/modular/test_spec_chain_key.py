@@ -17,7 +17,7 @@ def _worker(target, other_ready=True, speculation=None, mid_prefill_walks=frozen
         _can_speculate=lambda batch: True,
         chunk_loops=ChunkLoops(mid_prefill_walks),
         _choose_spec_target=lambda batch: target,
-        _try_speculate_next=lambda pending, target: speculation,
+        _try_speculate_next=lambda pending, target, owes_run=False: speculation,
         scheduler=SimpleNamespace(
             has_ready_excluding=lambda key: peeked.append(key) or other_ready,
             next_batch=lambda exclude_target: excluded.append(exclude_target),  # noqa: PLW0108

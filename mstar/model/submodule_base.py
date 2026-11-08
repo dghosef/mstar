@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 from enum import Enum
 from types import MappingProxyType
@@ -116,6 +116,16 @@ class DeviceLoopback(NamedTuple):
     sampler: str
     # the row-addressed output (``check_stop_buffers`` entry) holding the token
     buffer: str
+
+
+class RepeatPlan(NamedTuple):
+    """What a node turns on only when the deployment asks it to repeat
+    (``step_repeats:``), so a deployment that doesn't runs it as before: its
+    walks on resident tables, its token looped on the device and its stop in
+    the runtime."""
+    walks: frozenset[str]
+    device_loopback: DeviceLoopback
+    token_stop: TokenStop
 
 
 class StopCheck(NamedTuple):
@@ -294,6 +304,9 @@ class BatchedModelOutput:
     # along its last dim. The worker cuts the rows to it once the step has
     # run (see ``NodeSubmodule.spanned_outputs``).
     output_spans: dict[str, torch.Tensor] | None = None
+    # How many times the step's capture replayed (`StepContext.repeats`): each
+    # stop buffer then holds one column per replay.
+    repeats: int = 1
     # The request each row of ``output_spans`` belongs to, stamped by the
     # engine like ``row_request_ids``.
     span_request_ids: tuple | None = None
@@ -1121,6 +1134,25 @@ class NodeSubmodule(torch.nn.Module, ABC):
         del graph_walk, has_loopback
         return None
 
+    def repeat_carry(self, graph_walk: str, signals: Collection[str]) -> dict[str, str] | None:
+        """How each loop-back signal of this walk (``signals``, from the graph)
+        moves from one replay of its capture to the next, as {output buffer:
+        static input}; None when the walk's step can't repeat."""
+        del graph_walk, signals
+        return None
+
+    def enable_repeats(self, walks: Collection[str]) -> None:
+        """The deployment asks these walks of this node to repeat (``RepeatPlan``)."""
+        del walks
+
+    def record_tokens(
+        self, graph_walk: str, host_rows: "HostRows", info_of: Callable[[int], CurrentForwardPassInfo],
+    ) -> None:
+        """A landed step's host tokens, every iteration, for a node that keeps
+        them on the host. Only called where the runtime checks the stop, which
+        leaves ``check_stop`` nothing to read them from."""
+        del graph_walk, host_rows, info_of
+
     def resident_walks(self) -> frozenset[str]:
         """Walks whose captured steps may read their rows off the resident
         tables (`mstar.engine.resources.resident`). A walk here runs, for each
@@ -1524,6 +1556,9 @@ class ARNodeSubmodule(NodeSubmodule):
     # Set by a submodule whose decode walk reads its last sampled token back on
     # the device; the loop-back hooks below follow from it.
     device_loopback: DeviceLoopback | None = None
+    # what this node needs to repeat, applied only if the deployment asks
+    repeat_plan: RepeatPlan | None = None
+    _repeat_walks: frozenset[str] = frozenset()
 
     # The packed token counts a prefill capture is built at, which
     # ``__init__``'s ``prefill_token_buckets`` replaces per instance. A
@@ -1547,6 +1582,15 @@ class ARNodeSubmodule(NodeSubmodule):
                     f"prefill_token_buckets must be a non-empty list of distinct positive token counts, got {buckets!r}"
                 )
             self.PREFILL_TOKEN_BUCKETS = sorted(buckets)
+
+    def enable_repeats(self, walks: Collection[str]) -> None:
+        plan = self.repeat_plan
+        if plan is not None:
+            self._repeat_walks = plan.walks & frozenset(walks)
+            self.device_loopback, self.token_stop = plan.device_loopback, plan.token_stop
+
+    def resident_walks(self) -> frozenset[str]:
+        return self._repeat_walks
 
     def _loops_back(self, graph_walk: str) -> bool:
         """Whether this walk's token loops back on the device."""
@@ -1573,6 +1617,12 @@ class ARNodeSubmodule(NodeSubmodule):
         if self._reads_loopback(graph_walk):
             return frozenset({self.device_loopback.signal})
         return super().device_loopback_signals(graph_walk)
+
+    def repeat_carry(self, graph_walk: str, signals: Collection[str]) -> dict[str, str] | None:
+        if not self._loops_back(graph_walk) or self.device_loopback.signal not in signals:
+            return None
+        carried = {signal: signal for signal in signals if signal != self.device_loopback.signal}
+        return {self.device_loopback.buffer: "input_ids", **carried}
 
     def inline_client_signals(self, graph_walk: str) -> dict[str, str]:
         # the client's copy of the token the stop check already has on the host

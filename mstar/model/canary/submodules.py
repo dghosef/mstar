@@ -3,6 +3,8 @@ sampler); the encoder node is the shared ``FastConformerEncoderSubmodule``."""
 
 from __future__ import annotations
 
+import dataclasses
+
 from mstar.model.canary.config import (
     ATTN,
     CONTEXT_LABEL,
@@ -15,7 +17,7 @@ from mstar.model.canary.config import (
 )
 from mstar.model.canary.decoder import CanaryDecoderModel
 from mstar.model.components.encoder_decoder import EncoderDecoderNode
-from mstar.model.submodule_base import ARNodeSubmodule, TokenStop
+from mstar.model.submodule_base import ARNodeSubmodule, DeviceLoopback, RepeatPlan, TokenStop
 
 
 class CanaryDecoderSubmodule(EncoderDecoderNode, ARNodeSubmodule):
@@ -43,4 +45,11 @@ class CanaryDecoderSubmodule(EncoderDecoderNode, ARNodeSubmodule):
             loop=self.DECODE_LOOP, buffer="new_token",
             stop_ids=frozenset({config.eos_token_id}), sampler=self.SAMPLER,
             prefill_walks=frozenset({self.PREFILL_WALK}),
+        )
+        self.repeat_plan = RepeatPlan(
+            walks=frozenset({self.DECODE_WALK}),
+            device_loopback=DeviceLoopback(
+                walk=self.DECODE_WALK, signal="text_inputs", sampler=self.SAMPLER, buffer="new_token",
+            ),
+            token_stop=dataclasses.replace(self.token_stop, runtime_check=True),
         )

@@ -40,7 +40,7 @@ def test_a_request_the_next_node_holds_back_is_not_continued_onto_it():
             failed_rids=set(),
             backlog_splits_from=lambda *_, **__: False,
             # an uncapped target: the chain keeps every row it brings
-            pick_chain_step=lambda target, continuing, mid_prefill=(), next_iter_of=None: ChainPick(target, StepPick(
+            pick_chain_step=lambda target, continuing, *_, **__: ChainPick(target, StepPick(
                 taken=list(continuing), continuing=list(continuing), room=None,
                 held_back=set(), ordered=False,
             ), []),

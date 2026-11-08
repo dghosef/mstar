@@ -225,6 +225,8 @@ class _Engine:
 
 
 class _Scheduled:
+    repeats = 1
+
     def __init__(self, walks):
         self._walks = walks
         # rid -> real walk on a mixed step only, as ScheduledBatch keeps it

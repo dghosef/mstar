@@ -1,5 +1,6 @@
 
 
+import dataclasses
 import logging
 import os
 import threading
@@ -8,6 +9,7 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from itertools import repeat
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Collection, Iterator, Mapping, NamedTuple
 
 import torch
@@ -196,6 +198,8 @@ class SubmoduleManagement:
     fp32_precision: Fp32Precision | None = None
     # the node's request slots and device tables, where it runs on them
     resident: ResidentPlanner | None = None
+    # walk -> how a step of it that repeats carries each loop-back signal (output -> input)
+    repeat_carries: dict[str, dict[str, str]] = field(default_factory=dict)
 
     # Rotated globally, not per runner: slot-keyed buffers are shared across
     # buckets and regions, so per-runner counters let consecutive steps collide
@@ -735,7 +739,9 @@ class Engine:
                     "the decode walk while the request is rebuilt"
                 )
 
-    def _build_resident_planner(self, node_name: str, runner: AcceleratorGraphRunner) -> None:
+    def _build_resident_planner(
+        self, node_name: str, runner: AcceleratorGraphRunner, repeat_walks: Collection[str] = (),
+    ) -> None:
         """Put ``node_name`` on resident tables if it can and the deployment
         lets it; the startup log says why a node that named walks stays on the
         host. In `order`, so an owner runs after what it depends on. Built here
@@ -755,6 +761,8 @@ class Engine:
         )
         if submodule_mgmt.resident is None:
             logger.warning("resident planning stays off on %s: %s", node_name, refused)
+        else:
+            submodule_mgmt.resident.repeat_walks = frozenset(repeat_walks)
         runner.bind_resident(submodule_mgmt.resident)
 
     def paged_kv_caches(self) -> list[PagedKVCache]:
@@ -862,7 +870,9 @@ class Engine:
         """This node's resolved dtype, or None for one that opted out."""
         return self._submodules[node_name].node_dtype
 
-    def warmup(self) -> None:
+    def warmup(self, repeat_walks: Mapping[str, Collection[str]] = MappingProxyType({})) -> None:
+        """Capture every node's graphs. ``repeat_walks``: the walks a step of
+        which may stand for several iterations, by node."""
         # before capture: a region inside a captured graph compiles in its warm-up
         self._compile_regions()
         ag_runners: dict[str, AcceleratorGraphRunner] = {}
@@ -883,7 +893,7 @@ class Engine:
                 device_capability=self.device_capability,
                 capture_stream=capture_stream,
             )
-            self._build_resident_planner(node_name, runner)
+            self._build_resident_planner(node_name, runner, repeat_walks.get(node_name, ()))
             piecewise[node_name] = self._build_piecewise_runners(
                 node_name, submodule_mgmt, capture_stream,
             )
@@ -1643,6 +1653,7 @@ class Engine:
             if batch.admit_error is None:
                 self._record_loopback(batch)
                 batch.outputs.loopback_rids = batch.loopback_rids
+                batch.outputs.repeats = batch.step_context.repeats
             batch.outputs_ready.set()
             laps.lap("record_loopback")
             return batch.outputs
@@ -2181,11 +2192,15 @@ class Engine:
             ctx = batch.step_context
             if ctx.resident is not None:
                 ctx.resident.flush(ctx.resident_plan)
-            return cg_runner.run_forward(
+            out = cg_runner.run_forward(
                 lease, preprocessed,
                 plan_done_event=batch.preplan_event,
                 launch_started_event=release_event,
             )
+            if ctx.repeats > 1:
+                carries = submodule_mgmt.repeat_carries[graph_walk]
+                out = dataclasses.replace(out, check_stop_buffers=cg_runner.repeat(lease, carries, ctx.repeats))
+            return out
         if release_event is not None:
             release_event.set()
         if running_batched:
@@ -2789,6 +2804,38 @@ class Engine:
             )
         capped = [cap for cap in caps if cap is not None]
         return min(capped) if capped else None
+
+    def enable_repeats(self, node_name: str, walks: Collection[str]) -> None:
+        """Before capture: a node asked to repeat turns on what it needs (``RepeatPlan``)."""
+        mgmt = self._submodules[node_name]
+        mgmt.submodule.enable_repeats(walks)
+        if (loopback := getattr(mgmt.submodule, "device_loopback", None)) is not None:
+            mgmt.resources[loopback.sampler].enable_device_loopback_reader()
+
+    def reads_tokens(self, node_name: str) -> bool:
+        return type(self._submodules[node_name].submodule).record_tokens is not NodeSubmodule.record_tokens
+
+    def record_tokens(self, batch: ExecutingBatch, host_rows: HostRows, info_of) -> None:
+        self._submodules[batch.node_name].submodule.record_tokens(batch.step_context.graph_walk, host_rows, info_of)
+
+    def repeat_refusal(self, node_name: str, graph_walk: str, loop_back: Collection[str]) -> str | None:
+        """Why no step of this walk can replay with no host work between, or
+        None. After capture: its node must run the walk on resident tables,
+        carry every loop-back signal, and every resource must allow it."""
+        mgmt = self._submodules[node_name]
+        if mgmt.resident is None or graph_walk not in mgmt.resident.walks:
+            return "it doesn't run on resident tables (resident_walks, resident_planning)"
+        carries = mgmt.submodule.repeat_carry(graph_walk, loop_back)
+        if carries is None:
+            return "node: it keeps no device loop-back to carry between replays"
+        refusal = mgmt.accelerator_graph_runner.carry_refusal(graph_walk, carries)
+        if refusal is None:
+            step = mgmt.resident.captured_steps[graph_walk]
+            step.ctx.resident = mgmt.resident  # the capture's context; its step is over
+            refusal = self._runner.repeat_refusal(step)
+        if refusal is None:
+            mgmt.repeat_carries[graph_walk] = carries
+        return refusal
 
     def batch_cap_varies(self, node_name: str, graph_walk: str) -> bool:
         """Whether this walk's ``get_max_batch_size`` can move between passes."""

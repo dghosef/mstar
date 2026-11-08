@@ -55,6 +55,8 @@ class EncoderDecoderNode(TokenStepNode):
         inputs: NameToTensorList,
         **kwargs,
     ) -> ARNodeInputs:
+        if (row := self.uniform_row_inputs(graph_walk, kwargs.get("has_loopback", False))) is not None:
+            return row  # the token is read by slot in `preprocess`
         device = self.get_device()
         token_ids = to_device_nonblocking(inputs["text_inputs"][0], device).reshape(-1)
         tensor_inputs = {}
@@ -106,6 +108,8 @@ class EncoderDecoderNode(TokenStepNode):
         engine_inputs: ModelInputsFromEngine,
         inputs: list[ARNodeInputs],
     ) -> dict[str, torch.Tensor | Any]:
+        if graph_walk == self.DECODE_WALK and any(inp.input_ids is None for inp in inputs):
+            return self.loopback_inputs(engine_inputs, inputs)
         preprocessed: dict[str, torch.Tensor | Any] = {"input_ids": torch.cat([inp.input_ids for inp in inputs])}
         if graph_walk == self.PREFILL_WALK:
             # segment order, which is how the context plan laid out the pages

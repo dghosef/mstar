@@ -110,6 +110,7 @@ from mstar.worker.speculation import (
     SpeculationContext,
     SpeculationPreparer,
 )
+from mstar.worker.step_repeats import StepRepeats
 from mstar.worker.stream_buffers import StreamBufferManager
 from mstar.worker.worker_metrics import WorkerMetrics
 
@@ -263,12 +264,13 @@ _HOST_ROWS_RING = 4
 _HOST_SPANS_PURPOSE = tuple(f"output_spans{slot}" for slot in range(_HOST_ROWS_RING))
 
 
-def _host_column(host_rows: HostRows | None, name: str) -> torch.Tensor | None:
-    """Host buffer ``name``'s first value per row, a view; None without one."""
+def _host_column(host_rows: HostRows | None, name: str, width: int = 1) -> torch.Tensor | None:
+    """Host buffer ``name``'s first ``width`` values per row, a view; None without one."""
     buf = None if host_rows is None else host_rows.buffers.get(name)
     if not torch.is_tensor(buf) or buf.dim() == 0 or buf.numel() == 0:
         return None
-    return buf.reshape(buf.shape[0], -1)[:, 0]
+    rows = buf.reshape(buf.shape[0], -1)
+    return rows[:, 0] if width == 1 else rows[:, :width]
 
 
 class _LazyPerRid(Mapping):
@@ -402,6 +404,11 @@ class Worker:
     # worker built without __init__ reads them as off too.
     _metrics: WorkerMetrics | None = None
 
+    # Which steps stand for several iterations, set at load; None asks for none.
+    _step_repeats: StepRepeats | None = None
+    # nodes whose landed tokens the worker hands to ``record_tokens``
+    _token_readers: frozenset[str] = frozenset()
+
     # The CPUs the main, GPU and plan threads share (None: not pinned) and
     # the process mask everything else keeps; see ``mstar.utils.cpus``.
     _step_cpus: cpus.StepCpus | None = None
@@ -493,6 +500,7 @@ class Worker:
         self.parallel_leader_nodes = layout.parallel_leader_nodes
         self.is_tp_follower = layout.is_tp_follower
         self.chunk_loops = layout.chunk_loops
+        self._step_repeats = layout.step_repeats
         self._all_wg_nodes = layout.all_wg_nodes
         self._my_consumer_connections = list(layout.consumer_connections)
         self._streaming_edge_names = layout.streaming_edge_names
@@ -569,6 +577,14 @@ class Worker:
             device_capability=self.device_capability,
         )
         self._never_publish_unshared(all_worker_graph_ids_to_instances)
+        self._token_readers = frozenset()
+        if self._step_repeats is not None:
+            for node, walks in self._step_repeats.asked_walks().items():
+                self.engine_manager.get_engine(node).enable_repeats(node, walks)
+            self._token_readers = frozenset(
+                node for node in self._step_repeats.asked_walks()
+                if self.engine_manager.get_engine(node).reads_tokens(node)
+            )
         self._declare_stop_policies(my_walks)
 
         self.request_state = RequestStateManager(
@@ -1336,6 +1352,9 @@ class Worker:
                     "%.0f s; scheduling and teardowns wait for it",
                     self.worker_id, pending.node_name, pending.graph_walk, waited,
                 )
+        if self._step_repeats is not None:
+            # admit may have narrowed it; everything from here on reads this one
+            pending.batch.repeats = pending.node_batch.step_context.repeats
 
     def _submit_gpu_step(
         self,
@@ -1490,6 +1509,36 @@ class Worker:
             for walk in batch.rids_by_walk()
         )
 
+    def _stamp_repeats(
+        self, speculation: Speculation, pending: PendingBatch, in_chain: int, owes_run: bool,
+    ) -> None:
+        """Ask for as many iterations as the step can have; its resources narrow
+        it at admit, and `_await_admit_settled` takes the answer. ``owes_run``:
+        the step is the run ready rows wait for, which needs no turn in the chain."""
+        batch = speculation.scheduled_batch
+        speculation.node_batch.step_context.owed_run = owes_run
+        batch.repeats = speculation.node_batch.step_context.repeats = self._step_repeats.ceiling(
+            speculation, max(in_chain, int(owes_run)),
+            lambda: self._graph_runtime.loop_room(
+                batch.node_name, batch.graph_walk, self._innermost_loop_by_node[(batch.graph_walk, batch.node_name)],
+                list(speculation.continuing_rids), pending.batch.repeats,
+            ),
+        )
+
+    def _fwd_info_in(self, partition: str, rid: int):
+        return self.request_state.get_fwd_info(rid, partition)
+
+    def _repeat_refusal(self, node_name: str, graph_walk: str) -> str | None:
+        """Why no step of this walk can stand for several iterations, or None:
+        its stop runs in the runtime and everything it routes stays on the device."""
+        if self._stop_token_signal.get((node_name, graph_walk)) is None:
+            return "node: its stop is its own check_stop, which reads one token a step (TokenStop.runtime_check)"
+        engine = self.engine_manager.get_engine(node_name)
+        signals = self._graph_runtime.get_output_signals(node_name, graph_walk)
+        if not self._all_on_device(engine, node_name, graph_walk, signals):
+            return "node: an output of it doesn't stay on the device between steps"
+        return engine.repeat_refusal(node_name, graph_walk, self._step_repeats.loop_back(node_name, graph_walk))
+
     def _can_speculate(self, batch: ScheduledBatch) -> bool:
         if not self._async_schedulable(batch):
             return False
@@ -1620,6 +1669,7 @@ class Worker:
         self,
         pending: PendingBatch,
         target: SpeculationTarget,
+        owes_run: bool = False,
     ) -> Speculation | None:
         """Build a speculative N+1 batch + node_batch, by checking which nodes
         will become ready after the current batch's outputs are ingested.
@@ -1678,7 +1728,7 @@ class Worker:
         # rows waiting at its target (backlogged, or on its queues) get the
         # step here or not at all while it runs. Nothing is popped yet.
         chain = self.scheduler.pick_chain_step(
-            spec_target, candidates, mid_prefill, next_iter_of,
+            spec_target, candidates, mid_prefill, next_iter_of, continuing_only=owes_run,
         )
         laps.lap("pick_step")
         mid_prefill = chain.mid_prefill
@@ -2337,6 +2387,8 @@ class Worker:
             # routes without stopping for it
             checked = self._check_stops(batch_N, outputs, cpu_outputs, host_rows, engine).stops
             _pp_stage("check_stop")
+        # what the step's resources let it run, which only it knows
+        batch_N.batch.repeats = outputs.repeats
         request = self._get_postprocess_request(
             batch_N, host_rows, engine, runtime_stops, tokens, checked,
         )
@@ -2349,6 +2401,9 @@ class Worker:
         # Main loop only: the runtime holds `&mut self` across its GIL
         # release, so a concurrent caller gets "Already mutably borrowed"
         # rather than blocking.
+        if host_rows is not None and batch_N.node_name in self._token_readers:
+            info_of = partial(self._fwd_info_in, batch_N.partition)
+            engine.record_tokens(batch_N.node_batch, host_rows, info_of)
         rt = self._graph_runtime
         _t_rt = _time.perf_counter() if self.timer.period else 0.0
         step = rt.begin_postprocess(request)
@@ -2466,7 +2521,7 @@ class Worker:
         token_signal = self._stop_token_signal[key]
         if token_signal is None:
             return True, None
-        tokens = _host_column(host_rows, token_signal)
+        tokens = _host_column(host_rows, token_signal, batch_N.batch.repeats)
         return tokens is not None, tokens
 
     def _get_postprocess_request(
@@ -2527,7 +2582,7 @@ class Worker:
         ):
             client = engine.inline_client_signals(batch_N.node_name, batch_N.graph_walk)
             signal = next((s for s in client if s in signals), None)
-            column = None if signal is None else _host_column(host_rows, client[signal])
+            column = None if signal is None else _host_column(host_rows, client[signal], batch.repeats)
             if column is not None:
                 inline = InlineColumn(signal, column)
         return PostprocessRequest(
@@ -2543,6 +2598,7 @@ class Worker:
             partition_done=list(batch_N.node_batch.partition_done_rids),
             python_send=self.enable_prof,
             loop_strides=batch.loop_strides(rids),
+            token_width=batch.repeats,
         )
 
     def _check_stops(
@@ -3395,8 +3451,11 @@ class Worker:
             # chunk must not keep decode rows waiting a second prompt step. A
             # walk with no token budget runs its prompts whole and keeps
             # main's order.
+            owes_run = self._step_repeats is not None and self._step_repeats.owes_run(
+                pending.node_name, pending.node_batch.step_context.repeats, pending.node_batch.step_context.owed_run,
+            )
             other_ready = (
-                fair.peek
+                fair.peek and not owes_run
                 and (
                     consecutive >= 1
                     or (chain_key in self.chunk_loops.speculated and self.scheduler.chunks(*chain_key))
@@ -3408,7 +3467,9 @@ class Worker:
                 if self.enable_nvtx:
                     range_push("worker.speculate", synchronize=False)
                 _t0 = _time.perf_counter() if self.timer.period else 0.0
-                speculation = self._try_speculate_next(pending, target)
+                speculation = self._try_speculate_next(pending, target, owes_run)
+                if speculation is not None and not speculation.is_yield_away and self._step_repeats is not None:
+                    self._stamp_repeats(speculation, pending, consecutive, owes_run)
                 if self.timer.period:
                     self.timer.record("speculate", _time.perf_counter() - _t0)
                 if self.enable_nvtx:
@@ -3503,7 +3564,9 @@ class Worker:
         self.lockstep.verify_async_sched_agrees()
 
         # CUDA graph capture before entering the main loop
-        self.engine_manager.warmup_all()
+        self.engine_manager.warmup_all(self._step_repeats.asked_walks() if self._step_repeats is not None else {})
+        if self._step_repeats is not None:
+            self._step_repeats.settle(self._repeat_refusal)
 
         # Sync every worker before the main loop opens. Per-batch-size
         # captures inside CudaGraphRunner are already barriered on the
@@ -3922,7 +3985,7 @@ class Worker:
                     if speculation.is_yield_away and not speculation.gave_way:
                         consecutive_spec_steps = 0
                     else:
-                        consecutive_spec_steps += 1
+                        consecutive_spec_steps += spec_pending.batch.repeats
                     if phase_period:
                         timer.pass_done(len(spec_pending.batch.request_to_worker_graph), _iter_start, _iter_cpu)
                     _set_pending(spec_pending)
