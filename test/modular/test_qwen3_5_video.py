@@ -662,7 +662,8 @@ def test_the_scheduler_packs_only_the_images_one_replay_holds(model):
     take, dropped = fill_token_budget_in_start_order(list(tokens), tokens, set(), policy.max_batch_tokens)
 
     assert dropped
-    assert encoder.can_batch(None, [NodeInputs(input_seq_len=n, resource_step_info={"main": (n,)}) for n in take.values()])
+    rows = [NodeInputs(input_seq_len=n, resource_step_info={"main": (n,)}) for n in take.values()]
+    assert encoder.can_batch(None, rows)
 
 
 def test_a_vision_request_too_large_for_a_replay_gets_a_step_of_its_own():
