@@ -57,6 +57,8 @@ def test_the_conductor_sets_it_before_spawning_workers(clean_env, monkeypatch):
     seen = []
 
     class Process:
+        pid = 1
+
         def __init__(self, **kwargs):
             pass
 

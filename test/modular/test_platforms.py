@@ -205,6 +205,8 @@ def test_the_conductor_sets_env_defaults_before_spawning_workers(monkeypatch, ro
     seen = []
 
     class Process:
+        pid = 1
+
         def __init__(self, **kwargs):
             seen.append(os.environ.get(rocm_env_default))
 

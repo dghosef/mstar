@@ -672,7 +672,7 @@ def test_every_worker_process_gets_the_status_interval(tmp_path, monkeypatch):
     """The conductor spawns every rank, a lockstep instance's followers too."""
     spawned = []
     monkeypatch.setattr(conductor_mod.mp, "get_context", lambda method: SimpleNamespace(
-        Process=lambda **kw: spawned.append(kw["kwargs"]) or SimpleNamespace(start=lambda: None)))
+        Process=lambda **kw: spawned.append(kw["kwargs"]) or SimpleNamespace(pid=1, start=lambda: None)))
     monkeypatch.setattr(conductor_mod, "apply_process_env_defaults", lambda: None)
     monkeypatch.setattr(conductor_mod, "keep_bootstrap_sockets_on_loopback", lambda: None)
     monkeypatch.setattr(conductor_mod.atexit, "register", lambda fn: None)

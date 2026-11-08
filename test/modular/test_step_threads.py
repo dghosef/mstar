@@ -800,6 +800,8 @@ def test_the_api_server_and_the_conductors_workers_build_one_plan(
     spawned = []
 
     class Process:
+        pid = 1
+
         def __init__(self, target, kwargs, daemon):
             spawned.append(kwargs)
 
