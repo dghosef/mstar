@@ -3,7 +3,7 @@ over a batch of clips, for every FastConformer ASR model."""
 from __future__ import annotations
 
 import math
-from functools import partial
+from functools import cache, partial
 from typing import Any
 
 import torch
@@ -60,6 +60,13 @@ def _part_sizes(count: int, bucket: int) -> list[int]:
     return [sizes[-1]] * full + ([next(s for s in sizes if s >= rest)] if rest else [])
 
 
+@cache
+def _group_cost(count: int, bucket: int) -> float:
+    """The replays of ``count`` rows of one group; ``_plan`` asks for every
+    (count, bucket) of a batch on the GPU thread's path, and they never change."""
+    return sum(_replay_cost(bs, bucket) for bs in _part_sizes(count, bucket))
+
+
 def _plan(num_frames: list[int]) -> list[tuple[int | None, list[int]]]:
     """A batch's rows -> ``(bucket, rows)`` groups, one replay series each.
 
@@ -74,7 +81,7 @@ def _plan(num_frames: list[int]) -> list[tuple[int | None, list[int]]]:
     for i in range(1, len(bucketed) + 1):
         bucket = _bucket_for(num_frames[bucketed[i - 1]])
         for j in range(i):
-            cost = best[j] + sum(_replay_cost(bs, bucket) for bs in _part_sizes(i - j, bucket))
+            cost = best[j] + _group_cost(i - j, bucket)
             if cost < best[i]:
                 best[i], cut[i] = cost, j
     groups, i = [], len(bucketed)
