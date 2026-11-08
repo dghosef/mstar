@@ -593,6 +593,7 @@ def test_bagel_spans_come_from_one_tokenization(bagel):
 
 def test_qwen_schedule_walks_the_plan():
     """Qwen3-Omni prefills each attachment where it was written."""
+    from mstar.model.multimodal import MEDIA_LAYOUT
     from mstar.model.qwen3_omni.qwen3_omni_model import Qwen3OmniModel
 
     model = Qwen3OmniModel.__new__(Qwen3OmniModel)
@@ -600,15 +601,15 @@ def test_qwen_schedule_walks_the_plan():
     signals = {
         "text_inputs": ["t0", "t1", "t2", "t3"],
         "pixel_values": ["px0", "px1"],
-        "image_grid_thw": ["g0", "g1"],
         "audio_features": ["af0"],
     }
-    schedule = Qwen3OmniModel._build_thinker_prefill_schedule(model, mods, signals)
+    grids = {"image": ["g0", "g1"], "video": []}
+    schedule = Qwen3OmniModel._build_thinker_prefill_schedule(model, mods, signals, grids)
     assert [walk for walk, _ in schedule] == ["prefill_vision", "prefill_vision", "prefill_audio"]
     # Each vision walk carries its own image, in order.
     vision = [entry for walk, entry in schedule if walk == "prefill_vision"]
     assert [e["pixel_values"] for e in vision] == ["px0", "px1"]
-    assert [e["image_grid_thw"] for e in vision] == ["g0", "g1"]
+    assert [e[MEDIA_LAYOUT] for e in vision] == ["g0", "g1"]
     # Each attachment's walk takes the text before it, and the last one the text after it.
     assert [(e["text_inputs"], e["text_before"]) for _, e in schedule] == [
         (["t0"], 1), (["t1"], 1), (["t2", "t3"], 1),

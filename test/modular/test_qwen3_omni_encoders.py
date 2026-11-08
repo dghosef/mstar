@@ -32,6 +32,7 @@ from mstar.model.components.aut_encoder import AuTEncoder, AuTEncoderConfig  # n
 from mstar.model.components.aut_submodule import AuTEncoderSubmodule  # noqa: E402
 from mstar.model.components.block_loop_encoder import VISION_BLOCK_LOOP  # noqa: E402
 from mstar.model.loader import load_hf_weights  # noqa: E402
+from mstar.model.multimodal import MEDIA_LAYOUT  # noqa: E402
 from mstar.model.qwen3_omni.components.vision import Qwen3OmniVisionTower  # noqa: E402
 from mstar.model.qwen3_omni.config import (  # noqa: E402
     AUDIO_ATTN,
@@ -85,8 +86,8 @@ def _engine_inputs(rids):
     return SimpleNamespace(request_ids=list(rids), piecewise_runners={}, piecewise_leases={}, step=object())
 
 
-def _fwd(rid="r"):
-    return SimpleNamespace(request_id=rid)
+def _fwd(rid="r", grid=None):
+    return SimpleNamespace(request_id=rid, step_metadata={MEDIA_LAYOUT: {"grid": [grid], "output": ["vision_embeds"]}})
 
 
 @pytest.fixture(scope="module")
@@ -205,7 +206,7 @@ class RegionRunner:
 
 @pytest.mark.parametrize("replayed", [False, True], ids=["eager", "replayed"])
 @pytest.mark.parametrize(
-    "grid", [[[1, 4, 6]], [[3, 4, 4]], [[1, 2, 2], [1, 4, 4]]], ids=["image", "video", "two_images"],
+    "grid", [[[1, 4, 6]], [[3, 4, 4]]], ids=["image", "video"],
 )
 def test_vision_frames_and_deepstack_match_hf(vision_pair, grid, replayed):
     """One segment per frame, and the merged embeddings and every deepstack
@@ -215,7 +216,7 @@ def test_vision_frames_and_deepstack_match_hf(vision_pair, grid, replayed):
     grid_thw = torch.tensor(grid)
     patch_numel = 3 * VISION["temporal_patch_size"] * VISION["patch_size"] ** 2
     pixels = torch.randn(int(grid_thw.prod(-1).sum()), patch_numel)
-    row = sub.prepare_inputs("prefill_vision", _fwd(), {"pixel_values": [pixels], "image_grid_thw": [grid_thw]})
+    row = sub.prepare_inputs("prefill_vision", _fwd(grid=grid[0]), {"pixel_values": [pixels]})
     assert row.input_seq_len == pixels.shape[0]
     step = sub.declare_step("prefill_vision", ["v"], [row])
     assert [s.span for s in step.segments] == [h * w for t, h, w in grid for _ in range(t)]
@@ -245,10 +246,10 @@ def test_two_requests_in_one_vision_step_each_get_their_rows(vision_pair):
     tower with deepstack adds."""
     hf, sub, ragged = vision_pair
     patch_numel = 3 * VISION["temporal_patch_size"] * VISION["patch_size"] ** 2
-    grids = [torch.tensor([[1, 4, 6]]), torch.tensor([[1, 2, 2], [1, 4, 4]])]
+    grids = [torch.tensor([[1, 4, 6]]), torch.tensor([[1, 2, 2]])]
     pixels = [torch.randn(int(g.prod(-1).sum()), patch_numel) for g in grids]
     rows = [
-        sub.prepare_inputs("prefill_vision", _fwd(), {"pixel_values": [p], "image_grid_thw": [g]})
+        sub.prepare_inputs("prefill_vision", _fwd(grid=g[0].tolist()), {"pixel_values": [p]})
         for p, g in zip(pixels, grids, strict=True)
     ]
     ragged.plan(sub.declare_step("prefill_vision", ["a", "b"], rows))

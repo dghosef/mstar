@@ -364,9 +364,8 @@ def test_schedule_matches_the_spans(model):
     signals = {
         "text_inputs": [f"t{i}" for i in range(len(spans))],
         "pixel_values": ["px0", "px1"],
-        "image_grid_thw": ["g0", "g1"],
     }
-    schedule = model._build_thinker_prefill_schedule(mods, signals)
+    schedule = model._build_thinker_prefill_schedule(mods, signals, {"image": ["g0", "g1"], "video": []})
     assert [walk for walk, _ in schedule] == ["prefill_vision", "prefill_vision"]
     assert [text for _, entry in schedule for text in entry["text_inputs"]] == signals["text_inputs"]
 
@@ -415,5 +414,5 @@ def test_an_image_a_few_pixels_tall_is_read_as_height_width_channels(model, heig
     model._kv_layout = lambda *args: {}  # reads the checkpoint config; not what this checks
     image = torch.randint(0, 256, (3, height, 128), dtype=torch.uint8)
     out = model.process_prompt("Describe.", ["image", "text"], ["text"], tensors={"image_inputs": [image]})
-    (_, rows, cols), = (g.tolist() for g in out.new_input_tensors["image_grid_thw"])
+    (_, rows, cols), = out.metadata["vision_layouts"]["image"][0]["grid"]
     assert rows < cols, "a wide image's patch grid is wide"

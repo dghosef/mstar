@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Any
@@ -51,6 +52,7 @@ from mstar.model.components.qwen3_vit import (
     # the tower's 2D patch grid, not the Thinker's 3D MRoPE ids
     vision_position_ids as vision_grid_position_ids,
 )
+from mstar.model.multimodal import MEDIA_LAYOUT
 from mstar.model.qwen3_omni.components.code2wav import Qwen3OmniMoeCode2Wav
 from mstar.model.qwen3_omni.components.rope import (
     compute_3d_cos_sin,
@@ -156,8 +158,8 @@ class VisionEncoderSubmodule(PackedBlockLoopEncoder):
     """The ViT, which turns a request's pixel patches into Thinker-width
     embeddings and the deepstack features.
 
-    A request's images (or one video's frames) go through packed, in one
-    call. Grid maths runs in ``prepare_inputs`` and each frame is one segment
+    An attachment (an image, or one video's frames) goes through packed, in
+    one call. Grid maths runs in ``prepare_inputs`` and each frame is one segment
     of the node's ragged-attention step, so the only size the tower sees
     change is its patch count. The block loop is captured (eager, the tower
     is launch-bound), one request per replay; a request with more frames than
@@ -184,17 +186,12 @@ class VisionEncoderSubmodule(PackedBlockLoopEncoder):
         inputs: NameToTensorList,
         **kwargs
     ) -> NodeInputs:
-        """``pixel_values`` and ``image_grid_thw`` come from
+        """``pixel_values`` and the step's ``MEDIA_LAYOUT`` come from
         ``Qwen3OmniModel.process_prompt`` (a video walk maps its
-        ``pixel_values_videos`` / ``video_grid_thw`` onto them)."""
+        ``pixel_values_videos`` onto the former)."""
         device = self.get_device()
         merge = self.config.spatial_merge_size
-        # (num_images, 3): a single image's grid arrives as a bare [t, h, w]
-        grid = [
-            (int(t), int(h), int(w))
-            for g in inputs["image_grid_thw"]
-            for t, h, w in g.reshape(-1, 3).tolist()
-        ]
+        grid = self.grids(fwd_info)
         # Built here, not in the forward, so the tower reads nothing off the host;
         # and built on the host, as Qwen3.5's encoder does: on the device, the
         # grid upload and the per-patch index maths each block on the stream.
@@ -462,32 +459,32 @@ class ThinkerSubmodule(ARNodeSubmodule):
 
             wrapped_embeds = self._wrap_vision_input(vision_embeds)
             # Vision tokens use spatial 3D positions (temporal constant,
-            # h/w from the spatial grid after merging).  If a proper
-            # ``image_grid_thw`` is available, use ``get_rope_index_vision``;
-            # otherwise fall back to a 1-D sequence (test path)
-            grid_thw = inputs.get("image_grid_thw", [None])[0]
-            assert vision_len == int(grid_thw.prod()) // self.config.vision.spatial_merge_size ** 2, (
+            # h/w from the spatial grid after merging). Built on the host from
+            # the step's grid: the largest position is read below, and a read
+            # off the device would wait for the step still running.
+            layout = fwd_info.step_metadata[MEDIA_LAYOUT]
+            grid_thw, seconds_per_grid = layout["grid"][0], layout["seconds"][0]
+            merge = self.config.vision.spatial_merge_size
+            assert vision_len == math.prod(grid_thw) // merge ** 2, (
                 f"the vision encoder gave {vision_len} rows, where the layout counts the grid's merged patches"
             )
-            seconds_per_grid = inputs.get("video_second_per_grid", [])
-            seconds_per_grid = seconds_per_grid[0].item() if seconds_per_grid else None
             media_pos = start_pos + before.shape[0]
-            vision_pos_ids = get_rope_index_vision(
-                grid_thw.to(device),
+            host_pos_ids = get_rope_index_vision(
+                grid_thw,
                 media_pos + 1,  # leave room for the BOS token
                 position_id_per_seconds=self.config.thinker.position_id_per_seconds,
-                device=device,
-                spatial_merge_size=self.config.vision.spatial_merge_size,
+                spatial_merge_size=merge,
                 seconds_per_grid=seconds_per_grid
             )
+            vision_pos_ids = to_device_nonblocking(host_pos_ids, device)
 
             # Sentinel token positions (text-like).
             start_pos_ids = get_rope_index_text(1, media_pos, device)
             if seconds_per_grid is None:
                 # Use the prompt layout's helper, so the cache and this walk move the position by the same amount.
-                end_pos_base = media_pos + image_span(grid_thw, self.config.vision.spatial_merge_size).advance - 1
+                end_pos_base = media_pos + image_span(grid_thw, merge).advance - 1
             else:
-                end_pos_base = float(vision_pos_ids.max().item()) + 1
+                end_pos_base = float(host_pos_ids.max()) + 1
             end_pos_ids = get_rope_index_text(1, end_pos_base, device)
 
             pos_ids = torch.cat(

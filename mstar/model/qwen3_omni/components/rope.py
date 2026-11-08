@@ -13,6 +13,7 @@ from the HuggingFace ``modeling_qwen3_omni_moe.py``.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Tuple
 
 import torch
@@ -238,30 +239,26 @@ def get_rope_index_audio(
 
 
 def get_rope_index_vision(
-    grid_thw: torch.LongTensor,
+    grid_thw: Sequence[int],
     start_pos: float,
     position_id_per_seconds: float,
-    device: torch.device | None = None,
     spatial_merge_size: int = 2,
     seconds_per_grid: float | None = None,
 ) -> torch.Tensor:
-    """Build 3D MRoPE position IDs for a vision-only span.
+    """Build 3D MRoPE position IDs for a vision-only span, on the host.
 
     Temporal component is set to the constant ``start_pos`` (single
     image / frame) while the height and width components come from the
     spatial grid after the spatial merge.  For a grid of shape
     ``(T, H, W)`` the resulting sequence length is
-    ``T * (H // spatial_merge_size) * (W // spatial_merge_size)`` per
-    image, concatenated across images.
+    ``T * (H // spatial_merge_size) * (W // spatial_merge_size)``.
 
     Parameters
     ----------
-    grid_thw : torch.LongTensor
-        Shape ``(num_images, 3)`` -- temporal, height, width grid sizes.
+    grid_thw : Sequence[int]
+        The attachment's temporal, height and width grid sizes.
     start_pos : float
         Starting position offset; applied to all three components.
-    device : torch.device, optional
-        Device for the returned tensor.
     spatial_merge_size : int
         Spatial merge factor (tokens per merged patch).
 
@@ -270,48 +267,35 @@ def get_rope_index_vision(
     pos_ids_3d : torch.Tensor
         Shape ``(3, total_vision_tokens)``.  ``dtype=torch.float``.
     """
-    if grid_thw.dim() == 1:
-        grid_thw = grid_thw.unsqueeze(0)
+    grid_t, grid_h, grid_w = (int(n) for n in grid_thw)
+    llm_grid_h = grid_h // spatial_merge_size
+    llm_grid_w = grid_w // spatial_merge_size
+    num_tokens = grid_t * llm_grid_h * llm_grid_w
 
-    pos_ids_list: list[torch.Tensor] = []
-    for img_idx in range(grid_thw.shape[0]):
-        grid_t = int(grid_thw[img_idx, 0].item())
-        grid_h = int(grid_thw[img_idx, 1].item())
-        grid_w = int(grid_thw[img_idx, 2].item())
+    # Temporal is constant per image (= start_pos).  In the full HF
+    # multimodal parser the temporal component tracks video time via
+    # ``position_id_per_seconds``; for still images (grid_t == 1)
+    # that collapses to a single value per image.
+    if seconds_per_grid is None:
+        temporal = torch.full((num_tokens,), float(start_pos), dtype=torch.float)
+    else:
+        # a video's frame groups step by their time, from start_pos like h and w
+        temporal = (
+            torch.arange(grid_t, dtype=torch.float) * seconds_per_grid * position_id_per_seconds
+        ).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w).flatten().float() + float(start_pos)
 
-        llm_grid_h = grid_h // spatial_merge_size
-        llm_grid_w = grid_w // spatial_merge_size
-        num_tokens = grid_t * llm_grid_h * llm_grid_w
-
-        # Temporal is constant per image (= start_pos).  In the full HF
-        # multimodal parser the temporal component tracks video time via
-        # ``position_id_per_seconds``; for still images (grid_t == 1)
-        # that collapses to a single value per image.
-        if seconds_per_grid is None:
-            temporal = torch.full(
-                (num_tokens,), float(start_pos), dtype=torch.float, device=device
-            )
-        else:
-            # a video's frame groups step by their time, from start_pos like h and w
-            temporal = (
-                torch.arange(grid_t, dtype=torch.float, device=device) * seconds_per_grid * position_id_per_seconds
-            ).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w).flatten().float() + float(start_pos)
-
-        h_index = (
-            torch.arange(llm_grid_h, dtype=torch.float, device=device)
-            .view(1, -1, 1)
-            .expand(grid_t, -1, llm_grid_w)
-            .flatten()
-            + float(start_pos)
-        )
-        w_index = (
-            torch.arange(llm_grid_w, dtype=torch.float, device=device)
-            .view(1, 1, -1)
-            .expand(grid_t, llm_grid_h, -1)
-            .flatten()
-            + float(start_pos)
-        )
-
-        pos_ids_list.append(torch.stack([temporal, h_index, w_index], dim=0))
-
-    return torch.cat(pos_ids_list, dim=1)
+    h_index = (
+        torch.arange(llm_grid_h, dtype=torch.float)
+        .view(1, -1, 1)
+        .expand(grid_t, -1, llm_grid_w)
+        .flatten()
+        + float(start_pos)
+    )
+    w_index = (
+        torch.arange(llm_grid_w, dtype=torch.float)
+        .view(1, 1, -1)
+        .expand(grid_t, llm_grid_h, -1)
+        .flatten()
+        + float(start_pos)
+    )
+    return torch.stack([temporal, h_index, w_index], dim=0)

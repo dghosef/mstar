@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -15,9 +16,10 @@ from mstar.engine.resources.kv.manager import SpanCursor
 from mstar.engine.resources.kv.plan import KVPlanOutputs
 from mstar.engine.resources.position.config import PositionConfig
 from mstar.engine.resources.position.manager import RopeManager
+from mstar.model.multimodal import MEDIA_LAYOUT
 from mstar.model.qwen3_omni.components.rope import get_rope_index_vision
 from mstar.model.qwen3_omni.config import TALKER_KV, THINKER_KV, THINKER_MIXED, THINKER_POS, Qwen3OmniModelConfig
-from mstar.model.qwen3_omni.qwen3_omni_model import TEXT_BEFORE, Qwen3OmniModel, image_span
+from mstar.model.qwen3_omni.qwen3_omni_model import TEXT_BEFORE, VISION_LAYOUTS, Qwen3OmniModel, image_span
 from mstar.model.qwen3_omni.submodules import AudioEncoderSubmodule, ThinkerSubmodule, VisionEncoderSubmodule
 from mstar.testing_utils.engine import make_engine, make_mgmt
 
@@ -65,8 +67,11 @@ def thinker():
     return thinker
 
 
-def _prepare(thinker, walk: str, inputs: dict, held: CachedPrefix | None = None, rid: str = RID):
-    info = SimpleNamespace(rid_handle=rid, step_metadata={"text_before": 1})
+def _prepare(
+    thinker, walk: str, inputs: dict, held: CachedPrefix | None = None, rid: str = RID, grid=([1, 4, 6], None),
+):
+    layout = {"grid": [grid[0]], "output": ["vision_embeds"], "seconds": [grid[1]]}
+    info = SimpleNamespace(rid_handle=rid, step_metadata={"text_before": 1, MEDIA_LAYOUT: layout})
     prepared = thinker.prepare_inputs(walk, info, inputs)
     if held is None:
         return prepared
@@ -104,7 +109,6 @@ def test_a_cut_text_walk_prepared_again_is_planned_where_the_cache_keyed_it(thin
 def test_a_cut_vision_walk_cuts_its_masks_and_deepstack_with_the_embeds(thinker):
     image = {
         "vision_embeds": [torch.randn(6, HIDDEN)], "deepstack": [torch.randn(6, HIDDEN)] * 2,
-        "image_grid_thw": [torch.tensor([1, 4, 6])],
     }
     thinker.node_resources[THINKER_POS].ingest_request(RID)
     whole = _prepare(thinker, "prefill_vision", image)
@@ -118,12 +122,21 @@ def test_a_cut_vision_walk_cuts_its_masks_and_deepstack_with_the_embeds(thinker)
     ), "the Talker masks or deepstack rows kept rows the embeds lost, so they would land on other tokens"
 
 
+def test_a_videos_walk_moves_the_counter_past_its_largest_position(thinker):
+    """The layout's rule for a video: one past the end sentinel, which follows the grid's largest position."""
+    thinker.node_resources[THINKER_POS]._counters[RID] = {"main": 0}
+    video = {"vision_embeds": [torch.randn(12, HIDDEN)], "deepstack": [torch.randn(12, HIDDEN)] * 2}
+    row = _prepare(thinker, "prefill_vision", video, grid=([2, 4, 6], 1.0))
+    # the second frame group's time, 1 s at 25 positions a second, from the first position after the BOS
+    assert row.tensor_inputs["mrope_pos_advance"] == 25 + 1 + 2
+
+
 def test_an_images_deepstack_lands_on_its_vision_rows_between_the_text_around_it(thinker):
     thinker.node_resources[THINKER_POS]._counters[RID] = {"main": 10}
     deepstack = [torch.arange(1, 7, dtype=torch.float)[:, None].expand(6, HIDDEN) * (i + 1) for i in range(2)]
     image = {
         "vision_embeds": [torch.randn(6, HIDDEN)], "deepstack": deepstack,
-        "image_grid_thw": [torch.tensor([1, 4, 6])], "text_inputs": [torch.arange(8, 12), torch.arange(12, 15)],
+        "text_inputs": [torch.arange(8, 12), torch.arange(12, 15)],
     }
 
     row = _prepare(thinker, "prefill_vision", image)
@@ -170,7 +183,6 @@ def test_each_cut_row_of_a_mixed_step_moves_its_own_counter_past_its_whole_walk(
         "clip": ("prefill_audio", {"audio_embeds": [torch.zeros(28, HIDDEN)]}, 20, CachedPrefix("main", 28, 20)),
         "image": ("prefill_vision", {
             "vision_embeds": [torch.randn(6, HIDDEN)], "deepstack": [torch.randn(6, HIDDEN)] * 2,
-            "image_grid_thw": [torch.tensor([1, 4, 6])],
         }, 30, CachedPrefix("main", 3, 30)),
     }
     inputs = []
@@ -191,7 +203,7 @@ def test_each_cut_row_of_a_mixed_step_moves_its_own_counter_past_its_whole_walk(
 
 def test_an_images_span_is_what_its_positions_place():
     grid, start = (1, 30, 40), 7
-    positions = get_rope_index_vision(torch.tensor(grid), start + 1, position_id_per_seconds=25, spatial_merge_size=2)
+    positions = get_rope_index_vision(grid, start + 1, position_id_per_seconds=25, spatial_merge_size=2)
 
     # the end sentinel sits one past the image's last position, and the next walk one past that
     assert image_span(torch.tensor(grid), 2) == (positions.shape[1] + 2, int(positions.max()) + 2 - start), (
@@ -204,7 +216,7 @@ def test_vision_positions_match_transformers(grid, seconds_per_grid):
     hf = pytest.importorskip("transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe")
     start, per_second = 37, 13.0
     ours = get_rope_index_vision(
-        torch.tensor(grid), start, per_second, spatial_merge_size=2, seconds_per_grid=seconds_per_grid,
+        grid, start, per_second, spatial_merge_size=2, seconds_per_grid=seconds_per_grid,
     )
 
     # transformers' get_rope_index: a frame group's temporal index is its time, every axis offset by the start
@@ -300,7 +312,7 @@ def test_the_layout_lists_each_walk_the_schedule_runs_with_the_slots_it_writes(m
     layout = out.metadata["kv_layout"][THINKER_KV]["main"].spans
     signals = {name: [object()] * len(value) for name, value in out.new_input_tensors.items()}
 
-    ((walk, entry),) = model._build_thinker_prefill_schedule(modalities, signals)
+    ((walk, entry),) = model._build_thinker_prefill_schedule(modalities, signals, out.metadata[VISION_LAYOUTS])
     segments = out.new_input_tensors["text_inputs"]
     assert len(entry["text_inputs"]) == len(segments)
     media = next(iter(items))
@@ -366,7 +378,7 @@ def _row_slots(model, walk: str, entry: dict) -> list[int]:
     if walk == "prefill_audio":
         item = model.config.audio_encoder.tokens_for_frames(entry["audio_features"].shape[-1]) + 2
     else:
-        item = int(entry["image_grid_thw"].prod()) // model.config.vision.spatial_merge_size ** 2 + 2
+        item = math.prod(entry[MEDIA_LAYOUT]["grid"][0]) // model.config.vision.spatial_merge_size ** 2 + 2
     lead = entry[TEXT_BEFORE]
     return [*texts[:lead], item, *texts[lead:]]
 
@@ -375,7 +387,7 @@ def _row_slots(model, walk: str, entry: dict) -> list[int]:
 def test_the_layout_says_where_each_step_the_schedule_runs_ends(model, modalities, tensors, kwargs, steps):
     out = _prompt(model, modalities, tensors, **kwargs)
     layout = out.metadata["kv_layout"][THINKER_KV]["main"]
-    schedule = model._build_thinker_prefill_schedule(modalities, out.new_input_tensors)
+    schedule = model._build_thinker_prefill_schedule(modalities, out.new_input_tensors, out.metadata[VISION_LAYOUTS])
     cursor = SpanCursor(tuple(PrefixSpan(*row) for row in layout.row()[0]))
 
     assert [walk for walk, _ in schedule] == [walk for walk, _ in steps]
