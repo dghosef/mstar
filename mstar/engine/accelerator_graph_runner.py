@@ -192,6 +192,7 @@ def capture_into_graph(
     run, pool: AcceleratorGraphPool, device, autocast_dtype, keep_graph: bool = False,
     node_name: str | None = None,
     stream: Any = None,
+    conditionals: bool = False,
 ):
     """Capture ``run`` into a new CUDA graph allocated from ``pool``.
 
@@ -222,8 +223,9 @@ def capture_into_graph(
     try:
         with torch.compiler.set_stance("fail_on_recompile"), \
                 autocast_scope(autocast_dtype, backend.device_type, node_name):
-            with backend.capture(graph, pool=pool, stream=stream):
-                output = run()
+            graph, output = backend.capture_call(
+                graph, run, pool=pool, stream=stream, conditionals=conditionals, keep_graph=keep_graph,
+            )
     except BaseException:
         pool.on_failure(graph)
         backend.recover_failed_capture(pool, prev_stream)
