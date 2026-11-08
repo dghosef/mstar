@@ -18,6 +18,8 @@ from einops import rearrange
 from torch import nn
 from torch.nn.utils.parametrizations import weight_norm
 
+from mstar.model.components.snake import snake
+
 # ---------------------------------------------------------------------------
 # Utility layers
 # ---------------------------------------------------------------------------
@@ -31,22 +33,14 @@ def WNConvTranspose1d(*args, **kwargs):
     return weight_norm(nn.ConvTranspose1d(*args, **kwargs))
 
 
-@torch.jit.script
-def snake(x, alpha):
-    shape = x.shape
-    x = x.reshape(shape[0], shape[1], -1)
-    x = x + (alpha + 1e-9).reciprocal() * torch.sin(alpha * x).pow(2)
-    x = x.reshape(shape)
-    return x
-
-
 class Snake1d(nn.Module):
     def __init__(self, channels):
         super().__init__()
         self.alpha = nn.Parameter(torch.ones(1, channels, 1))
 
     def forward(self, x):
-        return snake(x, self.alpha)
+        alpha = self.alpha.reshape(-1).float()
+        return snake(x, alpha, (alpha + 1e-9).reciprocal())
 
 
 # ---------------------------------------------------------------------------
