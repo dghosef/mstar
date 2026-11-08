@@ -648,6 +648,23 @@ def test_vision_batch_that_overflows_one_replay_runs_request_by_request():
     assert not encoder.can_batch(None, [request(64, 2), request(64, 3)])
 
 
+def test_the_scheduler_packs_only_the_images_one_replay_holds(model):
+    """Past the top replay ``can_batch`` runs a step's images one by one, so
+    the walk's token budget has to leave the rest to the next step."""
+    from mstar.model.submodule_base import NodeInputs
+    from mstar.worker.batch_builder import fill_token_budget_in_start_order
+
+    policy = model.chunking_policy_of()[("vision_encoder", "prefill_vision")]
+    encoder = _encoder(max_segments=64)
+    encoder.grids = lambda fwd_info: [(1, 45, 80)]
+    tokens = {rid: encoder.get_input_sequence_len("prefill_vision", None, {}).seq_len for rid in range(8)}
+
+    take, dropped = fill_token_budget_in_start_order(list(tokens), tokens, set(), policy.max_batch_tokens)
+
+    assert dropped
+    assert encoder.can_batch(None, [NodeInputs(input_seq_len=n, resource_step_info={"main": (n,)}) for n in take.values()])
+
+
 def test_a_vision_request_too_large_for_a_replay_gets_a_step_of_its_own():
     """The scheduler groups vision requests by `cg_key_info`: requests that fit
     a replay alone share steps, and one past the top patch bucket or the

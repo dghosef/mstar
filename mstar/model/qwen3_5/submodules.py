@@ -50,7 +50,7 @@ from mstar.model.qwen3_5.config import (
     Qwen3_5Config,
     Qwen3_5VisionConfig,
 )
-from mstar.model.submodule_base import ARNodeInputs, ModelInputsFromEngine, NodeInputs
+from mstar.model.submodule_base import ARNodeInputs, InputSeqLenInfo, ModelInputsFromEngine, NodeInputs
 from mstar.utils.h2d import to_device_nonblocking
 from mstar.utils.knobs import compile_deterministic, ingraph_decode_rope
 from mstar.utils.profiler import PhaseLaps
@@ -337,6 +337,12 @@ class VisionEncoderSubmodule(PackedBlockLoopEncoder):
             # one segment per frame: a frame attends to itself alone
             resource_step_info={"main": vision_seq_lengths(grid)},
         )
+
+    def get_input_sequence_len(
+        self, graph_walk: str, fwd_info: CurrentForwardPassInfo,
+        inputs: NameToTensorList, **kwargs: Any,
+    ) -> InputSeqLenInfo:
+        return InputSeqLenInfo(sum(t * h * w for t, h, w in self.grids(fwd_info)))
 
     def split_batches_by_capture_key(self, graph_walk: str) -> bool:
         return True

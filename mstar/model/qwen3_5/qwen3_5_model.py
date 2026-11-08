@@ -214,14 +214,22 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
     # -----------------------------------------------------------------------
 
     def get_chunking_policies(self) -> dict[str, tuple[ChunkingPolicy, ...]]:
-        from mstar.model.qwen3_5.submodules import LLMSubmodule
+        from mstar.model.qwen3_5.submodules import LLMSubmodule, VisionEncoderSubmodule
 
         budget = LLMSubmodule.MAX_BATCH_TOKENS
-        return {"LLM": (
+        policies = {"LLM": (
             ChunkingPolicy(walks=("prefill_text",), chunkable=True, max_batch_tokens=budget),
             # carries the budget for the steps that mix a chunk with decode rows
             ChunkingPolicy(walks=(MIXED,), max_batch_tokens=budget),
         )}
+        if self.media:
+            # A step past the top replay runs its images one by one, each waiting
+            # on the last; the scheduler instead leaves them to the next step.
+            policies["vision_encoder"] = (ChunkingPolicy(
+                walks=("prefill_vision",),
+                max_batch_tokens=VisionEncoderSubmodule.BLOCK_LOOP_PATCH_BUCKETS[-1],
+            ),)
+        return policies
 
     # ------------------------------------------------------------------
     # Model ABC: I/O
