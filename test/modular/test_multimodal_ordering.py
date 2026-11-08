@@ -760,6 +760,35 @@ _BEFORE_THE_IMAGES = {
 }
 
 
+@pytest.mark.parametrize(
+    ("prompt", "in_mods", "out_mods", "instruction"),
+    [
+        (
+            None, ["image"], ["text"],
+            "You should first think about the reasoning process in the mind "
+            "and then provide the user with the answer. \n"
+            "The reasoning process is enclosed within <think> </think> tags, "
+            "i.e. <think> reasoning process here </think> answer here",
+        ),
+        (
+            "a cat", ["text"], ["image"],
+            "You should first think about the planning process in the mind and then generate the image. \n"
+            "The planning process is enclosed within <think> </think> tags, "
+            "i.e. <think> planning process here </think> image here",
+        ),
+    ],
+    ids=["understanding", "generation"],
+)
+def test_think_mode_prefills_upstream_bagels_instruction(bagel, prompt, in_mods, out_mods, instruction):
+    """Upstream's ``inferencer.py`` text, spelled out. Cut short, the understanding prompt gets no ``<think>``."""
+    bagel.config.think_mode = True
+    tensors = {"image_inputs": [torch.rand(3, *SIZES[0])]} if "image" in in_mods else {}
+    output = bagel.process_prompt(prompt, in_mods, out_mods, tensors=tensors)
+    assert _decoded(bagel, output.new_input_tensors["text_inputs"])[0] == f"<|im_start|>{instruction}<|im_end|>", (
+        "think mode prefilled another instruction than upstream BAGEL's"
+    )
+
+
 @pytest.mark.parametrize("before", _BEFORE_THE_IMAGES.values(), ids=_BEFORE_THE_IMAGES.keys())
 @pytest.mark.parametrize("n_images", [1, 2])
 @pytest.mark.parametrize("think", [False, True], ids=["plain", "think"])
@@ -772,8 +801,7 @@ def test_a_chat_ending_on_images_prefills_what_upstream_interleave_inference_doe
     think instruction, then each text (``prepare_prompts``: im_start, text,
     im_end) and image (``prepare_vit_images``) in order, and ``gen_text`` feeds
     ``<|im_start|>`` (``prepare_start_tokens``) before it samples. Under a system
-    turn and role markers every reply was the same greeting. The think span's
-    text is mstar's constant, which is shorter than upstream's.
+    turn and role markers every reply was the same greeting.
     """
     from mstar.model.bagel.bagel_model import VLM_THINK_SYSTEM_PROMPT
 

@@ -147,6 +147,8 @@ ROLE_TURNS = "role_turns"
 # System prompts (used when think_mode=True)
 # ---------------------------------------------------------------------------
 
+# Upstream's text exactly: github.com/ByteDance-Seed/Bagel/blob/a2fa77dd/inferencer.py.
+# Without the second sentence of the understanding prompt, the model doesn't write <think> tags.
 VLM_THINK_SYSTEM_PROMPT = (
     "You should first think about the reasoning process in the mind "
     "and then provide the user with the answer. \n"
