@@ -16,7 +16,9 @@ system prompt, short and rare, and runs eagerly on gathered state.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import accumulate
 
 import torch
 
@@ -31,6 +33,7 @@ from mstar.engine.resources.linear_attn.mamba2_kernels import (
 from mstar.engine.resources.recurrent.config import Mamba2Geometry
 from mstar.engine.resources.recurrent.pool import NO_SLOT, SINK_SLOT, RecurrentAddressing
 from mstar.engine.resources.step import Segment, SlotLease, StepContext
+from mstar.utils.h2d import to_device_nonblocking
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +46,15 @@ class Mamba2Plan:
     has_state: torch.Tensor  # [rows] bool, False where the slot reads as zeros
     spans: tuple[int, ...]
     num_rows: int
-
-    @property
-    def is_decode(self) -> bool:
-        return bool(self.spans) and all(s == 1 for s in self.spans)
+    is_decode: bool
+    # the same two on the host: a read of the device copies waits for the step
+    # still running
+    host_slots: Sequence[int]
+    host_has_state: Sequence[bool]
+    # every layer's lengths for the varlen conv, as [rows + 1] int32 bounds and
+    # the [rows] spans on the host; None on a decode step, which never reads them
+    query_start_loc: torch.Tensor | None = None
+    seqlens_cpu: torch.Tensor | None = None
 
 
 class Mamba2Manager(LinearAttnManager):
@@ -108,13 +116,22 @@ class Mamba2Manager(LinearAttnManager):
         for label, segments in self._group_by_label(step.segments or ()).items():
             spans = tuple(seg.span for seg in segments)
             num_rows = len(spans)
+            rows = addressing[label]
+            is_decode = bool(spans) and all(s == 1 for s in spans)
             self._current[label] = Mamba2Plan(
                 # every row addresses a slot (padding rows keep pointing at the
                 # sink, or carry NO_SLOT), so the plan is a narrow of the pool's
-                slots=addressing[label].slot_indices[:num_rows],
-                has_state=addressing[label].has_state[:num_rows],
+                slots=rows.slot_indices[:num_rows],
+                has_state=rows.has_state[:num_rows],
                 spans=spans,
                 num_rows=num_rows,
+                is_decode=is_decode,
+                host_slots=rows.host_slot_indices[:num_rows],
+                host_has_state=rows.host_has_state[:num_rows],
+                query_start_loc=None if is_decode else to_device_nonblocking(
+                    list(accumulate(spans, initial=0)), self._device, dtype=torch.int32,
+                ),
+                seqlens_cpu=None if is_decode else torch.tensor(spans, dtype=torch.int32),
             )
         if ctx.is_preplan:
             self._preplanned = True
@@ -169,21 +186,17 @@ class Mamba2Manager(LinearAttnManager):
                 activation=activation, conv_state_indices=plan.slots,
                 null_block_id=self._null_slot_id,
             )
-        cu = [0]
-        for span in plan.spans:
-            cu.append(cu[-1] + span)
-        query_start_loc = torch.tensor(cu, dtype=torch.int32, device=x.device)
         out = causal_conv1d_fn(
             x=x.transpose(0, 1),  # the varlen kernel is feature-major
             weight=weight, bias=bias,
             conv_states=conv_layer,
-            query_start_loc=query_start_loc,
+            query_start_loc=plan.query_start_loc,
             cache_indices=plan.slots,
             has_initial_state=plan.has_state,
             activation=activation,
             pad_slot_id=PAD_SLOT_ID,
             null_block_id=self._null_slot_id,
-            seqlens_cpu=torch.tensor(plan.spans, dtype=torch.int32),
+            seqlens_cpu=plan.seqlens_cpu,
         )
         return out.transpose(0, 1)
 
@@ -222,10 +235,8 @@ class Mamba2Manager(LinearAttnManager):
         # request.
         # NO_SLOT rows are skipped and read as zeros, like the decode kernel's.
         out = torch.zeros_like(x)
-        slots = plan.slots.tolist()
-        has_state = plan.has_state.tolist()
         start = 0
-        for span, slot, carried in zip(plan.spans, slots, has_state, strict=True):
+        for span, slot, carried in zip(plan.spans, plan.host_slots, plan.host_has_state, strict=True):
             if span <= 0 or slot == PAD_SLOT_ID:
                 start += max(span, 0)
                 continue

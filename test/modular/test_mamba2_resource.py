@@ -6,6 +6,8 @@ step continues from it, and padding rows leave live slots alone.
 The torch reference path runs on CPU; the Triton kernel is checked against it
 on a GPU when one is present (Nemotron-H's geometry among the cases).
 """
+from dataclasses import replace
+
 import pytest
 import torch
 
@@ -220,7 +222,8 @@ def test_prefill_no_slot_row_keeps_later_rows_aligned():
     manager._current = {"main": Mamba2Plan(
         slots=torch.tensor([1, NO_SLOT, 2], dtype=torch.int32),
         has_state=torch.zeros(3, dtype=torch.bool),
-        spans=spans, num_rows=3,
+        spans=spans, num_rows=3, is_decode=False,
+        host_slots=[1, NO_SLOT, 2], host_has_state=[False, False, False],
     )}
     out = manager.run(x, dt, b, c, layer, prm["a_log"], prm["d"], prm["dt_bias"], label="main")
 
@@ -247,6 +250,44 @@ def test_conv_updates_slot_zero_with_the_sink_off(walk, span):
     manager.run_conv(x, conv_layer, weight, activation=None, label="main")
     # the window's last tap is the newest token
     torch.testing.assert_close(conv_layer[0, :, -1], newest)
+
+
+def test_every_layers_prefill_conv_shares_the_rows_bounds_built_at_plan(monkeypatch):
+    """A device tensor built per layer is a pageable, blocking copy per layer."""
+    pool, manager = build()
+    plan(pool, manager, ["a", "b"], [3, 2], walk="prefill")
+    seen = []
+
+    def conv(x, query_start_loc, **_):
+        seen.append(query_start_loc)
+        return x
+
+    monkeypatch.setattr("mstar.utils.causal_conv1d.causal_conv1d_fn", conv)
+    for _ in range(2):
+        manager.run_conv(torch.zeros(5, 4), pool.block("conv", 0), torch.zeros(4, 4), label="main")
+    assert seen[0] is seen[1]
+    assert seen[0].tolist() == [0, 3, 5]
+
+
+class _DeviceColumn(torch.Tensor):
+    def _read(self, *args):
+        raise AssertionError("read a row column back off the device, waiting for the step still running")
+
+    tolist = item = __int__ = __bool__ = _read
+
+
+def test_a_prefill_step_reads_no_row_column_off_the_device(monkeypatch):
+    pool, manager = build()
+    prm = params()
+    plan(pool, manager, ["a", "b"], [3, 2], walk="prefill")
+    p = manager.current_plan("main")
+    manager._current["main"] = replace(
+        p, slots=p.slots.as_subclass(_DeviceColumn), has_state=p.has_state.as_subclass(_DeviceColumn),
+    )
+    monkeypatch.setattr("mstar.utils.causal_conv1d.causal_conv1d_fn", lambda x, **_: x)
+    x, dt, b, c = inputs(1, seq=5, gen=torch.Generator().manual_seed(9))
+    manager.run_conv(x[:, 0], pool.block("conv", 0), torch.zeros(4, 4), label="main")
+    manager.run(x, dt, b, c, pool.block("ssm", 0), prm["a_log"], prm["d"], prm["dt_bias"], label="main")
 
 
 def test_dt_clamp_applies_after_softplus():
