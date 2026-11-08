@@ -67,8 +67,8 @@ from mstar.communication.tensors import (
     Rid,
     SharedMemoryCommunicationManager,
     _default_shm_dir,
-    _deserialize_tensor,
     _nullcontext,
+    _read_tensor_file,
     _serialize_tensor,
     _sweep_dead_namespaces,
 )
@@ -1076,11 +1076,8 @@ class ArenaShmCommunicationManager(SharedMemoryCommunicationManager):
                             # Spilled at the producer (arena saturated): read the
                             # per-uuid file, the old protocol's path.
                             path = self._shm_path(info.source_entity, producer_uuid)
-                            with open(path, "rb") as f:
-                                f.seek(info.offset)
-                                data = f.read(info.nbytes)
-                            tensor = _deserialize_tensor(
-                                data, self.device, tensor_info=info)
+                            tensor = _read_tensor_file(
+                                path, info, self.device, pin=self._h2d_stream is not None)
                             h2d_did_work = h2d_did_work or tensor.numel() > 0
                             self.tensor_store.put_tensor(
                                 request_id, info.uuid, tensor, info)

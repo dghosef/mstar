@@ -16,7 +16,7 @@ from mstar.communication.communicator import BaseCommunicator, CommProtocol
 from mstar.communication.tensors import (
     MooncakeCommunicationManager,
     SharedMemoryCommunicationManager,
-    _deserialize_tensor,
+    _read_tensor_file,
     _serialize_tensor,
     create_tensor_communication_manager,
 )
@@ -72,7 +72,7 @@ def _empty_sharding_config() -> ShardingConfig:
 
 def _stub_info(t: torch.Tensor) -> TensorPointerInfo:
     """Build a minimal TensorPointerInfo carrying dims/dtype for the
-    serialize/deserialize round-trip tests.
+    file round-trip tests.
     """
     return TensorPointerInfo(
         dims=tuple(t.shape), dtype=t.dtype, stride=t.stride(),
@@ -101,11 +101,29 @@ def _make_manager(
 # Serialization round-trip tests
 # ---------------------------------------------------------------------------
 
+def _roundtrip(t: torch.Tensor, tmp_path) -> torch.Tensor:
+    path = tmp_path / "tensor"
+    path.write_bytes(_serialize_tensor(t))
+    return _read_tensor_file(str(path), _stub_info(t), "cpu", pin=False)
+
+
+def test_read_tensor_file_reads_a_slice_and_refuses_a_short_file(tmp_path):
+    t = torch.arange(8, dtype=torch.int32)
+    path = tmp_path / "tensor"
+    path.write_bytes(_serialize_tensor(t))
+    info = _stub_info(t[2:5])
+    info.offset = 2 * t.element_size()
+    assert torch.equal(_read_tensor_file(str(path), info, "cpu", pin=False), t[2:5])
+    info.offset = 6 * t.element_size()
+    with pytest.raises(RuntimeError, match="expected 12"):
+        _read_tensor_file(str(path), info, "cpu", pin=False)
+
+
 @pytest.mark.parametrize("dtype", [
     torch.float32, torch.float64, torch.float16, torch.bfloat16,
     torch.int32, torch.int64, torch.int8, torch.uint8, torch.bool,
 ])
-def test_serialize_roundtrip_dtypes(dtype):
+def test_serialize_roundtrip_dtypes(dtype, tmp_path):
     if dtype == torch.bool:
         t = torch.tensor([True, False, True, False], dtype=dtype)
     elif dtype in (torch.float32, torch.float64, torch.float16, torch.bfloat16):
@@ -113,32 +131,28 @@ def test_serialize_roundtrip_dtypes(dtype):
     else:
         t = torch.randint(0, 100, (4, 8), dtype=dtype)
 
-    data = _serialize_tensor(t)
-    t2 = _deserialize_tensor(data, "cpu", tensor_info=_stub_info(t))
+    t2 = _roundtrip(t, tmp_path)
     assert t2.shape == t.shape
     assert t2.dtype == t.dtype
     assert torch.equal(t2, t)
 
 
-def test_serialize_scalar():
+def test_serialize_scalar(tmp_path):
     t = torch.tensor(3.14, dtype=torch.float32)
-    data = _serialize_tensor(t)
-    t2 = _deserialize_tensor(data, "cpu", tensor_info=_stub_info(t))
+    t2 = _roundtrip(t, tmp_path)
     assert t2.shape == t.shape
     assert torch.equal(t2, t)
 
 
-def test_serialize_empty():
+def test_serialize_empty(tmp_path):
     t = torch.empty(0, 3, dtype=torch.float32)
-    data = _serialize_tensor(t)
-    t2 = _deserialize_tensor(data, "cpu", tensor_info=_stub_info(t))
+    t2 = _roundtrip(t, tmp_path)
     assert t2.shape == t.shape
 
 
-def test_serialize_high_dim():
+def test_serialize_high_dim(tmp_path):
     t = torch.randn(2, 3, 4, 5)
-    data = _serialize_tensor(t)
-    t2 = _deserialize_tensor(data, "cpu", tensor_info=_stub_info(t))
+    t2 = _roundtrip(t, tmp_path)
     assert torch.equal(t2, t)
 
 

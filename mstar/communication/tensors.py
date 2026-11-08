@@ -2449,30 +2449,32 @@ class MooncakeCommunicationManager(TensorCommunicationManager):
 # Shared-memory tensor serialization helpers
 # ---------------------------------------------------------------------------
 
-def _serialize_tensor(tensor: torch.Tensor) -> bytes:
-    """Serialize a tensor to bytes: header + contiguous raw data."""
+def _serialize_tensor(tensor: torch.Tensor) -> memoryview:
+    """A view of a tensor's raw bytes on the host, which the caller writes before the tensor can change."""
     t = tensor.detach().contiguous().cpu()
     # reshape(-1) so 0-dim (scalar) tensors can be byte-viewed: PyTorch
     # disallows viewing a 0-dim tensor to a dtype with a different element size.
-    return t.reshape(-1).view(torch.uint8).numpy().tobytes()
+    return memoryview(t.reshape(-1).view(torch.uint8).numpy())
 
 
-def _deserialize_tensor(
-    data: bytes | memoryview, device: str,
-    tensor_info: TensorPointerInfo
-) -> torch.Tensor:
-    """Reconstruct a tensor from bytes produced by ``_serialize_tensor``."""
-    if isinstance(data, memoryview):
-        data = bytes(data)
-    shape = tensor_info.dims
-    dtype = tensor_info.dtype
-    if len(data) == 0:
-        t = torch.empty(shape, dtype=dtype)
-    else:
-        t = torch.frombuffer(bytearray(data), dtype=torch.uint8).view(dtype).reshape(shape)
-    if device != "cpu":
-        t = t.to(device)
-    return t
+def _read_tensor_file(path: str, info: TensorPointerInfo, device: str, pin: bool) -> torch.Tensor:
+    """Read a tensor written by ``_serialize_tensor`` directly into the buffer its H2D copy reads.
+
+    ``pin`` is for a caller whose copy stream's event gates the read: the copy is then a true async
+    DMA, and torch's caching host allocator holds the pinned block until it finishes.
+    """
+    if info.nbytes == 0:
+        t = torch.empty(info.dims, dtype=info.dtype)
+        return t.to(device) if device != "cpu" else t
+    pin = pin and device != "cpu"
+    host = torch.empty(info.nbytes, dtype=torch.uint8, pin_memory=pin)
+    with open(path, "rb") as f:
+        f.seek(info.offset)
+        got = f.readinto(host.numpy())
+    if got != info.nbytes:
+        raise RuntimeError(f"tensor file {path} held {got} bytes at offset {info.offset}, expected {info.nbytes}")
+    t = host.view(info.dtype).reshape(info.dims)
+    return t.to(device, non_blocking=pin) if device != "cpu" else t
 
 
 # Docker gives a container 64 MB of /dev/shm, and one video or audio tensor can outgrow that
@@ -2762,7 +2764,7 @@ class SharedMemoryCommunicationManager(TensorCommunicationManager):
                     "deployment's namespace"
                 ) from None
 
-    def _write_shm_file(self, path: str, data: bytes) -> None:
+    def _write_shm_file(self, path: str, data: memoryview) -> None:
         """Write one tensor's bytes to ``path``.
 
         A full shm dir fails the write part way, and no cleanup knows the partial file: left behind, it
@@ -2893,10 +2895,7 @@ class SharedMemoryCommunicationManager(TensorCommunicationManager):
                             "ArenaShmCommunicationManager reads; this manager "
                             "reads the per-uuid files the arena spills")
                     path = self._shm_path(info.source_entity, producer_uuid)
-                    with open(path, "rb") as f:
-                        f.seek(info.offset)
-                        data = f.read(info.nbytes)
-                    tensor = _deserialize_tensor(data, self.device, tensor_info=info)
+                    tensor = _read_tensor_file(path, info, self.device, pin=self._h2d_stream is not None)
                     h2d_did_work = True
                     self.tensor_store.put_tensor(request_id, info.uuid, tensor, info)
                     self.tensor_store.set_metadata(info.uuid, mem_registered=False)
