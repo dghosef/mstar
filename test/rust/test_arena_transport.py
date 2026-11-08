@@ -533,18 +533,24 @@ def test_rocm_sends_by_files_and_never_loads_libcudart(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 @pytest.mark.parametrize("copy_stream", [True, False])
-def test_a_read_is_async_only_with_a_copy_stream(monkeypatch, tmp_path, copy_stream):
+@pytest.mark.parametrize("spilled", [False, True])
+def test_a_read_is_async_only_with_a_copy_stream(monkeypatch, tmp_path, copy_stream, spilled):
     """Without a copy stream (XPU) no event gates the ACK, so the copy out of
-    the peer's slot must be done when the read returns."""
+    the peer's slot, or out of a spilled tensor's file, must be done when the
+    read returns."""
     peer = _manager("nb_peer", tmp_path)
     gpu = ArenaShmCommunicationManager(
         my_entity_id="nb0", hostname="localhost", device="cuda",
         communicator=_NullCommunicator(), shm_dir=str(tmp_path))
     if not copy_stream:
         gpu._h2d_stream = None
+    if spilled:  # fill all 4 segments, so the next tensor goes to a file
+        fill = [torch.zeros(1 << 20, dtype=torch.uint8) for _ in range(4)]
+        peer.register_for_send("r", list(peer.store_and_return_tensor_info("r", {"fill": fill})["fill"]))
     y = torch.randn(1 << 16)
     (info,) = peer.store_and_return_tensor_info("r", {"y": [y]})["y"]
     peer.register_for_send("r", [info])
+    assert (info.shm_segment is None) == spilled
     seen, real_to = [], torch.Tensor.to
 
     def to(self, *args, **kwargs):
