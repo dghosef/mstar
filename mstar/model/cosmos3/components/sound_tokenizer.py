@@ -20,6 +20,8 @@ import torch
 from torch import nn
 from torch.nn.utils import weight_norm
 
+from mstar.model.components.snake import snake
+
 
 class Snake1d(nn.Module):
     """1D Snake activation (``x + 1/b * sin^2(a x)``) with log-scale parameters."""
@@ -31,12 +33,11 @@ class Snake1d(nn.Module):
         self.logscale = logscale
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        shape = hidden_states.shape
-        alpha = torch.exp(self.alpha) if self.logscale else self.alpha
-        beta = torch.exp(self.beta) if self.logscale else self.beta
-        hidden_states = hidden_states.reshape(shape[0], shape[1], -1)
-        hidden_states = hidden_states + (beta + 1e-9).reciprocal() * torch.sin(alpha * hidden_states).pow(2)
-        return hidden_states.reshape(shape)
+        alpha = self.alpha.reshape(-1).float()
+        beta = self.beta.reshape(-1).float()
+        if self.logscale:
+            alpha, beta = alpha.exp(), beta.exp()
+        return snake(hidden_states, alpha, (beta + 1e-9).reciprocal())
 
 
 class OobleckResidualUnit(nn.Module):
