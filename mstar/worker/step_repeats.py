@@ -18,6 +18,7 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, NamedTuple
 
+from mstar.engine.device_run import WalkAsk
 from mstar.graph.special_destinations import EMIT_TO_CLIENT, EMPTY_DESTINATION
 
 if TYPE_CHECKING:
@@ -35,6 +36,9 @@ class RepeatConfig:
     # Ready rows wait for a full-length run: after a step that ran once, the next
     # takes no new rows. Trades admission latency for longer runs.
     ready_waits: bool = False
+    # A step's WHILE node ends on the device once every row has stopped, in one
+    # launch, instead of the host launching each iteration.
+    device_stop: bool = False
 
     @classmethod
     def parse(cls, node: str, block: object) -> RepeatConfig:
@@ -46,10 +50,13 @@ class RepeatConfig:
         config = cls(**block)
         if type(config.max) is not int or config.max < 1:
             raise ValueError(f"step_repeats for {node!r}: max is {config.max!r}; it must be an integer of at least 1")
-        if type(config.ready_waits) is not bool:
-            raise ValueError(f"step_repeats for {node!r}: ready_waits is {config.ready_waits!r}; it must be a boolean")
-        if config.max == 1 and config.ready_waits:
-            raise ValueError(f"step_repeats for {node!r} sets ready_waits, which needs max above 1")
+        for name in ("ready_waits", "device_stop"):
+            if type(getattr(config, name)) is not bool:
+                raise ValueError(
+                    f"step_repeats for {node!r}: {name} is {getattr(config, name)!r}; it must be a boolean"
+                )
+            if config.max == 1 and getattr(config, name):
+                raise ValueError(f"step_repeats for {node!r} sets {name}, which needs max above 1")
         return config
 
 
@@ -108,12 +115,13 @@ class StepRepeats:
         self.loops = loops
         self._walks: set[tuple[str, str]] = set()
 
-    def asked_walks(self) -> dict[str, set[str]]:
+    def asked_walks(self) -> dict[str, dict[str, WalkAsk]]:
         """Node -> the walks a step of which may repeat if capture allows it."""
-        asked: dict[str, set[str]] = {}
+        asked: dict[str, dict[str, WalkAsk]] = {}
         for (node, walk), signals in self.loops.items():
             if signals.refusal is None:
-                asked.setdefault(node, set()).add(walk)
+                config = self._configs[node]
+                asked.setdefault(node, {})[walk] = WalkAsk(signals.loop_back, config.max if config.device_stop else 0)
         return asked
 
     def settle(self, refusal: Callable[[str, str], str | None]) -> None:

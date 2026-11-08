@@ -355,7 +355,7 @@ class EngineManager:
 
         return cls(engine=engine, node_names=set(node_names), side_keys=side_keys)
 
-    def warmup_all(self, repeat_walks: Mapping[str, Collection[str]] = MappingProxyType({})) -> None:
+    def warmup_all(self, repeat_walks: Mapping[str, Mapping] = MappingProxyType({})) -> None:
         """CUDA graph capture, for the whole forward and any piecewise region."""
         with torch.no_grad():
             self.engine.warmup(repeat_walks)

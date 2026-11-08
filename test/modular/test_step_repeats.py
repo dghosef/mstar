@@ -4,11 +4,15 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import torch
 
+from mstar.engine.device_run import RUN_REPLAYS, RunState
 from mstar.graph.base import GraphEdge, GraphNode, Loop
 from mstar.graph.special_destinations import EMIT_TO_CLIENT
+from mstar.model.submodule_base import HostRows
 from mstar.worker.services import _step_repeats  # noqa: PLC2701
 from mstar.worker.step_repeats import RepeatConfig, StepRepeats, loop_signals, parse_step_repeats
+from mstar.worker.worker import Worker
 
 NODE, WALK = "decoder", "decode"
 
@@ -23,8 +27,9 @@ def _loop(*outputs: GraphEdge) -> Loop:
 
 @pytest.mark.parametrize(("block", "match"), [
     ({NODE: {"max": 0}}, "at least 1"),
-    ({NODE: {"max": 8, "device_stop": "skip"}}, "not settings"),
+    ({NODE: {"max": 8, "auto": True}}, "not settings"),
     ({NODE: {"max": 1, "ready_waits": True}}, "needs max"),
+    ({NODE: {"max": 1, "device_stop": True}}, "needs max"),
     ({"other": {"max": 8}}, "not nodes"),
 ])
 def test_a_setting_that_cannot_run_is_refused_at_load(block, match):
@@ -60,3 +65,35 @@ def test_a_node_the_config_names_with_no_walk_that_can_repeat_stops_the_worker()
 def test_ready_rows_wait_only_for_the_one_run_owed(ready_waits, repeats, owed, want):
     config = RepeatConfig(max=8, ready_waits=ready_waits)
     assert StepRepeats({NODE: config}, {}).owes_run(NODE, repeats, owed) is want
+
+
+def test_a_device_run_starts_with_only_real_rows_live_and_keeps_a_column_an_iteration():
+    state = RunState(4, 3, {2}, torch.device("cpu"))
+    state.stage(2, [False, True], limit=3)
+    assert state.marks.tolist() == [False, False, True, True], "padding rows start stopped"
+    assert (state.continuation.item(), state.limit.item(), state.immune.tolist()) == (1, 3, [False, True, False, False])
+
+    state.tokens[:] = 0
+    for token in ([[5], [6], [0], [0]], [[7], [8], [0], [0]]):
+        state.keep_token(torch.tensor(token).reshape(-1))
+        state.index += 1
+    results = state.results(3, ("new_token",))
+    assert results["new_token"][:2, :2].tolist() == [[5, 7], [6, 8]]
+    assert results[RUN_REPLAYS].tolist() == [2, 2, 2, 2]
+
+
+def test_a_device_run_that_ended_short_settles_its_width_before_anything_reads_it():
+    """A run ended short wrote only the columns it ran, so the host cuts them
+    to that width and reads the step as the width it really had."""
+    rows = HostRows((1, 2), {"new_token": torch.tensor([[5, 9, 0], [6, 2, 0]]), RUN_REPLAYS: torch.tensor([2, 2])})
+    ctx = SimpleNamespace(repeats=3)
+    batch_n = SimpleNamespace(
+        batch=SimpleNamespace(repeats=3), node_batch=SimpleNamespace(step_context=ctx), graph_walk=WALK,
+    )
+    outputs = SimpleNamespace(repeats=3)
+
+    Worker._settle_device_run(batch_n, outputs, rows)
+
+    assert RUN_REPLAYS not in rows.buffers
+    assert rows.buffers["new_token"].tolist() == [[5, 9], [6, 2]]
+    assert (batch_n.batch.repeats, ctx.repeats, outputs.repeats) == (2, 2, 2)

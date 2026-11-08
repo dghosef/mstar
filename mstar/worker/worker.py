@@ -30,6 +30,7 @@ from mstar.distributed.base import ShardingConfig
 from mstar.distributed.communication import WorkerParallelGroups
 from mstar.engine import apply_dynamo_config
 from mstar.engine.chunking import ChunkRange
+from mstar.engine.device_run import RUN_REPLAYS
 from mstar.engine.engine import ExecutingBatch
 from mstar.engine.resources import AllocationFailed
 from mstar.engine.resources.kv.transfer import (
@@ -78,6 +79,7 @@ from mstar.utils.ipc_format import (
 from mstar.utils.profiler import (
     PhaseLaps,
     nvtx_enabled,
+    phase_record,
     range_pop,
     range_push,
     set_step_key,
@@ -1525,6 +1527,16 @@ class Worker:
             ),
         )
 
+    @staticmethod
+    def _settle_device_run(batch_N: PendingBatch, outputs: BatchedModelOutput, host_rows: HostRows) -> None:
+        """A device run that ended short (every row stopped) wrote only the
+        columns it ran; everything after this reads the width it really had."""
+        ran = int(host_rows.buffers.pop(RUN_REPLAYS)[0])
+        phase_record(f"repeats.{batch_N.graph_walk}.ran#", ran)
+        for name, column in host_rows.buffers.items():
+            host_rows.buffers[name] = column[:, :ran]
+        outputs.repeats = batch_N.batch.repeats = batch_N.node_batch.step_context.repeats = ran
+
     def _fwd_info_in(self, partition: str, rid: int):
         return self.request_state.get_fwd_info(rid, partition)
 
@@ -2369,6 +2381,8 @@ class Worker:
             outputs, batch_N.node_batch.completion_event,
             request_ids=batch_N.node_batch.request_ids,
         )
+        if host_rows is not None and RUN_REPLAYS in host_rows.buffers:
+            self._settle_device_run(batch_N, outputs, host_rows)
         self._rebuilds.keep_prompts(batch_N.node_batch)
         # Until its last chunk a row's sampled token is not a real sample, so it
         # keys no prefix and decides no stop (`_check_stops`).

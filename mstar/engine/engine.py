@@ -27,6 +27,7 @@ from mstar.engine.accelerator_graph_runner import (
     plan_captures,
 )
 from mstar.engine.chunking import DEFAULT_MIN_CHUNK_TOKENS, ChunkingManagement, ChunkRange
+from mstar.engine.device_run import RunAsk, WalkAsk
 from mstar.engine.fp32_precision import Fp32Precision, cudnn_benchmark, fp32_precision_scope, node_fp32_precision
 from mstar.engine.node_dtype import resolve_node_dtype
 from mstar.engine.resources import (
@@ -201,6 +202,8 @@ class SubmoduleManagement:
     resident: ResidentPlanner | None = None
     # walk -> how a step of it that repeats carries each loop-back signal (output -> input)
     repeat_carries: dict[str, dict[str, str]] = field(default_factory=dict)
+    # walk -> the stop policy its device runs read ``ignore_eos`` through
+    run_policies: dict[str, StopPolicy] = field(default_factory=dict)
 
     # Rotated globally, not per runner: slot-keyed buffers are shared across
     # buckets and regions, so per-runner counters let consecutive steps collide
@@ -741,7 +744,8 @@ class Engine:
                 )
 
     def _build_resident_planner(
-        self, node_name: str, runner: AcceleratorGraphRunner, repeat_walks: Collection[str] = (),
+        self, node_name: str, runner: AcceleratorGraphRunner,
+        repeat_walks: Mapping[str, WalkAsk] = MappingProxyType({}),
     ) -> None:
         """Put ``node_name`` on resident tables if it can and the deployment
         lets it; the startup log says why a node that named walks stays on the
@@ -764,6 +768,11 @@ class Engine:
             logger.warning("resident planning stays off on %s: %s", node_name, refused)
         else:
             submodule_mgmt.resident.repeat_walks = frozenset(repeat_walks)
+            if asks := {
+                walk: run_ask for walk, ask in repeat_walks.items()
+                if ask.device_limit and (run_ask := self._run_ask(submodule_mgmt, walk, ask)) is not None
+            }:
+                runner.ask_device_runs(asks)
         runner.bind_resident(submodule_mgmt.resident)
 
     def paged_kv_caches(self) -> list[PagedKVCache]:
@@ -871,7 +880,7 @@ class Engine:
         """This node's resolved dtype, or None for one that opted out."""
         return self._submodules[node_name].node_dtype
 
-    def warmup(self, repeat_walks: Mapping[str, Collection[str]] = MappingProxyType({})) -> None:
+    def warmup(self, repeat_walks: Mapping[str, Mapping[str, WalkAsk]] = MappingProxyType({})) -> None:
         """Capture every node's graphs. ``repeat_walks``: the walks a step of
         which may stand for several iterations, by node."""
         # before capture: a region inside a captured graph compiles in its warm-up
@@ -894,7 +903,7 @@ class Engine:
                 device_capability=self.device_capability,
                 capture_stream=capture_stream,
             )
-            self._build_resident_planner(node_name, runner, repeat_walks.get(node_name, ()))
+            self._build_resident_planner(node_name, runner, repeat_walks.get(node_name, MappingProxyType({})))
             piecewise[node_name] = self._build_piecewise_runners(
                 node_name, submodule_mgmt, capture_stream,
             )
@@ -2193,12 +2202,20 @@ class Engine:
             ctx = batch.step_context
             if ctx.resident is not None:
                 ctx.resident.flush(ctx.resident_plan)
+            run = cg_runner.slot_run(lease)
+            if run is not None:
+                run[0].stage(
+                    len(request_ids), self._ignore_eos(submodule_mgmt, graph_walk, engine_inputs, request_ids),
+                    ctx.repeats,
+                )
             out = cg_runner.run_forward(
                 lease, preprocessed,
                 plan_done_event=batch.preplan_event,
                 launch_started_event=release_event,
             )
             phase_record(f"repeats.{graph_walk}#", ctx.repeats)
+            if run is not None:
+                return dataclasses.replace(out, check_stop_buffers=run[0].results(ctx.repeats, run[1]))
             if ctx.repeats > 1:
                 carries = submodule_mgmt.repeat_carries[graph_walk]
                 out = dataclasses.replace(out, check_stop_buffers=cg_runner.repeat(lease, carries, ctx.repeats))
@@ -2814,6 +2831,25 @@ class Engine:
         if (loopback := getattr(mgmt.submodule, "device_loopback", None)) is not None:
             mgmt.resources[loopback.sampler].enable_device_loopback_reader()
 
+    @staticmethod
+    def _run_ask(submodule_mgmt: SubmoduleManagement, walk: str, ask: WalkAsk) -> RunAsk | None:
+        """A device run's needs off the walk's declared stop. None when it has
+        no token stop or carries, which ``repeat_refusal`` reports after capture."""
+        submodule = submodule_mgmt.submodule
+        policy = next(iter((submodule.get_stop_policies(walk) or {}).values()), None)
+        carries = submodule.repeat_carry(walk, ask.loop_back)
+        if policy is None or not policy.reads_token or carries is None:
+            return None
+        submodule_mgmt.run_policies[walk] = policy
+        return RunAsk(ask.device_limit, policy.token_signal, policy.eos_tokens, carries)
+
+    def _ignore_eos(
+        self, submodule_mgmt: SubmoduleManagement, walk: str, engine_inputs: ModelInputsFromEngine, request_ids,
+    ) -> list[bool]:
+        """Each row's ``ignore_eos``: a device run must not stop such a row."""
+        policy, infos = submodule_mgmt.run_policies[walk], engine_inputs.per_request_info
+        return [policy.limits(infos[rid]).ignore_eos for rid in request_ids]
+
     def reads_tokens(self, node_name: str) -> bool:
         return type(self._submodules[node_name].submodule).record_tokens is not NodeSubmodule.record_tokens
 
@@ -2830,7 +2866,9 @@ class Engine:
         carries = mgmt.submodule.repeat_carry(graph_walk, loop_back)
         if carries is None:
             return "node: it keeps no device loop-back to carry between replays"
-        refusal = mgmt.accelerator_graph_runner.carry_refusal(graph_walk, carries)
+        refusal = mgmt.accelerator_graph_runner.device_run_refusal(graph_walk)
+        if refusal is None:
+            refusal = mgmt.accelerator_graph_runner.carry_refusal(graph_walk, carries)
         if refusal is None:
             step = mgmt.resident.captured_steps[graph_walk]
             step.ctx.resident = mgmt.resident  # the capture's context; its step is over

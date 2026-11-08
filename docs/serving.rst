@@ -345,7 +345,7 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
        every prompt step. Off, the next chunk waits for the current one to land. Naming
        a node or walk the model does not chunk fails loading.
    * - ``step_repeats``
-     - *(optional, off by default)* Per node, ``{max: N, ready_waits: bool}``. A step of a decode Loop on
+     - *(optional, off by default)* Per node, ``{max: N, ready_waits: bool, device_stop: bool}``. A step of a decode Loop on
        that node stands for up to ``N`` iterations: the host plans once, launches the captured step that
        many times, and reads the stops when the step lands, so a row that stopped inside it costs the
        iterations past its stop. Narrowed per step by the row's loop cap and by each resource
@@ -354,7 +354,10 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
        measure it, it is not a free improvement. Needs a resident walk with a runtime stop, every output
        on the device, and a decode kernel that reads its lengths per replay (for Whisper,
        ``decode_tensor_cores: true`` on its attention resources). A node or walk that can't is refused at
-       load with the reason; a lockstep (TP/SP/CFG) node is refused.
+       load with the reason; a lockstep (TP/SP/CFG) node is refused. ``device_stop: true`` launches
+       each step once, as a WHILE node that ends on the device when every row has stopped (needs CUDA
+       12.4 or later with ``libcudadevrt.a``); a Loop stop must end the request's use of what the Loop
+       advances, since a run that ended short isn't rewound.
    * - ``batch_builder``
      - *(optional, default* ``fifo`` *)* How the worker composes a step under a token
        budget (``max_batch_tokens``). ``fifo`` serves prompts in the order they started:
