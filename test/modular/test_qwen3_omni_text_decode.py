@@ -286,7 +286,7 @@ def test_a_captured_decode_step_builds_its_rotary_tables_in_the_graph(thinker, w
 
     tokens = thinker.forward_batched(walk, engine_inputs, **out)
     call = thinker.model.calls[-1]
-    assert call["keep_states"] is (walk == "thinker_decode"), "only the Talker reads the states"
+    assert call["keep_states"] is False, "decode's layer-0 row is its own embeds; it never reads layer N"
     want = compute_3d_cos_sin(
         planned[:3].unsqueeze(0).expand(3, -1), thinker._get_inv_freq(torch.device("cpu")),
         mrope_section=thinker.MROPE_SECTION, target_dtype=torch.float32,

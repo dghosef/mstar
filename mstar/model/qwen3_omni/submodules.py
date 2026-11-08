@@ -775,17 +775,17 @@ class ThinkerSubmodule(ARNodeSubmodule):
                 pos.unsqueeze(0).expand(3, -1), self._get_inv_freq(embeds.device),
                 mrope_section=self.MROPE_SECTION, target_dtype=embeds.dtype,
             )
-        hidden, layer_0_embed, _ = self.model(
+        hidden, _, _ = self.model(
             input_embeds=embeds,
             cos_sin_3d=(cos_3d, sin_3d),
             mrope_section=self.MROPE_SECTION,
             label="main",
             num_valid_tokens=num_valid_tokens,
-            keep_states=keep_states,
+            keep_states=False,
         )
         return engine_inputs.resources[THINKER_SAMPLER].sample(
             engine_inputs.request_ids, logits=self.model.lm_head(hidden),
-        ), layer_0_embed
+        ), embeds if keep_states else None
 
     def _deepstack_inputs(
         self, inputs: list[ARNodeInputs], dtype: torch.dtype, device: torch.device,
