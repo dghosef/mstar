@@ -237,8 +237,10 @@ class CudaWhile:
         ctypes.c_int.from_address(ctypes.addressof(raw)).value = self._TYPE_CONDITIONAL
         conditional.handle, conditional.type, conditional.size = handle, 1, 1  # 1: WHILE
         node = ctypes.c_void_p()
+        # the form that takes edge data: CUDA 13 gave the base name this signature
+        add_node = "cudaGraphAddNode" if int(torch.version.cuda.split(".")[0]) >= 13 else "cudaGraphAddNode_v2"
         self.call(
-            "cudaGraphAddNode", ctypes.byref(node), ctypes.c_void_p(graph), ctypes.byref(previous), ctypes.c_size_t(1),
+            add_node, ctypes.byref(node), ctypes.c_void_p(graph), ctypes.byref(previous), None, ctypes.c_size_t(1),
             ctypes.byref(raw),
         )
         return conditional.graphs[0]
