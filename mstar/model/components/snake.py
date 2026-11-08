@@ -73,3 +73,10 @@ def snake(x: torch.Tensor, alpha: torch.Tensor, inv_beta: torch.Tensor) -> torch
     grid = (batch * channels, triton.cdiv(length, _BLOCK))
     _snake_kernel[grid](x, out, alpha.contiguous(), inv_beta.contiguous(), channels, length, BLOCK=_BLOCK)
     return out
+
+
+def snake_alpha(x: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
+    """``x + sin(alpha * x)^2 / alpha``, with ``alpha`` per channel in any stored
+    shape (checkpoints hold ``[C]`` or ``[1, C, 1]``) and dtype."""
+    alpha = alpha.reshape(-1).float()
+    return snake(x, alpha, (alpha + 1e-9).reciprocal())

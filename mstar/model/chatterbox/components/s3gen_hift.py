@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from mstar.model.chatterbox.config import S3GenHiFTConfig
-from mstar.model.components.snake import snake
+from mstar.model.components.snake import snake_alpha
 
 
 def _get_padding(kernel_size: int, dilation: int = 1) -> int:
@@ -40,8 +40,7 @@ class Snake(nn.Module):
         self.alpha = nn.Parameter(torch.ones(channels))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        alpha = self.alpha.float()
-        return snake(x, alpha, (alpha + 1e-9).reciprocal())
+        return snake_alpha(x, self.alpha)
 
 
 class ResBlock(nn.Module):

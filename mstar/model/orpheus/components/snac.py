@@ -18,7 +18,7 @@ from einops import rearrange
 from torch import nn
 from torch.nn.utils.parametrizations import weight_norm
 
-from mstar.model.components.snake import snake
+from mstar.model.components.snake import snake_alpha
 
 # ---------------------------------------------------------------------------
 # Utility layers
@@ -39,8 +39,7 @@ class Snake1d(nn.Module):
         self.alpha = nn.Parameter(torch.ones(1, channels, 1))
 
     def forward(self, x):
-        alpha = self.alpha.reshape(-1).float()
-        return snake(x, alpha, (alpha + 1e-9).reciprocal())
+        return snake_alpha(x, self.alpha)
 
 
 # ---------------------------------------------------------------------------
