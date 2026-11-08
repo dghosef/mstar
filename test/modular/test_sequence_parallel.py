@@ -11,6 +11,7 @@ step splits and into which ranges.
 
 from __future__ import annotations
 
+import functools
 import types
 
 import numpy as np
@@ -21,7 +22,7 @@ import torch.multiprocessing as mp
 from flashinfer_reference import reference_attention
 
 from mstar.distributed import communication
-from mstar.distributed.communication import CommGroup, JointGroups, sp_seq_split
+from mstar.distributed.communication import CommGroup, JointGroups, _layout_copy, _pack, _unpack, sp_seq_split
 from mstar.engine.resources.attn.config import AttentionConfig, AttentionSpec
 from mstar.engine.resources.attn.ragged.base import RaggedAttnManager
 from mstar.engine.resources.attn.ragged.config import RaggedAttentionConfig, RaggedAttentionSpec
@@ -94,7 +95,8 @@ def _exchanges(rank, world, total, batched, negative):
 @pytest.mark.parametrize("negative", [False, True], ids=["dims", "negative-dims"])
 @pytest.mark.parametrize("batched", [False, True], ids=["SHD", "BSHD"])
 @pytest.mark.parametrize(
-    "world,total", [(2, 6), (2, 7), (3, 9), (3, 11)], ids=["2-even", "2-uneven", "3-even", "3-uneven"],
+    # 2-uneven's second rank holds one token, whose block needs no copy to send
+    "world,total", [(2, 6), (2, 3), (3, 9), (3, 11)], ids=["2-even", "2-uneven", "3-even", "3-uneven"],
 )
 def test_all_to_all_exchanges(tmp_path, world, total, batched, negative):
     _run(_exchanges, world, tmp_path / "store", total, batched, negative)
@@ -116,6 +118,42 @@ def _several_at_once(rank, world, total, batched):
 @pytest.mark.parametrize("world,total", [(2, 6), (3, 11)], ids=["2-even", "3-uneven"])
 def test_all_to_all_of_several_tensors_matches_one_at_a_time(tmp_path, world, total, batched):
     _run(_several_at_once, world, tmp_path / "store", total, batched)
+
+
+def test_all_to_all_layout_copies_compile_once_for_every_token_count(monkeypatch):
+    """CPU runs them eager, so nothing else here sees `_layout_copy` change what it compiles: once
+    per token count (a compile stall at each new size of an uncaptured step, then the recompile
+    limit), again inside autocast, or with any size but the token count dynamic, which on an H100
+    made the pack 24x slower; a second head count recompiles, and must not make the heads dynamic."""
+    graphs = []
+
+    def backend(gm, example_inputs):
+        tensors = [node.meta["example_value"] for node in gm.graph.find_nodes(op="placeholder")]
+        sizes = [v for x in tensors if isinstance(x, torch.Tensor) for v in (*x.shape, *x.stride())]
+        graphs.append({
+            symbol for v in sizes if isinstance(v, torch.SymInt)
+            for symbol in v.node.shape_env.simplify(v.node.expr).free_symbols
+        })
+        return gm.forward
+
+    accelerator = types.SimpleNamespace(is_available=True)
+    monkeypatch.setattr(communication.DeviceCapability, "of", staticmethod(lambda device: accelerator))
+    monkeypatch.setattr(torch, "compile", functools.partial(torch.compile, backend=backend))
+    torch._dynamo.reset()
+    communication.compiled.cache_clear()
+    try:
+        for tokens, autocast, heads in ((64, False, (8, 2)), (96, False, (8, 2)), (7, True, (8, 2)),
+                                        (64, False, (16, 4)), (96, False, (16, 4))):
+            blocks = [torch.zeros(tokens, h, 4).unflatten(1, (2, -1)).movedim(1, 0) for h in heads]
+            numels = [blk[0].numel() for blk in blocks]
+            with torch.autocast("cpu", enabled=autocast):
+                recv = _layout_copy(_pack, blocks, (1,))
+                pieces = [piece.view(blk.shape) for blk, piece in zip(blocks, recv.split(numels, dim=1), strict=True)]
+                _layout_copy(_unpack, pieces, (1,), 0)
+    finally:
+        communication.compiled.cache_clear()
+    # one graph each per head count, in one symbol, the token count
+    assert [len(symbols) for symbols in graphs] == [1, 1, 1, 1]
 
 
 def _sharded_keys(rank, world, total):
