@@ -1428,21 +1428,21 @@ class Sampler(BaseSampler):
         want = [c.return_logprobs for c in configs]
         self.logprobs = None
         if any(want):
+            want_dev, processed_dev = self._stage([want, processed], torch.bool)
             chosen = token_logprobs(logits, tokens, temperature)
             if probs is not None:
                 chosen = torch.where(
-                    torch.tensor(processed, device=logits.device),
+                    processed_dev,
                     processed_logprobs(probs, tokens, top_k, top_p, history, order), chosen,
                 )
-            self.logprobs = torch.where(torch.tensor(want, device=logits.device), chosen, torch.nan)
+            self.logprobs = torch.where(want_dev, chosen, torch.nan)
 
         if history is not None:
             advance_history(history, tokens)
             new_tokens, count = history.tokens, history.count
             if kept_rids is not None:
                 # only the kept rows' draws count
-                sel = torch.tensor([i for i, rid in enumerate(request_ids) if rid in kept_rids],
-                                   dtype=torch.long, device=rows.device)
+                sel = self._stage([[i for i, rid in enumerate(request_ids) if rid in kept_rids]], torch.long)[0]
                 rows, count = rows.index_select(0, sel), count.index_select(0, sel)
                 new_tokens = None if new_tokens is None else new_tokens.index_select(0, sel)
             self.history.write(rows, new_tokens, count)

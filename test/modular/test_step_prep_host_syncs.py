@@ -673,9 +673,11 @@ def _eager_sampler(monkeypatch, device):
 
     def sample_tokens(logits, **kwargs):
         drawn.update(kwargs)
-        return torch.zeros(logits.shape[0], dtype=torch.long, device=logits.device)
+        tokens = torch.zeros(logits.shape[0], dtype=torch.long, device=logits.device)
+        return (tokens, logits.softmax(-1)) if kwargs["return_probs"] else tokens
 
     monkeypatch.setattr(sampler_utils, "sample_tokens", sample_tokens)
+    monkeypatch.setattr(sampler_utils, "processed_logprobs", lambda probs, *_: probs[:, 0])
     sampler = sampler_utils.Sampler(device=torch.device(device))
     for rid in ("a", "b"):
         sampler.add_request(rid)
@@ -683,19 +685,23 @@ def _eager_sampler(monkeypatch, device):
 
 
 def test_eager_sample_copies_no_pageable_settings(monkeypatch):
-    """An eager step's per-request settings and slot rows go up pinned: a pageable
-    copy would block the GPU thread on the stream's queued work every prefill. The
-    meta device stands in for the accelerator, so the stager takes its host branch."""
-    from mstar.engine.resources.sampler.utils import SamplerBuffers
+    """An eager step's per-request settings and slot rows go up pinned, as do a
+    logprobs row's masks and a history node's kept rows: a pageable copy would block
+    the GPU thread on the stream's queued work every prefill. The meta device stands
+    in for the accelerator, so the stager takes its host branch."""
+    from mstar.engine.resources.sampler.utils import GenerationHistory, SamplerBuffers
     from mstar.utils.h2d import PinnedStager
 
     sampler, _ = _eager_sampler(monkeypatch, "meta")
+    sampler.history = GenerationHistory(window=4, device=torch.device("meta"))
+    sampler.set_config("a", return_logprobs=True, logprobs_mode="processed", repetition_window=4)
+    sampler.set_config("b", return_logprobs=True)
     buffers = SimpleNamespace(
         last_token=SimpleNamespace(master=torch.empty(3, dtype=torch.long, device="meta")),
         _rid_to_slot={"a": 1, "b": 2}, _slots_stager=PinnedStager(torch.long),
     )
     with _PageableH2D() as h2d_copies:
-        sampler.sample(["a", "b"], torch.empty(2, 8, device="meta"))
+        sampler.sample(["a", "b"], torch.empty(2, 8, device="meta"), kept_rids=frozenset({"a"}))
         SamplerBuffers._slots_of(buffers, ["a", "b"])
     assert h2d_copies.copies == []
 
