@@ -108,12 +108,12 @@ def _layout_copy(copy: Callable, tensors: list[torch.Tensor], token_dims: tuple[
     """``copy`` of ``tensors``, compiled on an accelerator: `all_to_all` runs outside any compiled
     graph, where eager takes a slower strided kernel per tensor.
 
-    Only the ``token_dims`` are dynamic, under one symbol. Every other extent stays a constant, so
-    the kernel indexes with constants but for the token count. All-dynamic, the pack ran 24x as
-    long on an H100 as one compiled with static shapes. ``dynamic=False`` keeps it that way when a
+    Only the ``token_dims`` are dynamic, under one symbol per dim. Every other extent stays a
+    constant, so the kernel indexes with constants but for the token count. All-dynamic, the pack
+    ran 24x as long on an H100 as one compiled with static shapes. ``dynamic=False`` keeps it that way when a
     second head count or layout recompiles the same function, which would otherwise make every
     extent that differed dynamic. It compiles in the warm-ups once per number of tensors, per
-    geometry (head counts and layout, packed or ``[B, S, ...]``) and per extent of 1 (a single
+    geometry (head counts and layout, packed or ``[B, S, ...]``) and per extent of 0 or 1 (a single
     token, or B=1), but not per token count. Autocast is off around it, so a warm-up outside
     autocast and a step inside it share a compile.
 
@@ -354,7 +354,8 @@ class CommGroup:
             assert len(tensors) == 1, "all_to_all: several tensors need an even scatter"
             out = self._all_to_all_uneven_scatter(tensors[0], scatter_dim, gather_dim, scatter_sizes, gather_sizes)
             return out if isinstance(input_, torch.Tensor) else (out,)
-        assert len(tensors) == 1 or scatter_dim > gather_dim, "all_to_all: several tensors share their tokens"
+        assert len(tensors) == 1 or scatter_dim > gather_dim, \
+            "all_to_all: several tensors need scatter_dim after gather_dim"
         # per tensor [.., N, ..] -> [P, .., N/P, ..], rank r's block at index r
         blocks = [x.unflatten(scatter_dim, (world_size, -1)).movedim(scatter_dim, 0) for x in tensors]
         # a block's dims before the head dim (the later of the two): tokens, and a [B, S, ...] layout's
