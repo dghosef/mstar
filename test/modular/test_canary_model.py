@@ -381,3 +381,5 @@ def test_decoder_node_caps_captures_and_names(snapshot):
     assert outputs["text_inputs"] is outputs["new_token"]
     walks = CanaryModel(str(snapshot)).get_graph_walk_graphs()
     assert walks[node.DECODE_WALK].name == node.DECODE_LOOP and node.SAMPLER == SAMPLER
+    # repeats need every output of the step on the device: one signal, not a second for the client
+    assert {e.name for e in walks[node.DECODE_WALK].section.outputs} == {node.repeat_plan.device_loopback.signal}
