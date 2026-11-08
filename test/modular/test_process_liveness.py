@@ -119,6 +119,50 @@ def _failed(c):
     }
 
 
+def _launcher(n_workers):
+    """A conductor to call ``_launch_workers`` on, with ``n_workers`` workers on the CPU."""
+    conductor = mock.MagicMock(model=object(), _mps_requested=False)
+    conductor.worker_ids = [f"worker_{i}" for i in range(n_workers)]
+    conductor._worker_devices = ["cpu"] * n_workers
+    return conductor
+
+
+def _launch_with(monkeypatch, conductor, start):
+    """Run ``_launch_workers`` with each process's ``start`` replaced by ``start(process)``."""
+    class Process:
+        pid = None
+
+        def __init__(self, **kwargs):
+            self.worker_id = kwargs["kwargs"]["worker_id"]
+
+        def start(self):
+            start(self)
+            self.pid = 1
+
+    monkeypatch.setattr("mstar.conductor.conductor.mp.get_context", lambda _method: SimpleNamespace(Process=Process))
+    monkeypatch.setattr("mstar.conductor.conductor.atexit.register", lambda _fn: None)
+    Conductor._launch_workers(conductor)
+
+
+def test_workers_start_at_the_same_time_and_stay_in_rank_order(monkeypatch):
+    # a start that blocks until every other start has begun can only finish if they overlap
+    barrier = threading.Barrier(4, timeout=30)
+    conductor = _launcher(4)
+    _launch_with(monkeypatch, conductor, lambda _p: barrier.wait())
+    assert [p.worker_id for p in conductor._worker_processes] == conductor.worker_ids
+
+
+def test_a_worker_that_fails_to_start_raises_and_only_started_workers_are_kept(monkeypatch):
+    def start(process):
+        if process.worker_id == "worker_1":
+            raise OSError("out of pids")
+
+    conductor = _launcher(3)
+    with pytest.raises(OSError, match="out of pids"):
+        _launch_with(monkeypatch, conductor, start)
+    assert [p.worker_id for p in conductor._worker_processes] == ["worker_0", "worker_2"]
+
+
 def test_describe_exitcode():
     assert describe_exitcode(None) == "an unknown status"
     assert describe_exitcode(0) == "exit code 0"

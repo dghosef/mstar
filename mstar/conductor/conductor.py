@@ -80,7 +80,7 @@ from mstar.utils.ipc_format import (
 from mstar.utils.logging_config import quiet_noisy_loggers
 from mstar.utils.orphan import exit_when_orphaned
 from mstar.utils.profiler import nvtx_enabled, range_pop, range_push
-from mstar.utils.threads import Thread
+from mstar.utils.threads import Thread, ThreadPool
 from mstar.validation import validate_deployment
 from mstar.validation.resources import streamed_partitions
 
@@ -880,6 +880,7 @@ class Conductor:
             self._mps.start()
         # every worker runs on this host and builds the same CPU plan from all
         # of their devices (see mstar.utils.cpus)
+        workers = []
         for worker_id, device in zip(self.worker_ids, self._worker_devices, strict=True):
             p = ctx.Process(
                 target=_worker_process_target,
@@ -910,8 +911,18 @@ class Conductor:
                 },
                 daemon=False,
             )
-            p.start()
-            self._worker_processes.append(p)
+            workers.append(p)
+        # start() returns only once the child has read all its arguments, which
+        # are more than a pipe holds and which it reads after importing mstar:
+        # seconds, and one by one each rank would wait for all those before it
+        try:
+            with ThreadPool(max(len(workers), 1), thread_name_prefix="worker-start") as pool:
+                starts = [pool.submit(p.start) for p in workers]
+        finally:
+            # shutdown joins these, and a process that never started can't be joined
+            self._worker_processes = [p for p in workers if p.pid is not None]
+        for start in starts:
+            start.result()
 
     def shutdown(self):
         """Terminate and join all worker processes, then stop the MPS daemon if any."""
@@ -945,7 +956,7 @@ class Conductor:
 
     def _dead_workers(self) -> list[tuple[str, mp.Process]]:
         """(worker_id, handle) for every worker process that has exited.
-        Handles are appended in ``worker_ids`` order by ``_launch_workers``.
+        ``_launch_workers`` keeps the handles in ``worker_ids`` order.
         ``is_alive`` reaps the child, so ``exitcode`` is set afterwards."""
         return [
             (worker_id, p)
