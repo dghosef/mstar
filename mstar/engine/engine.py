@@ -2201,7 +2201,7 @@ class Engine:
             ctx = batch.step_context
             if ctx.resident is not None:
                 ctx.resident.flush(ctx.resident_plan)
-            run = cg_runner.slot_run(lease)
+            run = cg_runner.slot_run(lease) if graph_walk in submodule_mgmt.run_policies else None
             if run is not None:
                 run.stage(
                     len(request_ids), self._ignore_eos(submodule_mgmt, graph_walk, engine_inputs, request_ids),
@@ -2212,8 +2212,11 @@ class Engine:
                 plan_done_event=batch.preplan_event,
                 launch_started_event=release_event,
             )
+            carries = submodule_mgmt.repeat_carries.get(graph_walk)
+            if run is None and carries is None:
+                return out
             phase_record(f"repeats.{graph_walk}#", ctx.repeats)
-            return cg_runner.repeat(lease, out, submodule_mgmt.repeat_carries.get(graph_walk), ctx.repeats)
+            return cg_runner.repeat(lease, out, carries, ctx.repeats)
         if release_event is not None:
             release_event.set()
         if running_batched:
