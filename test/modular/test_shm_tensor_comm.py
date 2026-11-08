@@ -154,6 +154,18 @@ def test_a_read_with_no_event_to_wait_on_is_pinned_but_blocking(monkeypatch, tmp
     assert seen == [True, False]
 
 
+@pytest.mark.parametrize(("count", "pinned"), [(2, True), (3, False)])
+def test_a_read_past_the_size_limit_stays_pageable_and_blocking(monkeypatch, tmp_path, count, pinned):
+    """Torch keeps a freed pinned block for the worker's lifetime, so only reads up to the limit pin."""
+    monkeypatch.setattr(tensors_mod, "_MAX_PINNED_READ_BYTES", 8)
+    t = torch.arange(count, dtype=torch.int32)
+    path = tmp_path / "tensor"
+    path.write_bytes(_serialize_tensor(t))
+    seen = _fake_gpu(monkeypatch)
+    _read_tensor_file(str(path), _stub_info(t), "cuda", non_blocking=True)
+    assert seen == [pinned, pinned]
+
+
 @pytest.mark.parametrize("dtype", [
     torch.float32, torch.float64, torch.float16, torch.bfloat16,
     torch.int32, torch.int64, torch.int8, torch.uint8, torch.bool,

@@ -2458,6 +2458,13 @@ def _serialize_tensor(tensor: torch.Tensor) -> memoryview:
     return memoryview(t.reshape(-1).view(torch.uint8).numpy())
 
 
+# Torch's pinned host allocator rounds a block up to a power of two and keeps it once freed, so a
+# larger spilled read stays pageable instead of holding that much pinned RAM for the worker's life.
+# This is not the arena's segment size: a small /dev/shm has small segments or none, and the tensors
+# that spill there are the ones too big for a segment.
+_MAX_PINNED_READ_BYTES = 256 << 20
+
+
 def _read_tensor_file(path: str, info: TensorPointerInfo, device: str, non_blocking: bool) -> torch.Tensor:
     """Read a tensor written by ``_serialize_tensor`` directly into the buffer its H2D copy reads.
 
@@ -2467,7 +2474,7 @@ def _read_tensor_file(path: str, info: TensorPointerInfo, device: str, non_block
     if info.nbytes == 0:
         t = torch.empty(info.dims, dtype=info.dtype)
         return t.to(device) if device != "cpu" else t
-    pin = DeviceCapability.of(device).pin_memory
+    pin = info.nbytes <= _MAX_PINNED_READ_BYTES and DeviceCapability.of(device).pin_memory
     host = torch.empty(info.nbytes, dtype=torch.uint8, pin_memory=pin)
     with open(path, "rb") as f:
         f.seek(info.offset)
