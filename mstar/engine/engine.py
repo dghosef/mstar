@@ -90,6 +90,7 @@ from mstar.utils.profiler import (
     mark,
     nvtx_enabled,
     phase_end,
+    phase_record,
     phase_start,
     range_pop,
     range_push,
