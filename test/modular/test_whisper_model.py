@@ -1095,7 +1095,6 @@ def test_a_repeated_step_records_each_word_timestamp_token_up_to_its_stop():
     sub.record_tokens(DECODE_WALK, HostRows((9,), {"new_token": torch.tensor([[11, EOT, 13]])}), lambda rid: info)
 
     assert sub.request_state(9).get("decoded") == [10, 11, EOT]
-    assert not sub._transcribing, "a row that stopped keeps recording nothing"
     sub.record_tokens(DECODE_WALK, HostRows((9,), {"new_token": torch.tensor([[14]])}), lambda rid: info)
     assert sub.request_state(9).get("decoded") == [10, 11, EOT]
 
