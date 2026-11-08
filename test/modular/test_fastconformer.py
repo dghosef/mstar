@@ -274,6 +274,7 @@ def test_encoder_node_batches_like_single_requests(causal, captured):
         FastConformerEncoderSubmodule,
         _region,
     )
+    from mstar.model.submodule_base import NodeInputs
 
     torch.manual_seed(11)
     config = _causal_config(3) if causal else FastConformerConfig.from_hf(TINY)
@@ -283,13 +284,14 @@ def test_encoder_node_batches_like_single_requests(causal, captured):
     node = FastConformerEncoderSubmodule(enc, normalize_features=False)
     # two rows in the smallest bucket, one each in two others, one past them all
     lens = [100, 300, 250, 600, MEL_BUCKETS[-1] + 104]
-    feats = [torch.randn(n, 16) for n in lens]
+    clips = [torch.randn(n * node.log_mel.hop_length) for n in lens]
     out_lengths = [int(config.output_lengths(n)) for n in lens]
+    inputs = [NodeInputs(tensor_inputs={"audio": c}, input_seq_len=n) for c, n in zip(clips, out_lengths, strict=True)]
     runners = {_region(b): _PaddedReplay(node, b) for b in MEL_BUCKETS} if captured else {}
     with torch.no_grad():
-        states = node._encode(feats, out_lengths, runners)
+        states = node._encode(node.preprocess("prefill", None, inputs)["groups"], out_lengths, runners)
         for i, n in enumerate(lens):
-            single, _ = enc(feats[i][None], torch.tensor([n]))
+            single, _ = enc(node.log_mel(clips[i])[None], torch.tensor([n]))
             assert states[i].shape == single[0].shape
             assert torch.allclose(states[i], single[0], atol=1e-5), (i, (states[i] - single[0]).abs().max())
 
@@ -316,8 +318,12 @@ def test_encoder_node_features_pad_per_group_not_to_the_batch(monkeypatch):
     out = node.preprocess("prefill", None, [NodeInputs(tensor_inputs={"audio": c}, input_seq_len=1) for c in clips])
     assert padded_to.count(clips[2].numel()) == 1
     assert max(n for n in padded_to if n != clips[2].numel()) <= clips[1].numel()
-    for clip, feats in zip(clips, out["features"], strict=True):
-        torch.testing.assert_close(feats, batch([clip])[0].to(feats.dtype), rtol=1e-5, atol=1e-5)
+    for group in out["groups"]:
+        assert group.bucket is None or group.features.shape[1] == group.bucket
+        for i, (r, frames) in enumerate(zip(group.rows, group.frames, strict=True)):
+            feats = group.features[i, :frames]
+            torch.testing.assert_close(feats, batch([clips[r]])[0].to(feats.dtype), rtol=1e-5, atol=1e-5)
+            assert not group.features[i, frames:].any()
 
 
 def test_encoder_node_fails_only_the_clip_its_featurizer_cannot_take():

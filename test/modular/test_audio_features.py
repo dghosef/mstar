@@ -165,10 +165,12 @@ def test_nemo_log_mel_batch_gives_each_clip_what_it_gets_alone(normalize, reflec
     clips.append(torch.zeros(8_000))  # digital silence stays zero in a batch too
     log_mel = NemoLogMel(normalize=normalize, reflect_edges=reflect_edges)
     batch = log_mel.batch(clips)
-    for clip, feats in zip(clips, batch, strict=True):
+    for row, clip in enumerate(clips):
         alone = log_mel.batch([clip])[0]
-        assert feats.shape == alone.shape == (clip.numel() // 160 + reflect_edges, 128)
-        torch.testing.assert_close(feats, alone, rtol=1e-5, atol=1e-5)
+        frames = clip.numel() // 160 + reflect_edges
+        assert alone.shape == (frames, 128)
+        torch.testing.assert_close(batch[row, :frames], alone, rtol=1e-5, atol=1e-5)
+        assert not batch[row, frames:].any()
     assert torch.equal(batch[-1], torch.zeros_like(batch[-1])) or not normalize
 
 

@@ -277,12 +277,13 @@ class NemoLogMel:
     def __call__(self, waveform: torch.Tensor) -> torch.Tensor:
         return self.batch([waveform])[0]
 
-    def batch(self, waveforms: list[torch.Tensor]) -> list[torch.Tensor]:
+    def batch(self, waveforms: list[torch.Tensor]) -> torch.Tensor:
         """``__call__`` for several clips in one pass and one host-to-device
-        copy: each clip gets what it gets alone. A clip is preemphasized, then
-        zero past its end, which is what the STFT pads a lone clip with (or,
-        ``reflect_edges``, reflected at its own edges); and standardized over its
-        own frames."""
+        copy, as ``(B, longest clip's frames, n_mels)``, zero past each clip's
+        ``num_frames``: each clip gets what it gets alone. A clip is
+        preemphasized, then zero past its end, which is what the STFT pads a
+        lone clip with (or, ``reflect_edges``, reflected at its own edges); and
+        standardized over its own frames."""
         lengths = [w.numel() for w in waveforms]
         self.check_length(min(lengths))
         frames = [self.num_frames(n) for n in lengths]
@@ -314,18 +315,20 @@ class NemoLogMel:
                 window=self.window, return_complex=True, pad_mode="constant",
             )
         mel = self._log_mel(torch.view_as_real(stft))[:, :, :max(frames)]
+        uneven = min(frames) < max(frames)
+        if self.normalize or uneven:
+            n_frames = to_device_nonblocking(frames, device)
+            valid = length_mask(n_frames, mel.shape[2])[:, None, :]
         if self.normalize:
             # the mean taken as an offset from the first frame: the plain mean up
             # to rounding, and exact for a constant bin, so digital silence stays
             # zero where the reference's rounding amplifies it into noise
-            n_frames = to_device_nonblocking(frames, device)
-            valid = length_mask(n_frames, mel.shape[2])[:, None, :]
             n = n_frames[:, None, None]
             ref = mel[:, :, :1]
             mean = ref + ((mel - ref) * valid).sum(dim=2, keepdim=True) / n
             std = (((mel - mean) * valid).pow(2).sum(dim=2, keepdim=True) / (n - 1)).sqrt()
             mel = (mel - mean) / (std + 1e-5)
-        return [mel[row, :, :f].T for row, f in enumerate(frames)]
+        return (mel * valid if uneven else mel).transpose(1, 2)
 
     def windows(self, x: torch.Tensor, basis: torch.Tensor | None = None) -> torch.Tensor:
         """``(B, samples)`` preemphasized samples -> ``(B, T, n_mels)`` log-mel

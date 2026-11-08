@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import math
 from functools import cache, partial
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
-from torch.nn.utils.rnn import pad_sequence
 
 from mstar.communication.tensors import NameToTensorList
 from mstar.conductor.request_info import CurrentForwardPassInfo
@@ -92,6 +91,17 @@ def _plan(num_frames: list[int]) -> list[tuple[int | None, list[int]]]:
     return groups[::-1] + ([(None, eager)] if eager else [])
 
 
+class _EncoderGroup(NamedTuple):
+    """Rows that replay together. ``features`` is ``(rows, T, mel)``, zero past
+    each row's ``frames``; T is ``bucket``, or the row's own frames for a clip
+    past every bucket."""
+
+    bucket: int | None
+    rows: list[int]
+    frames: list[int]
+    features: torch.Tensor
+
+
 class FastConformerEncoderSubmodule(NodeSubmodule):
     """Log-mel features and the FastConformer encoder over a batch of clips.
 
@@ -150,20 +160,18 @@ class FastConformerEncoderSubmodule(NodeSubmodule):
         inputs: list[NodeInputs],
     ) -> dict[str, torch.Tensor | Any]:
         audio = [inp.tensor_inputs["audio"] for inp in inputs]
-        groups = _plan([self.log_mel.num_frames(a.numel()) for a in audio])
-        # features per encoder group, so one long clip doesn't pad the batch's short ones to its length
-        features: list[torch.Tensor | None] = [None] * len(audio)
-        for bucket, rows in groups:
-            # a clip past every bucket runs eagerly on its own
-            parts = [rows] if bucket is not None else [[r] for r in rows]
-            for part in parts:
-                for r, feats in zip(part, self.log_mel.batch([audio[r] for r in part]), strict=True):
-                    features[r] = feats.to(self._param_dtype())
-        return {
-            "features": features,
-            "out_lengths": [inp.input_seq_len for inp in inputs],
-            "groups": groups,
-        }
+        frames = [self.log_mel.num_frames(a.numel()) for a in audio]
+        dtype = self._param_dtype()
+        groups: list[_EncoderGroup] = []
+        for bucket, rows in _plan(frames):
+            # features per encoder group, so one long clip doesn't pad the batch's
+            # short ones to its length; a clip past every bucket runs eagerly on its own
+            for part in [rows] if bucket is not None else [[r] for r in rows]:
+                features = self.log_mel.batch([audio[r] for r in part]).to(dtype)
+                if bucket is not None:
+                    features = torch.nn.functional.pad(features, (0, 0, 0, bucket - features.shape[1]))
+                groups.append(_EncoderGroup(bucket, part, [frames[r] for r in part], features))
+        return {"groups": groups, "out_lengths": [inp.input_seq_len for inp in inputs]}
 
     # -- the encoder, captured per bucket or eager ---------------------------
 
@@ -199,27 +207,22 @@ class FastConformerEncoderSubmodule(NodeSubmodule):
         }
 
     def _encode(
-        self, features: list[torch.Tensor], out_lengths: list[int], runners: dict[str, Any],
-        groups: list[tuple[int | None, list[int]]] | None = None,
+        self, groups: list[_EncoderGroup], out_lengths: list[int], runners: dict[str, Any],
     ) -> list[torch.Tensor]:
-        states: list[torch.Tensor | None] = [None] * len(features)
-        if groups is None:
-            groups = _plan([feats.shape[0] for feats in features])
-        for bucket, rows in groups:
-            runner = runners.get(_region(bucket)) if bucket is not None else None
-            step = max(_batch_sizes(bucket)) if bucket is not None else 1
-            for part in (rows[i:i + step] for i in range(0, len(rows), step)):
-                lengths = to_device_nonblocking([features[r].shape[0] for r in part], features[part[0]].device)
+        states: list[torch.Tensor | None] = [None] * len(out_lengths)
+        for group in groups:
+            runner = runners.get(_region(group.bucket)) if group.bucket is not None else None
+            step = max(_batch_sizes(group.bucket)) if group.bucket is not None else 1
+            for start in range(0, len(group.rows), step):
+                part, frames = group.rows[start:start + step], group.frames[start:start + step]
+                features = group.features[start:start + step]
+                lengths = to_device_nonblocking(frames, features.device)
                 if runner is not None and runner.can_run(len(part)):
-                    padded = torch.stack([
-                        torch.nn.functional.pad(features[r], (0, 0, 0, bucket - features[r].shape[0]))
-                        for r in part
-                    ])
                     batch_states = runner.run(
-                        static_inputs={"features": padded, "lengths": lengths}, real_bs=len(part),
+                        static_inputs={"features": features, "lengths": lengths}, real_bs=len(part),
                     )["states"]
                 else:
-                    batch_states = self._run(pad_sequence([features[r] for r in part], batch_first=True), lengths)
+                    batch_states = self._run(features[:, :max(frames)], lengths)
                 for i, r in enumerate(part):
                     states[r] = batch_states[i, :out_lengths[r]]
         return states
@@ -228,12 +231,11 @@ class FastConformerEncoderSubmodule(NodeSubmodule):
         self,
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
-        features: list[torch.Tensor],
+        groups: list[_EncoderGroup],
         out_lengths: list[int],
-        groups: list[tuple[int | None, list[int]]] | None = None,
         **kwargs,
     ) -> NameToTensorList:
-        return {"encoder_states": self._encode(features, out_lengths, engine_inputs.piecewise_runners, groups)[:1]}
+        return {"encoder_states": self._encode(groups, out_lengths, engine_inputs.piecewise_runners)[:1]}
 
     def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
         return True
@@ -246,10 +248,9 @@ class FastConformerEncoderSubmodule(NodeSubmodule):
         self,
         graph_walk: str,
         engine_inputs: ModelInputsFromEngine,
-        features: list[torch.Tensor],
+        groups: list[_EncoderGroup],
         out_lengths: list[int],
-        groups: list[tuple[int | None, list[int]]] | None = None,
         **kwargs,
     ) -> dict[str, NameToTensorList]:
-        states = self._encode(features, out_lengths, engine_inputs.piecewise_runners, groups)
+        states = self._encode(groups, out_lengths, engine_inputs.piecewise_runners)
         return {rid: {"encoder_states": [s]} for rid, s in zip(engine_inputs.request_ids, states, strict=True)}
