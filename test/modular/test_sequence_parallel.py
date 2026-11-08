@@ -119,7 +119,7 @@ def test_all_to_all_layout_copies_compile_once_for_every_token_count(monkeypatch
     """CPU runs them eager, so nothing else here sees `_layout_copy` change what it compiles: once
     per token count (a compile stall at each new size of an uncaptured step, then the recompile
     limit), again inside autocast, or with any size but the token count dynamic, which on an H100
-    made the pack 24x slower."""
+    made the pack 24x slower; a second head count recompiles, and must not make the heads dynamic."""
     graphs = []
 
     def backend(gm, example_inputs):
@@ -137,8 +137,9 @@ def test_all_to_all_layout_copies_compile_once_for_every_token_count(monkeypatch
     torch._dynamo.reset()
     communication.compiled.cache_clear()
     try:
-        for tokens, autocast in ((64, False), (96, False), (7, True)):
-            blocks = [torch.zeros(tokens, heads, 4).unflatten(1, (2, -1)).movedim(1, 0) for heads in (8, 2)]
+        for tokens, autocast, heads in ((64, False, (8, 2)), (96, False, (8, 2)), (7, True, (8, 2)),
+                                        (64, False, (16, 4)), (96, False, (16, 4))):
+            blocks = [torch.zeros(tokens, h, 4).unflatten(1, (2, -1)).movedim(1, 0) for h in heads]
             numels = [blk[0].numel() for blk in blocks]
             with torch.autocast("cpu", enabled=autocast):
                 recv = _layout_copy(_pack, blocks, (1,))
@@ -146,8 +147,8 @@ def test_all_to_all_layout_copies_compile_once_for_every_token_count(monkeypatch
                 _layout_copy(_unpack, pieces, (1,), 0)
     finally:
         communication.compiled.cache_clear()
-    # one graph each, in one symbol, the token count
-    assert [len(symbols) for symbols in graphs] == [1, 1]
+    # one graph each per head count, in one symbol, the token count
+    assert [len(symbols) for symbols in graphs] == [1, 1, 1, 1]
 
 
 def _sharded_keys(rank, world, total):

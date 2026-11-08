@@ -110,10 +110,12 @@ def _layout_copy(copy: Callable, tensors: list[torch.Tensor], token_dims: tuple[
 
     Only the ``token_dims`` are dynamic, under one symbol. Every other extent stays a constant, so
     the kernel indexes with constants but for the token count. All-dynamic, the pack ran 24x as
-    long on an H100 as one compiled with static shapes. It compiles in the warm-ups once per number
-    of tensors, per layout (packed or ``[B, S, ...]``) and per extent of 1 (a single token, or
-    B=1), but not per token count. Autocast is off around it, so a warm-up outside autocast and a step inside it share a
-    compile.
+    long on an H100 as one compiled with static shapes. ``dynamic=False`` keeps it that way when a
+    second head count or layout recompiles the same function, which would otherwise make every
+    extent that differed dynamic. It compiles in the warm-ups once per number of tensors, per
+    geometry (head counts and layout, packed or ``[B, S, ...]``) and per extent of 1 (a single
+    token, or B=1), but not per token count. Autocast is off around it, so a warm-up outside
+    autocast and a step inside it share a compile.
 
     Gated on the device as the engine's compiles are, not on a node's ``disable_torch_compile``:
     that opts a forward out of being compiled whole, and Cosmos3 sets it while compiling its denoise
@@ -125,9 +127,9 @@ def _layout_copy(copy: Callable, tensors: list[torch.Tensor], token_dims: tuple[
             torch._dynamo.maybe_mark_dynamic(x, d)
     device_type = tensors[0].device.type
     if not torch.is_autocast_enabled(device_type):
-        return compiled(copy)(tensors, token_dims, *args)
+        return compiled(copy, dynamic=False)(tensors, token_dims, *args)
     with torch.autocast(device_type, enabled=False):
-        return compiled(copy)(tensors, token_dims, *args)
+        return compiled(copy, dynamic=False)(tensors, token_dims, *args)
 
 
 class ArFusionWorkspace(NamedTuple):
@@ -331,8 +333,9 @@ class CommGroup:
         (and ``scatter_dim`` must then be divisible by ``world_size``).
 
         ``input_`` may be several tensors that differ only in the extent of
-        ``scatter_dim``, split evenly (q, k and v with their own head counts):
-        they go in one exchange and come back as a tuple. Each exchange is one
+        ``scatter_dim``, split evenly, when that is the later of the two dims
+        (q, k and v with their own head counts, sharing a token count): they
+        go in one exchange and come back as a tuple. Each exchange is one
         ``all_to_all_single`` over a buffer packed in a single copy (none if
         ``input_`` is already in that layout), which replays from a CUDA
         graph. The collective is hidden from torch.compile,
@@ -351,6 +354,7 @@ class CommGroup:
             assert len(tensors) == 1, "all_to_all: several tensors need an even scatter"
             out = self._all_to_all_uneven_scatter(tensors[0], scatter_dim, gather_dim, scatter_sizes, gather_sizes)
             return out if isinstance(input_, torch.Tensor) else (out,)
+        assert len(tensors) == 1 or scatter_dim > gather_dim, "all_to_all: several tensors share their tokens"
         # per tensor [.., N, ..] -> [P, .., N/P, ..], rank r's block at index r
         blocks = [x.unflatten(scatter_dim, (world_size, -1)).movedim(scatter_dim, 0) for x in tensors]
         # a block's dims before the head dim (the later of the two): tokens, and a [B, S, ...] layout's
