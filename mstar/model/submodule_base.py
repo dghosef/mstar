@@ -122,7 +122,8 @@ class RepeatPlan(NamedTuple):
     """What a node turns on only when the deployment asks it to repeat
     (``step_repeats:``), so a deployment that doesn't runs it as before: its
     walks on resident tables, its token looped on the device and its stop in
-    the runtime."""
+    the runtime. The Loop's stop must end the request's use of what the Loop
+    advances: a step isn't rewound for a row that stopped inside it."""
     walks: frozenset[str]
     device_loopback: DeviceLoopback
     token_stop: TokenStop

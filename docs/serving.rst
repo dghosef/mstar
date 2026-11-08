@@ -354,10 +354,10 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
        measure it, it is not a free improvement. Needs a resident walk with a runtime stop, every output
        on the device, and a decode kernel that reads its lengths per replay (for Whisper,
        ``decode_tensor_cores: true`` on its attention resources). A node or walk that can't is refused at
-       load with the reason; a lockstep (TP/SP/CFG) node is refused. ``device_stop: true`` launches
-       each step once, as a WHILE node that ends on the device when every row has stopped (needs CUDA
-       12.4 or later with ``libcudadevrt.a``); a Loop stop must end the request's use of what the Loop
-       advances, since a run that ended short isn't rewound.
+       load with the reason; a lockstep (TP/SP/CFG) node is refused. A Loop stop must end the request's
+       use of what the Loop advances, since a step isn't rewound for a row that stopped inside it.
+       ``device_stop: true`` launches each step once, as a WHILE node that ends on the device when every
+       row has stopped (needs CUDA 12.4 or later with ``libcudadevrt.a``).
    * - ``batch_builder``
      - *(optional, default* ``fifo`` *)* How the worker composes a step under a token
        budget (``max_batch_tokens``). ``fifo`` serves prompts in the order they started:
