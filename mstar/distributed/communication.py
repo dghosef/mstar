@@ -1,6 +1,6 @@
 import math
 import socket
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, NamedTuple
@@ -13,6 +13,8 @@ from torch.distributed.distributed_c10d import _set_pg_timeout
 
 from mstar.distributed.all_reduce import AllReduce
 from mstar.distributed.utils import resolve_dist_timeout
+from mstar.platforms.compile import compiled
+from mstar.utils.device import DeviceCapability
 
 
 def default_group_timeout(backend: str) -> timedelta:
@@ -71,6 +73,65 @@ def _barrier(group: dist.ProcessGroup | None = None) -> None:
         dist.barrier(group=group, device_ids=[torch.cuda.current_device()])
     else:
         dist.barrier(group=group)
+
+
+def _same_tokens(tensors: list[torch.Tensor], token_dims: tuple[int, ...]) -> None:
+    # one token count per exchange: compiled, the tensors share its symbol and index by it alike
+    for x in tensors[1:]:
+        for d in token_dims:
+            torch._check(x.size(d) == tensors[0].size(d))
+
+
+def _pack(blocks: list[torch.Tensor], token_dims: tuple[int, ...]) -> torch.Tensor:
+    """The ``[P, ..]`` ``blocks`` as one ``[P, n]`` send buffer: row r is each block's r-th piece
+    in turn, so each tensor unpacks contiguous."""
+    _same_tokens(blocks, token_dims)
+    numels = [blk[0].numel() for blk in blocks]
+    send = blocks[0].new_empty(blocks[0].size(0), sum(numels))
+    for blk, piece in zip(blocks, send.split(numels, dim=1), strict=True):
+        piece.view(blk.shape).copy_(blk)
+    return send
+
+
+def _unpack(pieces: list[torch.Tensor], token_dims: tuple[int, ...], gather_dim: int) -> list[torch.Tensor]:
+    """Each ``[P, ..]`` piece with its P blocks joined along ``gather_dim``."""
+    _same_tokens(pieces, token_dims)
+    # rows of one buffer: compiled, this keeps the stride a multiple of the token count, which the
+    # kernel needs to know to vectorize, rather than a size of its own
+    row = sum(piece[0].numel() for piece in pieces)
+    if row:
+        for piece in pieces:
+            torch._check(piece.stride(0) == row)
+    return [piece.movedim(0, gather_dim).flatten(gather_dim, gather_dim + 1) for piece in pieces]
+
+
+def _layout_copy(copy: Callable, tensors: list[torch.Tensor], token_dims: tuple[int, ...], *args):
+    """``copy`` of ``tensors``, compiled on an accelerator: `all_to_all` runs outside any compiled
+    graph, where eager takes a slower strided kernel per tensor.
+
+    Only the ``token_dims`` are dynamic, under one symbol per dim. Every other extent stays a
+    constant, so the kernel indexes with constants but for the token count. All-dynamic, the pack
+    ran 24x as long on an H100 as one compiled with static shapes. ``dynamic=False`` keeps it that way when a
+    second head count or layout recompiles the same function, which would otherwise make every
+    extent that differed dynamic. It compiles once per number of tensors, per geometry (head
+    counts and layout, packed or ``[B, S, ...]``) and per extent of 0 or 1 (a single token, or
+    B=1), but not per token count: in the warm-ups where a captured bucket exchanges, else on the
+    first eager step that does. Autocast is off around it, so a warm-up outside
+    autocast and a step inside it share a compile.
+
+    Gated on the device as the engine's compiles are, not on a node's ``disable_torch_compile``:
+    that opts a forward out of being compiled whole, and Cosmos3 sets it while compiling its denoise
+    step itself."""
+    if not DeviceCapability.of(tensors[0].device).is_available:
+        return copy(tensors, token_dims, *args)
+    for x in tensors:
+        for d in token_dims:
+            torch._dynamo.maybe_mark_dynamic(x, d)
+    device_type = tensors[0].device.type
+    if not torch.is_autocast_enabled(device_type):
+        return compiled(copy, dynamic=False)(tensors, token_dims, *args)
+    with torch.autocast(device_type, enabled=False):
+        return compiled(copy, dynamic=False)(tensors, token_dims, *args)
 
 
 class ArFusionWorkspace(NamedTuple):
@@ -285,11 +346,13 @@ class CommGroup:
         group size); when ``None`` the respective dimension is split evenly
         (and ``scatter_dim`` must then be divisible by ``world_size``).
 
-        ``input_`` may be several tensors of one dtype and one extent along
-        ``gather_dim``, each split evenly (q, k and v with their own head counts):
-        they go in one exchange and come back as a tuple. Each exchange is one
-        ``all_to_all_single`` over a buffer packed in a single copy, which
-        replays from a CUDA graph. The collective is hidden from torch.compile,
+        ``input_`` may be several tensors of one dtype that share every dim
+        before ``scatter_dim`` (the token count), each split evenly, when
+        ``scatter_dim`` is the later of the two dims (q, k and v with their own
+        head counts): they go in one exchange and come back as a tuple. Each exchange is one
+        ``all_to_all_single`` over a buffer packed in a single copy (none if
+        ``input_`` is already in that layout), which replays from a CUDA
+        graph. The collective is hidden from torch.compile,
         so a compiled caller breaks around this call; tracing it as a
         functional collective instead gave an illegal memory access in
         Cosmos3's batched capture.
@@ -307,20 +370,21 @@ class CommGroup:
             assert len(tensors) == 1, "all_to_all: several tensors need an even scatter"
             out = self._all_to_all_uneven_scatter(tensors[0], scatter_dim, gather_dim, scatter_sizes, gather_sizes)
             return out if isinstance(input_, torch.Tensor) else (out,)
-        # per tensor [.., N, ..] -> [P, .., N/P, ..]; rank r's block of the send buffer holds
-        # its piece of each tensor one after another, so each tensor unpacks contiguous
+        assert len(tensors) == 1 or scatter_dim > gather_dim, \
+            "all_to_all: several tensors need scatter_dim after gather_dim"
+        # per tensor [.., N, ..] -> [P, .., N/P, ..], rank r's block at index r
         blocks = [x.unflatten(scatter_dim, (world_size, -1)).movedim(scatter_dim, 0) for x in tensors]
+        # a block's dims before the head dim (the later of the two): tokens, and a [B, S, ...] layout's
+        # rows, which change from step to step; the head dims after them are the model's own
+        token_dims = tuple(range(1, max(scatter_dim, gather_dim) + 1))
         numels = [blk[0].numel() for blk in blocks]
-        send = blocks[0].new_empty(world_size, sum(numels))
-        for blk, piece in zip(blocks, send.split(numels, dim=1), strict=True):
-            piece.view(blk.shape).copy_(blk)
+        one_buffer = len(blocks) == 1 and blocks[0].is_contiguous()
+        send = blocks[0].view(world_size, numels[0]) if one_buffer else _layout_copy(_pack, blocks, token_dims)
         if gather_sizes is None or len(set(gather_sizes)) == 1:
             # the block received from rank r has this rank's own block's layout
             recv = _all_to_all_single(self.device_group, send, torch.empty_like(send))
-            outs = [
-                piece.view(blk.shape).movedim(0, gather_dim).flatten(gather_dim, gather_dim + 1)
-                for blk, piece in zip(blocks, recv.split(numels, dim=1), strict=True)
-            ]
+            pieces = [piece.view(blk.shape) for blk, piece in zip(blocks, recv.split(numels, dim=1), strict=True)]
+            outs = _layout_copy(_unpack, pieces, token_dims, gather_dim)
         else:
             # rank r's block: each tensor's piece with the gathered dim at rank r's extent
             shapes = [
@@ -337,6 +401,7 @@ class CommGroup:
                 for block, row, shape_row in zip(recv.split([sum(row) for row in rank_numels]), rank_numels, shapes,
                                                  strict=True)
             ]
+            # eager: already a kernel per tensor, and compiled it would recompile per pattern of equal extents
             outs = [torch.cat([pieces[i] for pieces in per_rank], dim=gather_dim) for i in range(len(tensors))]
         return outs[0] if isinstance(input_, torch.Tensor) else tuple(outs)
 
