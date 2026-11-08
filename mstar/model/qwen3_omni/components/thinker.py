@@ -282,8 +282,8 @@ class Qwen3OmniThinkerModel(MoeParallelMixin, nn.Module):
                 stored length and position counter advance when the runner
                 commits the declared step (vision prefill declares its
                 MRoPE 3D-grid span there).
-            keep_states: False skips the two states below, which only the
-                Talker reads.
+            keep_states: False returns None for the two states below; a decode
+                step gives the Talker its own ``embeds`` as layer 0.
 
         Returns:
             hidden_states: [tokens, hidden_size] -- final normed hidden states
