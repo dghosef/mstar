@@ -2197,6 +2197,7 @@ class Engine:
                 plan_done_event=batch.preplan_event,
                 launch_started_event=release_event,
             )
+            phase_record(f"repeats.{graph_walk}#", ctx.repeats)
             if ctx.repeats > 1:
                 carries = submodule_mgmt.repeat_carries[graph_walk]
                 out = dataclasses.replace(out, check_stop_buffers=cg_runner.repeat(lease, carries, ctx.repeats))
