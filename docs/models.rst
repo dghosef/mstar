@@ -615,6 +615,7 @@ Not supported yet: FP8 weights and prefill CUDA graphs.
 Kokoro notes
 ------------
 
+- Kokoro serves on one GPU with ``mstar serve kokoro``.
 - Install the G2P dependencies with ``pip install -e '.[kokoro]'`` and fetch the
   spaCy tagger once with ``python -m spacy download en_core_web_sm`` (misaki does
   this itself on first use when it has network access). ``.[all]`` includes the G2P
