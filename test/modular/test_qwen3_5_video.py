@@ -327,6 +327,17 @@ def test_the_position_resample_matches_interpolate(grid):
     assert torch.allclose(ours, torch.cat(refs), atol=1e-6)
 
 
+def test_the_position_resample_stays_off_torch_floor(monkeypatch):
+    """It runs on the GPU thread, where `torch.floor` stalled every image's step."""
+    from mstar.model.components.qwen3_vit import vision_interpolation
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("torch.floor on the GPU thread's path")
+
+    monkeypatch.setattr(torch, "floor", refuse)
+    vision_interpolation([(1, 6, 10)], 4, 2)
+
+
 def test_expand_video_pads_writes_a_triple_per_group():
     text = "a<|vision_start|><|video_pad|><|vision_end|>b<|video_pad|>c"
     out = expand_video_pads(

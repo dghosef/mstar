@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -95,7 +96,10 @@ def vision_position_ids(
 
 
 def _axis_taps(src: torch.Tensor, side: int, zero_pad: bool) -> tuple[torch.Tensor, torch.Tensor]:
-    floor = torch.floor(src)
+    # On the host through numpy, as `_tile_frames` fills its rows: `torch.floor`
+    # cost a served worker's GPU thread 7-13 ms an image (0.7 ms this way), and
+    # the rest of the step waits behind that thread.
+    floor = torch.from_numpy(np.floor(src.numpy())) if src.device.type == "cpu" else torch.floor(src)
     offsets = torch.arange(0, 2, device=src.device)
     taps = floor.long()[:, None] + offsets
     weights = (1 - (src[:, None] - floor[:, None] - offsets).abs()).clamp(min=0)
