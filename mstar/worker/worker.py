@@ -1346,17 +1346,18 @@ class Worker:
         if pending is None:
             return
         event = pending.node_batch.launch_started_event
-        if event is None or event.is_set():
+        if event is None:
             return
-        waited = 0.0
-        with self.timer.span("worker.await_admit_settled"):
-            while not event.wait(timeout=_ADMIT_FENCE_WARN_S):
-                waited += _ADMIT_FENCE_WARN_S
-                logger.warning(
-                    "Worker %s: still waiting for node=%s walk=%s to admit after "
-                    "%.0f s; scheduling and teardowns wait for it",
-                    self.worker_id, pending.node_name, pending.graph_walk, waited,
-                )
+        if not event.is_set():
+            waited = 0.0
+            with self.timer.span("worker.await_admit_settled"):
+                while not event.wait(timeout=_ADMIT_FENCE_WARN_S):
+                    waited += _ADMIT_FENCE_WARN_S
+                    logger.warning(
+                        "Worker %s: still waiting for node=%s walk=%s to admit after "
+                        "%.0f s; scheduling and teardowns wait for it",
+                        self.worker_id, pending.node_name, pending.graph_walk, waited,
+                    )
         if self._step_repeats is not None:
             # admit may have narrowed it; everything from here on reads this one
             pending.batch.repeats = pending.node_batch.step_context.repeats

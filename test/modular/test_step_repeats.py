@@ -1,6 +1,7 @@
 """Which decode steps may stand for several iterations (``step_repeats:``)."""
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,7 @@ from mstar.engine.device_run import RUN_REPLAYS, RunState
 from mstar.graph.base import GraphEdge, GraphNode, Loop
 from mstar.graph.special_destinations import EMIT_TO_CLIENT
 from mstar.model.submodule_base import HostRows
+from mstar.testing_utils.worker import make_worker
 from mstar.worker.services import _step_repeats  # noqa: PLC2701
 from mstar.worker.step_repeats import RepeatConfig, StepRepeats, loop_signals, parse_step_repeats
 from mstar.worker.worker import Worker
@@ -97,3 +99,17 @@ def test_a_device_run_that_ended_short_settles_its_width_before_anything_reads_i
     assert RUN_REPLAYS not in rows.buffers
     assert rows.buffers["new_token"].tolist() == [[5, 9], [6, 2]]
     assert (batch_n.batch.repeats, ctx.repeats, outputs.repeats) == (2, 2, 2)
+
+
+def test_a_step_that_admitted_before_the_main_thread_looked_still_reads_its_narrowed_count():
+    """The launch event already set is the usual case at a short admit."""
+    event = threading.Event()
+    event.set()
+    pending = SimpleNamespace(
+        batch=SimpleNamespace(repeats=8),
+        node_batch=SimpleNamespace(launch_started_event=event, step_context=SimpleNamespace(repeats=1)),
+    )
+
+    make_worker(_step_repeats=StepRepeats({}, {}))._await_admit_settled(pending)
+
+    assert pending.batch.repeats == 1
