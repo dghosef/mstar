@@ -43,6 +43,7 @@ from mstar.engine.resources.step import (  # noqa: E402
     StepContext,
     SubmoduleStep,
 )
+from mstar.model.submodule_base import BatchedModelOutput
 from mstar.testing_utils.worker import make_worker
 from mstar.utils import knobs  # noqa: E402
 from mstar.utils.ipc_format import OffloadDelta  # noqa: E402
@@ -287,15 +288,11 @@ def test_a_repeat_feeds_each_replay_the_last_one_s_token_and_keeps_a_column_per_
         def replay(self):
             tokens.copy_(ids.reshape(-1) + 1)
 
-    slot = SimpleNamespace(
-        graph=Graph(), static_inputs={"input_ids": ids},
-        static_outputs=SimpleNamespace(
-            check_stop_buffers={"new_token": tokens, "text_inputs": tokens}, row_outputs=None,
-        ),
-    )
+    outputs = BatchedModelOutput(check_stop_buffers={"new_token": tokens, "text_inputs": tokens})
+    slot = SimpleNamespace(run=None, graph=Graph(), static_inputs={"input_ids": ids}, static_outputs=outputs)
     runner = AcceleratorGraphRunner.__new__(AcceleratorGraphRunner)
     runner.slot_for = lambda lease: slot
-    wide = runner.repeat(None, {"new_token": "input_ids"}, 3)
+    wide = runner.repeat(None, outputs, {"new_token": "input_ids"}, 3).check_stop_buffers
     assert wide["new_token"].tolist() == [[5, 6, 7], [7, 8, 9]]
     assert wide["text_inputs"] is wide["new_token"]
 

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from mstar.engine.device_run import RUN_REPLAYS, RunState
+from mstar.engine.device_run import RunState
 from mstar.graph.base import GraphEdge, GraphNode, Loop
 from mstar.graph.special_destinations import EMIT_TO_CLIENT
 from mstar.model.submodule_base import HostRows
@@ -81,22 +81,21 @@ def test_a_device_run_starts_with_only_real_rows_live_and_keeps_a_column_an_iter
         state.index += 1
     results = state.results(3, ("new_token",))
     assert results["new_token"][:2, :2].tolist() == [[5, 7], [6, 8]]
-    assert results[RUN_REPLAYS].tolist() == [2, 2, 2, 2]
+    assert state.index.item() == 2
 
 
 def test_a_device_run_that_ended_short_settles_its_width_before_anything_reads_it():
     """A run ended short wrote only the columns it ran, so the host cuts them
     to that width and reads the step as the width it really had."""
-    rows = HostRows((1, 2), {"new_token": torch.tensor([[5, 9, 0], [6, 2, 0]]), RUN_REPLAYS: torch.tensor([2, 2])})
+    rows = HostRows((1, 2), {"new_token": torch.tensor([[5, 9, 0], [6, 2, 0]])})
     ctx = SimpleNamespace(repeats=3)
     batch_n = SimpleNamespace(
         batch=SimpleNamespace(repeats=3), node_batch=SimpleNamespace(step_context=ctx), graph_walk=WALK,
     )
-    outputs = SimpleNamespace(repeats=3)
+    outputs = SimpleNamespace(repeats=3, run_replays=torch.tensor([2]))
 
     Worker._settle_device_run(batch_n, outputs, rows)
 
-    assert RUN_REPLAYS not in rows.buffers
     assert rows.buffers["new_token"].tolist() == [[5, 9], [6, 2]]
     assert (batch_n.batch.repeats, ctx.repeats, outputs.repeats) == (2, 2, 2)
 

@@ -307,6 +307,9 @@ class BatchedModelOutput:
     # How many times the step's capture replayed (`StepContext.repeats`): each
     # stop buffer then holds one column per replay.
     repeats: int = 1
+    # A device run's iterations, [1] int64; None on any other step. On the
+    # device until ``Worker._stage_host_rows`` replaces it with its host copy.
+    run_replays: torch.Tensor | None = None
     # The request each row of ``output_spans`` belongs to, stamped by the
     # engine like ``row_request_ids``.
     span_request_ids: tuple | None = None

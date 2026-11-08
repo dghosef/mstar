@@ -1,6 +1,5 @@
 
 
-import dataclasses
 import logging
 import os
 import threading
@@ -2204,7 +2203,7 @@ class Engine:
                 ctx.resident.flush(ctx.resident_plan)
             run = cg_runner.slot_run(lease)
             if run is not None:
-                run[0].stage(
+                run.stage(
                     len(request_ids), self._ignore_eos(submodule_mgmt, graph_walk, engine_inputs, request_ids),
                     ctx.repeats,
                 )
@@ -2214,12 +2213,7 @@ class Engine:
                 launch_started_event=release_event,
             )
             phase_record(f"repeats.{graph_walk}#", ctx.repeats)
-            if run is not None:
-                return dataclasses.replace(out, check_stop_buffers=run[0].results(ctx.repeats, run[1]))
-            if ctx.repeats > 1:
-                carries = submodule_mgmt.repeat_carries[graph_walk]
-                out = dataclasses.replace(out, check_stop_buffers=cg_runner.repeat(lease, carries, ctx.repeats))
-            return out
+            return cg_runner.repeat(lease, out, submodule_mgmt.repeat_carries.get(graph_walk), ctx.repeats)
         if release_event is not None:
             release_event.set()
         if running_batched:
@@ -2533,6 +2527,7 @@ class Engine:
                 check_stop_buffers=raw_outputs.check_stop_buffers,
                 row_request_ids=tuple(request_ids),
                 rows_only=True,
+                run_replays=raw_outputs.run_replays,
             )
         out_ids = (
             step_request_ids if lease is None
@@ -2565,6 +2560,7 @@ class Engine:
             row_views=row_views,
             output_spans=spans or None,
             span_request_ids=tuple(request_ids) if spans else None,
+            run_replays=raw_outputs.run_replays,
         )
 
     @staticmethod

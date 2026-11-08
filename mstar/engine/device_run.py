@@ -4,7 +4,8 @@ is reached.
 
 A run ends short only when every row has stopped, so a row still running always
 ran all of them, and what the host reserved and committed for the step stands.
-The host learns how many iterations ran from ``RUN_REPLAYS`` when the step lands.
+The host learns how many iterations ran from the output's ``run_replays`` when
+the step lands.
 A row's stop stays decided by the graph runtime, from the tokens that run kept;
 the device only decides when to end.
 
@@ -22,9 +23,6 @@ from typing import NamedTuple
 import torch
 
 from mstar.utils.h2d import PinnedStager
-
-# a stop buffer of a device run: the iterations it ran, on every row
-RUN_REPLAYS = "__run_replays__"
 
 _STOP_SOURCE = r"""
 typedef unsigned long long cudaGraphConditionalHandle;
@@ -88,7 +86,6 @@ class RunState:
         self.limit = torch.ones(1, dtype=torch.long, device=device)
         self.immune = torch.zeros(bs, dtype=torch.bool, device=device)
         self.marks = torch.zeros(bs, dtype=torch.bool, device=device)
-        self.replays = torch.zeros(bs, dtype=torch.long, device=device)
         self.tokens = torch.empty(bs, limit, dtype=torch.long, device=device)
         self.stop_ids = torch.tensor(sorted(stop_ids), dtype=torch.long, device=device)
         self._rows = torch.arange(bs, device=device)
@@ -112,10 +109,9 @@ class RunState:
         self.tokens.index_copy_(1, self.index, token.unsqueeze(1).to(self.tokens.dtype))
 
     def results(self, repeats: int, names: Collection[str]) -> dict[str, torch.Tensor]:
-        """After the launch: the stop buffers, a column an iteration, and how
-        many iterations ran."""
-        self.replays.copy_(self.index.expand_as(self.replays))
-        return {**{name: self.tokens[:, :repeats] for name in names}, RUN_REPLAYS: self.replays}
+        """After the launch: the stop buffers, a column an iteration. ``index``
+        holds how many ran."""
+        return {name: self.tokens[:, :repeats] for name in names}
 
 
 class CudaWhile:

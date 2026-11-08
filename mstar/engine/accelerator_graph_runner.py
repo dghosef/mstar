@@ -1660,18 +1660,25 @@ class AcceleratorGraphRunner:
             profiler.range_pop()
         return slot.static_outputs
 
-    def slot_run(self, lease: SlotLease) -> tuple[RunState, tuple[str, ...]] | None:
-        """This slot's device run and its stop buffers' names, or None."""
-        slot = self.slot_for(lease)
-        return None if slot.run is None else (slot.run, slot.run_names)
+    def slot_run(self, lease: SlotLease) -> RunState | None:
+        """This slot's device run, or None."""
+        return self.slot_for(lease).run
 
-    def repeat(self, lease: SlotLease, carries: Mapping[str, str], repeats: int) -> dict[str, torch.Tensor]:
-        """The rest of a step that repeats, after its first replay: before each
-        further replay every loop-back signal's output is copied into the
-        static input it feeds (``carries``, output -> input). Returns the stop
-        buffers with a column per replay: a replay overwrites what the last
-        one left, so each is copied out on the stream before the next."""
+    def repeat(
+        self, lease: SlotLease, out: BatchedModelOutput, carries: Mapping[str, str] | None, repeats: int,
+    ) -> BatchedModelOutput:
+        """``out``, the step's first launch, with the rest of its iterations:
+        its stop buffers gain a column per iteration. A device run has run them
+        all and says how many; a host run replays the graph, copying every
+        loop-back signal's output into the static input it feeds before each
+        replay (``carries``, output -> input), and each column out on the
+        stream before the next replay overwrites it."""
         slot = self.slot_for(lease)
+        if slot.run is not None:
+            buffers = slot.run.results(repeats, slot.run_names)
+            return replace(out, check_stop_buffers=buffers, run_replays=slot.run.index)
+        if repeats == 1:
+            return out
         buffers = slot.static_outputs.check_stop_buffers
         copies = [
             (_carried(slot.static_outputs, output), slot.static_inputs[target]) for output, target in carries.items()
@@ -1685,7 +1692,7 @@ class AcceleratorGraphRunner:
                 slot.graph.replay()
             for key, tensor in unique.items():
                 columns[key][:, i].copy_(tensor.reshape(-1))
-        return {name: columns[id(tensor)] for name, tensor in buffers.items()}
+        return replace(out, check_stop_buffers={name: columns[id(tensor)] for name, tensor in buffers.items()})
 
     def carry_refusal(self, walk: str, carries: Mapping[str, str]) -> str | None:
         """Why a capture of ``walk`` can't carry each loop-back output into the

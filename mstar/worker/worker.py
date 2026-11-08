@@ -30,7 +30,6 @@ from mstar.distributed.base import ShardingConfig
 from mstar.distributed.communication import WorkerParallelGroups
 from mstar.engine import apply_dynamo_config
 from mstar.engine.chunking import ChunkRange
-from mstar.engine.device_run import RUN_REPLAYS
 from mstar.engine.engine import ExecutingBatch
 from mstar.engine.resources import AllocationFailed
 from mstar.engine.resources.kv.transfer import (
@@ -1528,7 +1527,7 @@ class Worker:
     def _settle_device_run(batch_N: PendingBatch, outputs: BatchedModelOutput, host_rows: HostRows) -> None:
         """A device run that ended short (every row stopped) wrote only the
         columns it ran; everything after this reads the width it really had."""
-        ran = int(host_rows.buffers.pop(RUN_REPLAYS)[0])
+        ran = int(outputs.run_replays[0])
         phase_record(f"repeats.{batch_N.graph_walk}.ran#", ran)
         for name, column in host_rows.buffers.items():
             host_rows.buffers[name] = column[:, :ran]
@@ -2378,7 +2377,7 @@ class Worker:
             outputs, batch_N.node_batch.completion_event,
             request_ids=batch_N.node_batch.request_ids,
         )
-        if host_rows is not None and RUN_REPLAYS in host_rows.buffers:
+        if host_rows is not None and outputs.run_replays is not None:
             self._settle_device_run(batch_N, outputs, host_rows)
         self._rebuilds.keep_prompts(batch_N.node_batch)
         # Until its last chunk a row's sampled token is not a real sample, so it
@@ -3059,6 +3058,10 @@ class Worker:
                 tuple(outputs.row_request_ids),
                 self._copy_to_pinned(buffers, f"host_rows{slot}"),
             )
+            if outputs.run_replays is not None:
+                outputs.run_replays = self._copy_to_pinned(
+                    {"ran": outputs.run_replays}, f"run_replays{slot}",
+                )["ran"]
         if outputs.output_spans:
             outputs.host_spans = self._copy_to_pinned(
                 outputs.output_spans, _HOST_SPANS_PURPOSE[slot],
