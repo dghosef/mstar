@@ -408,8 +408,6 @@ class Worker:
 
     # Which steps stand for several iterations, set at load; None asks for none.
     _step_repeats: StepRepeats | None = None
-    # nodes whose landed tokens the worker hands to ``record_tokens``
-    _token_readers: frozenset[str] = frozenset()
 
     # The CPUs the main, GPU and plan threads share (None: not pinned) and
     # the process mask everything else keeps; see ``mstar.utils.cpus``.
@@ -579,14 +577,9 @@ class Worker:
             device_capability=self.device_capability,
         )
         self._never_publish_unshared(all_worker_graph_ids_to_instances)
-        self._token_readers = frozenset()
         if self._step_repeats is not None:
             for node, walks in self._step_repeats.asked_walks().items():
                 self.engine_manager.get_engine(node).enable_repeats(node, walks)
-            self._token_readers = frozenset(
-                node for node in self._step_repeats.asked_walks()
-                if self.engine_manager.get_engine(node).reads_tokens(node)
-            )
         self._declare_stop_policies(my_walks)
 
         self.request_state = RequestStateManager(
@@ -2419,7 +2412,7 @@ class Worker:
         # Main loop only: the runtime holds `&mut self` across its GIL
         # release, so a concurrent caller gets "Already mutably borrowed"
         # rather than blocking.
-        if host_rows is not None and batch_N.node_name in self._token_readers:
+        if host_rows is not None and self._step_repeats is not None:
             info_of = partial(self._fwd_info_in, batch_N.partition)
             engine.record_tokens(batch_N.node_batch, host_rows, info_of)
         rt = self._graph_runtime

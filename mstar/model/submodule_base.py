@@ -1149,8 +1149,9 @@ class NodeSubmodule(torch.nn.Module, ABC):
         self, graph_walk: str, host_rows: "HostRows", info_of: Callable[[int], CurrentForwardPassInfo],
     ) -> None:
         """A landed step's host tokens, every iteration, for a node that keeps
-        them on the host. Only called where the runtime checks the stop, which
-        leaves ``check_stop`` nothing to read them from."""
+        them on the host: when the runtime checks the stop, ``check_stop`` has
+        nothing to read them from. Called on every step of a worker with
+        ``step_repeats:``; a node reads only the walks it asked to repeat."""
         del graph_walk, host_rows, info_of
 
     def resident_walks(self) -> frozenset[str]:

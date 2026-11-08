@@ -2850,9 +2850,6 @@ class Engine:
         policy, infos = submodule_mgmt.run_policies[walk], engine_inputs.per_request_info
         return [policy.limits(infos[rid]).ignore_eos for rid in request_ids]
 
-    def reads_tokens(self, node_name: str) -> bool:
-        return type(self._submodules[node_name].submodule).record_tokens is not NodeSubmodule.record_tokens
-
     def record_tokens(self, batch: ExecutingBatch, host_rows: HostRows, info_of) -> None:
         self._submodules[batch.node_name].submodule.record_tokens(batch.step_context.graph_walk, host_rows, info_of)
 
