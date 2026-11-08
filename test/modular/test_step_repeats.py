@@ -42,18 +42,18 @@ def test_a_setting_that_cannot_run_is_refused_at_load(block, match):
 def test_a_lockstep_node_is_refused_before_any_rank_launches():
     model = SimpleNamespace(get_graph_walk_graphs=lambda: {WALK: _loop()})
     with pytest.raises(ValueError, match="lockstep"):
-        _step_repeats(model, {NODE: {"max": 8}}, {(NODE, WALK)}, {NODE})
+        _step_repeats(model, {NODE: {"max": 8}}, {(NODE, WALK)}, {NODE}, ())
 
 
 def test_a_per_iteration_output_other_than_the_client_token_refuses_its_walk():
-    good = loop_signals(_loop(), NODE)
+    good = loop_signals(_loop(), NODE, ())
     assert good.refusal is None and good.loop_back == {"text_inputs"}
-    bad = loop_signals(_loop(GraphEdge(next_node="vocoder", name="frames")), NODE)
+    bad = loop_signals(_loop(GraphEdge(next_node="vocoder", name="frames")), NODE, ())
     assert "read once an iteration" in bad.refusal
 
 
 def test_a_node_the_config_names_with_no_walk_that_can_repeat_stops_the_worker():
-    repeats = StepRepeats({NODE: RepeatConfig(max=8)}, {(NODE, WALK): loop_signals(_loop(), NODE)})
+    repeats = StepRepeats({NODE: RepeatConfig(max=8)}, {(NODE, WALK): loop_signals(_loop(), NODE, ())})
     with pytest.raises(ValueError, match="no walk of it can"):
         repeats.settle(lambda node, walk: "resource 'attn' allows one iteration a step")
 

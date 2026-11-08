@@ -79,12 +79,13 @@ class LoopSignals(NamedTuple):
     refusal: str | None
 
 
-def loop_signals(section: GraphSection, node: str, streamed: Collection[str] = ()) -> LoopSignals | None:
+def loop_signals(section: GraphSection, node: str, streamed: Collection[str]) -> LoopSignals | None:
     """``node``'s edges in ``section``'s Loop that runs it, or None if none does.
 
     Every output has to be a loop-back or a client token, the only per-iteration
     outputs the step's token column serves; every other input has to be the same
-    each iteration. ``streamed``: the node's inputs that arrive on streaming edges.
+    each iteration. ``streamed``: the edge names arriving on streaming edges,
+    which only the partition topology knows (a walk's graph is built without them).
     """
     loops = [loop for loop in section.get_loops().values() if node in loop.get_nodes()]
     inner = next((loop for loop in loops if not set(loop.section.get_loops()) & {lp.name for lp in loops}), None)
@@ -95,7 +96,7 @@ def loop_signals(section: GraphSection, node: str, streamed: Collection[str] = (
         return LoopSignals(frozenset(), f"graph: its Loop {inner.name!r} runs {sorted(nodes)}, not this node alone")
     this = nodes[node]
     back = {edge.name for edge in this.outputs if edge.next_node == node}
-    if arriving := sorted((set(this._streaming_inputs) | set(streamed)) & set(this.input_names)):
+    if arriving := sorted(set(streamed) & set(this.input_names)):
         return LoopSignals(frozenset(), f"graph: its inputs {arriving} are streamed in, a value an iteration")
     leaving = {edge.name for edge in (*inner.outputs, *inner.accumulated_outputs)}
     for edge in this.outputs:

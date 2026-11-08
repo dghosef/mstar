@@ -125,7 +125,6 @@ class WorkerLayout:
         step_repeats = None
         if model is not None:
             refuse_combined_walks_across_tp_groups(model, sharding_config, my_walks)
-            step_repeats = _step_repeats(model, (model_config or {}).get("step_repeats"), my_walks, parallel)
             walks = model.get_graph_walk_graphs()
             for pdef in model.get_partitions():
                 for walk_name in pdef.graph_walks:
@@ -140,6 +139,10 @@ class WorkerLayout:
                     conn for conn in topology.connections
                     if not node_names.isdisjoint(partition_nodes(conn.to_partition, model))
                 ]
+            step_repeats = _step_repeats(
+                model, (model_config or {}).get("step_repeats"), my_walks, parallel,
+                {conn.edge_name for conn in consumers},
+            )
         return cls(
             node_names=frozenset(node_names),
             my_walks=frozenset(my_walks),
@@ -159,6 +162,7 @@ class WorkerLayout:
 
 def _step_repeats(
     model: Model, block: object, my_walks: Collection[tuple[str, str]], parallel: Collection[str],
+    streamed: Collection[str],
 ) -> StepRepeats | None:
     """The serving config's ``step_repeats:`` on this worker, or None if it
     asks for nothing here. Lockstep nodes are refused: only one rank's plan
@@ -174,7 +178,7 @@ def _step_repeats(
         return None
     loops = {
         (node, walk): signals for node, walk in sorted(my_walks) if node in configs
-        and walk in walks and (signals := loop_signals(walks[walk], node)) is not None
+        and walk in walks and (signals := loop_signals(walks[walk], node, streamed)) is not None
     }
     return StepRepeats(configs, loops)
 
