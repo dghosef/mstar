@@ -1353,6 +1353,13 @@ class GraphRuntime(PhasedPostprocess, ABC):
         pass
 
     @abstractmethod
+    def loop_room(self, node_name: str, graph_walk: str, loop_name: str, rids: list[int], stride: int) -> int:
+        """How many more iterations of ``loop_name`` every one of ``rids`` can
+        take, after the ``stride`` each has in flight; 0 for a row this worker
+        does not hold."""
+        pass
+
+    @abstractmethod
     def complete_and_route_batch(
         self, input: RouteInput,
     ) -> RouteOutput:
