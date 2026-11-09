@@ -14,8 +14,8 @@ from mstar.model.submodule_base import BatchedModelOutput, HostRows
 from mstar.testing_utils.engine import make_engine, make_mgmt
 from mstar.testing_utils.worker import make_worker
 from mstar.worker.services import _step_repeats  # noqa: PLC2701
+from mstar.worker.step_executor import StepExecutor
 from mstar.worker.step_repeats import RepeatConfig, StepRepeats, loop_signals, parse_step_repeats
-from mstar.worker.worker import Worker
 
 NODE, WALK = "decoder", "decode"
 
@@ -95,7 +95,7 @@ def test_a_device_run_that_ended_short_settles_its_width_before_anything_reads_i
     )
     outputs = SimpleNamespace(repeats=3)
 
-    Worker._settle_device_run(batch_n, outputs, rows)
+    StepExecutor._settle_device_run(batch_n, outputs, rows)
 
     assert rows.buffers["new_token"].tolist() == [[5, 9], [6, 2]]
     assert (batch_n.batch.repeats, ctx.repeats, outputs.repeats) == (2, 2, 2)
@@ -110,7 +110,7 @@ def test_a_step_that_admitted_before_the_main_thread_looked_still_reads_its_narr
         node_batch=SimpleNamespace(launch_started_event=event, step_context=SimpleNamespace(repeats=1)),
     )
 
-    make_worker(_step_repeats=StepRepeats({}, {}))._await_admit_settled(pending)
+    make_worker(step_repeats=StepRepeats({}, {})).pipeline._await_admit_settled(pending)
 
     assert pending.batch.repeats == 1
 

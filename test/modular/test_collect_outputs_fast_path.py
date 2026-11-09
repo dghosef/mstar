@@ -173,6 +173,6 @@ def test_a_device_runs_count_reaches_the_host_rows(rows_only):
     raw = runner.repeat(SimpleNamespace(bucket=SimpleNamespace(graph_walk="w")), BatchedModelOutput(), 3)
 
     out = make_engine()._collect_outputs(make_mgmt(_Sub()), None, raw, [], {}, [1, 2], (1, 2), "w", rows_only=rows_only)
-    make_worker()._stage_host_rows(out)
+    make_worker().executor._host_copies.stage_host_rows(out)
 
     assert out.host_rows.ran.tolist() == [2]
