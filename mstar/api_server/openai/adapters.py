@@ -142,14 +142,14 @@ def flatten_messages(
                     if part.get("text"):
                         add_text(part["text"], role)
                 elif ptype in ("image_url", "video_url", "audio_url"):  # video and audio are extensions
-                    url = (part.get(ptype) or {}).get("url", "")
+                    url = _part_string(part, ptype, "url")
                     if url:
                         mod, path = media_io.resolve_media_ref(url, upload_dir, allow_remote=allow_remote)
                         # a MIME that names no modality (application/octet-stream) takes the part's
                         add_file(mod if mod != "unknown" else ptype.removesuffix("_url"), path)
                 elif ptype == "input_audio":  # OpenAI-native audio input (base64 + format)
-                    ia = part.get("input_audio") or {}
-                    data, fmt = ia.get("data"), ia.get("format", "wav")
+                    data = _part_string(part, ptype, "data")
+                    fmt = _part_string(part, ptype, "format") or "wav"
                     if data:
                         mod, path = media_io.save_base64(data, fmt, "audio", upload_dir)
                         add_file(mod, path)
@@ -162,6 +162,17 @@ def flatten_messages(
     text_parts = [p.text for p in parts if p.modality == "text"]
     text = "\n".join(text_parts) if text_parts else None
     return text, file_paths, [p.modality for p in parts], parts
+
+
+def _part_string(part: dict, ptype: str, key: str) -> str:
+    """A content part's ``part[ptype][key]``, ``""`` when left out; any other shape
+    (``image_url`` sent as a bare string, a number for a url) is a 400."""
+    obj = part.get(ptype)
+    if obj is None:
+        return ""
+    if not isinstance(obj, dict) or not isinstance(obj.get(key) or "", str):
+        raise ValueError(f"a {ptype} part's {ptype!r} must be an object with a string {key!r}")
+    return obj.get(key) or ""
 
 
 def _passthrough(req) -> dict:

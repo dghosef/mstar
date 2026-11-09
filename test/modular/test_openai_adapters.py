@@ -49,6 +49,21 @@ def test_an_untyped_attachment_takes_its_part_s_modality(tmp_path, ptype):
     assert adapters.Qwen3_5Adapter().chat_to_request(req, tmp_path).input_modalities == [ptype[:-4]]
 
 
+@pytest.mark.parametrize("part", [
+    {"type": "image_url", "image_url": "https://example.com/cat.png"},
+    {"type": "video_url", "video_url": {"url": 5}},
+    {"type": "input_audio", "input_audio": "aGk="},
+    {"type": "input_audio", "input_audio": {"data": "aGk=", "format": 5}},
+])
+def test_a_part_of_the_wrong_shape_is_a_bad_request(tmp_path, part):
+    """Read with .get, a string where an object goes was an AttributeError (a 500)."""
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGk="}}
+    req = ChatCompletionRequest(messages=[{"role": "user", "content": [image, part]}])
+    with pytest.raises(ValueError, match=part["type"]):
+        adapters.Qwen3_5Adapter().chat_to_request(req, tmp_path)
+    assert list(tmp_path.iterdir()) == [], "the image saved before the refusal was left behind"
+
+
 def test_a_chat_request_keeps_each_message_role(tmp_path):
     req = ChatCompletionRequest(model="bagel", messages=[
         {"role": "system", "content": "Be brief."},
