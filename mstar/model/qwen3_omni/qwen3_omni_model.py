@@ -961,6 +961,12 @@ class Qwen3OmniModel(Model):
         as one signal (``text_inputs.N``), each attachment's tensors as signals
         of their own (``pixel_values.N``, ...).
         """
+        voice = kwargs.get("voice")
+        if "audio" in output_modalities and voice is not None:
+            # the talker looks the speaker up by lowercase name
+            speakers = self.config.talker.speaker_id
+            if not isinstance(voice, str) or voice.lower() not in speakers:
+                raise ValueError(f"voice must be one of {sorted(speakers)}, got {voice!r}")
         result: NameToTensorList = {}
 
         attached = tensors is not None
@@ -987,6 +993,8 @@ class Qwen3OmniModel(Model):
             texts = [p.text or "" for p in prompt_parts if p.modality == TEXT]
             roles = [p.role for p in prompt_parts]
         parts = parts_from_modalities(input_modalities, texts, roles)
+        if all(p.modality == TEXT for p in parts) and not "".join(p.text or "" for p in parts).strip():
+            raise ValueError("Qwen3-Omni needs non-empty text when the request carries no media")
         if attached:
             check_attachments(parts, {
                 "image": len(raw_image_inputs),

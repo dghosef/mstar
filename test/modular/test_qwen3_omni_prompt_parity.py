@@ -346,6 +346,18 @@ def test_a_chat_the_template_refuses_is_a_bad_request(model):
         _new_text_inputs(model, "Hi.", ["text"])
 
 
+@pytest.mark.parametrize(("prompt", "kwargs", "match"), [
+    ("Hi.", {"voice": 5}, "voice"),
+    ("Hi.", {"voice": "nobody"}, "voice"),
+    (" ", {}, "non-empty text"),  # /v1/audio/speech with an empty input
+])
+def test_a_spoken_reply_needs_a_known_voice_and_some_text(model, prompt, kwargs, match):
+    model.config = SimpleNamespace(talker=SimpleNamespace(speaker_id={"ethan": 2302}))
+    with pytest.raises(ValueError, match=match):
+        model.process_prompt(prompt, ["text"], ["text", "audio"], **kwargs)
+    model.process_prompt("Hi.", ["text"], ["text", "audio"], voice="Ethan")
+
+
 def test_a_reply_comes_back_without_its_end_token(model):
     """Sent back as an assistant message, the reply gets its end token from the template."""
     model.config = SimpleNamespace(im_end_token_id=SPECIAL_IDS["<|im_end|>"])
