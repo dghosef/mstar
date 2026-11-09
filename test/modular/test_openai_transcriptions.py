@@ -339,38 +339,26 @@ def test_qwen3_asr_stream_sends_text_held_back_as_a_possible_language_line(clien
 
 
 @pytest.mark.parametrize("status,error_type", [(500, "server_error"), (400, "invalid_request_error")])
-def test_transcription_stream_reports_in_band_error(client_and_stub, status, error_type):
+def test_transcription_stream_refused_before_any_text_keeps_its_status(client_and_stub, status, error_type):
     client, stub = client_and_stub
     stub.next_chunks = [_Chunk("error", b"boom", {"status": status})]
-    with client.stream(
-        "POST", "/v1/audio/transcriptions",
-        data={"model": "whisper_large", "stream": "true"},
-        files={"file": ("a.wav", b"RIFF", "audio/wav")},
-    ) as r:
-        lines = [ln for ln in r.iter_lines() if ln.startswith("data:")]
-    event = json.loads(lines[0][len("data: "):])
-    assert event["type"] == "error"
-    assert event["error"] == {"message": "boom", "type": error_type, "code": status}, "the type ignores the status"
-    assert lines[-1] == "data: [DONE]"
+    r = _post(client, {"model": "whisper_large", "stream": "true"})
+    assert r.status_code == status
+    assert r.json()["error"] == {"message": "boom", "type": error_type, "code": status}
+    assert sorted(stub.released) == [s["request_id"] for s in stub.submits]
+    assert not list(stub.upload_dir.iterdir())
 
 
-@pytest.mark.parametrize("raises_in", ["cutting", "results"])
-def test_transcription_stream_reports_an_unexpected_error_in_band(client_and_stub, monkeypatch, raises_in):
+def test_transcription_stream_reports_an_unexpected_error_in_band(client_and_stub):
     """After the 200, an error the stream did not expect still ends it with an
-    error event and [DONE]: cutting the upload (a full upload dir), or mid-way
-    through a window's results."""
+    error event and [DONE]."""
     client, stub = client_and_stub
-    if raises_in == "cutting":
-        def fixed(self):
-            raise OSError("disk full")
 
-        monkeypatch.setattr(serving_transcriptions.WindowPlanner, "fixed", fixed)
-    else:
-        async def iter_result_chunks(request_id):
-            yield _Chunk("text", b" Hello")
-            raise RuntimeError("boom")
+    async def iter_result_chunks(request_id):
+        yield _Chunk("text", b" Hello")
+        raise RuntimeError("boom")
 
-        stub.iter_result_chunks = iter_result_chunks
+    stub.iter_result_chunks = iter_result_chunks
     with client.stream(
         "POST", "/v1/audio/transcriptions",
         data={"model": "whisper_large", "stream": "true"},
@@ -1067,8 +1055,8 @@ def test_streaming_parallel_error_releases_the_other_windows(client_and_stub):
         data={"model": "whisper_large", "stream": "true", "long_form": "parallel"},
         files={"file": ("long.wav", _wav_bytes(61), "audio/wav")},
     ) as r:
-        lines = [ln for ln in r.iter_lines() if ln.startswith("data:")]
-    assert json.loads(lines[0][len("data: "):])["type"] == "error"
+        r.read()
+    assert r.status_code == 400
     # the failed window is released too: its iterator was left mid-stream
     assert sorted(stub.released) == sorted(s["request_id"] for s in stub.submits)
 

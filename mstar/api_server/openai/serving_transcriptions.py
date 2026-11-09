@@ -72,7 +72,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from mstar.api_server import media_io
 from mstar.api_server.openai._util import SSE_DONE, error_type, rid, sse
 from mstar.api_server.openai.adapters import Transcript
-from mstar.api_server.streaming_response import ReleasingStreamingResponse
+from mstar.api_server.streaming_response import ReleasingStreamingResponse, read_first
 from mstar.utils.utf8_stream import Utf8Stream
 
 logger = logging.getLogger(__name__)
@@ -637,10 +637,20 @@ async def create_transcription(
         raise
 
     if req.stream:
-        # the stream owns the files and windows from here
+        # The stream owns the files and windows from here. Its first event is
+        # read before the 200, so that a refusal or a bad upload keeps its
+        # status; the cleanup is for a stream that never started.
+        events = _stream(api, adapter, req, planner, mode, raw_request)
+        try:
+            first = await read_first(events, raw_request)
+        except BaseException:
+            planner.cleanup()
+            raise
+        if first is None:   # the client left
+            planner.cleanup()
         return ReleasingStreamingResponse(
-            _stream(api, adapter, req, planner, mode, raw_request),
-            release=planner.cleanup,
+            _in_band(first, events),
+            release=events.aclose,
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache"},
         )
@@ -798,18 +808,36 @@ def _error_event(message: str, status: int | None) -> str:
 
 def _stream_error_event(exc: Exception) -> str:
     """In band, since the stream has sent its 200: the request's reason (an
-    HTTPException: a bad upload, a timeout), or a server error (no FFmpeg, no
-    memory, a bug), which is logged."""
+    HTTPException: a refusal, a bad upload, a timeout), or a server error (no
+    FFmpeg, no memory, a bug), which is logged."""
     if isinstance(exc, HTTPException):
         return _error_event(str(exc.detail), exc.status_code)
     logger.exception("Streamed transcription failed")
     return _error_event(f"transcription failed ({type(exc).__name__})", 500)
 
 
+async def _in_band(first: str | None, events):
+    """The body of a stream whose ``first`` event was read before the 200:
+    an error from here on ends it with an error event."""
+    if first is None:
+        return
+    try:
+        yield first
+        async for event in events:
+            yield event
+    except Exception as exc:
+        yield _stream_error_event(exc)
+        yield SSE_DONE
+    finally:
+        await events.aclose()
+
+
 async def _stream(api, adapter, req, planner: WindowPlanner, mode: str, raw_request=None):
     """Deltas as they come for one window or parallel windows (in window
     order); sequential long form emits each window's text once the window
-    is accepted, since only then is it known to stand."""
+    is accepted, since only then is it known to stand. Errors are raised:
+    before the first event they are the response's status (see
+    ``_in_band``)."""
     windows: list[Window] = []
     inflight: set[str] = set()
     share = window_share(api).join()
@@ -834,9 +862,10 @@ async def _stream(api, adapter, req, planner: WindowPlanner, mode: str, raw_requ
                 decoder = Utf8Stream()
                 async for c in api.iter_result_chunks(window.request_id):
                     if c.modality == "error":
-                        yield _error_event(c.data.decode("utf-8", "replace"), (c.metadata or {}).get("status"))
-                        yield SSE_DONE
-                        return
+                        raise HTTPException(
+                            status_code=int((c.metadata or {}).get("status") or 500),
+                            detail=c.data.decode("utf-8", "replace"),
+                        )
                     if c.modality != "text" or not c.data:
                         continue
                     raw += decoder.feed(c.data)
@@ -878,9 +907,6 @@ async def _stream(api, adapter, req, planner: WindowPlanner, mode: str, raw_requ
             "text": transcript.text,
             "usage": _usage(planner.duration),
         })
-        yield SSE_DONE
-    except Exception as exc:
-        yield _stream_error_event(exc)
         yield SSE_DONE
     finally:
         share.leave()

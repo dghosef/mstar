@@ -1,9 +1,12 @@
-"""Streaming-response helpers: a response that cleans up after a body
-Starlette never started, and a body that reports a mid-stream error in band."""
+"""Streaming-response helpers: the first item of a stream read before the
+response commits to a 200, a response that cleans up after a body Starlette
+never started, and a body that reports a mid-stream error in band."""
 
+import asyncio
+import contextlib
 import inspect
 import logging
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
@@ -11,6 +14,31 @@ from fastapi.responses import StreamingResponse
 from mstar.api_server.request_types import ResultChunk
 
 logger = logging.getLogger(__name__)
+
+
+async def _disconnected(raw_request) -> None:
+    """Return once the client has gone; the body is already read."""
+    while (await raw_request.receive())["type"] != "http.disconnect":
+        pass
+
+
+async def read_first(items, raw_request=None):
+    """``items``' first item (None when it has none), read before a route
+    commits to a 200, so that what the read raises (a refusal) still sets the
+    response's status. A client that disconnects first cancels the read, which
+    unwinds ``items`` (aborting its request), and gets None too."""
+    first_read = asyncio.ensure_future(anext(items, None))
+    gone = asyncio.ensure_future(_disconnected(raw_request)) if raw_request is not None else None
+    try:
+        await asyncio.wait({first_read, gone} - {None}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        # a pending receive() would take the disconnect StreamingResponse listens for
+        for task in (gone, first_read):
+            if task is not None and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+    return None if first_read.cancelled() else first_read.result()
 
 
 async def errors_in_band(request_id: str, chunks):
@@ -41,7 +69,7 @@ class ReleasingStreamingResponse(StreamingResponse):
     process restarts.
     """
 
-    def __init__(self, content: AsyncGenerator, *, release: Callable[[], None], **kwargs):
+    def __init__(self, content: AsyncGenerator, *, release: Callable[[], None | Awaitable[None]], **kwargs):
         super().__init__(content, **kwargs)
         self._release = release
 
@@ -51,7 +79,8 @@ class ReleasingStreamingResponse(StreamingResponse):
         finally:
             if inspect.getasyncgenstate(self.body_iterator) == inspect.AGEN_CREATED:
                 try:
-                    self._release()
+                    if inspect.isawaitable(released := self._release()):
+                        await released
                 except Exception:
                     # logged, not raised: raising here would replace the send
                     # error the server needs to see with this one

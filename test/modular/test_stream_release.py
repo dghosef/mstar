@@ -296,7 +296,6 @@ def test_transcription_stream_deletes_its_upload(monkeypatch):
         data={"model": "whisper_large", "stream": "true"},
         files={"file": ("long.wav", _wav_bytes(45), "audio/wav")},
     )
-    assert stub.submits == []
     assert not list(Path(stub.upload_dir).iterdir())
 
 
