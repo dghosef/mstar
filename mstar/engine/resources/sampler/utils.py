@@ -1470,11 +1470,11 @@ class Sampler(BaseSampler):
         return tokens
 
     def _stage(self, rows: list[list], dtype: torch.dtype = torch.float32) -> torch.Tensor:
-        """Per-request settings ``[len(rows), B]`` on the device in one pinned H2D
-        (the default float32 holds every int a setting can take exactly)."""
+        """Host values ``[len(rows), n]`` on the device in one pinned H2D (the
+        default float32 is exact for ints below 2**24, far past any real setting)."""
         stager = self._stagers.get(dtype)
         if stager is None:
-            stager = self._stagers[dtype] = PinnedStager(dtype, numel=len(rows) * len(rows[0]))
+            stager = self._stagers[dtype] = PinnedStager(dtype)
         values = np.asarray(rows)  # the stager's write converts to its dtype
         dev = torch.empty(values.shape, dtype=dtype, device=self.device)
         stager.copy_(dev, values.reshape(-1))
