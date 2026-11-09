@@ -59,6 +59,14 @@ def test_in_contract_values_pass(kwargs):
     ({"enable_thinking": "false"}, "enable_thinking"),  # a chat template thinks on "false"
     ({"talker_top_p": 0}, "talker_top_p"),
     ({"thinker_temperature": -0.1}, "thinker_temperature"),
+    # past 64 bits msgpack can't carry it to the conductor (#1221)
+    ({"top_k": 2**64}, "top_k"),
+    ({"max_tokens": 1e308}, "max_output_tokens"),
+    ({"extra": {"nested": [2**64]}}, "extra"),
+    ({"extra": -(2**63) - 1}, "extra"),
+    # JSON's 1e400, which int() can't take
+    ({"width": float("inf")}, "width"),
+    ({"guidance_interval": [0, float("nan")]}, "guidance_interval"),
 ])
 def test_out_of_contract_values_raise(kwargs, name):
     with pytest.raises(ValueError, match=name):

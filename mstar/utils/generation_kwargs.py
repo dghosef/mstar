@@ -8,6 +8,7 @@ sees the request. A multi-stage model's ``<stage>_<knob>`` (``talker_temperature
 follows the rule for ``<knob>``.
 """
 
+import math
 import re
 
 from mstar.engine.resources.sampler.config import (
@@ -106,4 +107,23 @@ def normalize_generation_kwargs(model_kwargs: dict | None) -> dict:
             check_int_knob(key, value, *_INT_RULES[name])
         elif _knob(key, _BOOL_KNOBS) is not None:
             check_bool_knob(key, value)
+    _check_wire_numbers(kwargs)
     return kwargs
+
+
+def _check_wire_numbers(kwargs: dict) -> None:
+    """Raise ``ValueError`` for an integer msgpack can't carry to the conductor
+    (outside [-2**63, 2**64)) or a float that isn't finite (JSON has neither:
+    ``1e400`` parses as inf, and ``int(inf)`` raises OverflowError, a 500),
+    anywhere in ``kwargs``."""
+    pending = list(kwargs.items())
+    while pending:
+        key, value = pending.pop()
+        if isinstance(value, int) and not -(2**63) <= value < 2**64:
+            raise ValueError(f"{key} must fit in 64 bits, got {value}.")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"{key} must be a finite number, got {value}.")
+        if isinstance(value, dict):
+            pending.extend((key, v) for v in value.values())
+        elif isinstance(value, (list, tuple)):
+            pending.extend((key, v) for v in value)
