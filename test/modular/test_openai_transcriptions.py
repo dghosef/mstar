@@ -327,6 +327,17 @@ def test_transcription_stream_events(client_and_stub):
     assert stub.last_submit["streaming"] is True
 
 
+def test_qwen3_asr_stream_sends_text_held_back_as_a_possible_language_line(client_and_stub):
+    # the deltas hold back a short text starting "language" in case "<asr_text>" follows
+    client, stub = client_and_stub
+    stub.model_name = "qwen3_asr"
+    stub.next_chunks = _text("language", " is interesting")
+    r = _post(client, {"model": "qwen3_asr", "stream": "true"})
+    events = [json.loads(ln[len("data: "):]) for ln in r.text.splitlines() if ln.startswith("data: {")]
+    assert "".join(e["delta"] for e in events if e["type"] == "transcript.text.delta") == "language is interesting"
+    assert events[-1]["text"] == "language is interesting"
+
+
 @pytest.mark.parametrize("status,error_type", [(500, "server_error"), (400, "invalid_request_error")])
 def test_transcription_stream_reports_in_band_error(client_and_stub, status, error_type):
     client, stub = client_and_stub

@@ -846,13 +846,16 @@ async def _stream(api, adapter, req, planner: WindowPlanner, mode: str, raw_requ
                             yield sse({"type": "transcript.text.delta", "delta": " "})
                             gap = False
                         yield sse({"type": "transcript.text.delta", "delta": delta})
-                tail = decoder.flush()
-                if tail:
-                    raw += tail
-                    delta, emitted = _stream_delta(adapter.stream_text(raw), emitted)
+                raw += decoder.flush()
+                # Once the window is done its text is known: the deltas may have
+                # held back text that could still have become a control line
+                # (Qwen3-ASR's "language X"), and the parse can tell
+                for text in (adapter.stream_text(raw), adapter.parse_transcript(raw, window_req).text):
+                    delta, emitted = _stream_delta(text, emitted)
                     if delta:
                         if gap:
                             yield sse({"type": "transcript.text.delta", "delta": " "})
+                            gap = False
                         yield sse({"type": "transcript.text.delta", "delta": delta})
                 inflight.discard(window.request_id)
                 window.raw_text = raw
