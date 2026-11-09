@@ -122,7 +122,6 @@ class WorkerLayout:
         node_to_partition: dict[str, str] = {}
         innermost: Mapping[tuple[str, str], str] = {}
         consumers: list[Connection] = []
-        step_repeats = None
         if model is not None:
             refuse_combined_walks_across_tp_groups(model, sharding_config, my_walks)
             walks = model.get_graph_walk_graphs()
@@ -139,10 +138,10 @@ class WorkerLayout:
                     conn for conn in topology.connections
                     if not node_names.isdisjoint(partition_nodes(conn.to_partition, model))
                 ]
-            step_repeats = _step_repeats(
-                model, (model_config or {}).get("step_repeats"), my_walks, parallel,
-                {conn.edge_name for conn in consumers},
-            )
+        streaming_edge_names = frozenset(conn.edge_name for conn in consumers)
+        step_repeats = None if model is None else _step_repeats(
+            model, (model_config or {}).get("step_repeats"), my_walks, parallel, streaming_edge_names,
+        )
         return cls(
             node_names=frozenset(node_names),
             my_walks=frozenset(my_walks),
@@ -155,7 +154,7 @@ class WorkerLayout:
             all_wg_nodes=all_wg_nodes,
             innermost_loop_by_node=MappingProxyType(innermost),
             consumer_connections=tuple(consumers),
-            streaming_edge_names=frozenset(conn.edge_name for conn in consumers),
+            streaming_edge_names=streaming_edge_names,
             step_repeats=step_repeats,
         )
 
