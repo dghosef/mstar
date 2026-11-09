@@ -583,12 +583,19 @@ def _lingbot():
     return object.__new__(LingBotWorldModel)
 
 
+def _minimax_h3():
+    from mstar.model.minimax_h3.minimax_h3_model import H3Model
+
+    return object.__new__(H3Model)
+
+
 _IMAGE_LOADERS = pytest.mark.parametrize("load", [
     lambda path: read_image(path).float() / 255,
     lambda path: read_image(path, rgb=True).float() / 255,
     lambda path: _flux2().load_image(path, "cpu").data,
     lambda path: _lingbot().load_image(path, "cpu").data.float() / 255,
-], ids=["read_image", "read_image_rgb", "flux2_pillow", "lingbot_pillow"])
+    lambda path: _minimax_h3().load_image(path, "cpu").data.float() / 255,
+], ids=["read_image", "read_image_rgb", "flux2_pillow", "lingbot_pillow", "minimax_h3_pillow"])
 
 
 def _left_half_white(path: str, exif: bytes) -> None:

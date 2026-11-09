@@ -31,7 +31,7 @@ from mstar.graph.base import GraphEdge, GraphNode, GraphSection, Loop, Parallel,
 from mstar.graph.special_destinations import EMIT_TO_CLIENT, EMPTY_DESTINATION
 from mstar.model.base import Model, TensorAndMetadata, WalkStep
 from mstar.model.components.video_encode import encode_mp4
-from mstar.model.media_limits import PILLOW_IMAGE_FORMATS, check_image_size
+from mstar.model.media_limits import PILLOW_IMAGE_FORMATS, check_image_size, decoding_upload, open_upright_image
 from mstar.model.minimax_h3.components.layout import H3Layout
 from mstar.model.minimax_h3.config import (
     AUDIO_CHANNELS,
@@ -333,15 +333,14 @@ class H3Model(Model):
 
     def load_image(self, filepath: str, device: str) -> TensorAndMetadata:
         """A keyframe as decoded RGB, uint8 ``[3, H, W]``: ``process_prompt`` puts it on the
-        canvas with PIL, as the reference does, so no resampling happens here."""
-        from PIL import Image
-
+        canvas with PIL, as the reference does, so no resampling happens here. Upright by its
+        EXIF orientation, as the other Pillow loaders read it."""
         check_image_size(filepath, formats=PILLOW_IMAGE_FORMATS)
-        try:
-            with Image.open(filepath, formats=PILLOW_IMAGE_FORMATS) as raw:
-                image = raw.convert("RGB")
-        except OSError as exc:
-            raise ValueError("could not decode image: the file is corrupt or truncated") from exc
+        with (
+            decoding_upload(filepath, "the image"),
+            open_upright_image(filepath, formats=PILLOW_IMAGE_FORMATS) as raw,
+        ):
+            image = raw.convert("RGB")
         return TensorAndMetadata(torch.from_numpy(np.asarray(image).copy()).permute(2, 0, 1).contiguous())
 
     def tokenize(self, prompt: str) -> torch.Tensor:
