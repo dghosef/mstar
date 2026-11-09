@@ -75,7 +75,9 @@ class Transcript:
     the model emitted timestamps; empty otherwise. ``unfinished`` says the
     output stopped inside a segment (a start timestamp with no end): the text
     after the last closed segment is provisional, and a long-form driver
-    re-decodes that audio from the last segment end.
+    re-decodes that audio from the last segment end. That open last segment
+    (and word) has ``end`` None until ``merge_windows`` closes it at its
+    window's end.
     """
     text: str
     language: str | None = None
