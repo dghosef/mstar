@@ -1404,10 +1404,10 @@ class WhisperAdapter(OpenAIAdapter):
 
 
 def _parse_timestamped(text: str) -> tuple[str | None, list[dict], list[str], bool]:
-    """Walk Whisper's rendered stream: ``(language, closed segments, text
-    pieces in order, whether a segment was left open)``. A segment is the
-    text between a start and an end timestamp; text outside timestamps is
-    kept as is."""
+    """Walk Whisper's rendered stream: ``(language, segments, text pieces in
+    order, whether a segment was left open)``; an open last segment has
+    ``end`` None. A segment is the text between a start and an end
+    timestamp; text outside timestamps is kept as is."""
     language: str | None = None
     segments: list[dict] = []
     parts: list[str] = []
@@ -1435,8 +1435,10 @@ def _parse_timestamped(text: str) -> tuple[str | None, list[dict], list[str], bo
     tail = text[cursor:]
     (buffer if start is not None else parts).append(tail)
     if start is not None and "".join(buffer).strip():
-        # an open segment at the end of the stream: keep its text, no end
-        parts.append("".join(buffer).strip())
+        # an open segment at the end of the stream: kept with no end (None),
+        # which the window's end supplies unless the tail is decoded again
+        segments.append({"start": start, "end": None, "text": "".join(buffer).strip()})
+        parts.append(segments[-1]["text"])
     return language, segments, parts, start is not None
 
 

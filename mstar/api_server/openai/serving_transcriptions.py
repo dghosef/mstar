@@ -463,15 +463,21 @@ def _carry_over(texts: list[str]) -> str:
     return joined[-CARRY_OVER_CHARS:]
 
 
+def _closed_end(t: Transcript) -> float:
+    """Where ``t``'s last closed segment ends (0 when none has)."""
+    return next((s["end"] for s in reversed(t.segments) if s["end"] is not None), 0.0)
+
+
 def _closed(t: Transcript) -> Transcript:
     """``t`` without its unfinished last segment, whose audio the next window
     hears again from the last closed segment's end."""
-    end = t.segments[-1]["end"]
+    end = _closed_end(t)
+    segments = [s for s in t.segments if s["end"] is not None]
     return Transcript(
-        text=" ".join(s["text"].strip() for s in t.segments if s["text"].strip()),
+        text=" ".join(s["text"].strip() for s in segments if s["text"].strip()),
         language=t.language,
-        segments=list(t.segments),
-        words=[w for w in t.words if w["end"] <= end + 1e-6],
+        segments=segments,
+        words=[w for w in t.words if w["end"] is not None and w["end"] <= end + 1e-6],
     )
 
 
@@ -487,7 +493,7 @@ async def _tail(adapter, req, planner: WindowPlanner, window: Window) -> Window 
     parsed = adapter.parse_transcript(window.raw_text, req)
     if not (parsed.unfinished and parsed.segments):
         return None
-    end = parsed.segments[-1]["end"]
+    end = _closed_end(parsed)
     if not MIN_SEEK_SECONDS <= end <= window.duration - MIN_REDECODE_SECONDS:
         return None
     window.transcript = _closed(parsed)
@@ -524,7 +530,7 @@ async def _sequential(api, adapter, req, planner: WindowPlanner, inflight: set[s
                 break
         consumed = window.duration
         if seeks and parsed.unfinished and parsed.segments:
-            end = parsed.segments[-1]["end"]
+            end = _closed_end(parsed)
             if MIN_SEEK_SECONDS <= end < window.duration:
                 consumed = end
                 parsed = _closed(parsed)
@@ -539,13 +545,15 @@ async def _sequential(api, adapter, req, planner: WindowPlanner, inflight: set[s
             return
 
 
-def _in_window(start: float, end: float, window: Window) -> tuple[float, float]:
+def _in_window(start: float, end: float | None, window: Window) -> tuple[float, float]:
     """A segment's or word's times in the upload: kept inside its window
     (Whisper can write a timestamp past the audio it heard, which would
-    overlap the next window), then shifted by the window's start."""
+    overlap the next window), then shifted by the window's start. An open
+    end (the decode stopped inside the segment) is the window's end, or the
+    start in a window of unknown length."""
     length = window.duration or math.inf
     start = min(max(start, 0.0), length)
-    end = min(max(end, start), length)
+    end = (window.duration or start) if end is None else min(max(end, start), length)
     return start + window.offset, end + window.offset
 
 

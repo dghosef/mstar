@@ -183,7 +183,15 @@ def test_whisper_parse_plain_text_and_forced_language():
 def test_whisper_parse_keeps_text_of_an_unterminated_segment():
     req = TranscriptionRequest()
     t = adapters.WhisperAdapter().parse_transcript("<|en|><|0.00|> cut off", req)
-    assert t.text == "cut off" and t.segments == []
+    assert t.text == "cut off"
+    # captions keep the words too: the open segment ends with its window
+    window = serving_transcriptions.Window(
+        path="", offset=30.0, duration=2.0, raw_text="<|0.00|> Hi.<|1.00|><|1.00|> cut off",
+    )
+    merged = serving_transcriptions.merge_windows([window], adapters.WhisperAdapter(), req)
+    assert [(s["start"], s["end"], s["text"]) for s in merged.segments] == [
+        (30.0, 31.0, "Hi."), (31.0, 32.0, "cut off"),
+    ]
 
 
 def test_whisper_stream_text_hides_control_tokens():
