@@ -3,6 +3,7 @@ client inline, and a batched stop check that agrees with the per-request one."""
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from mstar.conductor.request_info import FINAL_PREFILL
@@ -83,3 +84,15 @@ def test_batched_stop_check_agrees_with_the_per_request_one():
     }
     assert sub.check_stop("b", prefill["b"], {"new_token": [tokens[1]]}) == {END_PARTITION}
     assert sub.check_stop_batched(list(prefill), prefill, rows) == {"b": {END_PARTITION}}
+
+
+@pytest.mark.parametrize("samples", [0, 1, 200, 319])
+def test_audio_under_20_ms_is_a_bad_request(samples):
+    """Under about one mel window, the feature extractor's STFT padding raised a 500."""
+    transformers = pytest.importorskip("transformers")
+    model = object.__new__(HiggsAudioModel)
+    model.config = HiggsAudioModelConfig()
+    model.feature_extractor = transformers.WhisperFeatureExtractor(feature_size=128)
+    with pytest.raises(ValueError, match="20 ms"):
+        model._audio_intake(torch.zeros(samples), {})
+    model._audio_intake(torch.zeros(320), {})

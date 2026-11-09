@@ -1059,6 +1059,9 @@ class Qwen3OmniModel(Model):
         for audio in np_audios:
             feat_extractor = self._processor.feature_extractor
             sr = getattr(feat_extractor, "sampling_rate", 16000)
+            # under about one mel window the feature extractor's STFT padding fails
+            if audio.size < sr // 50:
+                raise ValueError(f"Qwen3-Omni needs at least 20 ms of audio, got {audio.size} samples")
             aud_out = feat_extractor(
                 audio, sampling_rate=sr,
                 padding=True,

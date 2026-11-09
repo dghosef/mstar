@@ -213,6 +213,9 @@ class HiggsAudioModel(MultimodalDecoderModel):
         mel frame count (the feature extractor's attention-mask sum), from
         which the encoder masks and slices its chunks."""
         waveform = clip.reshape(-1).cpu().numpy()
+        # under about one mel window the feature extractor's STFT padding fails
+        if len(waveform) < self.config.sampling_rate // 50:
+            raise ValueError(f"Higgs-Audio needs at least 20 ms of audio, got {len(waveform)} samples")
         n = self.config.chunk_size_samples
         chunks = [waveform[i:i + n] for i in range(0, max(len(waveform), 1), n)]
         feat = self.feature_extractor(

@@ -358,6 +358,17 @@ def test_a_spoken_reply_needs_a_known_voice_and_some_text(model, prompt, kwargs,
     model.process_prompt("Hi.", ["text"], ["text", "audio"], voice="Ethan")
 
 
+@pytest.mark.parametrize("samples", [0, 200, 319])
+def test_audio_under_20_ms_is_a_bad_request(model, samples):
+    """Under about one mel window, the feature extractor's STFT padding raised a 500."""
+    from transformers import WhisperFeatureExtractor
+
+    model._processor.feature_extractor = WhisperFeatureExtractor(feature_size=128)
+    audio = {"audio_inputs": [torch.zeros(samples)]}
+    with pytest.raises(ValueError, match="20 ms"):
+        model.process_prompt("Hi.", ["audio", "text"], ["text"], tensors=audio)
+
+
 def test_a_reply_comes_back_without_its_end_token(model):
     """Sent back as an assistant message, the reply gets its end token from the template."""
     model.config = SimpleNamespace(im_end_token_id=SPECIAL_IDS["<|im_end|>"])
