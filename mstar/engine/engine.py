@@ -2201,7 +2201,7 @@ class Engine:
             ctx = batch.step_context
             if ctx.resident is not None:
                 ctx.resident.flush(ctx.resident_plan)
-            run = cg_runner.slot_run(lease) if graph_walk in submodule_mgmt.run_policies else None
+            run = cg_runner.slot_run(lease)
             if run is not None:
                 run.stage(
                     len(request_ids), self._ignore_eos(submodule_mgmt, graph_walk, engine_inputs, request_ids),

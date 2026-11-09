@@ -10,7 +10,8 @@ import torch
 from mstar.engine.device_run import RunState
 from mstar.graph.base import GraphEdge, GraphNode, Loop
 from mstar.graph.special_destinations import EMIT_TO_CLIENT
-from mstar.model.submodule_base import HostRows
+from mstar.model.submodule_base import BatchedModelOutput, HostRows
+from mstar.testing_utils.engine import make_engine, make_mgmt
 from mstar.testing_utils.worker import make_worker
 from mstar.worker.services import _step_repeats  # noqa: PLC2701
 from mstar.worker.step_repeats import RepeatConfig, StepRepeats, loop_signals, parse_step_repeats
@@ -112,3 +113,16 @@ def test_a_step_that_admitted_before_the_main_thread_looked_still_reads_its_narr
     make_worker(_step_repeats=StepRepeats({}, {}))._await_admit_settled(pending)
 
     assert pending.batch.repeats == 1
+
+
+def test_a_slot_with_a_device_run_never_replays_unstaged():
+    """A walk that shares the capture of an asked walk gets its WHILE graph but
+    no stop policy: it must fail, not replay on the last run's device state."""
+    ctx = SimpleNamespace(graph_walk="alias", resident=None, repeats=1)
+    batch = SimpleNamespace(step_context=ctx, preplan_event=None)
+    run = SimpleNamespace(stage=lambda *args: None)
+    runner = SimpleNamespace(slot_run=lambda lease: run, run_forward=lambda *args, **kwargs: BatchedModelOutput())
+    inputs = SimpleNamespace(per_request_info={})
+
+    with pytest.raises(KeyError, match="alias"):
+        make_engine()._forward(batch, make_mgmt(), runner, inputs, {}, object(), True, [1])
