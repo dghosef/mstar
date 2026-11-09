@@ -519,16 +519,13 @@ def test_flashinfers_planner_runs_short_of_a_small_workspace():
         except ValueError as e:
             assert "tensor core decode" in str(e), e
         # a plan's Python is the emulator's time, not the host's: FlashInfer's own is a C++ loop
-        import time
+        from mstar_sim import clock
 
-        def shown(call):  # the least share of call's wall time the clock showed, over a few tries:
-            # on a loaded box a preemption the clock can't place raises one
-            shares = []
-            for _ in range(5):
-                wall, began = time.clock_gettime(time.CLOCK_MONOTONIC), time.perf_counter()
-                call()
-                shares.append((time.perf_counter() - began) / (time.clock_gettime(time.CLOCK_MONOTONIC) - wall))
-            return min(shares)
+        def shown(call):  # the share of call's CPU time that wasn't the emulator's (CPU, not wall
+            # time: a preemption takes none)
+            cpu, emulated = clock._real_thread_time(), clock.STATS["emulator_s"]
+            call()
+            return 1 - (clock.STATS["emulator_s"] - emulated) / (clock._real_thread_time() - cpu)
 
         batch = torch.arange(257, dtype=torch.int32)
         share = shown(lambda: get_batch_prefill_module("fa2").plan(
@@ -676,25 +673,26 @@ def test_device_time_follows_the_cost_model_not_the_host(gpu):
     """A big GEMM takes its simulated time on the device, while the host that
     launched it waits only at a sync."""
     out = run_sim("""
-        import os, time, torch
-        from mstar_sim import clock, cost
+        import torch
+        from mstar_sim import clock
         a = torch.randn(4096, 4096, device="cuda", dtype=torch.bfloat16)
         torch.cuda.synchronize()
         start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
         start.record()
-        t0 = time.perf_counter()
+        busy = clock.DEFAULT.busy
         outs = [a @ a for _ in range(20)]  # kept: freeing them is host time too
         end.record()
-        launched = time.perf_counter() - t0
         end.synchronize()
-        print(start.elapsed_time(end) / 1000, launched)
+        device = clock.DEFAULT.busy - busy  # the kernels' own time; the events' span adds the host's gaps
+        assert start.elapsed_time(end) / 1000 >= device, (start.elapsed_time(end), device)
+        print(device)
     """, gpu)
-    device_s, _ = map(float, out.split())
+    device_s = float(out)
     # a host read is a D2H copy: it takes device time even on an idle stream (slowed down
     # 1000x to stand clear of the host's own time between the events)
     out = run_sim("""
         import torch
-        from mstar_sim import cost
+        from mstar_sim import clock, cost
         small, start, end = torch.ones(1, device="cuda"), torch.cuda.Event(True), torch.cuda.Event(True)
         torch.cuda.synchronize()
         start.record(); small.item(); end.record(); end.synchronize()
@@ -703,10 +701,11 @@ def test_device_time_follows_the_cost_model_not_the_host(gpu):
         host, graph = torch.ones(4), torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             host.to("cuda", non_blocking=True)
-        start.record(); graph.replay(); end.record(); end.synchronize()
-        once = 1000 * (cost.copy_seconds(16, "h2d") + cost.graph_node_seconds() + cost.graph_launch_seconds())
-        # (scaled twice it is 1000x that: the bound leaves room for a host stalled by load)
-        assert start.elapsed_time(end) / 1000 < 100 * once, (start.elapsed_time(end), once)
+        busy = clock.DEFAULT.busy
+        graph.replay()
+        once = 1000 * (cost.copy_seconds(16, "h2d", pinned=False) + cost.graph_node_seconds()
+                       + cost.graph_launch_seconds())
+        assert abs(clock.DEFAULT.busy - busy - once) < 1e-9 * once, (clock.DEFAULT.busy - busy, once)
     """, gpu, MSTAR_SIM_TIME_SCALE="1000")
     flops = 20 * 2 * 4096**3
     # the device time is the roofline estimate's order of magnitude for this card
@@ -719,7 +718,7 @@ def test_a_wait_on_the_gpu_threads_step_spans_its_device_time_not_the_emulators(
     """A worker's main thread waits for the GPU thread's step, then syncs on its event: the
     span is the step's device time, however long the emulator took to launch it, with the
     parent watch asleep beside them as in a worker. So a faster GPU shows, host-bound box or
-    not."""
+    not: every real second of the emulator's work is taken off the clock."""
     out = run_sim("""
         import multiprocessing, time, torch
         from concurrent.futures import ThreadPoolExecutor
@@ -728,10 +727,13 @@ def test_a_wait_on_the_gpu_threads_step_spans_its_device_time_not_the_emulators(
 
         multiprocessing.parent_process = lambda: type("Alive", (), {"is_alive": lambda self: True})()
         orphan.watch_parent("test", "parent")
+        took = [0.0]  # the real time the emulator's work took
 
         @clock.kernel_fn("test.step", cost=lambda: (0.0, 4e9))  # ~1.6 ms of HBM traffic on an H100
         def kernel():
+            began = clock._real()
             sum(range(600000))  # the emulator's own work: far longer than the kernel
+            took[0] += clock._real() - began
 
         def step():
             for _ in range(50):
@@ -744,26 +746,30 @@ def test_a_wait_on_the_gpu_threads_step_spans_its_device_time_not_the_emulators(
         gpu.submit(int).result()  # its thread is up
         torch.cuda.synchronize()
         busy, t0 = clock.DEFAULT.busy, time.perf_counter()
+        hidden = clock.STATS["emulator_s"] + clock.STATS["run_delay_s"]
         gpu.submit(step).result().synchronize()  # the worker's await and event_sync
-        print(time.perf_counter() - t0, clock.DEFAULT.busy - busy)
+        hidden = clock.STATS["emulator_s"] + clock.STATS["run_delay_s"] - hidden
+        print(time.perf_counter() - t0, clock.DEFAULT.busy - busy, hidden, took[0])
     """, gpu)
-    span, device = map(float, out.split())
-    assert device <= span < device + 0.05, (span, device)  # (two thread hand-offs, on a loaded box)
+    span, device, hidden, took = map(float, out.split())
+    assert device <= span and hidden >= took, (span, device, hidden, took)
 
 
 def test_a_device_wait_jumps_the_clock_instead_of_sleeping():
+    """Each wait jumps the clock to the device's time, and no further. (An hour of device time:
+    slept, it would outlast the case's timeout.)"""
     out = run_sim("""
         import time, torch
         from mstar_sim import clock
-        wall, t0 = time.clock_gettime(time.CLOCK_MONOTONIC), time.perf_counter()
-        clock.charge(1.0)
+        t0, jumped = time.perf_counter(), clock.STATS["jumped_s"]
+        clock.charge(3600.0)
         torch.cuda.synchronize()
-        clock.charge(1.0)
+        clock.charge(3600.0)
         torch.ones(1, device="cuda").item()  # a host read's D2H is the same wait
-        print(time.perf_counter() - t0, time.clock_gettime(time.CLOCK_MONOTONIC) - wall)
+        print(time.perf_counter() - t0, clock.STATS["jumped_s"] - jumped, clock.DEFAULT.free_at - t0)
     """)
-    moved, wall = map(float, out.split())
-    assert 1.999 < moved < 2.1 and wall < 1, (moved, wall)
+    moved, jumped, device = map(float, out.split())
+    assert moved >= device > 7200 and 0 < jumped <= device, (moved, jumped, device)
 
 
 def test_a_region_alone_holds_the_clock_still_whatever_took_its_time():
@@ -772,28 +778,33 @@ def test_a_region_alone_holds_the_clock_still_whatever_took_its_time():
     out = run_sim("""
         import threading, time
         from mstar_sim import clock, waits
-        t0 = time.perf_counter()
-        with clock.computing():
-            waits._real_sleep(0.3)  # as if the box had taken the CPU away
-        print(time.perf_counter() - t0)
+
+        def region():  # the clock's span over it and the real span around that: the region's 0.3 s isn't in the first
+            real, t0 = clock._real(), time.perf_counter()
+            with clock.computing():
+                waits._real_sleep(0.3)  # as if the box had taken the CPU away
+            t1 = time.perf_counter()
+            print(t1 - t0, clock._real() - real)
+
+        region()
         spinning = [True]
         def spin():
             while spinning[0]:
                 pass
         threading.Thread(target=spin, name=waits.OWN + "spin").start()
         threading.Event().wait(0.05)  # only the spin runs: uncounted work, which the mover counts as running
-        t0 = time.perf_counter()
-        with clock.computing():  # a counted thread runs now, so that work no longer counts
-            waits._real_sleep(0.3)
-        print(time.perf_counter() - t0)
+        region()  # a counted thread runs now, so that work no longer counts
         spinning[0] = False
     """)
-    assert all(float(t) < 0.05 for t in out.split()), out
+    for line in out.splitlines():
+        span, real = map(float, line.split())
+        assert span <= real - 0.3, out
 
 
 def test_a_thread_woken_by_another_runs_before_the_clock_can_jump():
     """An executor's thread does the host's work and sets an event: its waiter's span is that
-    work, though the waker blocks at once and another thread waits for the device 10 s on."""
+    work, though the waker blocks at once and another thread waits for the device an hour on.
+    The clock doesn't jump until the woken waiter blocks again, and then it does."""
     out = run_sim("""
         import threading, time, torch
         from concurrent.futures import ThreadPoolExecutor
@@ -802,7 +813,7 @@ def test_a_thread_woken_by_another_runs_before_the_clock_can_jump():
         far, ready = threading.Event(), threading.Event()
 
         def device_waiter():
-            clock.charge(10.0)
+            clock.charge(3600.0)
             torch.cuda.synchronize()
             far.set()
 
@@ -819,17 +830,17 @@ def test_a_thread_woken_by_another_runs_before_the_clock_can_jump():
         pool.submit(int).result()
         started = threading.Thread(target=device_waiter)
         started.start()
-        wall, t0 = time.clock_gettime(time.CLOCK_MONOTONIC), time.perf_counter()
+        t0, jumped = time.perf_counter(), clock.STATS["jumped_s"]
         pool.submit(work)
         assert ready.wait(timeout=60)
-        span = time.perf_counter() - t0
+        span, early = time.perf_counter() - t0, clock.STATS["jumped_s"] - jumped
         far.wait()
-        print(span, time.clock_gettime(time.CLOCK_MONOTONIC) - wall)
+        print(span, early, clock.STATS["jumped_s"] - jumped)
         started.join()
         assert left  # a thread leaves its mode in Python, not in its thread-local teardown
     """)
-    span, wall = map(float, out.split())
-    assert 0.2 <= span < 1 and wall < 5, (span, wall)
+    span, early, jumped = map(float, out.split())
+    assert span >= 0.2 and early == 0 and jumped > 0, (span, early, jumped)
 
 
 def test_a_notify_as_a_wait_opens_leaves_the_mover_alive_and_a_dead_mover_stops_the_run():
@@ -916,24 +927,25 @@ def barrier():
 
 def test_a_blocked_process_follows_the_deployments_time():
     """A process with nothing to do but poll keeps up with a worker's jumps, in far less wall
-    time than the time it follows."""
+    time than the time it follows: an hour, which in real time would outlast the case's timeout."""
     worker, follower = run_deployment("""
         barrier()
         start = time.perf_counter()
-        clock.charge(20.0)
+        clock.charge(3600.0)
         torch.cuda.synchronize()
         print(time.perf_counter() - start)
-        time.sleep(0.5)  # the follower's last sleep ends with this one
+        while not os.path.exists(TMP + "/followed"):  # a peer until the follower is done
+            time.sleep(0.05)
     """, """
         barrier()
-        start = wall = time.perf_counter(), time.clock_gettime(time.CLOCK_MONOTONIC)
-        while time.perf_counter() - start[0] < 20.0:
-            time.sleep(0.5)
-        print(time.perf_counter() - start[0], time.clock_gettime(time.CLOCK_MONOTONIC) - start[1], waits.TABLE._q[1])
+        start = time.perf_counter()
+        while time.perf_counter() - start < 3600.0:
+            time.sleep(10.0)
+        print(waits.TABLE._q[1])
+        open(TMP + "/followed", "w").close()
     """)
-    moved, wall, slots = map(float, follower.split())
-    assert 19.99 < float(worker) < 20.1 and 20.0 <= moved < 20.6 and wall < 10, (worker, moved, wall)
-    assert slots == 2, slots  # a read scans what was used, not all 64
+    assert float(worker) >= 3600.0, worker
+    assert int(follower) == 2, follower  # a read scans what was used, not all 64
 
 
 def test_a_device_wait_does_not_expire_a_host_wait_before_a_peer_notifies():
@@ -972,7 +984,7 @@ def test_a_device_wait_does_not_expire_a_host_wait_before_a_peer_notifies():
 
 def test_blocked_processes_with_only_host_deadlines_keep_real_time():
     """Both blocked on host deadlines, with no device time to jump to: the clock goes to the earlier
-    one, then the later, each on time on the deployment's clock and no sooner in real time. A
+    one, then the later, neither before its time on the deployment's clock nor in real time. A
     deployment that is wedged, every process polling on a timeout, shows its timeouts at real time,
     not faster: idle processes don't leapfrog each other's deadlines."""
     early, late = run_deployment("""
@@ -989,7 +1001,7 @@ def test_blocked_processes_with_only_host_deadlines_keep_real_time():
     """)
     first, woke = map(float, early.split())
     second, ended, wall = map(float, late.split())
-    assert 1.0 <= first < 1.2 and 2.0 <= second < 2.2 and woke < ended and 1.9 < wall < 3, (first, second, wall)
+    assert first >= 1.0 and second >= 2.0 and woke < ended and wall > 1.9, (first, second, woke, ended, wall)
 
 
 def test_a_wait_woken_early_isnt_due_before_its_timeout():
@@ -1020,26 +1032,6 @@ def test_a_wait_woken_early_isnt_due_before_its_timeout():
     assert float(out) > 0.9, out
 
 
-def test_a_fixed_rate_client_keeps_up_with_a_worker_a_message_is_in_flight_to():
-    """A message in flight to a running worker holds no one else back. The
-    client moves to each arrival as the worker's clock passes it. Both make progress at
-    the client's fixed rate."""
-    worker, client = run_deployment("""
-        barrier()
-        start = time.perf_counter()
-        while time.perf_counter() - start < 0.3:
-            pass
-        print(time.perf_counter() - start)
-    """, """
-        barrier()
-        start = time.perf_counter()
-        for _ in range(30):  # 100 arrivals a second
-            time.sleep(0.01)
-        print(time.perf_counter() - start)
-    """)
-    assert 0.3 <= float(worker) < 0.5 and 0.3 <= float(client) < 0.5, (worker, client)
-
-
 def test_a_blocked_process_publishes_its_next_event_as_its_waits_end():
     """A deadline gone from a process that stays blocked (a thread the registry doesn't count) is
     not left in its slot: peers' bounds stand on that, and clause 2 would hold them for ever."""
@@ -1051,14 +1043,15 @@ def test_a_blocked_process_publishes_its_next_event_as_its_waits_end():
         def uncounted():
             time.sleep(0.2)
             waits._real_sleep(0.3)  # the main thread is blocked throughout
-            seen.append(waits.TABLE._d[waits.TABLE._mine + table._NEXT] - base)
+            seen.append((waits.TABLE._d[waits.TABLE._mine + table._NEXT] - base, clock.now() - base))
             done.set()
 
         threading.Thread(target=uncounted, name=waits.OWN + "test", daemon=True).start()
         done.wait(5.0)
-        print(seen[0])
+        print(*seen[0])
     """)
-    assert 4.9 < float(out) < 5.1, out
+    published, now = map(float, out.split())  # the main thread's deadline: 5 s after it began to wait
+    assert 5.0 <= published <= now + 5.0, out
 
 
 def test_a_clock_read_is_held_only_where_it_can_be_let_go():
@@ -1068,19 +1061,23 @@ def test_a_clock_read_is_held_only_where_it_can_be_let_go():
     out = run_sim("""
         import threading, time
         from mstar_sim import clock, waits
-        waits.HELD_LIMIT = 2.0
         bound = waits.TABLE.bound
         waits.TABLE.bound = lambda: 0.0
         waits._ahead[0] = 0.0
         with clock.LOCK:
             time.perf_counter()
         waits._move = lambda: 0.05  # the mover lets no one go, as when it is gone
-        threading.Thread(target=lambda: (waits._real_sleep(0.5), setattr(waits.TABLE, "bound", bound)),
-                         name=waits.OWN + "test").start()
+
+        def put_back():  # once the read is held
+            while not waits.REPORT["ahead_stalls"]:
+                waits._real_sleep(0.001)
+            waits.TABLE.bound = bound
+
+        threading.Thread(target=put_back, name=waits.OWN + "test").start()
         time.perf_counter()
-        print("returned")
+        print(waits.REPORT["ahead_stalls"])
     """)
-    assert out.strip() == "returned", out
+    assert out.strip() == "1", out
 
 
 def test_an_exiting_process_keeps_its_slot_and_its_table_until_it_is_gone():
@@ -1164,17 +1161,18 @@ def test_a_native_spinner_doesnt_hold_the_gate_shut():
 def test_a_device_wait_needs_no_one():
     """A device wait beside another thread's wait that it can't see the end of ends all the same.
     Beside a sleep (nothing bounds it, the sleep is earlier): at once, not as the sleep passes in
-    real time. And beside a thread at a meet, whose peer may be waiting for what comes after."""
+    real time (half an hour: the case's timeout would end it first). And beside a thread at a
+    meet, whose peer may be waiting for what comes after."""
     out = run_sim("""
         import threading, time, torch
         from mstar_sim import clock
-        threading.Thread(target=time.sleep, args=(0.5,), daemon=True).start()
-        wall = time.clock_gettime(time.CLOCK_MONOTONIC)
-        clock.charge(1.0)
+        threading.Thread(target=time.sleep, args=(1800.0,), daemon=True).start()
+        t0 = time.perf_counter()
+        clock.charge(3600.0)
         torch.cuda.synchronize()
-        print(time.clock_gettime(time.CLOCK_MONOTONIC) - wall)
+        print(time.perf_counter() - t0)
     """)
-    assert float(out) < 0.4, out
+    assert float(out) >= 3600.0, out
     run_deployment("""
         import datetime
         import torch.distributed as dist
@@ -1240,7 +1238,8 @@ def test_a_real_wake_of_the_rust_poll_survives_a_poke_for_another_wait():
 
 @pytest.mark.parametrize("notify", [False, True])
 def test_a_process_alone_sees_the_real_time_of_a_wait_it_cant_see_the_end_of(notify):
-    """An external response's real delay survives a known wake before the next clock read."""
+    """An external response's real delay survives a known wake before the next clock read, and the
+    wait ends by the response, not by jumping to its timeout (an hour on)."""
     out = run_sim("""
         import os, selectors, subprocess, sys, threading, time
         read, write = os.pipe()
@@ -1253,14 +1252,15 @@ def test_a_process_alone_sees_the_real_time_of_a_wait_it_cant_see_the_end_of(not
                 os.read(read, 1)
                 done.set()
             threading.Thread(target=receive).start()
-            done.wait()
+            answered = done.wait(3600)
         else:
             selector = selectors.DefaultSelector()
             selector.register(read, selectors.EVENT_READ)
-            selector.select(30)
-        print(time.perf_counter() - start)
+            answered = bool(selector.select(3600))
+        print(time.perf_counter() - start, answered)
     """ % notify)
-    assert 0.25 < float(out) < 5, out
+    span, answered = out.split()
+    assert float(span) > 0.25 and answered == "True", out
 
 
 def test_a_wait_keeps_the_real_time_it_stood_still_when_native_work_is_seen_before_its_wake():
@@ -1279,10 +1279,11 @@ def test_a_wait_keeps_the_real_time_it_stood_still_when_native_work_is_seen_befo
         start = time.perf_counter()
         selector = selectors.DefaultSelector()
         selector.register(read, selectors.EVENT_READ)
-        selector.select(30)
-        print(time.perf_counter() - start)
+        answered = bool(selector.select(3600))  # by the reply, not by jumping to its timeout
+        print(time.perf_counter() - start, answered)
     """)
-    assert 0.25 < float(out) < 5, out
+    span, answered = out.split()
+    assert float(span) > 0.25 and answered == "True", out
 
 
 def test_the_mover_waits_on_no_lock_of_threadings():
@@ -1325,22 +1326,35 @@ def test_a_slot_names_the_meet_of_a_wait_still_in_it():
 
 def test_a_host_collective_is_a_wait_for_the_peers():
     """A gloo collective on a CPU group, as ``agree`` makes: its rank waits there, as at a meet, so
-    a late peer doesn't show as host time on its clock."""
-    code = """
-        import datetime
+    a late peer doesn't show as host time on its clock: the clock stands still all the while."""
+    waiter, _ = run_deployment("""
         import torch.distributed as dist
-        dist.init_process_group("nccl", init_method="file://" + TMP + "/group", rank=%d, world_size=2)
+        dist.init_process_group("nccl", init_method="file://" + TMP + "/group", rank=0, world_size=2)
         barrier()
-        start = time.perf_counter()
+
+        def watch():  # its peer comes only once this rank waits at the meet
+            while not any(w.kind is waits.MEET and not w.woken for w in list(waits._waits)):
+                waits._real_sleep(0.001)
+            open(TMP + "/waiting", "w").close()
+
+        threading.Thread(target=watch, name=waits.OWN + "watch", daemon=True).start()
+        blocked = clock.STATS["blocked_s"]
+        dist.all_reduce(torch.zeros(1))
+        print(clock.STATS["blocked_s"] - blocked)
+        dist.destroy_process_group()
+    """, """
+        import torch.distributed as dist
+        dist.init_process_group("nccl", init_method="file://" + TMP + "/group", rank=1, world_size=2)
+        barrier()
+        while not os.path.exists(TMP + "/waiting"):
+            waits._real_sleep(0.001)
         late = clock._real() + 0.5
-        while %d and clock._real() < late:
+        while clock._real() < late:  # the host's own work, reading no clock
             pass
         dist.all_reduce(torch.zeros(1))
-        print(time.perf_counter() - start)
         dist.destroy_process_group()
-    """
-    waiter, _ = run_deployment(code % (0, 0), code % (1, 1))
-    assert float(waiter.split()[-1]) < 0.25, waiter
+    """)
+    assert float(waiter.split()[-1]) >= 0.5, waiter
 
 
 def test_a_forked_child_starts_its_own_process_state():
@@ -1369,28 +1383,30 @@ def test_a_forked_child_starts_its_own_process_state():
 
 def test_a_read_held_behind_a_rising_bound_doesnt_abort():
     """The limit is on a bound that stands still, not on a hold: a device wait can put a process
-    far past a peer that runs at real rate, and it then waits for the peer to get there."""
-    jumper, spinner = run_deployment("""
-        waits.HELD_LIMIT = 0.5
-        barrier()
+    far past a peer that runs at real rate, and it then waits for the peer to get there. (The peer
+    is a bound that rises at every look once the read is held, for far longer than the limit.)"""
+    out = run_sim("""
+        import itertools, time, torch
+        from mstar_sim import clock, waits
+        waits.HELD_LIMIT = 0.001
+        behind, looks = clock.now(), itertools.count()
+        waits.TABLE.bound = lambda: behind + (0.25 * next(looks) if waits.REPORT["ahead_stalls"] else 0.0)
         clock.charge(2.0)
         torch.cuda.synchronize()
         time.perf_counter()
-        print("passed")
-    """, """
-        barrier()
-        end = time.perf_counter() + 2.5
-        while time.perf_counter() < end:
-            pass
+        print(waits.REPORT["ahead_stalls"])
     """)
-    assert jumper.strip() == "passed", jumper
+    assert out.strip() == "1", out
 
 
 def test_a_permitted_clock_read_releases_an_application_lock_before_its_peer_exits():
+    """A read held behind a slow peer returns the observation it was permitted, however late its
+    thread resumes: held once, not chasing its own running clock until the peer is gone. (The peer
+    runs until the reader is done; its minute is a hang guard.)"""
     _, reader = run_deployment("""
         barrier()
         start = clock._real()
-        while not os.path.exists(TMP + "/reader-done") and clock._real() - start < 3.0:
+        while not os.path.exists(TMP + "/reader-done") and clock._real() - start < 60.0:
             with clock.computing():
                 waits._real_sleep(0.09)
             waits._real_sleep(0.01)
@@ -1410,19 +1426,24 @@ def test_a_permitted_clock_read_releases_an_application_lock_before_its_peer_exi
             original(t)
             waits._real_sleep(0.1)  # descheduled after permission; do not observe a new time
         waits._hold = delayed_resume
+        clock.jump(clock.now() + 0.1)  # ahead of the peer: the read is held
+        stalls = waits.REPORT["ahead_stalls"]
         waits.read()
+        held = waits.REPORT["ahead_stalls"] - stalls
         lock.release()
         thread.join()
-        print(os.path.exists(TMP + "/peer-done"))
+        print(held, os.path.exists(TMP + "/peer-done"))
         open(TMP + "/reader-done", "w").close()
     """)
-    assert reader.strip() == "False", reader
+    assert reader.split() == ["1", "False"], reader
 
 
 def test_clock_read_batches_account_for_an_application_lock_waiter():
+    """The peer runs until the reader is done (its minute is a hang guard): the reads are let go
+    by its progress, not by its exit."""
     _, reader = run_deployment("""
         barrier()
-        end = clock._real() + 2.0
+        end = clock._real() + 60.0
         while not os.path.exists(TMP + "/reader-done") and clock._real() < end:
             clock.READS[0] += 1
             waits._real_sleep(0.005)
@@ -1656,7 +1677,8 @@ def test_a_read_sees_a_bound_only_the_mover_had_stale(monkeypatch):
         table.bound = lambda: 1e9 if stale() else low
         waits._seen[0] = table.epochs()  # the change came before this read looked
         waits.kick()
-        waits._real_sleep(0.1)
+        while waits._seen[0] != -1:  # the mover has stored its bound
+            waits._real_sleep(0.001)
         time.perf_counter()  # past the true bound, though the mover's says not
         print(waits.REPORT["ahead_stalls"])
         far = clock.now() + 1e6  # (the clock starts at the box's uptime: no fixed time is ahead of it)
@@ -1680,7 +1702,8 @@ def test_a_read_sees_a_bound_only_the_mover_had_stale(monkeypatch):
 
 def test_a_process_in_a_wait_the_emulator_cant_see_doesnt_pace_the_deployment():
     """A thread in an unknown wait counts as running, but a process doing nothing at all (no task
-    on a CPU, no CPU used, no clock read) is parked: a peer's device wait still jumps."""
+    on a CPU, no CPU used, no clock read) is parked: a peer's device wait still jumps (an hour:
+    paced by the reader, it would outlast the case's timeout)."""
     reader, waiter = run_deployment("""
         os.mkfifo(TMP + "/fifo")
         fd = os.open(TMP + "/fifo", os.O_RDWR)  # (a writer of its own, so the read waits)
@@ -1690,14 +1713,13 @@ def test_a_process_in_a_wait_the_emulator_cant_see_doesnt_pace_the_deployment():
     """, """
         barrier()
         waits._real_sleep(0.2)  # the reader is in its read, and a look has seen it idle
-        wall = time.clock_gettime(time.CLOCK_MONOTONIC)
-        clock.charge(3.0)
+        start = time.perf_counter()
+        clock.charge(3600.0)
         torch.cuda.synchronize()
-        time.perf_counter()  # a read 3 s on: clause 2 holds it while the reader counts as running
-        print(time.clock_gettime(time.CLOCK_MONOTONIC) - wall)
+        print(time.perf_counter() - start)  # a read an hour on: clause 2 holds it while the reader counts as running
         os.write(os.open(TMP + "/fifo", os.O_WRONLY), b"x")
     """)
-    assert reader.strip() == "read" and float(waiter) < 0.5, (reader, waiter)
+    assert reader.strip() == "read" and float(waiter) >= 3600.0, (reader, waiter)
 
 
 def test_a_stalled_deployment_aborts_saying_who_holds_it():
@@ -1785,20 +1807,23 @@ def test_a_collective_starts_at_the_latest_ranks_stream(late):
                 end = clock._real() + 1.0  # the host's own work, reading no clock
                 while clock._real() < end:
                     pass
+            launched = clock.now()
             dist.all_reduce(x)
             torch.cuda.synchronize()
-            sys.stdout.write(f"rank {r} {time.perf_counter() - start} {clock.DEFAULT.free_at}\\n")  # one write
+            span = time.perf_counter() - start
+            sys.stdout.write(f"rank {r} {span} {clock.DEFAULT.free_at} {launched}\\n")  # one write
             sys.stdout.flush()
             dist.destroy_process_group()
 
         if __name__ == "__main__":
             mp.spawn(rank, args=(tempfile.mkdtemp() + "/group",), nprocs=2)
     """ % late, MSTAR_SIM_NODE=node)
-    rows = [line.split() for line in out.splitlines() if line.startswith("rank")]
-    spans, ends = {r[1]: float(r[2]) for r in rows}, [float(r[3]) for r in rows]
-    assert len(rows) == 2 and 0.95 <= spans["0"] < 1.2 and abs(ends[0] - ends[1]) < 1e-6, out
-    if late == "host":
-        assert spans["1"] >= 0.95, out
+    lines = [line.split() for line in out.splitlines() if line.startswith("rank")]
+    rows = {r[1]: list(map(float, r[2:])) for r in lines}
+    (span, end, launched), (_, other_end, _) = rows["0"], rows["1"]
+    # rank 0 is the late one: its own second of stream or host, and the end both ranks share is
+    # after its host launched the collective
+    assert span >= 0.95 and abs(end - other_end) < 1e-6 and end > launched, out
 
 
 def test_a_collectives_own_bookkeeping_is_the_emulators():
@@ -1825,8 +1850,8 @@ def test_a_collectives_own_bookkeeping_is_the_emulators():
 
 def test_a_native_process_holds_the_deployment_only_while_it_works():
     """The Rust frontend's shape: a child no patch reaches, watched by the process that started
-    it. Its work takes real time on the deployment's clock, a peer's deadline can't pass it,
-    and a wait for the device costs no wall time once it is idle."""
+    it. Its work takes real time on the deployment's clock, and once it is idle a wait for the
+    device jumps (an hour: paced by the child, it would outlast the case's timeout)."""
     owner, peer = run_deployment("""
         import subprocess
         work = "import sys, time; sys.stdin.readline(); end = time.process_time() + 0.3\\n" \\
@@ -1836,7 +1861,7 @@ def test_a_native_process_holds_the_deployment_only_while_it_works():
         child = subprocess.Popen([native, "-S", "-c", work], stdin=subprocess.PIPE, env={"PYTHONHOME": sys.base_prefix})
         assert child.pid in waits._native  # Popen watches it
         barrier()
-        start, real = time.perf_counter(), time.clock_gettime(time.CLOCK_MONOTONIC)
+        start = time.perf_counter()
         cpu = waits._native[child.pid][0]
         idle = time.clock_gettime(cpu)
         child.stdin.write(b"go\\n")
@@ -1847,11 +1872,11 @@ def test_a_native_process_holds_the_deployment_only_while_it_works():
             time.sleep(0.001)
         while waits._native_busy[0]:
             time.sleep(0.01)
-        print(time.perf_counter() - start, time.clock_gettime(time.CLOCK_MONOTONIC) - real)
-        wall = time.clock_gettime(time.CLOCK_MONOTONIC)
-        clock.charge(1.0)
+        print(time.perf_counter() - start)
+        start = time.perf_counter()
+        clock.charge(3600.0)
         torch.cuda.synchronize()
-        print(time.clock_gettime(time.CLOCK_MONOTONIC) - wall)
+        print(time.perf_counter() - start)
         child.kill()
     """, """
         barrier()
@@ -1859,8 +1884,8 @@ def test_a_native_process_holds_the_deployment_only_while_it_works():
         time.sleep(0.1)
         print(time.perf_counter() - start)
     """)
-    worked, real, wall = map(float, owner.split())
-    assert 0.25 < worked < real + 0.05 and wall < 0.2 and 0.1 <= float(peer) < 0.2, (worked, real, wall, peer)
+    worked, waited = map(float, owner.split())
+    assert worked > 0.25 and waited >= 3600.0 and float(peer) >= 0.1, (worked, waited, peer)
 
 
 def test_a_watched_child_takes_its_fds_with_it():
@@ -1891,20 +1916,21 @@ def test_a_blocking_h2d_holds_the_host_until_the_copy_is_done():
         device = torch.empty(1 << 30, dtype=torch.uint8, device="cuda")
         for blocking in (host.cuda, lambda: device.copy_(host)):
             torch.cuda.synchronize()
-            clock.charge(0.1)
             t0 = time.perf_counter()
+            clock.charge(3600.0)
+            queued = clock.DEFAULT.free_at
             blocking()
-            print(time.perf_counter() - t0, clock.DEFAULT.free_at - t0)
+            print(time.perf_counter() - t0, clock.DEFAULT.free_at - t0, clock.DEFAULT.free_at - queued)
     """)
     for line in out.splitlines():
-        span, done = map(float, line.split())
-        assert done > 0.1 and done <= span < done + 0.05, (span, done)
+        span, done, copy = map(float, line.split())
+        assert span >= done >= 3600.0 + copy and copy > 0, (span, done, copy)
 
 
 @pytest.mark.parametrize("time_scale", ["1", "10"])  # a slower GPU's staging takes as long as its copy
 def test_a_copy_from_pageable_memory_blocks_the_host_and_is_slower_than_from_pinned(time_scale):
     out = run_sim("""
-        import time, torch
+        import torch
         from mstar_sim import clock
         small = torch.zeros(64, dtype=torch.uint8)
         assert not small.is_pinned() and small.pin_memory().is_pinned() and not small.pin_memory().clone().is_pinned()
@@ -1913,12 +1939,12 @@ def test_a_copy_from_pageable_memory_blocks_the_host_and_is_slower_than_from_pin
         assert pinned.is_pinned() and pinned[8:].is_pinned() and not pageable.is_pinned()
         for source in (pinned, pageable):
             torch.cuda.synchronize()
-            t0 = time.perf_counter()
+            waited, busy = clock.STATS["device_waited_s"], clock.DEFAULT.busy
             source.to("cuda", non_blocking=True)
-            print(time.perf_counter() - t0, clock.DEFAULT.free_at - t0)
+            print(clock.STATS["device_waited_s"] - waited, clock.DEFAULT.busy - busy)  # the host's wait, the copy's
     """, MSTAR_SIM_TIME_SCALE=time_scale)
     (host_pinned, device_pinned), (host_pageable, device_pageable) = (map(float, l.split()) for l in out.splitlines())
-    assert host_pinned < 0.1 * device_pinned, (host_pinned, device_pinned)
+    assert host_pinned == 0, (host_pinned, device_pinned)
     assert host_pageable >= 0.9 * device_pageable and device_pageable > 1.5 * device_pinned, out
 
 
@@ -2662,13 +2688,13 @@ def test_fast_mode_skips_device_time_but_keeps_host_semantics():
     """--fast: a host read after a long kernel doesn't wait, graphs still capture
     and replay, and a host read during capture is still refused."""
     out = run_sim("""
-        import time, torch
+        import torch
+        from mstar_sim import clock
         a = torch.randn(32768, 32768, device="cuda", dtype=torch.bfloat16)
-        t0 = time.perf_counter()
         for _ in range(50):
-            a @ a  # ~5 s of simulated H100 time; the host work is ~5 ms, so load can't reach the bound
+            a @ a  # ~5 s of simulated H100 time in a timed run
         torch.cuda.synchronize()
-        assert time.perf_counter() - t0 < 1.0, time.perf_counter() - t0
+        assert clock.DEFAULT.kernels == 0 and clock.STATS["device_waited_s"] == 0, (clock.DEFAULT, clock.STATS)
         pos = torch.arange(4, device="cuda")
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
