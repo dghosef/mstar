@@ -1678,7 +1678,7 @@ class APIServer:
         if first is None:
             return _empty_stream()
         head = first[0] if batches and first else first
-        if head is not None and head.modality == "error":
+        if head.modality == "error":
             # read to the end, so the finished request is not aborted
             async for _ in items:
                 pass

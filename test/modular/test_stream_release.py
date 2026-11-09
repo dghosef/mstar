@@ -286,16 +286,31 @@ def test_speech_stream_schedules_its_reference_clip_cleanup(monkeypatch):
     assert _left_after_cleanup(stub.upload_dir) == []
 
 
-def test_transcription_stream_deletes_its_upload(monkeypatch):
-    from test_openai_transcriptions import _StubAPI, _wav_bytes
+def test_a_transcription_stream_whose_headers_fail_releases_its_windows():
+    """The stream reads its first event before the 200, so its windows are on
+    the engine by then: a body that never starts still releases each of them,
+    leaves the upload's window share and deletes the upload."""
+    from test_openai_transcriptions import _StubAPI, _text, _wav_bytes
+
+    from mstar.api_server.openai import adapters, serving_transcriptions
+    from mstar.api_server.openai.protocol import TranscriptionRequest
 
     stub = _StubAPI()
-    client = _client(monkeypatch, stub)
-    client.post(
-        "/v1/audio/transcriptions",
-        data={"model": "whisper_large", "stream": "true"},
-        files={"file": ("long.wav", _wav_bytes(45), "audio/wav")},
-    )
+    stub.queued_chunks = [_text(" one"), _text(" two")]
+    req = TranscriptionRequest(model="whisper_large", stream=True)
+
+    async def run():
+        response = await serving_transcriptions.create_transcription(
+            stub, "whisper_large", adapters.WhisperAdapter(), req, _wav_bytes(45), "long.wav",
+        )
+        with pytest.raises(ClientDisconnect):
+            await response(_ASGI_2_4, _disconnected, _client_gone)
+        # while the response, and so its unstarted body, is still alive
+        return sorted(stub.released), serving_transcriptions.window_share(stub).uploads
+
+    released, uploads = asyncio.run(run())
+    assert stub.submits and released == sorted(s["request_id"] for s in stub.submits)
+    assert uploads == 0
     assert not list(Path(stub.upload_dir).iterdir())
 
 

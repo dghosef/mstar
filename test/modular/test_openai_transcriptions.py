@@ -349,6 +349,19 @@ def test_transcription_stream_refused_before_any_text_keeps_its_status(client_an
     assert not list(stub.upload_dir.iterdir())
 
 
+def test_transcription_stream_failing_before_any_text_is_a_500_with_an_error_id(client_and_stub, monkeypatch):
+    client, stub = client_and_stub
+
+    def fixed(self):
+        raise OSError("/srv/uploads is full")
+
+    monkeypatch.setattr(serving_transcriptions.WindowPlanner, "fixed", fixed)
+    r = _post(client, {"model": "whisper_large", "stream": "true"})
+    assert r.status_code == 500
+    assert "error id" in r.json()["error"]["message"] and "/srv" not in r.text
+    assert not list(stub.upload_dir.iterdir())
+
+
 def test_transcription_stream_reports_an_unexpected_error_in_band(client_and_stub):
     """After the 200, an error the stream did not expect still ends it with an
     error event and [DONE]."""
