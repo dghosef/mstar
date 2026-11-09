@@ -602,14 +602,14 @@ def content_event(kind: str, response_id: str, item_id: str, **fields) -> dict:
     return server_event(kind, response_id=response_id, item_id=item_id, output_index=0, content_index=0, **fields)
 
 
-async def _session_failed(session_id: str, send, exc: Exception) -> None:
-    """An error the session did not expect ends it: logged in full under an
-    error id, and the client gets one ``server_error`` naming only the id
-    before the socket closes with 1011."""
+async def _server_error(send, what: str, session_id: str, exc: Exception) -> None:
+    """Report an error the server did not expect while doing ``what``: logged
+    in full under an error id, and the client gets one ``server_error`` that
+    names only the id (the error's text can name server paths)."""
     error_id = uuid.uuid4().hex[:12]
-    logger.error("realtime session %s failed (error id %s)", session_id, error_id, exc_info=exc)
+    logger.error("realtime %s failed (error id %s, session %s)", what, error_id, session_id, exc_info=exc)
     with contextlib.suppress(Exception):   # the client may have gone first
-        await send(error_event(f"the session failed (error id {error_id})", kind="server_error"))
+        await send(error_event(f"the {what} failed (error id {error_id})", kind="server_error"))
 
 
 async def _events(ws: WebSocket, send):
@@ -683,7 +683,7 @@ class RealtimeTranscription:
         except WebSocketDisconnect:
             return
         except Exception as exc:  # noqa: BLE001 — the client hears why the session ends
-            await _session_failed(self.session.session_id, self.send, exc)
+            await _server_error(self.send, "session", self.session.session_id, exc)
             with contextlib.suppress(Exception):
                 await self.ws.close(code=1011)
 
@@ -1067,7 +1067,7 @@ class RealtimeConversation:
         except WebSocketDisconnect:
             pass
         except Exception as exc:  # noqa: BLE001 — the client hears why the call ends
-            await _session_failed(self.session_id, self.send, exc)
+            await _server_error(self.send, "session", self.session_id, exc)
             await self.close(1011)
         finally:
             tasks = [task for task in (self.clock_task, self.relay_task) if task is not None]
@@ -1247,10 +1247,7 @@ class RealtimeConversation:
                 self.api.reject_input(self.key, f"append rejected: {exc}", 400)
                 return False
             except Exception as exc:  # noqa: BLE001 — the client gets an error event, not a bare close
-                error_id = uuid.uuid4().hex[:12]
-                logger.error("realtime append failed (error id %s, session %s)", error_id, self.session_id,
-                             exc_info=exc)
-                await self.send(error_event(f"the append failed (error id {error_id})", kind="server_error"))
+                await _server_error(self.send, "append", self.session_id, exc)
                 return False
 
     async def _clock(self) -> None:
@@ -1317,10 +1314,7 @@ class RealtimeConversation:
             await self.send(error_event(str(exc.detail), kind=error_type(exc.status_code)))
             status, code = "failed", 1011
         except Exception as exc:  # noqa: BLE001 — the socket must still close
-            error_id = uuid.uuid4().hex[:12]
-            logger.error("realtime conversation failed (error id %s, session %s)", error_id, self.session_id,
-                         exc_info=exc)
-            await self.send(error_event(f"the call failed (error id {error_id})", kind="server_error"))
+            await _server_error(self.send, "call", self.session_id, exc)
             status, code = "failed", 1011
         # no more text will come: held audio goes to its reply, and a reply still open ends here
         while self.early:
