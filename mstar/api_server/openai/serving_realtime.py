@@ -602,6 +602,16 @@ def content_event(kind: str, response_id: str, item_id: str, **fields) -> dict:
     return server_event(kind, response_id=response_id, item_id=item_id, output_index=0, content_index=0, **fields)
 
 
+async def _session_failed(session_id: str, send, exc: Exception) -> None:
+    """An error the session did not expect ends it: logged in full under an
+    error id, and the client gets one ``server_error`` naming only the id
+    before the socket closes with 1011."""
+    error_id = uuid.uuid4().hex[:12]
+    logger.error("realtime session %s failed (error id %s)", session_id, error_id, exc_info=exc)
+    with contextlib.suppress(Exception):   # the client may have gone first
+        await send(error_event(f"the session failed (error id {error_id})", kind="server_error"))
+
+
 async def _events(ws: WebSocket, send):
     """A socket's client events as dicts, until it disconnects. A frame that
     is not a JSON object is answered with an ``error`` and skipped."""
@@ -672,6 +682,10 @@ class RealtimeTranscription:
                 await self.handle(event)
         except WebSocketDisconnect:
             return
+        except Exception as exc:  # noqa: BLE001 — the client hears why the session ends
+            await _session_failed(self.session.session_id, self.send, exc)
+            with contextlib.suppress(Exception):
+                await self.ws.close(code=1011)
 
     async def handle(self, event: dict) -> None:
         kind = event.get("type")
@@ -1052,6 +1066,9 @@ class RealtimeConversation:
                 await self.handle(event)
         except WebSocketDisconnect:
             pass
+        except Exception as exc:  # noqa: BLE001 — the client hears why the call ends
+            await _session_failed(self.session_id, self.send, exc)
+            await self.close(1011)
         finally:
             tasks = [task for task in (self.clock_task, self.relay_task) if task is not None]
             for task in tasks:

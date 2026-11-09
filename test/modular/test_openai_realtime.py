@@ -1391,6 +1391,25 @@ def test_an_append_that_fails_inside_the_server_is_an_error_event(duplex, monkey
     assert error["type"] == "server_error" and "error id" in error["message"] and "secret" not in error["message"]
 
 
+@pytest.mark.parametrize("conversation", [False, True], ids=["transcription", "conversation"])
+def test_an_unexpected_error_ends_the_session_with_an_error_event(client_and_stub, duplex, monkeypatch, conversation):
+    client = duplex()[0] if conversation else client_and_stub[0]
+    session = serving_realtime.RealtimeConversation if conversation else serving_realtime.RealtimeTranscription
+
+    async def broken(self, event):
+        raise RuntimeError("/srv/secret/path is gone")
+
+    monkeypatch.setattr(session, "handle", broken)
+    with client.websocket_connect("/v1/realtime" + ("" if conversation else "?intent=transcription")) as ws:
+        ws.receive_text()
+        _send(ws, "input_audio_buffer.clear")
+        error = json.loads(ws.receive_text())["error"]
+        with pytest.raises(WebSocketDisconnect) as closed:
+            ws.receive_text()
+    assert error["type"] == "server_error" and "error id" in error["message"] and "secret" not in error["message"]
+    assert closed.value.code == 1011
+
+
 def _text(step, data=b"", mark=None):
     return _Chunk("text", data, {"step": step, **({"turn": [mark]} if mark else {})})
 
