@@ -32,6 +32,8 @@ class HostRows(NamedTuple):
 
     request_ids: tuple
     buffers: dict[str, torch.Tensor]
+    # ``BatchedModelOutput.run_replays`` on the host; None on any other step
+    ran: torch.Tensor | None = None
 
     def first_values(self, name: str, request_ids: Sequence[str]):
         """``(rid, value)`` for each of ``request_ids`` that has a row, where
@@ -308,8 +310,8 @@ class BatchedModelOutput:
     # How many times the step's capture replayed (`StepContext.repeats`): each
     # stop buffer then holds one column per replay.
     repeats: int = 1
-    # A device run's iterations, [1] int64; None on any other step. On the
-    # device until ``Worker._stage_host_rows`` replaces it with its host copy.
+    # A device run's iterations, [1] int64, on the device; None on any other
+    # step. Its host copy is ``HostRows.ran``.
     run_replays: torch.Tensor | None = None
     # The request each row of ``output_spans`` belongs to, stamped by the
     # engine like ``row_request_ids``.

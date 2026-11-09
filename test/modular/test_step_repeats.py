@@ -88,12 +88,12 @@ def test_a_device_run_starts_with_only_real_rows_live_and_keeps_a_column_an_iter
 def test_a_device_run_that_ended_short_settles_its_width_before_anything_reads_it():
     """A run ended short wrote only the columns it ran, so the host cuts them
     to that width and reads the step as the width it really had."""
-    rows = HostRows((1, 2), {"new_token": torch.tensor([[5, 9, 0], [6, 2, 0]])})
+    rows = HostRows((1, 2), {"new_token": torch.tensor([[5, 9, 0], [6, 2, 0]])}, torch.tensor([2]))
     ctx = SimpleNamespace(repeats=3)
     batch_n = SimpleNamespace(
         batch=SimpleNamespace(repeats=3), node_batch=SimpleNamespace(step_context=ctx), graph_walk=WALK,
     )
-    outputs = SimpleNamespace(repeats=3, run_replays=torch.tensor([2]))
+    outputs = SimpleNamespace(repeats=3)
 
     Worker._settle_device_run(batch_n, outputs, rows)
 
