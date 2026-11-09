@@ -1,4 +1,6 @@
 import json
+import sys
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
@@ -170,7 +172,8 @@ class _UploadServer(_RecordingServer):
     ([("clip.wav", b"RIFF")], {"input_modalities": "video_frame"}, "'video_frame' is an output-only modality"),
     ([("clip.wav", b"RIFF")], {"model_kwargs": "{"}, "model_kwargs must be valid JSON"),
     ([("clip.wav", b"RIFF")], {"model_kwargs": "[1]"}, "model_kwargs must be a JSON object"),
-], ids=["unknown-file", "video-frame-input", "bad-json", "not-an-object"])
+    ([("clip.wav", b"RIFF"), ("x" * 300 + ".wav", b"RIFF")], {"model_kwargs": "{"}, "model_kwargs must be valid JSON"),
+], ids=["unknown-file", "video-frame-input", "bad-json", "not-an-object", "long-name"])
 def test_a_refused_generate_leaves_no_upload_behind(monkeypatch, tmp_path, files, fields, detail):
     """A request refused after its files are saved is never submitted, so the
     deferred cleanup never sees them; the refusal deletes them."""
@@ -186,3 +189,16 @@ def test_a_refused_generate_leaves_no_upload_behind(monkeypatch, tmp_path, files
     assert (response.status_code, response.json()) == (400, {"detail": detail})
     assert server.streaming is None
     assert list(tmp_path.iterdir()) == []
+
+
+def test_an_upload_name_is_not_interned(monkeypatch, tmp_path):
+    """Python 3.12's pathlib interns each name it parses, for the life of the
+    process, so a path built from every request's file grows the server."""
+    monkeypatch.setattr(entrypoint, "api_server", _UploadServer(tmp_path))
+    name = f"{uuid.uuid4().hex}.wav"
+    response = TestClient(entrypoint.app).post(
+        "/generate", files=[("files", (name, b"RIFF"))], data={"model_kwargs": "{"},
+    )
+    assert response.status_code == 400
+    copy = "".join(list(name))  # an equal string that is a new object
+    assert sys.intern(copy) is copy, "the client's file name was interned"

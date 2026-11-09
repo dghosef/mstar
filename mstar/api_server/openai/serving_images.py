@@ -5,8 +5,6 @@ from __future__ import annotations
 import base64
 import os
 import re
-from pathlib import Path
-from uuid import uuid4
 
 from fastapi import HTTPException
 
@@ -87,16 +85,12 @@ async def create_image_edit(
 ):  # noqa: ARG001
     # Persist the uploaded image so the model's loader can read it by path
     # (same contract as multipart uploads), then run the image-to-image edit.
-    upload_dir = Path(api.upload_dir)
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    ext = os.path.splitext(image_filename or "")[1] or ".png"
-    image_path = upload_dir / f"{uuid4().hex}{ext}"
-    image_path.write_bytes(image_bytes)
+    image_path = media_io.save_upload(image_bytes, image_filename or "image.png", api.upload_dir)
 
     try:
-        args = adapter.image_edit_to_request(prompt, str(image_path), model_kwargs)
+        args = adapter.image_edit_to_request(prompt, image_path, model_kwargs)
     except Exception as exc:
-        image_path.unlink(missing_ok=True)
+        media_io.unlink_upload(image_path)
         if isinstance(exc, NotImplementedError):
             # a model with images but no editing: the client's error, a 400
             raise ValueError(str(exc)) from exc
@@ -116,7 +110,7 @@ async def create_image_edit(
         )
         chunks = await api.collect_results(request_id, raw_request)
     finally:
-        media_io.schedule_upload_cleanup({"image": [str(image_path)]}, upload_dir)
+        media_io.schedule_upload_cleanup({"image": [image_path]}, api.upload_dir)
     data = [
         {"b64_json": base64.b64encode(c.data), "url": None}
         for c in chunks

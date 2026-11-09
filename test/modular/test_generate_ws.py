@@ -387,7 +387,7 @@ def test_a_file_that_cannot_be_saved_refuses_its_message_and_leaves_nothing(monk
     monkeypatch.setattr(entrypoint, "api_server", fake)
     with TestClient(entrypoint.app).websocket_connect("/generate/ws") as ws:
         ws.send_text(json.dumps({"request_id": "r", "text": "x", "files": [
-            {"name": "a.png", "data": "QUJD"}, {"name": "b" * 300 + ".png", "data": "QUJD"},
+            {"name": "a.png", "data": "QUJD"}, {"name": "b\0.png", "data": "QUJD"},
         ]}))
         reply = json.loads(ws.receive_text())
     assert reply["request_id"] == "r" and str(tmp_path) not in reply["error"]

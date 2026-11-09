@@ -125,7 +125,7 @@ for _mod, _exts in {
 
 
 def _detect_modality(filename: str) -> str:
-    return _EXT_TO_MODALITY.get(Path(filename).suffix.lower(), "unknown")
+    return _EXT_TO_MODALITY.get(os.path.splitext(filename)[1].lower(), "unknown")
 
 
 def resolve_lora_spec(model, model_config: dict | None) -> LoraSpec | None:
@@ -2205,7 +2205,7 @@ def _decode_ws_files(
         raise ValueError("files must be a list of {name, data} objects")
     file_paths: dict[str, list[str]] = {}
     parts: list[PromptPart] = []
-    saved: list[Path] = []
+    saved: list[str] = []
     try:
         for entry in files or []:
             if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
@@ -2216,19 +2216,19 @@ def _decode_ws_files(
                 raise ValueError(f"Cannot determine modality for file: {name}")
             data = entry.get("data")
             save_path = (
-                Path(data.claim()) if isinstance(data, ws_frames.SavedUpload)
+                data.claim() if isinstance(data, ws_frames.SavedUpload)
                 else ws_frames.save_entry(name, data, upload_dir)
             )
             saved.append(save_path)
             paths = file_paths.setdefault(modality, [])
             parts.append(PromptPart(modality=modality, index=len(paths)))
-            paths.append(str(save_path))
+            paths.append(save_path)
     except Exception:
-        for path in saved:
-            path.unlink(missing_ok=True)
-        for entry in files or []:  # the ones not reached
-            if isinstance(entry, dict) and isinstance(entry.get("data"), ws_frames.SavedUpload):
-                Path(entry["data"].claim()).unlink(missing_ok=True)
+        unreached = [
+            entry["data"].claim() for entry in files or []
+            if isinstance(entry, dict) and isinstance(entry.get("data"), ws_frames.SavedUpload)
+        ]
+        media_io.remove_uploads({"saved": saved, "unreached": unreached}, upload_dir)
         raise
     return file_paths, parts
 
@@ -2777,27 +2777,26 @@ async def generate(
     # --- save uploaded files, grouped by modality ----------------
     file_paths: dict[str, list[str]] = {}
     parts: list[PromptPart] = []
-    if files:
-        for f in files:
+    try:
+        for f in files or []:
             modality = _detect_modality(f.filename or "")
             if modality == "unknown":
-                # a refused request is never submitted, so the deferred cleanup
-                # below never sees what it saved
-                _remove_uploads(file_paths)
                 raise HTTPException(
                     status_code=400,
                     detail=f"Cannot determine modality for file: {f.filename}",
                 )
-            # Sanitize: only the final path component of the client name;
-            # embedded separators (../) would escape upload_dir.
-            base = os.path.basename(f.filename or "") or "upload"
-            save_name = f"{uuid.uuid4()}_{base}"
-            save_path = api_server.upload_dir / save_name
             content = await f.read()
-            await run_in_threadpool(save_path.write_bytes, content)
+            save_path = await run_in_threadpool(
+                media_io.save_upload, content, f.filename or "", api_server.upload_dir,
+            )
             paths = file_paths.setdefault(modality, [])
             parts.append(PromptPart(modality=modality, index=len(paths)))
-            paths.append(str(save_path))
+            paths.append(save_path)
+    except BaseException:
+        # a refused request is never submitted, so the deferred cleanup
+        # below never sees what it saved
+        _remove_uploads(file_paths)
+        raise
     if text:
         parts.append(PromptPart(modality="text", text=text))
 

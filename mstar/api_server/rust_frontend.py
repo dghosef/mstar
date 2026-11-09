@@ -395,12 +395,13 @@ class RustFrontendBridge:
             try:
                 from mstar.api_server import media_io
 
-                path = Path(msg["path"])
+                path = msg["path"]  # a str: pathlib would intern its per-request name (media_io.save_upload)
                 # it deletes what it refuses, so only a clip the frontend saved under upload_dir
-                if not path.resolve().is_relative_to(Path(self.server.upload_dir).resolve()):
+                root = os.path.realpath(self.server.upload_dir)
+                if os.path.commonpath((root, os.path.realpath(path))) != root:
                     raise RuntimeError(f"ref_audio {path} is outside the upload directory")
                 await asyncio.to_thread(
-                    media_io.check_saved_ref_audio, str(path), msg["decoder"], bool(msg.get("bare")))
+                    media_io.check_saved_ref_audio, path, msg["decoder"], bool(msg.get("bare")))
                 self._send(reply)
             except ValueError as exc:
                 self._send({**reply, "error": str(exc), "status": 400})

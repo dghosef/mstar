@@ -138,12 +138,38 @@ def _ext_for(mime: str, fallback: str = ".bin") -> str:
 # Inbound: persist request media into upload_dir, return (modality, path)
 # ---------------------------------------------------------------------------
 
+# Per-request upload paths are strings, never pathlib paths: Python 3.12's pathlib interns
+# each name it parses, for the life of the process, so one per request grows the server.
+
+def save_upload(raw: bytes, filename: str, upload_dir: Path, prefix: str | None = None) -> str:
+    """Write a client's file under ``upload_dir`` as ``<prefix or uuid>_<name>`` and return
+    its path. Only the name's last component is kept, so an embedded ``../`` can't escape;
+    past 180 bytes it becomes ``upload`` plus its extension (the decoders sniff the container
+    by it) when that is short, as a file name is at most 255. A failed write leaves nothing."""
+    os.makedirs(upload_dir, exist_ok=True)
+    base = os.path.basename(filename) or "upload"
+    if len(os.fsencode(base)) > 180:
+        ext = os.path.splitext(base)[1]
+        base = "upload" + (ext if len(os.fsencode(ext)) <= 16 else "")
+    path = os.path.join(upload_dir, f"{prefix or uuid4()}_{base}")
+    try:
+        with open(path, "wb") as f:
+            f.write(raw)
+    except BaseException:
+        unlink_upload(path)
+        raise
+    return path
+
+
+def unlink_upload(path: str) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
 def _save_bytes(raw: bytes, mime: str, upload_dir: Path) -> tuple[str, str]:
-    upload_dir = Path(upload_dir)
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    path = upload_dir / f"{uuid4()}{_ext_for(mime)}"
-    path.write_bytes(raw)
-    return modality_from_mime(mime), str(path)
+    return modality_from_mime(mime), save_upload(raw, "upload" + _ext_for(mime), upload_dir)
 
 
 def _decode_base64_payload(payload: str) -> bytes:
@@ -168,16 +194,12 @@ def save_data_url(data_url: str, upload_dir: Path) -> tuple[str, str]:
 
 def save_base64(b64: str, fmt: str, modality_hint: str, upload_dir: Path) -> tuple[str, str]:
     """Persist a bare base64 blob with a known ``fmt`` (e.g. ``"wav"``)."""
-    upload_dir = Path(upload_dir)
-    upload_dir.mkdir(parents=True, exist_ok=True)
     raw = _decode_base64_payload(b64)
     # Sanitize the client-controlled fmt: alphanumerics only, so it cannot
     # inject path separators into the upload path.
     clean = "".join(c for c in fmt.lstrip(".") if c.isalnum())
     ext = "." + clean if clean else ".bin"
-    path = upload_dir / f"{uuid4()}{ext}"
-    path.write_bytes(raw)
-    return modality_hint, str(path)
+    return modality_hint, save_upload(raw, "upload" + ext, upload_dir)
 
 
 # Telephone band, the lowest rate speech is recorded or coded at. A clip below it
@@ -257,10 +279,10 @@ def check_ref_audio(path: str, decoder: str) -> None:
             except Exception:  # noqa: BLE001 — not a libsndfile container; the loader tries FFmpeg
                 _check_ref_audio_torchcodec(path)
     except RefAudioTooLongError:
-        Path(path).unlink(missing_ok=True)
+        unlink_upload(path)
         raise
     except Exception as exc:  # noqa: BLE001 — not loadable here, so the model cannot load it either
-        Path(path).unlink(missing_ok=True)
+        unlink_upload(path)
         raise ValueError(
             f"ref_audio must be audio the model can decode, at {MIN_REF_AUDIO_SAMPLE_RATE} Hz or more"
         ) from exc
@@ -503,7 +525,7 @@ def save_remote_url(url: str, upload_dir: Path, timeout: float = 30.0) -> tuple[
                 continue
             if not 200 <= resp.status < 300:
                 raise _fetch_error(host, f"upstream returned {resp.status}")
-            return _stream_to_upload(resp, conn, url, Path(upload_dir), max_bytes, host)
+            return _stream_to_upload(resp, conn, url, upload_dir, max_bytes, host)
         except RemoteFetchError:
             raise
         # before ValueError: a failed certificate check (SSLCertVerificationError) is both;
@@ -529,12 +551,12 @@ def _stream_to_upload(resp, conn: _PinnedConnection, url: str, upload_dir: Path,
     mime = (resp.getheader("Content-Type") or "").split(";", 1)[0].strip().lower()
     if mime in ("", "application/octet-stream"):
         # Infer from the URL path extension.
-        suffix = Path(urlparse(url).path).suffix.lower()
+        suffix = os.path.splitext(urlparse(url).path)[1].lower()
         rev = {v: k for k, v in _MIME_TO_EXT.items()}
         mime = rev.get(suffix, "application/octet-stream")
-    path = upload_dir / f"{uuid4()}{_ext_for(mime)}"
+    path = os.path.join(upload_dir, f"{uuid4()}{_ext_for(mime)}")
     try:
-        upload_dir.mkdir(parents=True, exist_ok=True)
+        os.makedirs(upload_dir, exist_ok=True)
         f = open(path, "wb", buffering=0)
     except OSError as e:
         raise _fetch_error(host, "could not save the file", e) from None
@@ -559,9 +581,9 @@ def _stream_to_upload(resp, conn: _PinnedConnection, url: str, upload_dir: Path,
         if conn.timed_out():  # a body that runs to EOF also "ends" when the watchdog shuts the socket
             raise TimeoutError
     except BaseException:
-        path.unlink(missing_ok=True)
+        unlink_upload(path)
         raise
-    return modality_from_mime(mime), str(path)
+    return modality_from_mime(mime), path
 
 
 def resolve_media_ref(ref: str, upload_dir: Path, *, allow_remote: bool = False) -> tuple[str, str]:
@@ -593,14 +615,13 @@ def remove_uploads(file_paths: dict[str, list[str]] | None, upload_dir: Path) ->
     """Delete a request's files under ``upload_dir`` now. A path elsewhere is
     left alone: no route puts one in ``file_paths`` today, and a file the
     server did not save is never the request's to delete."""
-    root = Path(upload_dir).resolve()
+    root = os.path.realpath(upload_dir)
     for paths in (file_paths or {}).values():
         for path in paths:
-            p = Path(path)
-            if not p.resolve().is_relative_to(root):
+            if os.path.commonpath((root, os.path.realpath(path))) != root:
                 continue
             try:
-                p.unlink(missing_ok=True)
+                unlink_upload(path)
             except OSError:
                 pass
 
@@ -949,7 +970,8 @@ def to_pcm16(audio) -> np.ndarray:
 
 def write_wav(audio, path: str, sample_rate: int = 16000) -> str:
     """Float waveform -> 16-bit PCM WAV file at ``path`` (see :func:`to_pcm16`)."""
-    Path(path).write_bytes(pcm16_to_wav_bytes(to_pcm16(audio).tobytes(), sample_rate))
+    with open(path, "wb") as f:
+        f.write(pcm16_to_wav_bytes(to_pcm16(audio).tobytes(), sample_rate))
     return path
 
 
@@ -1001,11 +1023,10 @@ def mux_mp4_with_pcm16(
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
-        vpath = Path(tmp) / "v.mp4"
-        apath = Path(tmp) / "a.pcm"
-        opath = Path(tmp) / "out.mp4"
-        vpath.write_bytes(video_mp4)
-        apath.write_bytes(pcm)
+        vpath, apath, opath = (os.path.join(tmp, name) for name in ("v.mp4", "a.pcm", "out.mp4"))
+        for path, data in ((vpath, video_mp4), (apath, pcm)):
+            with open(path, "wb") as f:
+                f.write(data)
         itsscale = None
         if video_fps:
             probe = subprocess.run(
@@ -1033,7 +1054,8 @@ def mux_mp4_with_pcm16(
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, check=False)
         if proc.returncode != 0:
             raise RuntimeError(f"ffmpeg mux failed: {proc.stderr.strip()[:500]}")
-        return opath.read_bytes()
+        with open(opath, "rb") as f:
+            return f.read()
 
 
 def wav_stream_header(sample_rate: int, num_channels: int = 1, bits: int = 16) -> bytes:

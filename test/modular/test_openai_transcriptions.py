@@ -21,6 +21,7 @@ pytest.importorskip("httpx")
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from mstar.api_server import media_io  # noqa: E402
 from mstar.api_server.openai import adapters, serving_transcriptions  # noqa: E402
 from mstar.api_server.openai.protocol import TranscriptionRequest  # noqa: E402
 
@@ -221,9 +222,16 @@ def test_srt_and_vtt_rendering():
     assert vtt.startswith("WEBVTT\n\n00:00:00.000 --> 00:00:01.500\nHi")
 
 
-def test_save_upload_keeps_extension_and_drops_directories(tmp_path):
-    path = serving_transcriptions.save_upload(b"x", "../../evil.flac", tmp_path)
-    assert Path(path).parent == tmp_path and path.endswith("_evil.flac")
+@pytest.mark.parametrize("name, saved_as", [
+    ("../../evil.flac", "_evil.flac"),
+    # past the 255-byte file name limit the write failed: a 500 (images, transcriptions, /generate)
+    ("x" * 300 + ".flac", "_upload.flac"),
+    ("é" * 200 + ".flac", "_upload.flac"),
+    ("in." + "x" * 400, "_upload"),
+])
+def test_save_upload_keeps_extension_and_drops_directories(tmp_path, name, saved_as):
+    path = media_io.save_upload(b"x", name, tmp_path)
+    assert Path(path).parent == tmp_path and path.endswith(saved_as)
     assert Path(path).read_bytes() == b"x"
 
 

@@ -20,6 +20,7 @@ server's entrypoint (torch included, a few hundred MB each).
 from __future__ import annotations
 
 import asyncio
+import glob
 import json
 import logging
 import multiprocessing as mp
@@ -33,7 +34,7 @@ from pathlib import Path
 
 import msgpack
 
-from mstar.api_server.media_io import _decode_base64_payload
+from mstar.api_server.media_io import _decode_base64_payload, save_upload, unlink_upload
 from mstar.utils.orphan import watch_parent
 
 logger = logging.getLogger(__name__)
@@ -68,7 +69,7 @@ class SavedUpload:
 
     def __init__(self, path: str):
         self.path = path
-        self._remove = weakref.finalize(self, _unlink, path)
+        self._remove = weakref.finalize(self, unlink_upload, path)
 
     def claim(self) -> str:
         self._remove.detach()
@@ -77,10 +78,6 @@ class SavedUpload:
     def __reduce__(self):
         # The pool sends it back as a path; the server makes the owning object.
         return SavedUpload, (self.path,)
-
-
-def _unlink(path: str) -> None:
-    Path(path).unlink(missing_ok=True)
 
 
 def parse(payload: bytes | str):
@@ -101,7 +98,7 @@ def _files(message) -> list[dict]:
     return [entry for files in found for entry in files if isinstance(entry, dict)]
 
 
-def save_entry(name: str, data, upload_dir: Path, prefix: str | None = None) -> Path:
+def save_entry(name: str, data, upload_dir: Path, prefix: str | None = None) -> str:
     """Save a file's ``data``: raw bytes, or base64 text, by the decoder the
     data-URL paths use (unpadded or wrapped is fine; a bad alphabet is the
     client's error). A failed write leaves nothing."""
@@ -109,13 +106,7 @@ def save_entry(name: str, data, upload_dir: Path, prefix: str | None = None) -> 
         data = _decode_base64_payload(data)
     if not isinstance(data, (bytes, bytearray)):
         raise ValueError(f"file {name!r} carries no data")
-    path = Path(upload_dir) / f"{prefix or uuid.uuid4()}_{os.path.basename(name) or 'upload'}"
-    try:
-        path.write_bytes(data)
-    except BaseException:
-        _unlink(str(path))
-        raise
-    return path
+    return save_upload(data, name, upload_dir, prefix)
 
 
 def _parse_saving_files(frame: str, binary: bool, upload_dir: str):
@@ -125,7 +116,7 @@ def _parse_saving_files(frame: str, binary: bool, upload_dir: str):
     The saved names start with the frame's: until this returns, they are
     ``parse_frame``'s to remove."""
     global _parsing
-    stem = Path(frame).stem
+    stem = os.path.splitext(os.path.basename(frame))[0]
     _parsing = (upload_dir, stem)
     with open(frame, "rb") as f:
         payload = f.read()
@@ -147,11 +138,11 @@ def _parse_saving_files(frame: str, binary: bool, upload_dir: str):
                 entry["data"] = "!"
                 continue
         try:
-            path = save_entry(name, data, Path(upload_dir), f"{stem}-{i}")
+            path = save_entry(name, data, upload_dir, f"{stem}-{i}")
         except (OSError, ValueError):
             continue
         upload = object.__new__(SavedUpload)  # no finalizer in this process
-        upload.path = str(path)
+        upload.path = path
         entry["data"] = upload
     _parsing = None
     return message
@@ -219,7 +210,7 @@ async def parse_frame(payload: bytes | str, upload_dir: Path):
         return parse(payload)
     loop = asyncio.get_running_loop()
     stem = str(uuid.uuid4())
-    frame = str(Path(upload_dir) / f"{stem}.wsframe")
+    frame = os.path.join(upload_dir, f"{stem}.wsframe")
     pool = None
     try:
         await loop.run_in_executor(None, _write_frame, payload, frame)
@@ -241,7 +232,7 @@ async def parse_frame(payload: bytes | str, upload_dir: Path):
         _replace(pool)
         raise OSError("the frame's parser process died") from None
     finally:
-        _unlink(frame)
+        unlink_upload(frame)
 
 
 def _replace(pool: ProcessPoolExecutor) -> None:
@@ -255,5 +246,5 @@ def _replace(pool: ProcessPoolExecutor) -> None:
 
 
 def _sweep(upload_dir: Path, stem: str) -> None:
-    for path in Path(upload_dir).glob(f"{stem}-*"):
-        _unlink(str(path))
+    for path in glob.glob(os.path.join(glob.escape(str(upload_dir)), f"{stem}-*")):
+        unlink_upload(path)

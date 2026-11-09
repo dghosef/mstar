@@ -62,7 +62,6 @@ import logging
 import math
 import os
 import threading
-import uuid
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -146,21 +145,6 @@ def window_share(api) -> WindowShare:
     return share
 
 
-def save_upload(audio_bytes: bytes, filename: str | None, upload_dir: Path) -> str:
-    """Persist the uploaded audio under ``upload_dir`` and return its path.
-
-    Only the final path component of the client's name is kept, so an
-    embedded ``../`` cannot escape the directory; the extension is kept
-    because the data worker's decoder sniffs the container by it.
-    """
-    upload_dir = Path(upload_dir)
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    base = os.path.basename(filename or "") or "audio.wav"
-    path = upload_dir / f"{uuid.uuid4()}_{base}"
-    path.write_bytes(audio_bytes)
-    return str(path)
-
-
 def audio_duration_seconds(path: str) -> float | None:
     """Duration from the container, or None when it can't be read."""
     try:
@@ -230,7 +214,7 @@ class WindowPlanner:
         # request asks for keep most of their length
         self.search_seconds = search_seconds if max_seconds is None else min(search_seconds, max_seconds / 3)
         self.frame_seconds = frame_seconds
-        self.upload_dir = Path(upload_dir)
+        self.upload_dir = upload_dir
         self.duration = audio_duration_seconds(audio_path)
         self.files = [audio_path]
         self._audio = None
@@ -311,11 +295,11 @@ class WindowPlanner:
         return self._audio
 
     def _write(self, piece, offset: float) -> Window:
-        stem = Path(self.audio_path).stem
-        path = media_io.write_wav(piece, str(self.upload_dir / f"{stem}_w{self._count:04d}.wav"), SAMPLE_RATE)
+        stem = os.path.splitext(os.path.basename(self.audio_path))[0]
+        path = media_io.write_wav(piece, os.path.join(self.upload_dir, f"{stem}_w{self._count:04d}.wav"), SAMPLE_RATE)
         with self._lock:
             if self._closed:
-                Path(path).unlink(missing_ok=True)
+                media_io.unlink_upload(path)
                 raise RuntimeError("the request was closed while its upload was being cut")
             self.files.append(path)
         self._count += 1
@@ -326,7 +310,7 @@ class WindowPlanner:
             self._closed = True
             files, self.files = self.files, []
         for path in files:
-            Path(path).unlink(missing_ok=True)
+            media_io.unlink_upload(path)
 
 
 def plan_windows(audio_path: str, max_seconds: float | None, upload_dir: Path) -> list[Window]:
@@ -603,7 +587,7 @@ async def create_transcription(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     window = _window_seconds(adapter, req)
-    audio_path = save_upload(audio_bytes, filename, api.upload_dir)
+    audio_path = media_io.save_upload(audio_bytes, filename or "audio.wav", api.upload_dir)
     planner = planner_for(adapter, audio_path, api.upload_dir, window)
     if planner.duration is not None and planner.duration > MAX_DURATION_SECONDS:
         planner.cleanup()
