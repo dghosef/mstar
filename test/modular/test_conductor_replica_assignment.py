@@ -70,7 +70,7 @@ class _Model(StubModel):
 
     def __init__(self, keyed=None, partitions=None):
         self._keyed = {"kv": {"main": ("prefill",)}} if keyed is None else keyed
-        self._partitions = partitions or [SimpleNamespace(name="default", graph_walks={"prefill"})]
+        self._partitions = partitions or [SimpleNamespace(name="default", graph_walks={"prefill"}, open_after=None)]
 
     def get_partitions(self):
         return self._partitions
@@ -372,7 +372,7 @@ def test_a_request_that_runs_none_of_a_resources_nodes_takes_no_part_in_its_mirr
     # an encoder group and the LLM's on the same ranks pick together; the cache is the LLM's
     router = ReplicaRouter(
         _Model(partitions=[SimpleNamespace(name="encoder", graph_walks={"encode"}),
-                           SimpleNamespace(name="default", graph_walks={"prefill"})]),
+                           SimpleNamespace(name="default", graph_walks={"prefill"}, open_after=None)]),
         [_wg(0, [0, 1], nodes=("enc",), walk="encode"), _wg(1, [0, 1])], specs=[_kv_spec()],
     )
     configs = _configs(_prompt("P"))
@@ -391,7 +391,7 @@ def test_a_request_refused_at_ingest_leaves_nothing_in_the_mirrors():
     ))
     conductor.model = make_model(
         LENGTH_KWARGS=("max_output_tokens",),
-        get_partitions=lambda: [SimpleNamespace(name="default", graph_walks={"prefill"})],
+        get_partitions=lambda: [SimpleNamespace(name="default", graph_walks={"prefill"}, open_after=None)],
         get_partition_topology=lambda: SimpleNamespace(connections=[]),
         get_initial_forward_pass_args=lambda **kw: walk,
         get_max_output_tokens=lambda **kw: 8,

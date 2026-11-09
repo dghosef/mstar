@@ -134,6 +134,8 @@ class StepRunner:
         # declaring node runs on this lockstep instance, so no other instance
         # can retrieve their state (``skip_publish``)
         self._unpublished: dict[str, set] = {key: set() for key in self._publish_order}
+        # request -> the resource keys it has opened (``ingest_request``)
+        self._opened: dict[str, set[str]] = {}
         # capture-time buffer allocation, likewise scoped: a node's runner has
         # no business sizing a resource it never plans against
         self._node_order = self._per_node(node_resources, list(self._order))
@@ -346,17 +348,24 @@ class StepRunner:
     def ingest_request(
         self, rid: str,
         overrides: Mapping[str, ResourceReqConfig] | None = None,
+        keys: Collection[str] | None = None,
+        skip: Collection[str] = (),
     ) -> None:
-        """open state on all resources; `overrides` are per-resource. All or
-        nothing: a resource that raises leaves the request on none of them."""
-        for i, key in enumerate(self._order):
+        """open state on the resources of ``keys`` (all by default, less ``skip``)
+        that the request has not opened yet; `overrides` are per-resource. All or
+        nothing for this call: a resource that raises leaves the request on
+        none of the ones it opened here. What each call opened is kept in
+        ``_opened``, so ``remove_request`` releases exactly that."""
+        opened = self._opened.setdefault(rid, set())
+        todo = [key for key in self._order if key not in opened and key not in skip and (keys is None or key in keys)]
+        for i, key in enumerate(todo):
             try:
                 self._resources[key].ingest_request(
                     rid, None if overrides is None else overrides.get(key)
                 )
             except Exception:
                 # the raising resource may have taken part of it too
-                for done in self._order[:i + 1]:
+                for done in todo[:i + 1]:
                     try:
                         self._resources[done].remove_request(rid)
                     except Exception:
@@ -364,6 +373,7 @@ class StepRunner:
                             "rolling back request %s on resource %s failed", rid, done,
                         )
                 raise
+            opened.add(key)
 
     def ingest_capture_row(self, rid: str) -> None:
         """open a capture padding row on all resources"""
@@ -372,8 +382,11 @@ class StepRunner:
 
     def remove_request(self, rid: str) -> None:
         self._admission.remove_request(rid)
+        # only what the request opened; a rid never ingested (a capture row) is removed everywhere
+        opened = self._opened.pop(rid, None)
         for key in self._order:
-            self._resources[key].remove_request(rid)
+            if opened is None or key in opened:
+                self._resources[key].remove_request(rid)
         for rids in self._unpublished.values():
             rids.discard(rid)
 

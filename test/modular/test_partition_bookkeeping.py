@@ -7,6 +7,7 @@ sys.path.insert(0, ".")
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 import yaml
 from rust_runtime import Inboxes, build_runtime
@@ -30,7 +31,7 @@ from mstar.streaming.chunk_policy import FixedChunkPolicy
 from mstar.streaming.topology import Connection, PartitionTopology
 from mstar.testing_utils.model import StubModel
 from mstar.utils.containers import ParallelList
-from mstar.utils.ipc_format import NewRequestConductor
+from mstar.utils.ipc_format import NewRequestConductor, WorkerGraphsDone
 
 
 def colocated_partitions():
@@ -88,18 +89,21 @@ def test_token_counts_stay_with_their_partition(tmp_path):
             per_request_info=ParallelList([rid], [_fwd_info(walk, part)]),
             new_token_counts=ParallelList([rid], [tokens])))
 
+    rt.mark_exit(rid, "P", "tool_call")
     for part, walk, wg, node, inp in STEPS:
         _ingest(rt, rid, [GraphEdge(next_node=node, name=inp)])
         run(part, walk, wg, node, {"tok": 1} if part == "P" else {})
     dones = inboxes.bodies("conductor")
     assert [d.partition_name for d in dones] == ["C"]
     assert dones[0].new_token_counts == {}, f"C's WORKER_GRAPHS_DONE carries P's {dones[0].new_token_counts}"
+    assert dones[0].exit == ""
 
     # P's count is still held for P's own report, when its loop ends
     rt.stop_loops_batched("P", "produce", "p", ParallelList([rid], [["lp"]]))
     run("P", "produce", 0, "p", {})
     done = inboxes.bodies("conductor")[-1]
     assert (done.partition_name, done.new_token_counts) == ("P", {"tok": 1})
+    assert done.exit == "tool_call"
 
 
 def test_split_inputs_keeps_persist_order_across_walks():
@@ -166,6 +170,49 @@ def _two_stream_conductor(tmp_path, monkeypatch, model=None):
         request_id="rid", initial_signals={}, initial_input_modalities=["text"],
         initial_output_modalities=["text"], input_metadata={}, model_kwargs={}))
     return c
+
+
+class _AgentModel(StubModel):
+    """Two models' nodes and a tool in one graph: the first model's loop either
+    leaves through the ``tool_call`` exit, to the tool and then the second
+    model, or ends the request."""
+
+    def get_graph_walk_graphs(self):
+        return {walk: GraphNode(name=walk, input_names=["x"], outputs=[]) for walk in ("llm_a", "tool", "llm_b")}
+
+    def get_partitions(self):
+        return [PartitionDefinition("default", {"llm_a", "tool", "llm_b"}, initial_walk="llm_a")]
+
+    def get_initial_forward_pass_args(self, partition_name, *a, **k):
+        return ForwardPassArgs(CurrentForwardConductorMetadata(graph_walk="llm_a", is_prefill=False), [], [])
+
+    def get_partition_forward_pass_args(self, partition_name, partition_metadata, *a, **k):
+        walk = partition_metadata.graph_walk
+        after_llm_a = "tool" if partition_metadata.exit == "tool_call" else None
+        following = {"llm_a": after_llm_a, "tool": "llm_b"}.get(walk)
+        if following is None:
+            return ForwardPassArgs(partition_metadata, [], [], request_done=True)
+        metadata = CurrentForwardConductorMetadata(graph_walk=following, is_prefill=False)
+        return ForwardPassArgs(metadata, [GraphEdge(next_node=following, name="x")], [])
+
+
+@pytest.mark.parametrize(("exit_name", "walks"), [("tool_call", ["tool", "llm_b"]), ("", [])])
+def test_an_exit_picks_the_next_walk_once(tmp_path, monkeypatch, exit_name, walks):
+    c = _two_stream_conductor(tmp_path, monkeypatch, _AgentModel())
+    sent = []
+    monkeypatch.setattr(c, "_send_partition_inputs", lambda rid, part, args: sent.append(args.full_metadata.graph_walk))
+    pstate = c.requests["rid"].partition_states["default"]
+    c._process_worker_graphs_done(WorkerGraphsDone(
+        request_id="rid", worker_graph_ids=list(pstate.current_worker_graph_ids),
+        is_first_tp_rank=True, partition_name="default", exit=exit_name,
+    ))
+    assert pstate.metadata.exit == exit_name
+
+    c._process_done_forward("rid", "default")
+    assert pstate.metadata.exit == ""   # the tool's own transition must not see it
+    if exit_name:
+        c._process_done_forward("rid", "default")
+    assert sent == walks
 
 
 def test_parallel_stream_connections_are_both_tracked(tmp_path, monkeypatch):

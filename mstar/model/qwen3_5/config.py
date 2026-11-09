@@ -11,6 +11,7 @@ from pathlib import Path
 from mstar.engine.resources.lora.config import LORA_RESOURCE_KEY
 from mstar.model import keys
 from mstar.model.components.qwen_vision import QwenVisionConfig
+from mstar.model.multimodal import DecoderNames
 
 LINEAR_ATTENTION = "linear_attention"
 FULL_ATTENTION = "full_attention"
@@ -22,6 +23,20 @@ GDN_STATE = "gdn_state"
 LINEAR_ATTN = "linear_attn"
 ROPE = keys.ROPE
 SAMPLER = keys.SAMPLER
+
+
+@dataclass(frozen=True)
+class Qwen3_5Names(DecoderNames):
+    """The text decoder's shared names (``DecoderNames``) and the LLM node's
+    resource keys, which a multimodel member gets prefixed. ``vision_attn`` and
+    the LoRA keys stay unscoped, like the vision node itself."""
+    ATTN: str = ATTN
+    GDN_STATE: str = GDN_STATE
+    LINEAR_ATTN: str = LINEAR_ATTN
+
+
+QWEN3_5_NAMES = Qwen3_5Names()
+
 # per-request LoRA adapters, declared only when the serving YAML turns them on: the
 # LLM's, and the vision encoder's (sized by the same YAML block)
 LORA = LORA_RESOURCE_KEY

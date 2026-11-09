@@ -14,6 +14,7 @@ from mstar.communication.tensors import NameToTensorList
 from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.engine.resources import Resource, SlotLease, SubmoduleStep
 from mstar.engine.resources.lora.config import LoraStep
+from mstar.model.keys import Scope
 from mstar.utils.knobs import device_loopback_enabled  # noqa: F401  (re-export)
 
 # What ``check_stop`` returns, besides loop names, for a stop no loop can carry:
@@ -78,6 +79,13 @@ class TokenStop:
     # or not (``StopCheck.withheld``): a frame streamed beside the stop token
     # is loop control, and only the stop check's host copy tells it from data
     withhold: tuple[str, ...] = ()
+    # stop id -> the name of the conditional edge out of the loop it takes. The
+    # loop's own back-edge is the expected edge: speculation follows it, and a
+    # row that exits costs the usual one wasted step. Only a stopping row pays.
+    # The conductor hands the name to the model's walk transition
+    # (``CurrentForwardConductorMetadata.exit``), which picks the next
+    # walk: a tool's, another model's. A stop id with no name leaves as ever.
+    exits: Mapping[int, str] = field(default_factory=dict)
     # the graph runtime checks ``walk``'s stop ids itself, without calling
     # check_stop (``ARNodeSubmodule.get_stop_policies``); the prompt walks keep
     # check_stop, which can end the partition
@@ -87,6 +95,11 @@ class TokenStop:
         if self.withhold and self.runtime_check:
             # the runtime's check never calls check_stop, which is what withholds
             raise ValueError("a TokenStop that withholds outputs needs check_stop: drop runtime_check")
+        if self.exits and self.runtime_check:
+            # the runtime's check never calls check_stop, which is what names the exit
+            raise ValueError("a TokenStop with named exits needs check_stop: drop runtime_check")
+        if unknown := set(self.exits) - self.stop_ids:
+            raise ValueError(f"TokenStop exits name tokens {sorted(unknown)} that are not stop ids")
 
     def stops_on(self, graph_walk: str) -> bool:
         """Whether a row of ``graph_walk`` can stop the loop."""
@@ -125,19 +138,23 @@ class StopCheck(NamedTuple):
     request, e.g. a frame streamed beside a stop token: a streaming edge then
     gets no item for it, so its consumer needs no device read to find and drop
     it. A plain ``set`` return is the same as ``StopCheck(stops)``.
+
+    ``exit`` names which way the stopping loop left (``TokenStop.exits``).
     """
 
     stops: set[str] | frozenset[str] = frozenset()
     withheld: tuple[str, ...] = ()
+    exit: str = ""
 
 
 class BatchedStopCheck(NamedTuple):
     """``StopCheck`` for ``check_stop_batched``: rid -> what ``check_stop``
     returns for it (loop names or ``END_PARTITION``) and rid -> withheld
-    outputs, rids with none left out of each."""
+    outputs, rids with none left out of each; ``exits`` is rid -> ``StopCheck.exit``."""
 
     stops: dict[str, set[str]]
     withheld: dict[str, tuple[str, ...]]
+    exits: dict[str, str] | None = None
 
 
 if TYPE_CHECKING:
@@ -831,6 +848,10 @@ class NodeSubmodule(torch.nn.Module, ABC):
     # forward where the trace cost dwarfs the win. The KV-cache / stateless
     # engines skip compiling such submodules (CUDA-graph capture is unaffected).
     disable_torch_compile: bool = False
+
+    # The prefix its model's multimodel member gave the names it shares with the
+    # deployment (`mstar.model.keys.Scope`); empty when served alone.
+    scope: Scope = Scope()
 
     def dynamo_recompile_limit(self) -> int | None:
         """Entries dynamo may keep per code object of this submodule's compiled forwards, when
@@ -1633,8 +1654,9 @@ class ARNodeSubmodule(NodeSubmodule):
         # a row's first element, as ``HostRows.first_values`` reads it
         token = outputs[stop.buffer][0].reshape(-1)[0].item()
         stops = self._stop_names(request_info) if self._token_stops(request_id, token, request_info) else set()
-        if stop.withhold and token in stop.stop_ids:
-            return StopCheck(stops, withheld=stop.withhold)
+        exit_name = self._exit_name(token, stops)
+        if exit_name or (stop.withhold and token in stop.stop_ids):
+            return StopCheck(stops, withheld=stop.withhold, exit=exit_name)
         return stops
 
     def check_stop_batched(
@@ -1649,19 +1671,22 @@ class ARNodeSubmodule(NodeSubmodule):
         if pairs is None:
             return None
         verdict, names = self._token_stops, self._stop_names
-        if not stop.withhold:
+        if not stop.withhold and not stop.exits:
             return {
                 rid: names(info) for rid, token in pairs
                 if verdict(rid, token, info := request_infos[rid])
             }
         stops: dict[str, set[str]] = {}
         withheld: dict[str, tuple[str, ...]] = {}
+        exits: dict[str, str] = {}
         for rid, token in pairs:
             if verdict(rid, token, info := request_infos[rid]):
                 stops[rid] = names(info)
-            if token in stop.stop_ids:
+                if exit_name := self._exit_name(token, stops[rid]):
+                    exits[rid] = exit_name
+            if stop.withhold and token in stop.stop_ids:
                 withheld[rid] = stop.withhold
-        return BatchedStopCheck(stops, withheld) if withheld else stops
+        return BatchedStopCheck(stops, withheld, exits or None) if withheld or exits else stops
 
     def _token_stops(self, request_id: str, token: int, info: CurrentForwardPassInfo) -> bool:
         """Both stop checks' verdict on one row: whether its sampled
@@ -1680,6 +1705,11 @@ class ARNodeSubmodule(NodeSubmodule):
         return bool(prefill_walks) and info.max_tokens <= 1 and (
             info.graph_walk in prefill_walks and self._is_reply_token(info)
         )
+
+    def _exit_name(self, token: int, stops: set[str]) -> str:
+        """The named exit a row's ``token`` takes: only a stop of the loop has
+        one, not a row that stopped nothing or ended a prefill."""
+        return self.token_stop.exits.get(token, "") if self.token_stop.loop in stops else ""
 
     def _is_reply_token(self, info: CurrentForwardPassInfo) -> bool:
         flag = self.token_stop.last_prefill_flag

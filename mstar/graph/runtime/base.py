@@ -1040,6 +1040,12 @@ class GraphRuntime(PhasedPostprocess, ABC):
         WORKER_GRAPHS_DONE that follows, unless the node was speculative."""
         pass
 
+    def mark_exit(self, rid: int, partition: str, name: str):
+        """A pass of the partition ended through the named exit
+        (``TokenStop.exits``). Reported once, on the WORKER_GRAPHS_DONE that
+        follows, unless the node was speculative."""
+        raise NotImplementedError
+
     @abstractmethod
     def get_consumed_edges(
         self, source_node: str, dest_node: str, graph_walk: str,

@@ -31,17 +31,17 @@ from torch import nn
 from mstar.distributed.communication import CommGroup
 from mstar.model.components.distributed.attention import ParallelAttention, ParallelCrossAttention
 from mstar.model.whisper.config import (
-    ATTN,
     CONTEXT_LABEL,
-    CROSS_ATTN,
-    CROSS_KV_CACHE,
-    KV_CACHE,
+    WHISPER_NAMES,
     WhisperModelConfig,
+    WhisperNames,
 )
 
 
 class WhisperDecoderLayer(nn.Module):
-    def __init__(self, config: WhisperModelConfig, comm_group: CommGroup | None = None):
+    def __init__(
+        self, config: WhisperModelConfig, comm_group: CommGroup | None = None, names: WhisperNames = WHISPER_NAMES,
+    ):
         super().__init__()
         self.self_attn_layer_norm = nn.LayerNorm(config.d_model)
         self.self_attn = ParallelAttention(
@@ -52,8 +52,8 @@ class WhisperDecoderLayer(nn.Module):
             head_dim=config.head_dim,
             qkv_bias=True,
             o_bias=True,
-            attn_key=ATTN,
-            kv_key=KV_CACHE,
+            attn_key=names.ATTN,
+            kv_key=names.KV_CACHE,
             # learned absolute positions, added at embedding time
             pos_key=None,
         )
@@ -64,8 +64,8 @@ class WhisperDecoderLayer(nn.Module):
             hidden_size=config.d_model,
             num_heads=config.decoder_attention_heads,
             head_dim=config.head_dim,
-            cross_key=CROSS_ATTN,
-            context_kv_key=CROSS_KV_CACHE,
+            cross_key=names.CROSS_ATTN,
+            context_kv_key=names.CROSS_KV_CACHE,
             num_kv_heads=config.decoder_attention_heads,
         )
         self.final_layer_norm = nn.LayerNorm(config.d_model)
@@ -90,13 +90,15 @@ class WhisperDecoderLayer(nn.Module):
 class WhisperDecoderModel(nn.Module):
     """Decoder stack; parameter paths mirror HF's ``model.decoder.*``."""
 
-    def __init__(self, config: WhisperModelConfig, comm_group: CommGroup | None = None):
+    def __init__(
+        self, config: WhisperModelConfig, comm_group: CommGroup | None = None, names: WhisperNames = WHISPER_NAMES,
+    ):
         super().__init__()
         self.config = config
         self.embed_tokens = nn.Embedding(config.vocab_size, config.d_model)
         self.embed_positions = nn.Embedding(config.max_target_positions, config.d_model)
         self.layers = nn.ModuleList(
-            [WhisperDecoderLayer(config, comm_group=comm_group) for _ in range(config.decoder_layers)]
+            [WhisperDecoderLayer(config, comm_group=comm_group, names=names) for _ in range(config.decoder_layers)]
         )
         self.layer_norm = nn.LayerNorm(config.d_model)
 

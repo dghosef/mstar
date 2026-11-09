@@ -23,10 +23,10 @@ from mstar.engine.resources.position.config import PositionConfig, PositionSpec
 from mstar.engine.resources.spec import NodeResourceSpec
 from mstar.model.multimodal import PromptPart, messages_from_parts, vision_encoder
 from mstar.model.multimodal_decoder import (
-    MIXED_SPLIT,
     MediaIntake,
     MultimodalDecoderModel,
     PreparedMedia,
+    mixed_split,
 )
 from mstar.model.muse.config import (
     ATTN_FULL,
@@ -162,13 +162,13 @@ class MuseGlimmerModel(MultimodalDecoderModel):
                 resource_key=ATTN_SLIDING, nodes={"LLM"},
                 config=AttentionConfig(
                     kv_cache=KV_CACHE, sliding_window=cfg.sliding_window, layers=sliding,
-                    sm_scale=cfg.attn_scale, splits=(MIXED_SPLIT,),
+                    sm_scale=cfg.attn_scale, splits=(mixed_split(),),
                 ),
             ),
             AttentionSpec(
                 resource_key=ATTN_FULL, nodes={"LLM"},
                 config=AttentionConfig(
-                    kv_cache=KV_CACHE, sm_scale=cfg.attn_scale, splits=(MIXED_SPLIT,),
+                    kv_cache=KV_CACHE, sm_scale=cfg.attn_scale, splits=(mixed_split(),),
                 ),
             ),
             PositionSpec(

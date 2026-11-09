@@ -31,19 +31,15 @@ from mstar.model.multimodal import (
     vision_encoder,
 )
 from mstar.model.multimodal_decoder import (
-    MIXED_SPLIT,
     MediaIntake,
     MultimodalDecoderModel,
     PreparedMedia,
+    mixed_split,
 )
 from mstar.model.qwen3_5.components.language_model import Qwen3_5ForCausalLM
 from mstar.model.qwen3_5.components.rope import vision_position_advance
 from mstar.model.qwen3_5.config import (
-    ATTN,
-    GDN_STATE,
-    KV_CACHE,
-    LINEAR_ATTN,
-    ROPE,
+    QWEN3_5_NAMES,
     VISION_ATTN,
     Qwen3_5Config,
     Qwen3_5VisionConfig,
@@ -62,6 +58,7 @@ logger = logging.getLogger(__name__)
 # TODO: implement MoE variants
 class Qwen3_5DenseModel(MultimodalDecoderModel):
     NAME = "Qwen3.5"
+    NAMES = QWEN3_5_NAMES
     METADATA_FILES = (
         "config.json",
         "preprocessor_config.json",
@@ -80,9 +77,10 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
         model_path_hf: str,
         cache_dir: str | None = None,
         prefill_token_buckets: list[int] | None = None,
+        scope: str = "",
         **kwargs: Any,
     ):
-        super().__init__(model_path_hf, cache_dir, prefill_token_buckets)
+        super().__init__(model_path_hf, cache_dir, prefill_token_buckets, scope)
         self.config = Qwen3_5Config.from_hf(self.local_dir)
         # None on a text-only checkpoint (`_create_submodule` then refuses a
         # vision_encoder node)
@@ -132,11 +130,13 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
         return torch.float32
 
     def get_node_resources(self) -> list[NodeResourceSpec]:
+        n = self.names
+        split = mixed_split(n)
         num_kv_layers = len(self.config.full_layer_indices)
         num_gdn_layers = len(self.config.linear_layer_indices)
         return [
             KVSpec(
-                resource_key=KV_CACHE, nodes={"LLM"},
+                resource_key=n.KV_CACHE, nodes={"LLM"},
                 config=PagedKVConfig(
                     num_layers=num_kv_layers,
                     num_kv_heads=self.config.num_key_value_heads,
@@ -146,19 +146,19 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
                 )
             ),
             AttentionSpec(
-                resource_key=ATTN, nodes={"LLM"},
+                resource_key=n.ATTN, nodes={"LLM"},
                 config=AttentionConfig(
-                    kv_cache=KV_CACHE,
-                    splits=(MIXED_SPLIT,),
+                    kv_cache=n.KV_CACHE,
+                    splits=(split,),
                     decode_fmha=True,
                 ),
             ),
             PositionSpec(
-                resource_key=ROPE, nodes={"LLM"},
-                config=PositionConfig(kv_cache=KV_CACHE),
+                resource_key=n.ROPE, nodes={"LLM"},
+                config=PositionConfig(kv_cache=n.KV_CACHE),
             ),
             RecurrentStateSpec(
-                resource_key=GDN_STATE, nodes={"LLM"},
+                resource_key=n.GDN_STATE, nodes={"LLM"},
                 config=RecurrentStateConfig(
                     num_layers=num_gdn_layers,
                     blocks=DeltaNetGeometry(
@@ -168,15 +168,15 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
                         head_v_dim=self.config.linear_value_head_dim,
                         conv_kernel_size=self.config.linear_conv_kernel_dim
                     ).to_blocks(state_dtype=self._gdn_state_dtype()),
-                    kv_cache=KV_CACHE,
+                    kv_cache=n.KV_CACHE,
                 )
             ),
             LinearAttnSpec(
-                resource_key=LINEAR_ATTN, nodes={"LLM"},
+                resource_key=n.LINEAR_ATTN, nodes={"LLM"},
                 config=LinearAttnConfig(
-                    recurrent_state=GDN_STATE,
+                    recurrent_state=n.GDN_STATE,
                     variant=LinearAttnVariant.GDN,
-                    splits=(MIXED_SPLIT,),
+                    splits=(split,),
                 ),
             ),
             self._sampler_spec(self.config.vocab_size),
@@ -225,7 +225,7 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
 
         budget = LLMSubmodule.MAX_BATCH_TOKENS
         return {"LLM": (
-            ChunkingPolicy(walks=("prefill_text",), chunkable=True, max_batch_tokens=budget),
+            ChunkingPolicy(walks=(self.names.PREFILL_TEXT,), chunkable=True, max_batch_tokens=budget),
             # carries the budget for the steps that mix a chunk with decode rows
             ChunkingPolicy(walks=(MIXED,), max_batch_tokens=budget),
         )}
@@ -464,12 +464,12 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
         from mstar.model.qwen3_5.weight_loader import load_qwen3_5_weights
 
         model = self._build(
-            lambda: Qwen3_5ForCausalLM(self.config, tp_group), dtype, device,
+            lambda: Qwen3_5ForCausalLM(self.config, tp_group, self.names), dtype, device,
         )
         load_qwen3_5_weights(model, weights_dir, device=device)
         model.requires_grad_(False).eval()
         logger.info("Loaded Qwen3.5 LLM submodule onto %s", device)
         return LLMSubmodule(
             model, self.config, self.vision_config, self.encoders,
-            prefill_token_buckets=self.prefill_token_buckets,
+            prefill_token_buckets=self.prefill_token_buckets, scope=self.scope,
         )

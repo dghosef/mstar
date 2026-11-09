@@ -395,6 +395,12 @@ class ByteLevelDetokenizer:
             # UTF-8, as in the tokenizers library's ByteLevel decoder
             return token.encode("utf-8")
 
+    def to_text_bytes(self, token_ids: list[int]) -> bytes:
+        """The ids' text alone, for a reader that is not the client: a detokenizer
+        that renders control ids for the client's sake (Whisper's language and
+        timestamps) leaves them out here."""
+        return self.to_bytes(token_ids)
+
     def to_bytes(self, token_ids: list[int]) -> bytes:
         raw = bytearray()
         ids = [i for i in token_ids if i not in self.special_ids]
@@ -445,6 +451,9 @@ class TextChunkDetokenizer:
         if self._bytes is None:
             return self.tokenizer.decode(token_ids).encode("utf-8")
         return self._bytes.to_bytes(token_ids)
+
+    def to_text_bytes(self, token_ids: list[int]) -> bytes:
+        return self.to_bytes(token_ids)
 
     def token_bytes(self, token_id: int) -> bytes:
         """``to_bytes([token_id])``, memoized."""

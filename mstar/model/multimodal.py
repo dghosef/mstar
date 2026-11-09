@@ -26,7 +26,7 @@ import torch
 
 from mstar.graph.base import GraphEdge, GraphNode, GraphSection, Loop, Parallel, Sequential
 from mstar.graph.special_destinations import EMIT_TO_CLIENT
-from mstar.model.keys import MIXED
+from mstar.model.keys import KV_CACHE, MIXED, ROPE, SAMPLER
 
 if TYPE_CHECKING:
     from mstar.conductor.request_info import CurrentForwardConductorMetadata
@@ -423,14 +423,31 @@ def vision_encoder(pad_ids: tuple[int, ...]) -> MediaEncoder:
     return MediaEncoder("vision", "vision_encoder", ("pixel_values",), "vision_embeds", pad_ids)
 
 
-def media_walk_name(encoders: Sequence[MediaEncoder]) -> str:
-    return "prefill_" + "_".join(e.name for e in encoders)
+@dataclass(frozen=True)
+class DecoderNames:
+    """The walk, loop, resource-key and persisted-signal names a text decoder
+    built on these scaffolds shares with the deployment. A multimodel member gets
+    them prefixed (``Scope.of``); a model served alone has them as they are.
+    A model with more resources subclasses this."""
+    PREFILL_TEXT: str = "prefill_text"
+    # a media walk is this + its encoders' names (`media_walk_name`)
+    MEDIA_PREFIX: str = "prefill_"
+    DECODE_WALK: str = "decode"
+    DECODE_LOOP: str = "decode_loop"
+    NEW_TOKEN: str = "new_token"
+    KV_CACHE: str = KV_CACHE
+    ROPE: str = ROPE
+    SAMPLER: str = SAMPLER
 
 
-def media_walk_names(encoders: Sequence[MediaEncoder]) -> list[str]:
+def media_walk_name(encoders: Sequence[MediaEncoder], prefix: str = DecoderNames.MEDIA_PREFIX) -> str:
+    return prefix + "_".join(e.name for e in encoders)
+
+
+def media_walk_names(encoders: Sequence[MediaEncoder], prefix: str = DecoderNames.MEDIA_PREFIX) -> list[str]:
     """One walk per non-empty subset of ``encoders``, in declaration order."""
     return [
-        media_walk_name([e for i, e in enumerate(encoders) if mask >> i & 1])
+        media_walk_name([e for i, e in enumerate(encoders) if mask >> i & 1], prefix)
         for mask in range(1, 1 << len(encoders))
     ]
 
@@ -475,7 +492,7 @@ def media_encoders(encoders: Sequence[MediaEncoder], layout: Mapping) -> list[Me
 
 
 def media_walks(
-    max_iters: int, encoders: Sequence[MediaEncoder] = (),
+    max_iters: int, encoders: Sequence[MediaEncoder] = (), names: DecoderNames = DecoderNames(),
 ) -> dict[str, GraphSection]:
     """``prefill_text``, one media walk per subset of ``encoders``, and
     ``decode``, over the ``LLM`` node and the encoders. ``max_iters`` bounds
@@ -483,11 +500,11 @@ def media_walks(
 
     def emit_first_token() -> GraphEdge:
         return GraphEdge(
-            next_node=EMIT_TO_CLIENT, name="new_token", persist=True, output_modality="text",
+            next_node=EMIT_TO_CLIENT, name=names.NEW_TOKEN, persist=True, output_modality="text",
         )
 
     walks: dict[str, GraphSection] = {
-        "prefill_text": GraphNode(name="LLM", input_names=["text_inputs"], outputs=[emit_first_token()]),
+        names.PREFILL_TEXT: GraphNode(name="LLM", input_names=["text_inputs"], outputs=[emit_first_token()]),
     }
     for mask in range(1, 1 << len(encoders)):
         present = [e for i, e in enumerate(encoders) if mask >> i & 1]
@@ -498,7 +515,7 @@ def media_walks(
             )
             for e in present
         ]
-        walks[media_walk_name(present)] = Sequential([
+        walks[media_walk_name(present, names.MEDIA_PREFIX)] = Sequential([
             nodes[0] if len(nodes) == 1 else Parallel(nodes),
             GraphNode(
                 name="LLM",
@@ -506,8 +523,8 @@ def media_walks(
                 outputs=[emit_first_token()],
             ),
         ])
-    walks["decode"] = Loop(
-        name="decode_loop",
+    walks[names.DECODE_WALK] = Loop(
+        name=names.DECODE_LOOP,
         section=GraphNode(
             name="LLM",
             input_names=["text_inputs"],
@@ -522,9 +539,9 @@ def media_walks(
     return walks
 
 
-def text_combined_walks() -> dict[str, dict[str, set[str]]]:
+def text_combined_walks(names: DecoderNames = DecoderNames()) -> dict[str, dict[str, set[str]]]:
     """Text prefill and decode rows of the ``LLM`` node share a step."""
-    return {"LLM": {MIXED: {"prefill_text", "decode"}}}
+    return {"LLM": {MIXED: {names.PREFILL_TEXT, names.DECODE_WALK}}}
 
 
 @dataclass(frozen=True)
@@ -542,6 +559,7 @@ def media_prefill_step(
     layout: dict | None = None,
     *,
     model_name: str,
+    names: DecoderNames = DecoderNames(),
 ) -> PrefillStep:
     """The one prefill walk a request runs over its whole prompt
     (``text_inputs``, one tensor): with media in its ``layout``, the walk over
@@ -562,12 +580,12 @@ def media_prefill_step(
         if sent:
             # a text prefill would drop them
             raise ValueError(f"{model_name} got {sent} with no media layout to place them by")
-        return PrefillStep("prefill_text", {("LLM", "text_inputs"): texts})
+        return PrefillStep(names.PREFILL_TEXT, {("LLM", "text_inputs"): texts})
     inputs = {("LLM", "text_inputs"): texts}
     for e in present:
         for name in e.inputs:
             inputs[(e.node, name)] = signals.get(name, [])
-    return PrefillStep(media_walk_name(present), inputs, {MEDIA_LAYOUT: layout or {}})
+    return PrefillStep(media_walk_name(present, names.MEDIA_PREFIX), inputs, {MEDIA_LAYOUT: layout or {}})
 
 
 def walk_input_edges(step: PrefillStep) -> list[GraphEdge]:
@@ -611,15 +629,16 @@ def initial_prefill_args(
 def next_prefill_args(
     metadata: CurrentForwardConductorMetadata,
     persist_signals: dict[str, list[TensorPointerInfo]],
+    names: DecoderNames = DecoderNames(),
 ) -> ForwardPassArgs:
     """After the prefill, loop in decode until the decoder's stop check ends it."""
     from mstar.model.base import ForwardPassArgs
 
     if metadata.is_prefill:
         metadata.is_prefill = False
-        metadata.graph_walk = "decode"
+        metadata.graph_walk = names.DECODE_WALK
         edge = GraphEdge(next_node="LLM", name="text_inputs")
-        edge.tensor_info = persist_signals.get("new_token", [])
+        edge.tensor_info = persist_signals.get(names.NEW_TOKEN, [])
         return _prefill_args(metadata, [edge], {})
     # reaching here again after decode stopped means the request is finished
     metadata.kwargs["decode_finished"] = True

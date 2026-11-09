@@ -33,9 +33,9 @@ class _Producer(NodeSubmodule):
     """Streams a frame every step; the frame of a stop-token step is not data.
     With ``stop=False`` (``ignore_eos``, say) the loop runs on past it."""
 
-    def __init__(self, fail_on=None, stop=True, batched=False):
+    def __init__(self, fail_on=None, stop=True, batched=False, exit_name=""):
         super().__init__()
-        self.fail_on, self.stop, self.batched = fail_on, stop, batched
+        self.fail_on, self.stop, self.batched, self.exit_name = fail_on, stop, batched, exit_name
         self.reads = []
 
     def prepare_inputs(self, *args, **kwargs):
@@ -50,7 +50,7 @@ class _Producer(NodeSubmodule):
             raise RuntimeError("cannot tell")
         if token != STOP_TOKEN:
             return set()
-        return StopCheck({LOOP} if self.stop else set(), withheld=("frame",))
+        return StopCheck({LOOP} if self.stop else set(), withheld=("frame",), exit=self.exit_name)
 
     def check_stop(self, request_id, request_info, outputs):
         return self._check(request_id, int(outputs["token"][0].item()))
@@ -58,14 +58,15 @@ class _Producer(NodeSubmodule):
     def check_stop_batched(self, request_ids, request_infos, host_rows):
         if not self.batched:
             return None
-        stops, withheld = {}, {}
+        stops, withheld, exits = {}, {}, {}
         for rid, token in host_rows.first_values("token", request_ids):
             result = self._check(rid, token)
             if isinstance(result, StopCheck):
                 if result.stops:
                     stops[rid] = result.stops
                 withheld[rid] = result.withheld
-        return BatchedStopCheck(stops, withheld)
+                exits[rid] = result.exit
+        return BatchedStopCheck(stops, withheld, exits)
 
 
 class _Plain(_Producer):
@@ -96,9 +97,10 @@ def _engine(submodule):
 
 
 def test_the_stop_check_records_what_the_submodule_withholds():
-    submodule, batch = _Producer(), _batch()
+    submodule, batch = _Producer(exit_name="tool_call"), _batch()
     assert _engine(submodule).check_stop_for_batch(batch, _outputs()) == {DROP: {LOOP}}
     assert batch.withheld_outputs == {DROP: ("frame",)}
+    assert batch.exits == {DROP: "tool_call"}
     assert submodule.reads == [KEEP, DROP]   # one read per row
 
 
@@ -124,11 +126,12 @@ def test_a_raise_fails_only_that_request():
 def test_the_batched_check_withholds_off_the_rows_without_building_per_row_dicts():
     host = {"token": torch.tensor([[3], [STOP_TOKEN]]), "frame": torch.tensor([[3, 0], [STOP_TOKEN, 0]])}
     per_rid = _LazyPerRid(host, [KEEP, DROP])
-    submodule, batch = _Producer(batched=True), _batch()
+    submodule, batch = _Producer(batched=True, exit_name="tool_call"), _batch()
 
     stops = _engine(submodule).check_stop_for_batch(batch, per_rid, host_rows=HostRows((KEEP, DROP), host))
 
     assert stops == {DROP: {LOOP}} and batch.withheld_outputs == {DROP: ("frame",)}
+    assert batch.exits == {DROP: "tool_call"}
     assert submodule.reads == [KEEP, DROP]
     assert per_rid._built is None
 
@@ -160,6 +163,10 @@ class _RecordingRuntime(PhasedPostprocess):
     def __init__(self):
         self.routes = []
         self.stops = []
+        self.exits = []
+
+    def mark_exit(self, rid, partition, name):
+        self.exits.append((rid, partition, name))
 
     def cleanup_consumed_inputs(self, *args):
         return FreedTensors.none()
@@ -186,7 +193,7 @@ class _RecordingRuntime(PhasedPostprocess):
 
 
 def test_the_worker_routes_no_tensor_for_a_withheld_output(tmp_path):
-    engine = _engine(_Producer())
+    engine = _engine(_Producer(exit_name="tool_call"))
     runtime = _RecordingRuntime()
     tensor_manager = SharedMemoryCommunicationManager(
         my_entity_id="worker_0", hostname="localhost", device="cpu",
@@ -224,6 +231,7 @@ def test_the_worker_routes_no_tensor_for_a_withheld_output(tmp_path):
     w.executor.postprocess(pending, BatchedModelOutput(per_rid_outputs=_outputs()))
 
     assert runtime.stops == [{DROP: [LOOP]}]
+    assert runtime.exits == [(DROP, "default", "tool_call")]
     (route,) = runtime.routes
     assert list(route.wg_ids.keys) == [KEEP, DROP]
     # (KEEP: token, frame), (DROP: token, frame): the stop step's frame carries nothing

@@ -38,6 +38,7 @@ from mstar.graph.base import (
     TensorPointerInfo,
 )
 from mstar.graph.special_destinations import EMPTY_DESTINATION
+from mstar.model.keys import Scope
 from mstar.model.media_limits import VideoBudget, decoding_upload, read_image, video_decode_threads
 from mstar.model.multimodal import TEXT, PromptPart
 from mstar.model.rebuild import RebuildPolicy
@@ -616,6 +617,11 @@ class Model(ABC):
         build = cls.__dict__.get("get_graph_walk_graphs")
         if build is not None and not getattr(build, "_applies_chunking", False):
             cls.get_graph_walk_graphs = _applying_chunking(build)
+
+    # The prefix a multimodel gives this member on its walk, loop, resource-key and
+    # persisted-signal names (`mstar.model.keys.Scope`); empty when served alone.
+    # A model that supports one takes it as a `scope=` constructor kwarg.
+    scope: Scope = Scope()
 
     # Inputs consumed by process_prompt (tokenized or placed on tensor edges).
     # Retain them locally for postprocessing, but do not send the original

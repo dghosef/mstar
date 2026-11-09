@@ -66,29 +66,20 @@ from mstar.graph.special_destinations import EMIT_TO_CLIENT, EMPTY_DESTINATION
 from mstar.model.base import ForwardPassArgs, KVLabel, LabelLayout, Model, ProcessPromptOutput, Span, TensorAndMetadata
 from mstar.model.components.audio_features import LogMelSpectrogram, load_speech_file
 from mstar.model.components.request_kwargs import checked_request_kwargs
+from mstar.model.keys import Scope
 from mstar.model.submodule_base import NodeSubmodule
 from mstar.model.utils import ByteLevelDetokenizer, TextOutput, check_kv_pools_fit, kv_pages
 from mstar.model.whisper.components import alignment
 from mstar.model.whisper.components.timestamps import inactive_state
 from mstar.model.whisper.config import (
-    ALIGN_WALK,
-    ATTN,
     CONTEXT_LABEL,
-    CROSS_ATTN,
-    CROSS_KV_CACHE,
-    DECODE_LOOP,
-    DECODE_WALK,
     DECODER_NODE,
-    DETECT_LANGUAGE_WALK,
     ENCODER_NODE,
-    KV_CACHE,
-    POS,
-    PREFILL_PROMPT_WALK,
-    PREFILL_WALK,
-    SAMPLER,
     TS_RULES,
+    WHISPER_NAMES,
     WORDS_MARKER,
     WhisperModelConfig,
+    WhisperNames,
 )
 
 logger = logging.getLogger(__name__)
@@ -126,6 +117,9 @@ class WhisperDetokenizer(ByteLevelDetokenizer):
     def _rendered(self, token_id: int) -> bool:
         return token_id in self._render_ids or self.config.is_timestamp(token_id)
 
+    def to_text_bytes(self, token_ids: list[int]) -> bytes:
+        return super().to_bytes([i for i in token_ids if not self._rendered(i)])
+
     def to_bytes(self, token_ids: list[int]) -> bytes:
         raw = bytearray()
         for token_id in token_ids:
@@ -157,12 +151,18 @@ class WhisperModel(Model):
     # the decoder unsharded, so word timestamps need tp_size 1.
     _decoder_tp_size = 1
 
+    @property
+    def names(self) -> WhisperNames:
+        return self.scope.of(WHISPER_NAMES)
+
     def __init__(
         self,
         model_path_hf: str,
         cache_dir: str | None = None,
+        scope: str = "",
         **kwargs,
     ):
+        self.scope = Scope(scope)
         self.cache_dir = cache_dir
         self.model_path_hf = model_path_hf
 
@@ -227,34 +227,34 @@ class WhisperModel(Model):
         )
         nodes = {DECODER_NODE}
         return [
-            KVSpec(resource_key=KV_CACHE, nodes=nodes, config=kv_config),
+            KVSpec(resource_key=self.names.KV_CACHE, nodes=nodes, config=kv_config),
             # Whisper is MHA: the CUDA-core decode kernel beats the
             # tensor-core one, which pads one query head per KV head to a tile
             AttentionSpec(
-                resource_key=ATTN, nodes=nodes,
-                config=AttentionConfig(kv_cache=KV_CACHE, decode_tensor_cores=False),
+                resource_key=self.names.ATTN, nodes=nodes,
+                config=AttentionConfig(kv_cache=self.names.KV_CACHE, decode_tensor_cores=False),
             ),
             KVSpec(
-                resource_key=CROSS_KV_CACHE, nodes=nodes,
+                resource_key=self.names.CROSS_KV_CACHE, nodes=nodes,
                 config=context_kv_config,
             ),
             CrossAttentionSpec(
-                resource_key=CROSS_ATTN, nodes=nodes,
+                resource_key=self.names.CROSS_ATTN, nodes=nodes,
                 config=CrossAttentionConfig(
-                    kv_cache=CROSS_KV_CACHE,
-                    query_kv_cache=KV_CACHE,
+                    kv_cache=self.names.CROSS_KV_CACHE,
+                    query_kv_cache=self.names.KV_CACHE,
                     context_label=CONTEXT_LABEL,
                     decode_tensor_cores=False,
                 ),
             ),
             PositionSpec(
-                resource_key=POS, nodes=nodes,
+                resource_key=self.names.POS, nodes=nodes,
                 # No RoPE: this exists for the position counter, whose planned
                 # ids drive the learned ``embed_positions`` lookup.
-                config=PositionConfig(kv_cache=KV_CACHE),
+                config=PositionConfig(kv_cache=self.names.KV_CACHE),
             ),
             SamplerSpec(
-                resource_key=SAMPLER, nodes=nodes,
+                resource_key=self.names.SAMPLER, nodes=nodes,
                 vocab_size=self.config.vocab_size,
                 # ASR transcription decodes greedily; no seen-token buffers.
                 enable_repetion_penalty=False,
@@ -272,7 +272,7 @@ class WhisperModel(Model):
         del partition_fwd_args
         kw = checked_request_kwargs(model_kwargs or {})
         return {
-            SAMPLER: SamplingReqConfig(
+            self.names.SAMPLER: SamplingReqConfig(
                 # ASR default is greedy (temperature 0 -> argmax).
                 temperature=kw.get("temperature", 0.0),
                 top_p=kw.get("top_p", 1.0),
@@ -301,7 +301,8 @@ class WhisperModel(Model):
         # the align walk reads the first token and detected language the
         # prompt walks' stop check recorded, and the decode walk's tokens, in
         # the decoder's worker-local request state
-        walks = (PREFILL_WALK, DETECT_LANGUAGE_WALK, PREFILL_PROMPT_WALK, DECODE_WALK, ALIGN_WALK)
+        n = self.names
+        walks = (n.PREFILL_WALK, n.DETECT_LANGUAGE_WALK, n.PREFILL_PROMPT_WALK, n.DECODE_WALK, n.ALIGN_WALK)
         served = {walk: serving(walk) for walk in walks}
         if len(set(served.values())) > 1:
             raise ValueError(
@@ -327,7 +328,7 @@ class WhisperModel(Model):
             return [
                 GraphEdge(
                     next_node=EMIT_TO_CLIENT,
-                    name="new_token",
+                    name=self.names.NEW_TOKEN,
                     output_modality="text",
                     persist=True,
                 ),
@@ -357,7 +358,7 @@ class WhisperModel(Model):
         )
 
         decode = Loop(
-            name=DECODE_LOOP,
+            name=self.names.DECODE_LOOP,
             section=GraphNode(
                 name=DECODER_NODE,
                 input_names=["text_inputs", "ts_rules"],
@@ -386,11 +387,11 @@ class WhisperModel(Model):
         )
 
         return {
-            PREFILL_WALK: encoder_then_decoder(),
-            DETECT_LANGUAGE_WALK: encoder_then_decoder(),
-            PREFILL_PROMPT_WALK: prefill_prompt,
-            DECODE_WALK: decode,
-            ALIGN_WALK: align,
+            self.names.PREFILL_WALK: encoder_then_decoder(),
+            self.names.DETECT_LANGUAGE_WALK: encoder_then_decoder(),
+            self.names.PREFILL_PROMPT_WALK: prefill_prompt,
+            self.names.DECODE_WALK: decode,
+            self.names.ALIGN_WALK: align,
         }
 
     # -------------------------------------------------------------------
@@ -445,7 +446,7 @@ class WhisperModel(Model):
         full_metadata = CurrentForwardConductorMetadata(
             input_modalities=input_modalities,
             output_modalities=output_modalities,
-            graph_walk=DETECT_LANGUAGE_WALK if detect else PREFILL_WALK,
+            graph_walk=self.names.DETECT_LANGUAGE_WALK if detect else self.names.PREFILL_WALK,
             is_prefill=True,
             kwargs={
                 "prompt_tail": prompt_tail,
@@ -483,16 +484,16 @@ class WhisperModel(Model):
         """Single-partition state machine:
         ``[detect_language -> prefill_prompt | prefill] -> decode -> [align] -> done``."""
         metadata = partition_metadata
-        new_token = persist_signals.get("new_token", [])
+        new_token = persist_signals.get(self.names.NEW_TOKEN, [])
         ts_rules = persist_signals.get("ts_rules", [])
         word_timestamps = bool(metadata.kwargs.get("word_timestamps"))
 
         if metadata.is_prefill:
-            if metadata.graph_walk == DETECT_LANGUAGE_WALK:
+            if metadata.graph_walk == self.names.DETECT_LANGUAGE_WALK:
                 # the sampled language token leads the rest of the prompt, and
                 # the detection step's rule state is inactive by construction
                 # and is dropped, the prompt step builds the real one
-                metadata.graph_walk = PREFILL_PROMPT_WALK
+                metadata.graph_walk = self.names.PREFILL_PROMPT_WALK
                 inputs = [
                     self._edge(DECODER_NODE, "text_inputs", new_token),
                     self._edge(DECODER_NODE, "prompt_tail", metadata.kwargs.get("prompt_tail", [])),
@@ -504,11 +505,11 @@ class WhisperModel(Model):
                     step_metadata=self._prefill_step_metadata(metadata.kwargs),
                 )
             metadata.is_prefill = False
-            metadata.graph_walk = DECODE_WALK
-        elif metadata.graph_walk == DECODE_WALK and word_timestamps:
+            metadata.graph_walk = self.names.DECODE_WALK
+        elif metadata.graph_walk == self.names.DECODE_WALK and word_timestamps:
             # The loop is done. Align the transcript (recorded on the decoder)
             # against the persisted encoder output.
-            metadata.graph_walk = ALIGN_WALK
+            metadata.graph_walk = self.names.ALIGN_WALK
             inputs = [
                 self._edge(DECODER_NODE, "encoder_states", persist_signals.get("encoder_states", [])),
             ]
@@ -526,7 +527,7 @@ class WhisperModel(Model):
                     "audio_frames": kwargs.get("audio_frames"),
                 },
             )
-        elif metadata.graph_walk in (DECODE_WALK, ALIGN_WALK):
+        elif metadata.graph_walk in (self.names.DECODE_WALK, self.names.ALIGN_WALK):
             # The decode dynamic loop returned to the conductor (EOS or max
             # tokens), or the alignment after it ran: the request is complete.
             return ForwardPassArgs(
@@ -629,16 +630,16 @@ class WhisperModel(Model):
             # detection commits the prompt up to <|sot|>; the prompt walk commits the
             # detected language token and the tail
             spans = (
-                Span("ids", DETECT_LANGUAGE_WALK, len(prompt_ids), len(prompt_ids), "text_inputs"),
-                Span("rows", PREFILL_PROMPT_WALK, 1 + len(tail), 1 + len(tail), "prompt_tail"),
+                Span("ids", self.names.DETECT_LANGUAGE_WALK, len(prompt_ids), len(prompt_ids), "text_inputs"),
+                Span("rows", self.names.PREFILL_PROMPT_WALK, 1 + len(tail), 1 + len(tail), "prompt_tail"),
             )
-            encoder_walk = DETECT_LANGUAGE_WALK
+            encoder_walk = self.names.DETECT_LANGUAGE_WALK
         else:
-            spans = (Span("ids", PREFILL_WALK, len(prompt_ids), len(prompt_ids), "text_inputs"),)
-            encoder_walk = PREFILL_WALK
+            spans = (Span("ids", self.names.PREFILL_WALK, len(prompt_ids), len(prompt_ids), "text_inputs"),)
+            encoder_walk = self.names.PREFILL_WALK
         kv_layout = {
-            KV_CACHE: {"main": LabelLayout(spans=spans, growth=((DECODE_LOOP, 1),))},
-            CROSS_KV_CACHE: {CONTEXT_LABEL: LabelLayout(
+            self.names.KV_CACHE: {"main": LabelLayout(spans=spans, growth=((self.names.DECODE_LOOP, 1),))},
+            self.names.CROSS_KV_CACHE: {CONTEXT_LABEL: LabelLayout(
                 spans=(Span("rows", encoder_walk, context, context, "encoder_states"),),
             )},
         }
@@ -650,12 +651,12 @@ class WhisperModel(Model):
 
     def get_loop_caps(self, **model_kwargs) -> dict[str, int]:
         # the prefill emits the first of max_output_tokens, so the loop runs one fewer
-        return {DECODE_LOOP: max(1, self.get_max_output_tokens(**model_kwargs) - 1)}
+        return {self.names.DECODE_LOOP: max(1, self.get_max_output_tokens(**model_kwargs) - 1)}
 
     def kv_labels(self) -> dict[str, dict[str, KVLabel]]:
         return {
-            KV_CACHE: {"main": KVLabel(growth=((DECODE_WALK, DECODE_LOOP),))},
-            CROSS_KV_CACHE: {CONTEXT_LABEL: KVLabel()},
+            self.names.KV_CACHE: {"main": KVLabel(growth=((self.names.DECODE_WALK, self.names.DECODE_LOOP),))},
+            self.names.CROSS_KV_CACHE: {CONTEXT_LABEL: KVLabel()},
         }
 
     # -------------------------------------------------------------------
@@ -762,7 +763,7 @@ class WhisperModel(Model):
         encoder.eval()
 
         from mstar.model.whisper.submodules import WhisperEncoderSubmodule
-        return WhisperEncoderSubmodule(encoder=encoder, config=self.config)
+        return WhisperEncoderSubmodule(encoder=encoder, config=self.config, scope=self.scope)
 
     @staticmethod
     def _decoder_remap(name: str) -> str:
@@ -778,7 +779,7 @@ class WhisperModel(Model):
         from mstar.model.whisper.components.decoder import WhisperDecoderModel
 
         with torch.device("meta"):
-            decoder = WhisperDecoderModel(self.config, comm_group=tp_group)
+            decoder = WhisperDecoderModel(self.config, comm_group=tp_group, names=self.names)
         # Cast on meta (no allocation) so to_empty allocates directly in the
         # target dtype instead of fp32-then-downcast.
         if autocast_dtype is not None:
@@ -799,4 +800,4 @@ class WhisperModel(Model):
         decoder.eval()
 
         from mstar.model.whisper.submodules import WhisperDecoderSubmodule
-        return WhisperDecoderSubmodule(decoder=decoder, config=self.config)
+        return WhisperDecoderSubmodule(decoder=decoder, config=self.config, scope=self.scope)

@@ -356,6 +356,11 @@ pub struct GraphRuntime {
                 .unwrap_or(false);
 
         let partition = self.interner.get(partition_name);
+        // Taken, not read: a request that re-enters the loop exits afresh.
+        let exit = match (speculative, partition) {
+            (false, Some(p)) => self.requests[rid as usize].as_mut().and_then(|i| i.take_exit(p)),
+            _ => None,
+        };
         let (persist, new_tokens, output_signals, stream_items) =
             match self.requests[rid as usize].as_mut() {
                 Some(info) => info.pending.take_for_send(partition),
@@ -373,6 +378,7 @@ pub struct GraphRuntime {
             output_signal_names: output_signals,
             partition_name,
             partition_done,
+            exit,
             graph_walk,
             stream_tokens_consumed,
             stream_items_sent: stream_items,
@@ -1905,6 +1911,13 @@ impl GraphRuntime {
         let Some(p) = self.interner.get(partition) else { return };
         if let Some(info) = self.requests.get_mut(rid as usize).and_then(|r| r.as_mut()) {
             info.mark_partition_done(p);
+        }
+    }
+
+    fn mark_exit(&mut self, rid: u32, partition: &str, name: String) {
+        let Some(p) = self.interner.get(partition) else { return };
+        if let Some(info) = self.requests.get_mut(rid as usize).and_then(|r| r.as_mut()) {
+            info.mark_exit(p, name);
         }
     }
 

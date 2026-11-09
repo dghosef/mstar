@@ -49,6 +49,7 @@ from mstar.utils.ipc_format import (
     MessageBody,
     NewRequest,
     NewRequestConductor,
+    OpenPartition,
     ReadsDone,
     RemoveRequest,
     ScheduleTPNode,
@@ -83,6 +84,7 @@ _TYPES: dict[str, type] = {
     "schedule_tp_node": ScheduleTPNode,
     "tp_no_speculation": TPNoSpeculation,
     "client_stream_route": ClientStreamRoute,
+    "open_partition": OpenPartition,
     # conductor-bound bodies
     "wgs_done": WorkerGraphsDone,
     "setup_done": SetupDone,

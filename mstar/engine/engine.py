@@ -370,6 +370,8 @@ class ExecutingBatch:
     # rids for which this step ends every finite stream into the partition, or
     # whose stop check returned END_PARTITION; this step reports the partition done
     partition_done_rids: set[int] = field(default_factory=set)
+    # rid -> the named exit its stop check took (``TokenStop.exits``)
+    exits: dict[int, str] = field(default_factory=dict)
 
     # rid -> the part of a chunked row's input this step runs
     chunk_ranges: Mapping[int, ChunkRange] = field(default_factory=dict)
@@ -2348,6 +2350,8 @@ class Engine:
             if isinstance(batched, BatchedStopCheck):
                 if batched.withheld:
                     batch.withheld_outputs = batched.withheld
+                if batched.exits:
+                    batch.exits = batched.exits
                 return batched.stops
             if batched is not None:
                 return batched
@@ -2367,6 +2371,8 @@ class Engine:
             if isinstance(rid_stops, StopCheck):
                 if rid_stops.withheld:
                     withheld[rid] = rid_stops.withheld
+                if rid_stops.exit:
+                    batch.exits[rid] = rid_stops.exit
                 rid_stops = rid_stops.stops
             if rid_stops:
                 stops[rid] = rid_stops
@@ -3414,10 +3420,16 @@ class Engine:
         self, request_id: str,
         overrides: Mapping[str, ResourceReqConfig] | None = None,
         request_info: CurrentForwardPassInfo | None = None,
+        keys: Collection[str] | None = None,
+        skip: Collection[str] = (),
     ) -> None:
-        """Open the request on every resource, then tell each submodule. All or
-        nothing: a raise leaves the request on none of them."""
-        self._runner.ingest_request(request_id, overrides)
+        """Open the request on the resources of ``keys`` (every one by default,
+        less ``skip``) that it has not opened, then tell each submodule. All or nothing: a
+        raise leaves the request on none of the resources this call opened."""
+        scope = {} if keys is None else {"keys": keys}
+        if skip:
+            scope["skip"] = skip
+        self._runner.ingest_request(request_id, overrides, **scope)
         if request_info is None:
             return
         try:

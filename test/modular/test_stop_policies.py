@@ -37,8 +37,8 @@ MODELS = {
 }
 
 
-def _sampler_key(cls):
-    return getattr(cls, "SAMPLER", None) or __import__(cls.__module__, fromlist=["SAMPLER"]).SAMPLER
+def _sampler_key(sub):
+    return getattr(sub, "SAMPLER", None) or __import__(type(sub).__module__, fromlist=["SAMPLER"]).SAMPLER
 
 
 def _info(rng, walk, sampler):
@@ -54,9 +54,9 @@ def _info(rng, walk, sampler):
 @pytest.mark.parametrize("seed", range(8))
 def test_declared_policies_stop_the_rows_check_stop_does(model, seed):
     cls, config, walks, stop = MODELS[model]
-    sampler = _sampler_key(cls)
     sub = cls.__new__(cls)
     torch.nn.Module.__init__(sub)
+    sampler = _sampler_key(sub)
     sub.config = config
     if stop is not None:
         sub.token_stop = stop
@@ -91,13 +91,46 @@ def test_a_token_stop_names_the_walks_that_end_its_loop():
     assert both.stops_on("a") and both.stops_on("b") and not both.stops_on("c")
 
 
-def test_a_withholding_token_stop_refuses_the_runtime_check():
-    """The runtime's check never calls ``check_stop``, which is what withholds."""
+@pytest.mark.parametrize("declared", [{"withhold": ("codes",)}, {"exits": {EOS[0]: "tool_call"}}])
+def test_a_token_stop_that_needs_check_stop_refuses_the_runtime_check(declared):
+    """The runtime's check never calls ``check_stop``, which is what withholds and names exits."""
     from mstar.model.submodule_base import TokenStop
 
     with pytest.raises(ValueError, match="runtime_check"):
         TokenStop(loop=LOOP, buffer="new_token", stop_ids=frozenset(EOS), sampler="s",
-                  withhold=("codes",), runtime_check=True)
+                  runtime_check=True, **declared)
+
+
+@pytest.mark.parametrize("batched", [False, True])
+@pytest.mark.parametrize(("token", "walk", "ignore_eos", "expected"), [
+    (EOS[0], "decode", False, "tool_call"),   # the conditional edge
+    (EOS[1], "decode", False, ""),            # a stop with no name leaves as ever
+    (1, "decode", False, ""),                 # the expected edge: the loop goes on
+    (EOS[0], "decode", True, ""),             # ignore_eos: nothing stopped, nothing exits
+    (EOS[0], "prefill", False, ""),           # ends the partition, no loop to exit
+])
+def test_only_a_row_that_stops_its_loop_names_an_exit(batched, token, walk, ignore_eos, expected):
+    from mstar.model.submodule_base import BatchedStopCheck, HostRows, StopCheck, TokenStop
+
+    sub = LLMSubmodule.__new__(LLMSubmodule)
+    torch.nn.Module.__init__(sub)
+    sub.token_stop = TokenStop(
+        loop=LOOP, buffer="new_token", stop_ids=frozenset(EOS), sampler="s", walk="decode",
+        prefill_walks=frozenset({"prefill"}), exits={EOS[0]: "tool_call"},
+    )
+    info = SimpleNamespace(
+        graph_walk=walk, step_metadata={}, max_tokens=5,
+        resource_configs={"s": SimpleNamespace(ignore_eos=ignore_eos)},
+    )
+    if batched:
+        result = sub.check_stop_batched(["r"], {"r": info}, HostRows(("r",), {"new_token": torch.tensor([[token]])}))
+        named = result.exits["r"] if isinstance(result, BatchedStopCheck) else ""
+        # an empty withheld map keeps the step's inline route
+        assert not isinstance(result, BatchedStopCheck) or not result.withheld
+    else:
+        result = sub.check_stop("r", info, {"new_token": [torch.tensor([token])]})
+        named = result.exit if isinstance(result, StopCheck) else ""
+    assert named == expected
 
 
 def test_a_nodes_stop_limits_come_from_its_own_partitions_info():

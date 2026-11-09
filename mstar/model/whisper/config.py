@@ -55,6 +55,39 @@ ALIGN_WALK = "align"
 WORDS_MARKER = "<|startoflm|>"
 
 
+@dataclass(frozen=True)
+class WhisperNames:
+    """The walk, loop, resource-key and persisted-signal names Whisper shares
+    with the deployment: the constants above, which a multimodel member gets
+    prefixed (``Scope.of``). A model served alone has them as they are.
+    ``ts_rules`` and ``encoder_states`` are persisted too but stay unscoped:
+    only one Whisper fits a deployment while its node names are shared."""
+    KV_CACHE: str = KV_CACHE
+    ATTN: str = ATTN
+    SAMPLER: str = SAMPLER
+    CROSS_KV_CACHE: str = CROSS_KV_CACHE
+    CROSS_ATTN: str = CROSS_ATTN
+    POS: str = POS
+    PREFILL_WALK: str = PREFILL_WALK
+    DETECT_LANGUAGE_WALK: str = DETECT_LANGUAGE_WALK
+    PREFILL_PROMPT_WALK: str = PREFILL_PROMPT_WALK
+    DECODE_WALK: str = DECODE_WALK
+    DECODE_LOOP: str = DECODE_LOOP
+    ALIGN_WALK: str = ALIGN_WALK
+    NEW_TOKEN: str = "new_token"
+
+    @property
+    def encoder_walks(self) -> tuple[str, ...]:
+        return (self.PREFILL_WALK, self.DETECT_LANGUAGE_WALK)
+
+    @property
+    def first_token_walks(self) -> tuple[str, ...]:
+        return (self.PREFILL_WALK, self.PREFILL_PROMPT_WALK)
+
+
+WHISPER_NAMES = WhisperNames()
+
+
 @dataclass
 class WhisperModelConfig:
     # transformer dims (large-v3 defaults)

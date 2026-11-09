@@ -26,6 +26,7 @@ from mstar.model.base import ForwardPassArgs  # noqa: E402
 from mstar.streaming.topology import PartitionTopology  # noqa: E402
 from mstar.testing_utils.model import StubModel  # noqa: E402
 from mstar.utils.ipc_format import (  # noqa: E402
+    AbortRequest,
     ConductorMessage,
     ConductorMessageType,
     NewRequestConductor,
@@ -248,3 +249,80 @@ def test_ingest_releases_the_union_of_every_partitions_declaration(tmp_path, mon
     request = c.requests["r"]
     assert [i.uuid for i in request.persist_signals["w"]] == [never_sent]
     assert not any(request.persist_signals[name] for name in ("x", "y", "z"))
+
+
+def _deferred_member(tmp_path, monkeypatch):
+    """A (rank 0) then B (rank 1), which opens from A's persisted ``out``."""
+    walks = {
+        "a": GraphNode(name="na", input_names=["x"], outputs=[
+            GraphEdge(next_node=EMIT_TO_CLIENT, name="out", output_modality="text", persist=True),
+        ]),
+        "b": GraphNode(name="nb", input_names=["text_inputs"], outputs=[]),
+    }
+    partitions = [
+        PartitionDefinition(name="A", graph_walks={"a"}, initial_walk="a"),
+        PartitionDefinition(name="B", graph_walks={"b"}, open_after="A", open_signal="out"),
+    ]
+    opened = []
+
+    def initial(partition, signals):
+        opened.append(partition)
+        if partition == "A":
+            return _fwd("a", [_edge("na", "x", signals["x"])], unpersist=signals["x"])
+        return _fwd("b", [_edge("nb", "text_inputs", signals["text_inputs"])])
+
+    c = _conductor(
+        _ToyModel(walks, initial, lambda metadata, persist: _fwd(metadata.graph_walk, done=True),
+                  partitions=partitions),
+        [{"node_names": ["na"], "ranks": [0]}, {"node_names": ["nb"], "ranks": [1]}],
+        tmp_path, monkeypatch,
+    )
+    c.opened = opened
+    return c
+
+
+def _opened_by(rid="r"):
+    return _msg(ConductorMessageType.OPEN_PARTITION, NewRequestConductor(
+        request_id=rid, initial_signals={"text_inputs": [_info(303)]}, initial_input_modalities=["text"],
+        initial_output_modalities=["text"], input_metadata={}, model_kwargs={}, open_partitions=["B"],
+    ))
+
+
+def _a_done(c):
+    wg = c.node_walk_to_wg[("na", "a")].worker_graph_id
+    return _msg(ConductorMessageType.WORKER_GRAPHS_DONE, WorkerGraphsDone(
+        request_id="r", worker_graph_ids=[wg], is_first_tp_rank=True, partition_name="A",
+        persist_signals={"out": [_info(202, entity="worker_0", node="na", walk="a")]},
+    ))
+
+
+def test_a_deferred_member_opens_with_its_own_message_once_its_producer_is_done(tmp_path, monkeypatch):
+    c = _deferred_member(tmp_path, monkeypatch)
+    _run(c, [[_new_request("r", {"x": [_info(101)]})], [_a_done(c)], [_opened_by()]])
+
+    kinds = ("NEW_REQUEST", "OPEN_PARTITION")
+    sent = [(kind, entity, body) for kind, entity, body in _sends(c, kinds)]
+    assert [(kind, entity) for kind, entity, _ in sent] == [
+        ("NEW_REQUEST", "worker_0"),      # ingest: only the producer
+        ("OPEN_PARTITION", PREPROCESS),   # its signal goes to the data worker to build the prompt from
+        ("NEW_REQUEST", "worker_1"),      # the member, with its own inputs
+    ]
+    ingest, ask, opened = (body for _, _, body in sent)
+    # the first message already carries every member's workers, and opens all resources but B's
+    assert sorted(w for ws in ingest.worker_graph_to_workers.values() for w in ws) == ["worker_0", "worker_1"]
+    assert ingest.resource_keys is None
+    assert (ask.partitions, [i.uuid for i in ask.signals["out"]]) == (["B"], [202])
+    assert (opened.request_info.partition_name, opened.resource_keys) == ("B", [])
+    assert [e.name for e in opened.initial_inputs] == ["text_inputs"]
+    assert c.opened == ["A", "B"]
+    # the producer's tensor is released once, with the data worker as its reader
+    assert (("worker_0", {202: 1}) in _releases(c))
+
+
+def test_a_prompt_that_arrives_after_the_request_ended_opens_nothing(tmp_path, monkeypatch):
+    c = _deferred_member(tmp_path, monkeypatch)
+    abort = _msg(ConductorMessageType.ABORT_REQUEST, AbortRequest(request_id="r"))
+    _run(c, [[_new_request("r", {"x": [_info(101)]})], [abort], [_opened_by()]])
+    assert "r" in c.draining  # the existing teardown took it, with the never-opened member's worker in it
+    assert {entity for kind, entity, _ in _sends(c, ("DRAIN_REQUEST",))} >= {"worker_0", "worker_1"}
+    assert [entity for _, entity, _ in _sends(c, ("NEW_REQUEST",))] == ["worker_0"]

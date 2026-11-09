@@ -69,6 +69,7 @@ from mstar.model.media_limits import (
     check_file_counts,
     check_media_limits,
 )
+from mstar.model.multimodal import PromptPart
 from mstar.observability.catalog import STATUS_INTERVAL_S
 from mstar.observability.recorders import EdgeTransfers
 from mstar.profile.format import InputInfo, RxInfo, TxInfo
@@ -88,6 +89,7 @@ from mstar.utils.ipc_format import (
     EnableMetrics,
     InputSignals,
     NewRequestConductor,
+    OpenPartition,
     ReadsDone,
     RemoveRequest,
     TensorReceived,
@@ -98,6 +100,9 @@ from mstar.utils.ipc_format import (
 from mstar.utils.threads import Thread, ThreadPool
 
 logger = logging.getLogger(__name__)
+
+# the name of the edge a deferred member's producer text is read on
+OPEN_EDGE = "open_partition"
 
 # Outputs whose postprocess encodes a whole artifact (a PNG takes tens of ms,
 # an mp4 mux hundreds) run on the encode pool, so reads, streamed chunks and
@@ -793,6 +798,12 @@ class PreprocessWorkerThread:
         # honor per-request parameters (e.g. the video container fps).
         self.request_model_kwargs: dict[str, dict] = {}
         self.request_output_state: dict[str, RequestOutputState] = {}
+        # A request's own input, kept while a member of it is deferred: the
+        # prompt that member opens with is built from it (its system prompt and
+        # history) and its producer's text
+        self._held_inputs: dict[str, PreprocessInput] = {}
+        # request -> the deferred partitions whose producer text is being read
+        self._opening: dict[str, list[str]] = {}
 
         # Owned by PreprocessWorker (main thread); used only from this thread.
         self.communicator = communicator
@@ -857,6 +868,8 @@ class PreprocessWorkerThread:
             "request_model_kwargs",
             "request_output_state",
             "_client_calls",
+            "_held_inputs",
+            "_opening",
         ):
             state = getattr(self, state_name, None)
             if state is not None:
@@ -948,11 +961,13 @@ class PreprocessWorkerThread:
         # only this worker keys a prompt: a client that sent its own could name
         # another request's pages and be served that request's KV. Likewise
         # only process_prompt sets the model's INTERNAL_KWARGS.
-        internal = getattr(self.model, "INTERNAL_KWARGS", ())
+        # a deferred member's prompt is that member's own
+        model = self.model if input.opens is None else self.model.open_member(input.opens)
+        internal = getattr(model, "INTERNAL_KWARGS", ())
         for name in ("prefix_keys", "prefix_tail", "prefix_decode", "kv_layout", "prefix_root", *internal):
             model_kwargs.pop(name, None)
-        if self.model is not None:
-            prompt_tensors = self.model.process_prompt(
+        if model is not None:
+            prompt_tensors = model.process_prompt(
                 input.text,
                 input.input_modalities,
                 input.output_modalities,
@@ -988,6 +1003,56 @@ class PreprocessWorkerThread:
             )]
         return PreparedInput(tensors, input_metadata, model_kwargs)
 
+    def _read_open_signals(self, body: OpenPartition) -> None:
+        """A deferred member is to open: read the text its producer finished,
+        which `_open_member` builds the member's prompt from once it is here."""
+        request_id = body.request_id
+        if request_id not in self._held_inputs or self._torn_down(request_id):
+            return  # ended, failed or aborted: nothing will read it
+        self._opening[request_id] = body.partitions
+        edge = GraphEdge(next_node="", name=OPEN_EDGE)
+        edge.tensor_info = [info for infos in body.signals.values() for info in infos]
+        futures = self.tensor_manager.start_read_tensors(request_id=request_id, graph_edges=[edge])
+        wakeup = getattr(self, "wakeup", None)
+        if wakeup is not None and futures:
+            wakeup.register_futures(futures)
+
+    def _open_member(self, request_id: str, edge: GraphEdge) -> None:
+        """The producer's text is read: build the deferred member's prompt with
+        its own ``process_prompt`` (the request's chat so far, then this as the
+        user's turn), as a request's is, and hand it to the conductor."""
+        partitions = self._opening.pop(request_id, None)
+        held = self._held_inputs.get(request_id)
+        ids = [self.tensor_manager.get_tensor(info.uuid) for info in edge.tensor_info]
+        for info in edge.tensor_info:
+            self.tensor_manager.dereference(info.uuid)
+        if partitions is None or held is None or self._torn_down(request_id):
+            return
+        text = self.model.open_text(partitions[0], torch.cat([t.reshape(-1).cpu() for t in ids]))
+        parts = [p for p in held.prompt_parts or [] if p.modality == "text"]
+        parts.append(PromptPart(modality="text", text=text, role="user"))
+        opening = PreprocessInput(
+            request_id=request_id, text=text, file_paths=None,
+            input_modalities=["text"] * len(parts), output_modalities=["text"],
+            model_kwargs=held.model_kwargs, prompt_parts=parts, opens=partitions[0],
+        )
+        tensors, input_metadata, model_kwargs = self._prepare_input(opening)
+        initial_signals = self._store_persisted(request_id, tensors)
+        model = self.model.open_member(partitions[0])
+        preprocess_only = getattr(model, "PREPROCESS_ONLY_KWARGS", ())
+        self.communicator.send("conductor", ConductorMessage(
+            message_type=ConductorMessageType.OPEN_PARTITION,
+            body=NewRequestConductor(
+                request_id=request_id,
+                initial_signals=initial_signals,
+                initial_input_modalities=opening.input_modalities,
+                initial_output_modalities=opening.output_modalities,
+                input_metadata=input_metadata,
+                model_kwargs={k: v for k, v in model_kwargs.items() if k not in preprocess_only},
+                open_partitions=list(partitions),
+            ),
+        ))
+
     def _finish_input(
         self, input: PreprocessInput, prepared: PreparedInput, profile: DataWorkerProfile | None,
     ) -> None:
@@ -1009,6 +1074,8 @@ class PreprocessWorkerThread:
 
         self.request_model_kwargs[input.request_id] = model_kwargs
         self.request_output_state[input.request_id] = RequestOutputState()
+        if self.model is not None and any(p.open_after for p in self.model.get_partitions()):
+            self._held_inputs[input.request_id] = input
         preprocess_only = getattr(self.model, "PREPROCESS_ONLY_KWARGS", ())
         conductor_kwargs = {k: v for k, v in model_kwargs.items() if k not in preprocess_only}
         msg = ConductorMessage(
@@ -1797,6 +1864,12 @@ class PreprocessWorkerThread:
         for request_id, graph_edges in ready.items():
             did_work = True
             for graph_edge in graph_edges:
+                if graph_edge.name == OPEN_EDGE:
+                    try:
+                        self._open_member(request_id, graph_edge)
+                    except Exception as exc:  # noqa: BLE001 — this request's failure
+                        self._fail_request(request_id, exc, "Opening a member")
+                    continue
                 modality = graph_edge.name.replace("_output", "")
 
                 for tensor_info in graph_edge.tensor_info:
@@ -1866,6 +1939,11 @@ class PreprocessWorkerThread:
                     self._route_client_streams(message.body)
                 except Exception as exc:  # noqa: BLE001 — this call's failure; the batch's other messages still apply
                     self._fail_request(message.body.request_id, exc, "Client stream route")
+            elif message.message_type == WorkerMessageType.OPEN_PARTITION:
+                try:
+                    self._read_open_signals(message.body)
+                except Exception as exc:  # noqa: BLE001 — this request's failure
+                    self._fail_request(message.body.request_id, exc, "Opening a member")
             elif message.message_type == WorkerMessageType.DRAIN_REQUEST:
                 body: DrainRequest = message.body
                 self._begin_drain(body.request_id)

@@ -196,10 +196,16 @@ class InputIngest:
             self._tensors.register_request(rid, runtime.get_sharding_config(rid))
         laps.lap("worker_state")
         try:
-            if first:
+            # all of the request's resources on its first message here, less a
+            # deferred member's; and that member's own when it opens
+            if first or body.resource_keys is not None:
+                scope = {"keys": body.resource_keys} if body.resource_keys is not None else {}
+                if body.deferred_resources:
+                    scope["skip"] = body.deferred_resources
                 self._engines.add_request(
-                    rid, body.request_info.resource_configs, body.request_info,
+                    rid, body.request_info.resource_configs, body.request_info if first else None, **scope,
                 )
+            if first:
                 laps.lap("engine_add")
                 self._skip_unshared_publish(rid, body.worker_graph_to_workers)
                 laps.lap("skip_publish")

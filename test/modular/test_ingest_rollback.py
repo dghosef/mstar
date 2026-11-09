@@ -27,6 +27,9 @@ def _runner(resources):
     runner = StepRunner.__new__(StepRunner)
     runner._resources = {r.name: r for r in resources}
     runner._order = [r.name for r in resources]
+    runner._opened = {}
+    runner._unpublished = {}
+    runner._admission = SimpleNamespace(remove_request=lambda rid: None)
     return runner
 
 
@@ -39,6 +42,18 @@ def test_a_raising_ingest_rolls_back_every_resource_it_reached():
         ("ingest", "kv", 7), ("ingest", "sampler", 7),
         ("remove", "kv", 7), ("remove", "sampler", 7),
     ]
+
+
+def test_a_request_opens_its_resources_in_parts_and_releases_exactly_those():
+    log = []
+    runner = _runner([_Res("kv", log), _Res("llm_kv", log, fail=True), _Res("pos", log)])
+    runner.ingest_request(7, skip={"llm_kv"})  # the first message leaves the deferred member's closed
+    runner.ingest_request(7, skip={"llm_kv"})  # and a partition after it opens nothing twice
+    with pytest.raises(RuntimeError, match="over capacity"):
+        runner.ingest_request(7, keys={"llm_kv"})  # a failed open leaves the first part alone
+    assert log == [("ingest", "kv", 7), ("ingest", "pos", 7), ("ingest", "llm_kv", 7), ("remove", "llm_kv", 7)]
+    runner.remove_request(7)
+    assert log[4:] == [("remove", "kv", 7), ("remove", "pos", 7)]
 
 
 def _raise(err):
@@ -78,7 +93,7 @@ def test_the_worker_fails_only_the_request_whose_ingest_raised(raises_in):
     w.ingest._dispatch = processed.extend
     body = SimpleNamespace(
         request_id="wire", partition_worker_graph_ids=None, worker_graph_to_workers={}, loop_caps={},
-        initial_inputs=[],
+        initial_inputs=[], resource_keys=None, deferred_resources=(),
         request_info=SimpleNamespace(
             partition_name="p", graph_walk="g", resource_configs={}, rid_handle=None,
         ),

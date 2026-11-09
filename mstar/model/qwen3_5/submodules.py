@@ -33,7 +33,7 @@ from mstar.model.components.qwen3_vit import (
     vision_position_ids as vision_grid_position_ids,
 )
 from mstar.model.components.sampled_token_decoder import SampledTokenDecoder
-from mstar.model.keys import MIXED
+from mstar.model.keys import MIXED, Scope
 from mstar.model.multimodal import MediaEncoder
 from mstar.model.qwen3_5.components.language_model import Qwen3_5ForCausalLM
 from mstar.model.qwen3_5.components.rope import (
@@ -42,11 +42,7 @@ from mstar.model.qwen3_5.components.rope import (
     vision_position_ids,
 )
 from mstar.model.qwen3_5.config import (
-    ATTN,
-    GDN_STATE,
-    KV_CACHE,
-    LINEAR_ATTN,
-    ROPE,
+    QWEN3_5_NAMES,
     Qwen3_5Config,
     Qwen3_5VisionConfig,
 )
@@ -65,7 +61,8 @@ def _mixed_token_buckets(prefill_buckets, slack: int) -> list[int]:
 
 
 class LLMSubmodule(SampledTokenDecoder):
-    ATTN_KEY = ATTN
+    NAMES = QWEN3_5_NAMES
+    ATTN_KEY = property(lambda self: self.names.ATTN)
 
     # An eager 8k prefill is launch-bound (~1,100 kernel launches, the GPU
     # idle half the time: 78 ms of wall for 36 ms of kernels on 0.8B), so the
@@ -126,8 +123,9 @@ class LLMSubmodule(SampledTokenDecoder):
         vision_config: Qwen3_5VisionConfig | None = None,
         encoders: tuple[MediaEncoder, ...] = (),
         prefill_token_buckets: list[int] | None = None,
+        scope: Scope = Scope(),
     ):
-        super().__init__(model, config, encoders, prefill_token_buckets)
+        super().__init__(model, config, encoders, prefill_token_buckets, scope)
         if "MSTAR_QWEN35_PREFILL_TOKEN_BUCKETS" in os.environ:
             logger.warning(
                 "MSTAR_QWEN35_PREFILL_TOKEN_BUCKETS is no longer read; set the ladder "
@@ -154,11 +152,12 @@ class LLMSubmodule(SampledTokenDecoder):
         return DETERMINISTIC_COMPILE_MODE
 
     def layer_steps(self) -> dict[str, ResourceStep]:
+        n = self.names
         return {
-            KV_CACHE: KVStep(),
-            ATTN: AttentionStep(causal=True),
-            GDN_STATE: RecurrentStep(),
-            LINEAR_ATTN: LinearAttnStep(),
+            n.KV_CACHE: KVStep(),
+            n.ATTN: AttentionStep(causal=True),
+            n.GDN_STATE: RecurrentStep(),
+            n.LINEAR_ATTN: LinearAttnStep(),
         }
 
     # ------------------------------------------------------------------
@@ -200,10 +199,9 @@ class LLMSubmodule(SampledTokenDecoder):
     def resident_walks(self) -> frozenset[str]:
         # a captured decode step builds its rope inside the graph on every config
         # (`_rope_in_graph`), so its `preprocess` reads nothing the tables fill
-        return frozenset({"decode"})
+        return frozenset({self.DECODE_WALK})
 
-    @staticmethod
-    def _rope_in_graph(engine_inputs: ModelInputsFromEngine, graph_walk: str) -> bool:
+    def _rope_in_graph(self, engine_inputs: ModelInputsFromEngine, graph_walk: str) -> bool:
         """A step of a text walk replayed on a leased slot, or being captured
         for one, whose rotary tables come from the planned positions inside
         the graph: always for decode, with ``ingraph_decode_rope`` on for text
@@ -211,14 +209,16 @@ class LLMSubmodule(SampledTokenDecoder):
         positions."""
         if not engine_inputs.captured:
             return False
-        return graph_walk == "decode" or (graph_walk in ("prefill_text", MIXED) and ingraph_decode_rope())
+        return graph_walk == self.DECODE_WALK or (
+            graph_walk in (self.names.PREFILL_TEXT, MIXED) and ingraph_decode_rope()
+        )
 
     def _decode_cos_sin(
         self, engine_inputs: ModelInputsFromEngine, num_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """The rotary tables of a decode step from the position resource's
         planned positions: one token per row, no custom grids."""
-        pos_ids = self.node_resources[ROPE].pos_ids("main")
+        pos_ids = self.node_resources[self.names.ROPE].pos_ids("main")
         assert pos_ids is not None, (
             "position resource has no plan for this step; `plan` must run "
             "before the forward"
@@ -227,7 +227,7 @@ class LLMSubmodule(SampledTokenDecoder):
         return self.model.model.build_cos_sin(pos, dtype=self.model.embed_dtype)
 
     def _position_ids_3d(self, inputs: list[ARNodeInputs]) -> torch.Tensor:
-        return mrope_position_ids(self.node_resources[ROPE].pos_ids("main"), inputs)
+        return mrope_position_ids(self.node_resources[self.names.ROPE].pos_ids("main"), inputs)
 
     def preprocess(
         self,

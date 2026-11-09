@@ -34,13 +34,10 @@ from mstar.model.qwen3_5.components.rope import (
     compute_inv_freq,
 )
 from mstar.model.qwen3_5.config import (
-    ATTN,
-    GDN_STATE,
-    KV_CACHE,
     LINEAR_ATTENTION,
-    LINEAR_ATTN,
-    ROPE,
+    QWEN3_5_NAMES,
     Qwen3_5Config,
+    Qwen3_5Names,
 )
 
 
@@ -152,7 +149,7 @@ def _build_mlp(config: Qwen3_5Config, comm_group: CommGroup) -> nn.Module:
 
 
 def _build_linear_attn_layer(
-    config: Qwen3_5Config, comm_group: CommGroup,
+    config: Qwen3_5Config, comm_group: CommGroup, names: Qwen3_5Names,
 ) -> DecoderLayer:
     return DecoderLayer(
         self_attn=ParallelGatedDeltaNet(
@@ -164,8 +161,8 @@ def _build_linear_attn_layer(
             conv_kernel_size=config.linear_conv_kernel_dim,
             layout=GDNProjLayout.SPLIT,
             rms_norm_eps=config.rms_norm_eps,
-            linear_attn_key=LINEAR_ATTN,
-            state_key=GDN_STATE,
+            linear_attn_key=names.LINEAR_ATTN,
+            state_key=names.GDN_STATE,
             comm_group=comm_group,
         ),
         mlp=_build_mlp(config, comm_group),
@@ -175,7 +172,7 @@ def _build_linear_attn_layer(
 
 
 def _build_full_attn_layer(
-    config: Qwen3_5Config, rope_cache: RopeCache, comm_group: CommGroup,
+    config: Qwen3_5Config, rope_cache: RopeCache, comm_group: CommGroup, names: Qwen3_5Names,
 ) -> DecoderLayer:
     return DecoderLayer(
         self_attn=Qwen3_5Attention(
@@ -188,9 +185,9 @@ def _build_full_attn_layer(
             qk_norm=True,
             rms_norm_eps=config.rms_norm_eps,
             rope_theta=config.rope_theta,
-            attn_key=ATTN,
-            kv_key=KV_CACHE,
-            pos_key=ROPE,
+            attn_key=names.ATTN,
+            kv_key=names.KV_CACHE,
+            pos_key=names.ROPE,
             comm_group=comm_group,
         ),
         mlp=_build_mlp(config, comm_group),
@@ -202,6 +199,7 @@ def _build_full_attn_layer(
 class Qwen3_5LanguageModel(nn.Module):
     def __init__(
         self, config: Qwen3_5Config, comm_group: CommGroup | None = None,
+        names: Qwen3_5Names = QWEN3_5_NAMES,
     ):
         super().__init__()
         self.config = config
@@ -213,9 +211,9 @@ class Qwen3_5LanguageModel(nn.Module):
         )
         self.rope_cache = RopeCache()
         self.layers = nn.ModuleList(
-            _build_linear_attn_layer(config, comm_group)
+            _build_linear_attn_layer(config, comm_group, names)
             if kind == LINEAR_ATTENTION
-            else _build_full_attn_layer(config, self.rope_cache, comm_group)
+            else _build_full_attn_layer(config, self.rope_cache, comm_group, names)
             for kind in config.layer_types
         )
         self.register_buffer(
@@ -276,10 +274,11 @@ class Qwen3_5LanguageModel(nn.Module):
 class Qwen3_5ForCausalLM(nn.Module):
     def __init__(
         self, config: Qwen3_5Config, comm_group: CommGroup | None = None,
+        names: Qwen3_5Names = QWEN3_5_NAMES,
     ):
         super().__init__()
         self.config = config
-        self.model = Qwen3_5LanguageModel(config, comm_group)
+        self.model = Qwen3_5LanguageModel(config, comm_group, names)
         # Gathers the vocab so the sampler is TP-oblivious. Its `[vocab/tp,
         # hidden]` shard matches the embedding's, so the tie works per rank.
         self.lm_head = ColumnParallelLinear(

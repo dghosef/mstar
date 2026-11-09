@@ -43,6 +43,7 @@ class WorkerMessageType(Enum):
     TP_NO_SPEC = "tp_no_spec"
     ENABLE_METRICS = "enable_metrics"
     CLIENT_STREAM_ROUTE = "client_stream_route"
+    OPEN_PARTITION = "open_partition"
     LOAD_LORA_ADAPTER = "load_lora_adapter"
     UNLOAD_LORA_ADAPTER = "unload_lora_adapter"
 
@@ -55,6 +56,11 @@ class NewRequest(MessageBody):
     initial_inputs: list[GraphEdge]
     request_info: CurrentForwardPassInfo
     loop_caps: dict[str, int]
+    # The resources this message opens for the request: ``resource_keys`` only
+    # (a deferred member's, when it opens), else all but ``deferred_resources``
+    # (the first messages, which leave a deferred member's closed).
+    resource_keys: list[str] | None = None
+    deferred_resources: list[str] = field(default_factory=list)
 
 
 class MessageSource(IntEnum):
@@ -304,6 +310,8 @@ class ConductorMessageType(Enum):
     LOAD_LORA_ADAPTER = "load_lora_adapter"
     UNLOAD_LORA_ADAPTER = "unload_lora_adapter"
     LORA_ADAPTER_ACK = "lora_adapter_ack"
+    # a deferred member's prompt, built by the data worker (see OpenPartition)
+    OPEN_PARTITION = "open_partition"
 
 
 @dataclass
@@ -320,6 +328,20 @@ class NewRequestConductor(MessageBody):
     # A client stream the opening leaves open: a live call, which is refused
     # rather than queued at max_concurrent_requests.
     input_open: bool = False
+    # Set on the reply to an OpenPartition: the deferred partitions this body
+    # opens, with the member's own signals and kwargs. None for a new request.
+    open_partitions: list[str] | None = None
+
+
+@dataclass
+class OpenPartition(MessageBody):
+    """The conductor asking the data worker, which reads tensors and runs
+    ``process_prompt``, to build a deferred member's prompt from what its
+    producer finished: the producer's persisted ``signals``. Answered with a
+    NewRequestConductor carrying ``open_partitions``."""
+    request_id: str
+    partitions: list[str]
+    signals: dict[str, list[TensorPointerInfo]]
 
 
 @dataclass
@@ -334,6 +356,8 @@ class WorkerGraphsDone(MessageBody):
     resource_publish_info: dict[str, PublishedInfo] = field(default_factory=dict)
     partition_name: str = field(default="default")
     partition_done: bool = field(default=False)
+    # The named exit the partition's loop took, "" for none (``TokenStop.exits``)
+    exit: str = field(default="")
     # The walk the completed pass ran under. The conductor follows it for a
     # partition whose walk the stream drives.
     graph_walk: str = field(default="")

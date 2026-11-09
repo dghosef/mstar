@@ -1020,6 +1020,11 @@ class StepExecutor:
         # stop would cut the prompt short. Its chunk Loop ends by its own count.
         for rid in batch_N.batch.incomplete_node_rids:
             stops.pop(rid, None)
+        # Nor does it take an exit. Both callers run before the send that reports it.
+        incomplete = batch_N.batch.incomplete_node_rids
+        for rid, exit_name in batch_N.node_batch.exits.items():
+            if rid not in incomplete:
+                self._graph_runtime.mark_exit(rid, batch_N.partition, exit_name)
         ended = []
         # Only a row outside any loop can end its pass here: inside one it
         # would stop only the innermost loop, and a speculated next iteration

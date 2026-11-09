@@ -370,11 +370,15 @@ class EngineManager:
         self, request_id: str,
         resource_configs: dict[str, ResourceReqConfig] | None = None,
         request_info: CurrentForwardPassInfo | None = None,
+        keys: Collection[str] | None = None,
+        skip: Collection[str] = (),
     ) -> None:
         """Open resource state for a request, on the per-resource configs the
         conductor resolved for it (``Model.get_request_resource_configs``),
-        and hand the submodules its ``request_info``."""
-        self.engine.add_request(request_id, resource_configs, request_info)
+        and hand the submodules its ``request_info``. ``keys`` limits it to
+        those resources (every one less ``skip`` by default); one already open
+        for the request is left as it is."""
+        self.engine.add_request(request_id, resource_configs, request_info, keys, skip)
 
     def remove_request(self, request_id: str) -> set[str]:
         """Tear the request down; returns the resources it handed pages back to."""

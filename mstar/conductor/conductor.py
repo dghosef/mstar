@@ -8,6 +8,7 @@ import signal
 import socket
 import time
 from collections import defaultdict, deque
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field, replace
 
 import torch
@@ -71,6 +72,7 @@ from mstar.utils.ipc_format import (
     InputSignals,
     NewRequest,
     NewRequestConductor,
+    OpenPartition,
     ReadsDone,
     RemoveRequest,
     UnpersistTensors,
@@ -714,6 +716,55 @@ class Conductor:
                 break
         return cap, caps
 
+    def _settle_resources(
+        self, model_kwargs: dict, partition_fwd_args: dict[str, ForwardPassArgs],
+        partition_states: dict[str, PartitionState], seed: int,
+        only: set[str] | None = None, exclude: set[str] = frozenset(),
+    ) -> tuple[dict[str, ResourceReqConfig], int, dict[str, int]]:
+        """The per-resource configs a request (or a deferred member of it) opens
+        with, its prefix keys and layout applied and checked against what the
+        resources hold; with them the output cap and the loop caps fitted to
+        those. ``only`` and ``exclude`` limit it to some resources' keys."""
+        max_output_tokens = self._max_output_tokens(model_kwargs)
+        loop_caps = self._loop_caps(model_kwargs)
+        resource_configs = {
+            key: cfg for key, cfg in self._get_resource_configs(model_kwargs, partition_fwd_args).items()
+            if key not in exclude and (only is None or key in only)
+        }
+        # keyed by resource, so each config is handed only its own chain
+        kwargs = model_kwargs or {}
+        prefix_keys = kwargs.get("prefix_keys") or {}
+        prefix_tail = kwargs.get("prefix_tail") or {}
+        prefix_decode = kwargs.get("prefix_decode") or {}
+        prefix_cache = kwargs.get("prefix_cache")
+        if not all(partition_states[name].is_done for name in self._streamed_partitions()):
+            prefix_cache = False
+        kv_layout = kwargs.get("kv_layout") or {}
+        refuse_undeclared_labels(type(self.model).__name__, self._kv_labels, kv_layout, resource_configs)
+        for key, cfg in resource_configs.items():
+            cfg.apply_conductor_config(
+                seed=seed,
+                resource_key=key,
+                prefix_keys=prefix_keys.get(key),
+                prefix_tail=prefix_tail.get(key),
+                prefix_decode=prefix_decode.get(key),
+                # the LoRA adapter the chains were keyed under, the same for all
+                prefix_root=kwargs.get("prefix_root"),
+                prefix_cache=prefix_cache,
+                kv_layout=kv_layout.get(key),
+                loop_caps=loop_caps,
+            )
+        if not any(model_kwargs.get(key) is not None for key in self.model.LENGTH_KWARGS):
+            max_output_tokens, loop_caps = self._fit_loop_caps(
+                model_kwargs, resource_configs, max_output_tokens,
+            )
+            for key, cfg in resource_configs.items():
+                cfg.apply_conductor_config(seed=seed, resource_key=key, loop_caps=loop_caps)
+        for specs in self._resource_specs():
+            for key, cfg in resource_configs.items():
+                cfg.validate(specs.get(key))
+        return resource_configs, max_output_tokens, loop_caps
+
     def _get_resource_configs(
         self, model_kwargs: dict,
         partition_fwd_args: dict[str, ForwardPassArgs]
@@ -1347,8 +1398,6 @@ class Conductor:
             else self._queued_since.pop(body.request_id, ingest_time)
         )
         model_kwargs = body.model_kwargs or {}
-        max_output_tokens = self._max_output_tokens(model_kwargs)
-        loop_caps = self._loop_caps(model_kwargs)
         # Honor an explicit per-request seed (e.g. OpenAI ``seed``) when given;
         # otherwise derive a stable seed from the request id. ``_ingest_request``
         # already rejected a bad one.
@@ -1356,6 +1405,10 @@ class Conductor:
 
         partitions = self.model.get_partitions()
         topology = self.model.get_partition_topology()
+        # a deferred partition is dormant until its producer is done: no inputs,
+        # resources or NEW_REQUEST yet, but its workers are assigned with the rest
+        deferred = {p.name for p in partitions if p.open_after}
+        deferred_keys = self._partition_keys(deferred)
 
         # Build partition states and definitions
         partition_states: dict[str, PartitionState] = {}
@@ -1371,11 +1424,14 @@ class Conductor:
                     is_prefill=True,
                 ),
                 random_seed=seed,
+                waiting_open=p.name in deferred,
             )
 
         # Kick off all partitions by calling get_initial_forward_pass_args per partition
         partition_fwd_args: dict[str, ForwardPassArgs] = {}
         for p in partitions:
+            if p.name in deferred:
+                continue
             fwd_args = self.model.get_initial_forward_pass_args(
                 partition_name=p.name,
                 input_modalities=body.initial_input_modalities,
@@ -1394,46 +1450,14 @@ class Conductor:
         # after the initial fwd args: the configs are derived from them (BAGEL
         # reads `requires_cfg` off the metadata the model just settled), and
         # before the replica pick, which scores the request from them
-        resource_configs = self._get_resource_configs(
-            model_kwargs, partition_fwd_args
+        resource_configs, max_output_tokens, loop_caps = self._settle_resources(
+            model_kwargs, partition_fwd_args, partition_states, seed, exclude=deferred_keys,
         )
-        # keyed by resource, so each config is handed only its own chain
-        kwargs = model_kwargs or {}
-        prefix_keys = kwargs.get("prefix_keys") or {}
-        prefix_tail = kwargs.get("prefix_tail") or {}
-        prefix_decode = kwargs.get("prefix_decode") or {}
-        prefix_cache = kwargs.get("prefix_cache")
-        if not all(partition_states[name].is_done for name in self._streamed_partitions()):
-            prefix_cache = False
-        kv_layout = kwargs.get("kv_layout") or {}
-        refuse_undeclared_labels(type(self.model).__name__, self._kv_labels, kv_layout, resource_configs)
-        for key, cfg in resource_configs.items():
-            cfg.apply_conductor_config(
-                seed=seed,
-                resource_key=key,
-                prefix_keys=prefix_keys.get(key),
-                prefix_tail=prefix_tail.get(key),
-                prefix_decode=prefix_decode.get(key),
-                # the LoRA adapter the chains were keyed under, the same for all
-                prefix_root=kwargs.get("prefix_root"),
-                prefix_cache=prefix_cache,
-                kv_layout=kv_layout.get(key),
-                loop_caps=loop_caps,
-            )
-        if not any(model_kwargs.get(key) is not None for key in self.model.LENGTH_KWARGS):
-            max_output_tokens, loop_caps = self._fit_loop_caps(
-                model_kwargs, resource_configs, max_output_tokens,
-            )
-            for key, cfg in resource_configs.items():
-                cfg.apply_conductor_config(seed=seed, resource_key=key, loop_caps=loop_caps)
-        for specs in self._resource_specs():
-            for key, cfg in resource_configs.items():
-                cfg.validate(specs.get(key))
 
         # a partition done from the start runs none of its nodes, so it adds no
         # load to their replicas
         groups_run = self._router.groups_run(
-            name for name, fwd_args in partition_fwd_args.items() if not fwd_args.request_done
+            [*deferred, *(name for name, fwd_args in partition_fwd_args.items() if not fwd_args.request_done)]
         )
         placement = self._router.pick(resource_configs, groups_run)
         worker_graph_to_workers = self._assign_worker_graphs_to_workers(placement.replicas)
@@ -1476,57 +1500,20 @@ class Conductor:
         self._register_request(body.request_id, request_data)
 
         for p in partitions:
-            self._set_partition_worker_graph_ids(
-                body.request_id, p.name, partition_fwd_args[p.name].full_metadata.graph_walk,
-            )
+            if p.name not in deferred:
+                self._set_partition_worker_graph_ids(
+                    body.request_id, p.name, partition_fwd_args[p.name].full_metadata.graph_walk,
+                )
 
         # only now: a request refused before this leaves nothing in the mirrors
         request_data.routing = self._router.add(placement, resource_configs, groups_run)
 
         # Send NewRequest to each worker with the appropriate partition's inputs
         request_data.dispatched = True
-        for worker_id, worker_graph_ids in worker_to_worker_graph_ids.items():
-            # Determine which partition this worker serves
-            for partition_name, partition_wg_ids in self._resolve_worker_partition(
-                worker_graph_ids, partitions,
-            ).items():
-                fwd_args = partition_fwd_args[partition_name]
-                pstate = partition_states[partition_name]
-                inputs_per_worker = self._split_inputs_to_workers(
-                    sharding_config=request_data.sharding_config,
-                    inputs=self._with_chunk_ticks(
-                        fwd_args.inputs, fwd_args.full_metadata.graph_walk,
-                    ),
-                    graph_walk=fwd_args.full_metadata.graph_walk,
-                )
-
-                initial_inputs = inputs_per_worker.get(worker_id, [])
-                self._update_persist_ref_counts(body.request_id, initial_inputs)
-
-                message = NewRequest(
-                    request_id=body.request_id,
-                    partition_worker_graph_ids=partition_wg_ids,
-                    worker_graph_to_workers=worker_graph_to_workers,
-                    initial_inputs=initial_inputs,
-                    loop_caps=loop_caps,
-                    request_info=CurrentForwardPassInfo(
-                        request_id=body.request_id,
-                        graph_walk=fwd_args.full_metadata.graph_walk,
-                        step_metadata=fwd_args.step_metadata,
-                        stream_lead_items=fwd_args.stream_lead_items,
-                        fwd_index=pstate.fwd_pass_number,
-                        random_seed=pstate.random_seed,
-                        partition_name=partition_name,
-                        max_tokens=request_data.max_output_tokens,
-                        resource_configs=request_data.resource_configs
-                    ),
-                )
-                self.communicator.send(
-                    worker_id, WorkerMessage(
-                        message_type=WorkerMessageType.NEW_REQUEST,
-                        body=message,
-                    ),
-                )
+        self._send_new_requests(
+            body.request_id, request_data, partition_fwd_args, loop_caps,
+            deferred_resources=sorted(deferred_keys),
+        )
 
         request_data.resource_configs = without_layouts(request_data.resource_configs)
 
@@ -1550,6 +1537,142 @@ class Conductor:
         self._un_persist_tensors(body.request_id, [
             info for fwd_args in partition_fwd_args.values()
             for info in fwd_args.unpersist_tensors
+        ])
+
+    def _send_new_requests(
+        self, request_id: str, request_data: RequestData,
+        partition_fwd_args: dict[str, ForwardPassArgs], loop_caps: dict[str, int],
+        *, deferred_resources: Sequence[str] = (), resource_keys: Sequence[str] | None = None,
+        resource_configs: dict[str, ResourceReqConfig] | None = None,
+    ) -> None:
+        """A NEW_REQUEST to every worker for each partition of ``partition_fwd_args``,
+        with that partition's first inputs. A request's ingest sends its
+        partitions' and leaves ``deferred_resources`` closed; a deferred member's
+        open sends its own, opening ``resource_keys`` with ``resource_configs``."""
+        partitions = list(request_data.partition_definitions.values())
+        worker_to_worker_graph_ids: dict[str, list[int]] = defaultdict(list)
+        for wg_id, worker_ids in request_data.worker_graph_to_workers.items():
+            for worker_id in worker_ids:
+                worker_to_worker_graph_ids[worker_id].append(wg_id)
+        for worker_id, worker_graph_ids in worker_to_worker_graph_ids.items():
+            # Determine which partition this worker serves
+            for partition_name, partition_wg_ids in self._resolve_worker_partition(
+                worker_graph_ids, partitions,
+            ).items():
+                fwd_args = partition_fwd_args.get(partition_name)
+                if fwd_args is None:
+                    continue  # a deferred partition, not opened yet
+                pstate = request_data.partition_states[partition_name]
+                inputs_per_worker = self._split_inputs_to_workers(
+                    sharding_config=request_data.sharding_config,
+                    inputs=self._with_chunk_ticks(
+                        fwd_args.inputs, fwd_args.full_metadata.graph_walk,
+                    ),
+                    graph_walk=fwd_args.full_metadata.graph_walk,
+                )
+
+                initial_inputs = inputs_per_worker.get(worker_id, [])
+                self._update_persist_ref_counts(request_id, initial_inputs)
+
+                message = NewRequest(
+                    request_id=request_id,
+                    partition_worker_graph_ids=partition_wg_ids,
+                    worker_graph_to_workers=request_data.worker_graph_to_workers,
+                    initial_inputs=initial_inputs,
+                    loop_caps=loop_caps,
+                    request_info=CurrentForwardPassInfo(
+                        request_id=request_id,
+                        graph_walk=fwd_args.full_metadata.graph_walk,
+                        step_metadata=fwd_args.step_metadata,
+                        stream_lead_items=fwd_args.stream_lead_items,
+                        fwd_index=pstate.fwd_pass_number,
+                        random_seed=pstate.random_seed,
+                        partition_name=partition_name,
+                        max_tokens=request_data.max_output_tokens,
+                        resource_configs=(
+                            request_data.resource_configs if resource_configs is None else resource_configs
+                        ),
+                    ),
+                    resource_keys=None if resource_keys is None else list(resource_keys),
+                    deferred_resources=list(deferred_resources),
+                )
+                self.communicator.send(
+                    worker_id, WorkerMessage(
+                        message_type=WorkerMessageType.NEW_REQUEST,
+                        body=message,
+                    ),
+                )
+
+    def _partition_keys(self, partitions: Collection[str]) -> set[str]:
+        """The resource keys the nodes of ``partitions`` declare."""
+        if not partitions:
+            return set()
+        graphs = self.model.get_graph_walk_graphs()
+        nodes = {
+            node for p in self.model.get_partitions() if p.name in partitions
+            for walk in p.graph_walks for node in graphs[walk].get_nodes()
+        }
+        return {spec.resource_key for spec in self._node_resources() if not nodes.isdisjoint(spec.nodes)}
+
+    def _send_opens(self, request_id: str, producer: str) -> None:
+        """Ask the data worker to build the prompt of each deferred member
+        ``producer``, now done, opens: from the producer's persisted signal."""
+        request_data = self.requests[request_id]
+        by_signal: dict[str, list[str]] = {}
+        for name, pdef in request_data.partition_definitions.items():
+            if pdef.open_after == producer and request_data.partition_states[name].waiting_open:
+                by_signal.setdefault(pdef.open_signal, []).append(name)
+        for held, names in by_signal.items():
+            for name in names:
+                request_data.partition_states[name].waiting_open = False
+            infos = request_data.persist_signals.get(held, [])
+            if not infos:
+                raise ValueError(f"partition {producer!r} is done but persisted no {held!r} to open {names} with")
+            self._update_persist_ref_counts(request_id, [GraphEdge(next_node="", name=held, tensor_info=list(infos))])
+            self.communicator.send(self.PREPROCESS_WORKER, WorkerMessage(
+                message_type=WorkerMessageType.OPEN_PARTITION,
+                body=OpenPartition(request_id=request_id, partitions=names, signals={held: list(infos)}),
+            ))
+            self._un_persist_tensors(request_id, list(infos))
+
+    def _open_partitions(self, body: NewRequestConductor) -> None:
+        """A deferred member's prompt has been built (``body``): the rest of its
+        ingest, for its partitions only. Its resources open with its own
+        configs, prefix keys and layout; its workers were assigned at ingest."""
+        request_id = body.request_id
+        request_data = self.requests.get(request_id)
+        if request_data is None or request_id in self.draining:
+            return  # torn down meanwhile; the data worker's REMOVE frees what it stored
+        names = body.open_partitions
+        model_kwargs = body.model_kwargs or {}
+        partition_fwd_args = {}
+        for name in names:
+            fwd_args = self.model.get_initial_forward_pass_args(
+                partition_name=name,
+                input_modalities=body.initial_input_modalities,
+                output_modalities=body.initial_output_modalities,
+                input_signals=body.initial_signals,
+                model_kwargs=model_kwargs,
+            )
+            pstate = request_data.partition_states[name]
+            pstate.is_done = fwd_args.request_done
+            pstate.metadata = fwd_args.full_metadata
+            pstate.metadata.kwargs.update(fwd_args.step_metadata)
+            partition_fwd_args[name] = fwd_args
+        keys = self._partition_keys(names)
+        resource_configs, _, loop_caps = self._settle_resources(
+            model_kwargs, partition_fwd_args, request_data.partition_states,
+            request_data.random_seed, only=keys,
+        )
+        for name in names:
+            self._set_partition_worker_graph_ids(request_id, name, partition_fwd_args[name].full_metadata.graph_walk)
+        self._send_new_requests(
+            request_id, request_data, partition_fwd_args, loop_caps,
+            resource_keys=sorted(keys), resource_configs=resource_configs,
+        )
+        request_data.resource_configs = {**request_data.resource_configs, **without_layouts(resource_configs)}
+        self._un_persist_tensors(request_id, [
+            info for fwd_args in partition_fwd_args.values() for info in fwd_args.unpersist_tensors
         ])
 
     def _resolve_worker_partition(
@@ -1939,6 +2062,8 @@ class Conductor:
         # Absorb-only fields are replicated across TP ranks; only the rank-0
         # message contributes.
         if body.is_first_tp_rank:
+            if body.exit:
+                pstate.metadata.exit = body.exit
             if body.new_token_counts:
                 for name, count in body.new_token_counts.items():
                     pstate.num_output_tokens += count
@@ -2012,6 +2137,7 @@ class Conductor:
             incoming_connections=incoming_connections,
         )
         pstate.metadata = fwd_args.full_metadata
+        pstate.metadata.exit = ""  # the transition has taken it
         pstate.metadata.kwargs.update(fwd_args.step_metadata)
 
         # The worker's signal is authoritative, whatever walk the model chose:
@@ -2042,6 +2168,7 @@ class Conductor:
 
         if fwd_args.request_done:
             pstate.is_done = True
+            self._send_opens(request_id, partition_name)
             ended = [
                 name for name, stream in self._client_streams.items()
                 if stream.partition == partition_name
@@ -2241,6 +2368,8 @@ class Conductor:
         that finishes a partition's pass is queued on ``done_partition_forwards``."""
         if message.message_type == ConductorMessageType.NEW_REQUEST:
             self._ingest_request(message.body)
+        elif message.message_type == ConductorMessageType.OPEN_PARTITION:
+            self._open_partitions(message.body)
         elif message.message_type == ConductorMessageType.ABORT_REQUEST:
             self._abort_request(message.body.request_id)
         elif message.message_type == ConductorMessageType.FAIL_REQUESTS:

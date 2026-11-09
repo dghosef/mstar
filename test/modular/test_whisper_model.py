@@ -25,6 +25,7 @@ from mstar.model.components.audio_features import (  # noqa: E402
     load_audio_file,
     sinusoid_positions,
 )
+from mstar.model.keys import Scope  # noqa: E402
 from mstar.model.registry import HF_MODELS, get_model_class  # noqa: E402
 from mstar.model.submodule_base import ARNodeInputs, HostRows, ModelInputsFromEngine, NodeInputs  # noqa: E402
 from mstar.model.whisper.components.decoder import WhisperDecoderModel  # noqa: E402
@@ -724,12 +725,15 @@ def _signals(names):
     return {n: [object()] for n in names}
 
 
-def test_state_machine_forced_language():
+@pytest.mark.parametrize("scope", ["", "asr."])
+def test_state_machine_forced_language(scope):
+    """The same walk compares and persisted-signal reads hold under a pipeline prefix."""
     model = _make_model()
+    model.scope = Scope(scope)
     args = model.get_initial_forward_pass_args(
         "default", ["audio", "text"], ["text"], _signals(["audio", "text_inputs"]),
     )
-    assert args.full_metadata.graph_walk == PREFILL_WALK and args.full_metadata.is_prefill
+    assert args.full_metadata.graph_walk == scope + PREFILL_WALK and args.full_metadata.is_prefill
     assert [(e.next_node, e.name) for e in args.inputs] == [
         (ENCODER_NODE, "audio"), (DECODER_NODE, "text_inputs"),
     ]
@@ -737,9 +741,9 @@ def test_state_machine_forced_language():
 
     rules = object()
     nxt = model.get_partition_forward_pass_args(
-        "default", args.full_metadata, {"new_token": [object()], "ts_rules": [rules]},
+        "default", args.full_metadata, {scope + "new_token": [object()], "ts_rules": [rules]},
     )
-    assert nxt.full_metadata.graph_walk == DECODE_WALK and not nxt.full_metadata.is_prefill
+    assert nxt.full_metadata.graph_walk == scope + DECODE_WALK and not nxt.full_metadata.is_prefill
     assert [(e.next_node, e.name) for e in nxt.inputs] == [(DECODER_NODE, "text_inputs"), (DECODER_NODE, "ts_rules")]
     assert nxt.inputs[1].tensor_info == [rules] and len(nxt.unpersist_tensors) == 2
     done = model.get_partition_forward_pass_args("default", nxt.full_metadata, {})
@@ -929,6 +933,9 @@ def test_postprocess_renders_language_and_timestamps_only():
     assert text.startswith("<|en|><|0.00|>") and text.endswith("<|1.50|>")
     assert "<|startoftranscript|>" not in text and "<|notimestamps|>" not in text and "endoftext" not in text
     assert " " in text  # the byte-level 'Ġ' became a space
+    # the same ids as plain text, for a reader that is not the client
+    plain = model.text_output().detokenizer.to_text_bytes(ids).decode("utf-8")
+    assert plain == " m n"  # no language, timestamps or specials
     with pytest.raises(ValueError):
         model.postprocess(torch.tensor([1]), "audio")
 

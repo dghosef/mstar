@@ -14,6 +14,9 @@ class CurrentForwardConductorMetadata:
     input_modalities: list[str] = field(default_factory=list)
     output_modalities: list[str] = field(default_factory=list)
     kwargs: dict = field(default_factory=dict)
+    # the named exit the pass just finished took, "" for none
+    # (``TokenStop.exits``): the model's transition branches on it
+    exit: str = ""
 
 
 DEFAULT_PARTITION = "default"
@@ -100,6 +103,11 @@ class PartitionDefinition:
     graph_walks: set[str]                                       # walks this partition uses
     initial_walk: str | None = None                             # first walk, or None = triggered later
     producer_partitions: list[str] = field(default_factory=list)  # partitions feeding tokens to this one
+    # A deferred partition: dormant at ingest (no inputs, resources or NEW_REQUEST)
+    # and opened with its own prompt when partition ``open_after`` is done, built
+    # from that partition's persisted ``open_signal``.
+    open_after: str | None = None
+    open_signal: str = ""
 
 
 @dataclass
@@ -134,6 +142,8 @@ class PartitionState:
     # next pass's; see `Conductor._process_done_forward`)
     worker_reported_done: bool = False
     num_output_tokens: int = 0
+    # a deferred partition not yet asked for (its producer is not done)
+    waiting_open: bool = False
     # resource label -> PublishedInfo, accumulated across all TP ranks and
     # handed back out on the next forward
     resource_publish_info: dict[str, PublishedInfo] = field(default_factory=dict)

@@ -35,6 +35,8 @@ pub struct RequestPartitionInfo {
     /// Set when the consuming pass sees the final streaming chunk, or a stop
     /// check returns `END_PARTITION`.
     pub partition_done: bool,
+    /// The named exit a pass of the partition took, until a report carries it.
+    pub exit: Option<String>,
 }
 
 /// Python's `NestedLoopIndices`, as the runtime stores it.
@@ -214,6 +216,7 @@ impl RequestInfo {
                 graph_walk: walk,
                 walk_worker_graphs: live,
                 partition_done: false,
+                exit: None,
             },
         );
     }
@@ -243,6 +246,16 @@ impl RequestInfo {
         if let Some(info) = self.partitions.get_mut(&partition) {
             info.partition_done = true;
         }
+    }
+
+    pub fn mark_exit(&mut self, partition: PartitionId, name: String) {
+        if let Some(info) = self.partitions.get_mut(&partition) {
+            info.exit = Some(name);
+        }
+    }
+
+    pub fn take_exit(&mut self, partition: PartitionId) -> Option<String> {
+        self.partitions.get_mut(&partition)?.exit.take()
     }
 
     pub fn partition_done(&self, partition: PartitionId) -> bool {
@@ -368,5 +381,14 @@ mod tests {
         info.mark_partition_done(1);
         assert!(info.partition_done(1));
         assert!(!info.partition_done(2));
+    }
+
+    #[test]
+    fn an_exit_is_taken_once_so_a_reentered_loop_exits_afresh() {
+        let mut info = RequestInfo::default();
+        info.set_partition(1, 10, vec![]);
+        info.mark_exit(1, "tool_call".to_string());
+        assert_eq!(info.take_exit(1).as_deref(), Some("tool_call"));
+        assert_eq!(info.take_exit(1), None);
     }
 }

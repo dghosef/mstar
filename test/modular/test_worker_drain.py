@@ -471,7 +471,7 @@ def test_a_new_request_behind_the_drain_is_admitted_until_reads_done():
     info = SimpleNamespace(resource_configs={}, graph_walk="g", partition_name="p")
     w.ingest._add_new_request(SimpleNamespace(
         request_id="X", request_info=info, initial_inputs=[],
-        partition_worker_graph_ids=[], worker_graph_to_workers={}, loop_caps={},
+        partition_worker_graph_ids=[], worker_graph_to_workers={}, loop_caps={}, resource_keys=None, deferred_resources=(),
     ))
     # failed by the drain check, not by an ingest error
     assert known == ["X"] and w.lifecycle.failed_rids == {"X"}
@@ -517,7 +517,7 @@ def test_add_new_request_hands_off_the_handle_not_the_string():
     info = SimpleNamespace(resource_configs={}, graph_walk="g", partition_name="p")
     w.ingest._add_new_request(SimpleNamespace(
         request_id="X", request_info=info, initial_inputs=[],
-        partition_worker_graph_ids=[], worker_graph_to_workers={}, loop_caps={},
+        partition_worker_graph_ids=[], worker_graph_to_workers={}, loop_caps={}, resource_keys=None, deferred_resources=(),
     ))
 
     handle = w._graph_runtime.get_rid_handle("X")
