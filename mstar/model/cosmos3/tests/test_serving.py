@@ -860,3 +860,20 @@ def test_the_denoise_loops_cap_is_the_dits_step_count(kwargs, inputs, outputs) -
     )
     st = dit.request_states["r"]
     assert len(st["scheduler"].host_timesteps) == st["ar_steps"] and cap == st["ar_total_iters"]
+
+
+_ACTION = {"raw_action_dim": 7, "domain_name": "droid_lerobot"}
+
+
+@pytest.mark.parametrize("kwargs, outputs, match", [
+    ({"size": "abc"}, ["video"], "WIDTHxHEIGHT"),
+    ({"num_frames": 0}, ["video"], "num_frames"),
+    ({"guidance_interval": [1]}, ["image"], "guidance_interval"),
+    (_ACTION, ["action"], "requires an action_mode"),
+    ({**_ACTION, "action_mode": "policy"}, ["video"], "outputs action only"),
+    ({**_ACTION, "action_mode": "forward_dynamics", "action": [[0.0] * 7]}, ["action"], "outputs video only"),
+])
+def test_a_malformed_generation_request_fails_at_intake(kwargs, outputs, match) -> None:
+    model = Cosmos3Model(model_path_hf="unused", skip_weight_loading=True)
+    with pytest.raises(ValueError, match=match):
+        model._resolve_gen_params(kwargs, ["text"], outputs)
