@@ -82,7 +82,7 @@ def test_the_worker_fails_only_the_request_whose_ingest_raised(raises_in):
     body = SimpleNamespace(
         request_id="wire", partition_worker_graph_ids=None, worker_graph_to_workers={}, loop_caps={},
         initial_inputs=[],
-        request_info=SimpleNamespace(
+        request_info=SimpleNamespace(arrival=None,
             partition_name="p", graph_walk="g", resource_configs={}, rid_handle=None,
         ),
     )

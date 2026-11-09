@@ -12,6 +12,7 @@ from collections import deque
 import pytest
 import torch
 
+from mstar.conductor.admission_policy import AdmissionPolicy
 from mstar.conductor.conductor import Conductor, RequestData, _req_id_to_seed, _request_seed
 from mstar.graph.base import TensorPointerInfo
 from mstar.utils.ipc_format import (
@@ -72,6 +73,7 @@ def _conductor(requests, drain_ttl_s=120.0):
     c.enable_prof = False
     c.enable_nvtx = False
     c.max_concurrent_requests = None
+    c.admission_policy = AdmissionPolicy(frozenset())
     c._try_admit_waiting = lambda: setattr(c, "admits", c.admits + 1)
     return c
 

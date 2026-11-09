@@ -14,6 +14,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from mstar.conductor.admission_policy import AdmissionPolicy  # noqa: E402
 from mstar.conductor.conductor import Conductor  # noqa: E402
 from mstar.conductor.routing import ReplicaRouter, RoutingWeights, routing_cost  # noqa: E402
 from mstar.engine.resources.kv import manager as manager_mod  # noqa: E402
@@ -404,6 +405,7 @@ def test_a_request_refused_at_ingest_leaves_nothing_in_the_mirrors():
     conductor._status_interval_s = None
     conductor._loop_max_iters = {}
     conductor._arrivals = itertools.count()
+    conductor.admission_policy = AdmissionPolicy(frozenset())
     conductor._kv_labels = {"kv": ("main",)}
     conductor._build_request_sharding_config = lambda workers: None
     refused = []

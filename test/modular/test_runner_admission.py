@@ -14,6 +14,8 @@ from collections.abc import Collection
 
 sys.path.insert(0, ".")
 
+import pytest
+
 from mstar.engine.resources import StepRunner
 from mstar.engine.resources.base import Resource
 from mstar.engine.resources.step import ADMIT_OK, ASKS, AdmitOutcome, AdmitRuntimeError
@@ -251,6 +253,21 @@ def test_requests_pass_one_refused_while_passing_where_it_is_first():
     runner.admit_waiting(_nothing)
 
     assert kv.held == set(small), "six small requests waited behind one refused while it passed, with room for them"
+
+
+@pytest.mark.parametrize(("keys", "passes"), [({}, "a"), ({"b": -1}, "b")])
+def test_requests_that_may_pass_try_in_their_pools_pass_key_order(keys, passes):
+    """Room for one passer: the earlier request takes it, unless the pool's `Resource.pass_key` puts the other first."""
+    kv = _PassingPool(0, needs={"head": 5})
+    kv.pass_key = lambda rid, node_name, graph_walk, published: keys.get(rid, 0)
+    runner = _runner(kv=kv)
+    for rid in ("head", "a", "b"):
+        assert runner.admit_retrieve(rid, NODE, WALK).queued
+    kv.free = 2
+
+    runner.admit_waiting(_nothing)
+
+    assert kv.held == {passes}, f"{sorted(kv.held)} passed the head, not {passes}"
 
 
 def test_a_request_refused_while_passing_isnt_passed_once_it_is_first():

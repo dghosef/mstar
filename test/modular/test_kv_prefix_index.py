@@ -17,6 +17,7 @@ sys.path.insert(0, ".")
 import pytest
 
 from mstar.engine.resources.kv.arena import PageArena, new_page_arena
+from mstar.engine.resources.kv.cache_policy import cache_policy
 from mstar.engine.resources.kv.prefix_index import PrefixIndex
 
 PAGE_SIZE = 16
@@ -138,6 +139,24 @@ def test_eviction_after_a_hit_takes_the_cold_branch_and_stops_at_the_fork():
     assert index.lookup([b"A", b"B", b"C"]) == [pages["A"], pages["B"]], (
         "the cold leaf survived the eviction"
     )
+    _assert_pages_partition(arena)
+
+
+@pytest.mark.parametrize(("policy", "evicted"), [("lru", "C"), ("lfu", "D")])
+def test_the_pools_cache_policy_picks_the_leaf_eviction_takes(policy, evicted):
+    """C is hit twice, then D once more recently: LRU evicts C, the less recent, and LFU D, the less often hit."""
+    arena = _arena()
+    index = PrefixIndex(arena, cache_policy(policy))
+    pages = _chain(index, arena)
+    index.lookup([b"A", b"B", b"C"])
+    index.lookup([b"A", b"B", b"C"])
+    index.lookup([b"A", b"B", b"D"])
+
+    index.evict(1)
+
+    kept = "D" if evicted == "C" else "C"
+    assert index.lookup([b"A", b"B", evicted.encode()]) == [pages["A"], pages["B"]], f"{policy} kept {evicted}"
+    assert index.lookup([b"A", b"B", kept.encode()])[-1] == pages[kept], f"{policy} evicted {kept}"
     _assert_pages_partition(arena)
 
 

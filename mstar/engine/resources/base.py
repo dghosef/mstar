@@ -397,6 +397,15 @@ class Resource(ResidentHooks, ABC):
         would take nothing for it, and the request may then start wherever it stands in this resource's queue."""
         return 0
 
+    def pass_key(
+        self, rid: str, node_name: str, graph_walk: str, published: "PublishedInfo | None",
+    ) -> object:
+        """The order in which the runner tries waiting requests that may pass the first request of this resource's
+        queue: the lowest key first, and equal keys in the requests' order. Asked only of a resource that overrides
+        `reserve_past`. Whatever the order, `reserve_past` leaves the first request what it needs, so its wait stays
+        bounded. The base keeps the requests' order."""
+        return 0
+
     def unreserve(self, rid: str) -> None:
         """Give back what `reserve` took, because another resource ``rid`` asks didn't fit."""
         return

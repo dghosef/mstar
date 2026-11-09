@@ -11,6 +11,7 @@ import contextlib
 from collections.abc import Mapping
 from typing import Any, NamedTuple
 
+from mstar.conductor.admission_policy import admission_policy
 from mstar.distributed.base import ShardingConfig
 from mstar.engine.resources.lora.config import LORA_RESOURCE_KEY, lora_enabled
 from mstar.engine.resources.lora.serving import declared_lora_specs, size_lora_specs
@@ -94,6 +95,10 @@ def validate_deployment(
             f"unpausable_outputs must be a list of output modalities from {sorted(SUPPORTED_MODALITIES)}, "
             f"got {unpausable!r}"
         )
+    try:
+        admission_policy(config, frozenset())
+    except ValueError as e:
+        problems.append(str(e))
     if (workers := config.get("preprocess_workers")) is not None:
         try:
             positive_int("preprocess_workers", workers)

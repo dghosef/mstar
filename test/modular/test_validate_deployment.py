@@ -146,6 +146,15 @@ def test_unpausable_outputs_that_name_no_output_modality_are_refused(tmp_path, o
     )
 
 
+@pytest.mark.parametrize(("policy", "why"), [
+    ("priorty", r"admission_policy must be one of \['fcfs', 'priority'\] or 'package.module:Class', got 'priorty'"),
+    ("mstar.no_such_module:Policy", r"admission_policy 'mstar.no_such_module:Policy' can't be imported"),
+    ("mstar.engine.resources.kv.cache_policy:CachePolicy", r"must name a subclass of AdmissionPolicy"),
+])
+def test_an_admission_policy_that_names_no_policy_is_refused(tmp_path, policy, why):
+    _refused(_Model(), _cfg(tmp_path, admission_policy=policy), why)
+
+
 def test_missing_node_groups_is_refused(tmp_path):
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("max_seq_len: 64\n")

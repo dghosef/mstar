@@ -164,7 +164,9 @@ def test_a_request_no_rebuild_can_write_again_isnt_rebuildable_in_its_pools(monk
     configs = {R: _config(), 12: _config(growth=(("embeds_loop", 1),)), 13: _config(walk="audio"),
                10: {"kv": KVReqConfig(kv_layout={})}}
     for rid, config in configs.items():
-        info = SimpleNamespace(partition_name="p", graph_walk=PREFILL, resource_configs=config, stream_lead_items={})
+        info = SimpleNamespace(
+            arrival=None, partition_name="p", graph_walk=PREFILL, resource_configs=config, stream_lead_items={},
+        )
         w.ingest._add_new_request(SimpleNamespace(request_id=str(rid), partition_worker_graph_ids=None, loop_caps={},
                                                   worker_graph_to_workers={}, initial_inputs=[], request_info=info))
     refused = {rid for rid in configs if not kv._overrides[rid].rebuildable}
@@ -364,7 +366,9 @@ def test_intake_journals_each_log_rank_0s_pool_couldnt_hold_once_the_engine_hold
     w.tensor_manager.register_request, w.tensor_manager.start_read_tensors = lambda *a: None, lambda *a, **k: []
 
     for rid in (R, A):
-        info = SimpleNamespace(partition_name="p", graph_walk=PREFILL, resource_configs=_config(), stream_lead_items={})
+        info = SimpleNamespace(
+            arrival=None, partition_name="p", graph_walk=PREFILL, resource_configs=_config(), stream_lead_items={},
+        )
         w.ingest._add_new_request(SimpleNamespace(request_id=str(rid), partition_worker_graph_ids=None, loop_caps={},
                                                   worker_graph_to_workers={}, initial_inputs=[], request_info=info))
 

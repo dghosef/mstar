@@ -32,6 +32,9 @@ logger = logging.getLogger(__name__)
 # matches them. Every submission has its own key, so a remembered key never gets
 # another NEW_REQUEST.
 _REMOVED_RIDS_KEEP = 4096
+# Past every number the conductor gives (`admission_policy.order`, below 2**59) and below the bands the line order
+# adds (`micro_scheduler._MID_PREFILL`)
+_UNNUMBERED = 1 << 60
 
 # `no_new_work` with nothing to exclude, so a scan with no teardown allocates nothing
 _NONE: frozenset[int] = frozenset()
@@ -42,11 +45,12 @@ class RequestLifecycle:
         self._is_tp_follower = layout.is_tp_follower
         self._runtime = graph_runtime
 
-        # rid -> the order requests arrived at this worker in. Also which rids
+        # rid -> the request's place in the conductor's order (`CurrentForwardPassInfo.arrival`), which every
+        # worker reads alike, or past every numbered request for one the conductor gave no number. Also which rids
         # are admitted here and not yet torn down: the runtime keeps a handle
         # past `removed`, until the teardown's last step frees it.
         self.arrivals: dict[int, int] = {}
-        self._arrived = 0
+        self._unnumbered = 0
 
         # wire id -> messages for a request that has not arrived. Keyed by the
         # string: these come before the NEW_REQUEST that mints the handle.
@@ -76,13 +80,15 @@ class RequestLifecycle:
 
     # -- arrival ------------------------------------------------------------
 
-    def add(self, rid: int, wire_rid: str) -> list[WorkerMessage]:
+    def add(self, rid: int, wire_rid: str, arrival: int | None = None) -> list[WorkerMessage]:
         """A NEW_REQUEST, of which a request with several partitions here sends
-        one per partition: it keeps its first arrival. Its parked messages
+        one per partition, all with the conductor's ``arrival``. Its parked messages
         stay parked until ``take_parked``."""
         if rid not in self.arrivals:
-            self._arrived += 1
-            self.arrivals[rid] = self._arrived
+            if arrival is None:
+                self._unnumbered += 1
+                arrival = _UNNUMBERED + self._unnumbered
+            self.arrivals[rid] = arrival
         if wire_rid in self.draining or wire_rid in self.pending_drains:
             # Drained before admission: no new work, while committed TP steps still run.
             self.failed_rids.add(rid)

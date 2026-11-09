@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum, StrEnum
 from typing import TYPE_CHECKING
 
+from mstar.engine.resources.kv.cache_policy import cache_policy
 from mstar.engine.resources.spec import NodeResourceSpec, ResourceReqConfig, RoutingContext, check_sizes
 from mstar.engine.resources.step import ResourceStep
 
@@ -107,6 +108,9 @@ class PagedKVConfig(KVConfig):
     prefix_cache_salt: str = ""
     prefix_cache: bool = True
     prefix_cache_tp: bool = False
+    # the prefix cache's eviction, passing and victim order (`cache_policy.CachePolicy`): a built-in's name or
+    # "package.module:Class"
+    cache_policy: str = "lru"
     # MLA only: the latent is ``[ckv (kv_lora_rank) | kpe (qk_rope_head_dim)]``
     kv_lora_rank: int | None = None
     qk_rope_head_dim: int | None = None
@@ -136,6 +140,7 @@ class PagedKVConfig(KVConfig):
     def _check_sizes(self) -> None:
         check_sizes({"max_seq_len": self.max_seq_len, "max_num_pages": self.max_num_pages})
         check_sizes({"cpu_offload_pages": self.cpu_offload_pages}, smallest=0)
+        cache_policy(self.cache_policy)
         if self.page_size is not None:
             check_sizes({"page_size": self.page_size})
 
@@ -720,7 +725,10 @@ class KVSpec(NodeResourceSpec):
             return None
         from mstar.engine.resources.kv.routing import KVRoutingMirror
 
-        return KVRoutingMirror(ctx.num_replicas, self.config.num_units, self.config.tokens_per_page, labels)
+        return KVRoutingMirror(
+            ctx.num_replicas, self.config.num_units, self.config.tokens_per_page, labels,
+            cache_policy(self.config.cache_policy),
+        )
 
     def derive(self, specs: Mapping[str, NodeResourceSpec]) -> list[str]:
         # the attentions over a pool decide what it keeps, and their module imports this one

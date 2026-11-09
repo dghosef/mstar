@@ -271,7 +271,7 @@ def test_add_new_request_hands_the_handle_to_every_subsystem():
         w.request_state.per_request_info[request_id] = cfg
 
     w.request_state.add_request = _state_add
-    info = SimpleNamespace(
+    info = SimpleNamespace(arrival=None,
         rid_handle=-1, resource_configs={}, graph_walk="decode",
         partition_name="p",
     )
@@ -317,7 +317,7 @@ def test_add_new_request_keeps_the_stream_buffer_and_primes_it_for_its_consumer(
     w.streams.consumer_node = {"codec_tokens": "Codec"}
 
     def new(partition, lead):
-        info = SimpleNamespace(
+        info = SimpleNamespace(arrival=None,
             rid_handle=-1, resource_configs={}, graph_walk="w", partition_name=partition,
             stream_lead_items=lead,
         )

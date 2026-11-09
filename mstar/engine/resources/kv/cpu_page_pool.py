@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import torch
 
 from mstar.engine.resources.kv.cache import GroupPages, KVCache, PagedKVConfig, held_pages, on_pages
+from mstar.engine.resources.kv.cache_policy import cache_policy
 from mstar.engine.resources.kv.page_copier import make_page_copier
 from mstar.engine.resources.kv.prefix_index import PrefixIndex
 
@@ -67,7 +68,7 @@ class CPUPagePool:
     ):
         self.config = config
         self.arena = arena
-        self.index = PrefixIndex(arena)
+        self.index = PrefixIndex(arena, cache_policy(config.cache_policy))
         # the arena reports owner changes to the index, so `room` reads the evictable set
         arena.index = self.index
 

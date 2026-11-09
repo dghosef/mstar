@@ -2,10 +2,10 @@
 
 Inserting makes the index a page's second owner, so evicting releases that one
 reference and the page reaches the free list only once no live request holds it
-too. Leaves are ordered by a clock that ticks on every insert and every matching
-lookup. A hit re-stamps a page without pushing it again, so a leaf keeps one heap
-entry however often it is read, and an entry that surfaces under an older stamp
-is pushed back under the page's own.
+too. Leaves are ordered by the pool's `CachePolicy.evict_key`, worked out from a
+clock that ticks on every insert and every matching lookup. A hit re-stamps a page
+without pushing it again, so a leaf keeps one heap entry however often it is read,
+and an entry that surfaces under an older key is pushed back under the page's own.
 
 Every caller holds the manager's lock, or is the conductor's one thread, so none
 of this takes one of its own.
@@ -14,14 +14,16 @@ of this takes one of its own.
 import copy
 import heapq
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from mstar.engine.resources.kv.cache_policy import CachePolicy
 
 if TYPE_CHECKING:
     from mstar.engine.resources.kv.arena import PageArena
 
 
 class PrefixIndex:
-    def __init__(self, arena: "PageArena") -> None:
+    def __init__(self, arena: "PageArena", policy: CachePolicy | None = None) -> None:
         num_pages = arena.max_num_pages
         self._arena = arena
         self._by_key: dict[bytes, int] = {}
@@ -30,8 +32,10 @@ class PrefixIndex:
         self._children: list[int] = [0] * num_pages
         # how many of a page's children are held, or have a held page below them
         self._held_below: list[int] = [0] * num_pages
-        self._stamp: list[int] = [0] * num_pages
-        self._leaves: list[tuple[int, int]] = []
+        self._evict_key = (policy or CachePolicy()).evict_key
+        # each indexed page's eviction key
+        self._stamp: list[Any] = [None] * num_pages
+        self._leaves: list[tuple[Any, int]] = []
         self._clock = 0
         self._evictable: set[int] = set()
         # Pages ever inserted, and pages ever taken out of the evictable set by a request that holds
@@ -52,7 +56,9 @@ class PrefixIndex:
             # one stamp for the whole run, so recency stays monotone along it
             self._clock += 1
             for page in pages:
-                self._stamp[page] = self._clock
+                key = self._evict_key(self._clock, self._stamp[page])
+                assert key >= self._stamp[page], f"a hit lowered page {page}'s eviction key"
+                self._stamp[page] = key
 
     def insert(self, key: bytes, page: int, parent: int | None = None) -> bool:
         """Name ``page`` by ``key`` under ``parent``; the first writer wins. When the arena reports to this
@@ -78,7 +84,7 @@ class PrefixIndex:
         self._parent[page] = parent
         self._children[page] = 0
         self._held_below[page] = 0
-        self._stamp[page] = self._clock
+        self._stamp[page] = self._evict_key(self._clock, None)
         self._arena.seal([page])
         self._arena.retain([page])
         if self._arena.index is self and self._arena.owners(page) > 2:
@@ -87,7 +93,7 @@ class PrefixIndex:
             self.set_shared(page, True)
         if parent is not None:
             self._children[parent] += 1
-        heapq.heappush(self._leaves, (self._clock, page))
+        heapq.heappush(self._leaves, (self._stamp[page], page))
         return True
 
     def insert_run(self, keys: Sequence[bytes], pages: Sequence[int], parent: int | None) -> int:
@@ -221,7 +227,7 @@ class PrefixIndex:
         """
         dropped = []
         passed_over = []
-        spared: list[tuple[int, int]] = []
+        spared: list[tuple[Any, int]] = []
         while len(dropped) < n:
             entry = self._pop_leaf()
             last = entry is None and bool(spared)

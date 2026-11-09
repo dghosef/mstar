@@ -46,9 +46,9 @@ def _stub_transfer(monkeypatch):
     monkeypatch.setattr(manager_mod, "KVTransferManager", _StubTransfer)
 
 
-def _pool():
+def _pool(cache_policy: str = "lru"):
     """A pool where requests can hold 10 pages, past the sink page, on a worker that runs the decode loop."""
-    kv = _manager(max_num_pages=11)
+    kv = _manager(max_num_pages=11, cache_policy=cache_policy)
     kv.local_loops = {"decode"}
     return kv
 
@@ -243,6 +243,20 @@ def test_a_newer_victim_waits_until_the_older_request_has_its_page():
     _remove(kv, "r")
     # its history is the prompt's 5 pages and the sample its next step writes
     assert _admitted(kv, "v") and kv._allotments["v"].pages == 7, "v didn't reserve its history and a page"
+
+
+@pytest.mark.parametrize(("policy", "victim"), [("lru", "v2"), ("cache_aware", "v1")])
+def test_the_pools_cache_policy_orders_the_victims_after_the_short_request(policy, victim):
+    """``lru`` drops the newest request, and ``cache_aware`` the one with the fewest tokens to write again. Neither
+    takes an older request."""
+    kv = _pool(policy)
+    _running(kv, "v0", 1, arrival=0)
+    _running(kv, "r", 3, arrival=1)
+    _running(kv, "v1", 1, arrival=2)
+    _running(kv, "v2", 4, arrival=3)
+    assert _step(kv, "r", 1 * PAGE_SIZE).ok, "r grows past its allotment into the room"
+
+    assert _preempt(kv, "r", _short(kv, "r"), droppable=lambda rid: True).to_drop == [victim]
 
 
 def test_each_victim_sets_aside_what_it_frees_before_the_next_one_moves():

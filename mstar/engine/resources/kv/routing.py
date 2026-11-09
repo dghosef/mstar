@@ -35,6 +35,10 @@ when it is placed and its end, and is approximate for that reason:
   the pool keeps a few per prefill in ``prefix_slots``; the mirror counts the
   KV hit whole, so it over-predicts there.
 
+Under a pool's ``cache_policy`` the mirror evicts with the same key, but it counts
+one hit per placement where the worker counts one per lease, so under ``lfu`` its
+eviction order drifts from the worker's.
+
 Only the GPU pool is modelled. With a host pool (``cpu_offload_pages``) a
 cached page the GPU evicted can come back from the host, so it under-predicts
 hits there.
@@ -46,6 +50,7 @@ from collections.abc import Collection, Sequence
 from typing import TYPE_CHECKING, NamedTuple
 
 from mstar.engine.resources.kv.arena import PageArena, PythonPageArena
+from mstar.engine.resources.kv.cache_policy import CachePolicy
 from mstar.engine.resources.kv.prefix_index import PrefixIndex
 from mstar.engine.resources.spec import RoutingFacts
 
@@ -102,11 +107,13 @@ class KVRoutingMirror:
     """`RoutingMirror` of one paged KV resource, for the keyed ``labels`` whose
     walks run on these replicas."""
 
-    def __init__(self, num_replicas: int, num_pages: int, page_size: int, labels: Collection[str]):
+    def __init__(
+        self, num_replicas: int, num_pages: int, page_size: int, labels: Collection[str], policy: CachePolicy,
+    ):
         self._page_size = page_size
         self._labels = labels
         self._arenas = [PythonPageArena(num_pages, _FreePages(num_pages)) for _ in range(num_replicas)]
-        self._indexes = [PrefixIndex(arena) for arena in self._arenas]
+        self._indexes = [PrefixIndex(arena, policy) for arena in self._arenas]
         for arena, index in zip(self._arenas, self._indexes, strict=True):
             # as `KVManager.enable_prefix_cache` at one rank, the only size a mirror is built for
             arena.index = index

@@ -23,6 +23,7 @@ import pytest
 import torch
 import yaml
 
+from mstar.conductor.admission_policy import AdmissionPolicy
 from mstar.conductor.conductor import Conductor
 from mstar.engine.resources import AllocationFailed, apply_yaml_overrides
 from mstar.engine.resources.kv import manager as manager_mod
@@ -95,6 +96,7 @@ def _conductor(max_concurrent_requests: int | None) -> Conductor:
     c.waiting_queue = []
     c._client_streams = {}
     c.max_concurrent_requests = max_concurrent_requests
+    c.admission_policy = AdmissionPolicy(frozenset())
     c._early_abort_requests = set()
     c.enable_nvtx = False
     c._admit_request = lambda body: c.requests.__setitem__(body.request_id, body)

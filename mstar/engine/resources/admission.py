@@ -215,7 +215,7 @@ class Admission:
         blocked = self._blocked(queue[0] for key, queue in self._queues.items() if key in self._passes and queue)
         # a request a resource refused while it passed waits for its mark, so the sweep skips it
         waiting = self._waiting.keys() - self._refused.keys() - self._returns.keys()
-        for rid in sorted(waiting, key=self._arrival.__getitem__):
+        for rid in sorted(waiting, key=lambda rid: (self._pass_key(rid, published_of), self._arrival[rid])):
             if rid in self._waiting:
                 nodes = self._pass(rid, lambda node, rid=rid: published_of(rid, node), blocked)
                 started.extend((node, rid) for node in nodes or ())
@@ -320,6 +320,19 @@ class Admission:
         if nodes is None:
             blocked.update(self._blocked([rid]))
         return nodes
+
+    def _pass_key(
+        self, rid: str, published_of: Callable[[str, str], Mapping[str, PublishedInfo] | None],
+    ) -> tuple:
+        """The `Resource.pass_key` of each resource waiting ``rid`` asked that lets requests pass, in ask order."""
+        keys = []
+        for key, (node_name, graph_walk) in self._waiting[rid].asked.items():
+            if key in self._passes:
+                published = published_of(rid, node_name)
+                keys.append(self._resources[key].pass_key(
+                    rid, node_name, graph_walk, None if published is None else published.get(key),
+                ))
+        return tuple(keys)
 
     def _blocked(self, rids: Iterable[str]) -> dict[str, str]:
         """Those of the waiting ``rids`` that can't start now and may be passed, each with the resource that keeps it

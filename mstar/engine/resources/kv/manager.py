@@ -26,6 +26,7 @@ from mstar.engine.resources.base import (
 )
 from mstar.engine.resources.kv.arena import PageArena, StreamPages, columns_from_raw, new_page_arena, plan_columns
 from mstar.engine.resources.kv.cache import GroupPages, KVCache, held_pages, on_pages
+from mstar.engine.resources.kv.cache_policy import CachePolicy, VictimCost, cache_policy
 from mstar.engine.resources.kv.config import (
     KVGroup,
     KVLayout,
@@ -604,6 +605,7 @@ class KVManager(AttentionResource):
         self._needs_remote_transfer = needs_remote_transfer
 
         self._arena = new_page_arena(cfg.num_units)
+        self._policy = cache_policy(cfg.cache_policy)
         # take SINK_PAGE out of circulation; the allocator is FIFO from 0
         sink = self._arena.acquire(1)
         assert sink == [SINK_PAGE], f"expected page {SINK_PAGE} first, got {sink}"
@@ -894,7 +896,7 @@ class KVManager(AttentionResource):
                 keyed.update(named.growth)
             self._keyed_walks[label] = frozenset(keyed)
         self._prefix_root = root
-        self._index = PrefixIndex(self._arena)
+        self._index = PrefixIndex(self._arena, self._policy)
         # every rank counts the evictable set, since the ranks admit each step from the same room
         self._arena.index = self._index
         if self._cpu_pool is not None:
@@ -1401,8 +1403,10 @@ class KVManager(AttentionResource):
             or stream.lease is not None
         ):
             return
-        # never past what the other side published, and only whole pages
-        matched = self._index.lookup(rooted)[
+        # never past what the other side published, and only whole pages. Above one rank a hit is stamped at
+        # commit, as `_lease`'s is, so every rank's eviction keys move alike.
+        walk = self._index.lookup if self._world_size == 1 else self._index.pages_for
+        matched = walk(rooted)[
             :published_len // self.config.tokens_per_page
         ]
         matched = self._retain_cached(rid, stream, matched)
@@ -4407,14 +4411,9 @@ class KVManager(AttentionResource):
         with self._lock:
             if self._host_copies:
                 self._land_host_copies()
-            chains = [] if self._index is None or self._on_host(rid) else [
-                stream.chain for stream in self._streams[rid].values()
-                if stream.chain is not None and stream.chain.rooted is None
-            ]
         # Requests ask and are removed on one thread only, so ``rid`` still asks once the lock is
         # taken again.
-        for prefix_chain in chains:
-            self._root_chain(prefix_chain)
+        self._root_chains(rid)
         with self._lock:
             if rid not in self._asks:
                 # the moves `make_room` chose for ``rid`` admitted it (`_settle`)
@@ -4442,12 +4441,7 @@ class KVManager(AttentionResource):
             least = (self._fixed_need(rid) or 0) + self._footprint(rid) - self._asks[rid]
             if rid in self._allotments or least > room:
                 return PassMark(room, None, None)
-            chains = [] if self._index is None or self._on_host(rid) else [
-                stream.chain for stream in self._streams[rid].values()
-                if stream.chain is not None and stream.chain.rooted is None
-            ]
-        for prefix_chain in chains:
-            self._root_chain(prefix_chain)
+        self._root_chains(rid)
         with self._lock:
             # before `_need`, as in `reserve`
             counts = self._index_counts()
@@ -4460,6 +4454,31 @@ class KVManager(AttentionResource):
             if not self._admit(rid, pages, passed=True):
                 return PassMark(room, None, None)
             return None
+
+    def pass_key(
+        self, rid: str, node_name: str, graph_walk: str, published: PublishedKVInfo | None,
+    ) -> object:
+        """`Resource.pass_key`: the pool's `CachePolicy.pass_key` of the pages ``rid``'s prompt finds cached and the
+        pages it would take."""
+        if type(self._policy).pass_key is CachePolicy.pass_key:
+            return 0
+        self._root_chains(rid)
+        with self._lock:
+            if rid not in self._asks or rid in self._allotments:
+                return self._policy.pass_key(0, 0)
+            whole, _ = self._hit(rid, node_name, graph_walk, published)
+            return self._policy.pass_key(whole, self._need(rid, node_name, graph_walk, published))
+
+    def _root_chains(self, rid: str) -> None:
+        """Hash the keys of ``rid``'s prefix chains that aren't hashed yet, outside the lock, which it takes to read
+        them."""
+        with self._lock:
+            chains = [] if self._index is None or self._on_host(rid) else [
+                stream.chain for stream in self._streams[rid].values()
+                if stream.chain is not None and stream.chain.rooted is None
+            ]
+        for prefix_chain in chains:
+            self._root_chain(prefix_chain)
 
     def _admit(self, rid: str, pages: int, passed: bool = False) -> bool:
         """Allot ``rid`` the ``pages`` it asks for, which the room covers, or return False when ``rid`` turns
@@ -4764,16 +4783,12 @@ class KVManager(AttentionResource):
             return None if victims is None else self._earmark(Earmark(mark.rid, pages, set(), mark=mark), victims)
 
     def _choose(self, pages_short: int, newer: Collection[str], droppable: Callable[[str], bool]) -> Victims | None:
-        """The fewest leading requests of ``newer`` whose moves free ``pages_short`` pages, or None when moving every
-        one a move can take frees less. Caller holds the lock."""
+        """The fewest leading requests of ``newer``, in the pool's `CachePolicy.victim_key` order, whose moves free
+        ``pages_short`` pages, or None when moving every one a move can take frees less. Caller holds the lock."""
         left = 0 if self._cpu_pool is None else self._cpu_pool.room()
         hosted, asking = set(), set()
         victims: list[str] = []
-        for other in newer:
-            if not self._holds(other):
-                continue
-            if not self._movable(other):
-                continue
+        for other in self._victim_order([other for other in newer if self._holds(other) and self._movable(other)]):
             if self._unwritten(other):
                 asking.add(other)
             elif (pages := self._host_pages(other)) is not None and pages <= left:
@@ -4796,6 +4811,38 @@ class KVManager(AttentionResource):
             [victim for victim in victims if victim not in hosted and victim not in asking],
             [victim for victim in victims if victim in asking],
         )
+
+    def _victim_order(self, candidates: list[str]) -> list[str]:
+        """``candidates``, last request first, in the order the pool's policy takes them. Caller holds the lock."""
+        if type(self._policy).victim_key is CachePolicy.victim_key:
+            return candidates
+        room = 0 if self._cpu_pool is None else self._cpu_pool.room()
+
+        def fits_host(rid: str) -> bool:
+            pages = self._host_pages(rid)
+            return pages is not None and pages <= room
+
+        costs = [
+            VictimCost(
+                rid, place, lambda rid=rid: self._frees([rid]), lambda rid=rid: fits_host(rid),
+                lambda rid=rid: self._rebuild_tokens(rid),
+            )
+            for place, rid in enumerate(candidates)
+        ]
+        costs.sort(key=self._policy.victim_key)
+        return [cost.rid for cost in costs]
+
+    def _rebuild_tokens(self, rid: str) -> int:
+        """About the tokens a drop of ``rid`` would write again: those of the pages it holds, less its pages the
+        index files, which its rebuild's probe takes back while they stay cached."""
+        pages = 0
+        for stream in self._streams[rid].values():
+            chain = stream.chain
+            filed = 0 if self._index is None or chain is None or chain.rooted is None else (
+                self._filed(chain.rooted, stream.page_indices)
+            )
+            pages += len(stream.pages()) - filed
+        return max(0, pages) * self.config.tokens_per_page
 
     def _earmark(self, earmark: Earmark, victims: Victims) -> Victims:
         """Set aside what ``victims`` free for ``earmark.rid``. Caller holds the lock."""

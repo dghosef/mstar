@@ -13,7 +13,6 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Collection, Iterable
-from enum import Enum
 
 from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.engine.resources import AllocationFailed, Residency
@@ -27,14 +26,6 @@ logger = logging.getLogger(__name__)
 
 # Seconds between logs of one (node, walk)'s refusals with nothing to evict
 _HOLD_LOG_INTERVAL = 5.0
-
-
-class EvictionPolicy(Enum):
-    """Strategy for choosing which request to offload to CPU on OOM."""
-    LAST_IN_LINE = "last_in_line"  # the row a step of the refused key would reach last
-    # TODO: PRIORITY — ask a named resource how much it wants each candidate
-    # gone (``Engine.offload_priority``), for cases where the line is the wrong
-    # question. Needs eviction-policy metadata naming which resource to consult.
 
 
 class Admission:
@@ -67,7 +58,6 @@ class Admission:
         self.batch_ceilings: dict[tuple[str, str], int] = {}
         # (node, graph walk) -> the resource whose refusal set its cap, if named
         self.ceiling_resources: dict[tuple[str, str], str | None] = {}
-        self.eviction_policy = EvictionPolicy.LAST_IN_LINE
         # (node, walk) -> when its last hold was logged, and the holds since
         self._hold_logged: dict[tuple[str, str], tuple[float, int]] = {}
 
@@ -324,7 +314,7 @@ class Admission:
         decision a backoff could improve, and rank 0 hit the same refusal on the
         same batch and is already driving the retry.
 
-        ``arrivals``: this worker's requests, earliest first. ``last_in_line``:
+        ``arrivals``: this worker's requests. ``last_in_line``:
         of some rids, the one a step of this key reaches last. ``could_refill``:
         whether other rows wait to run; asked lazily, since it scans the queues.
         """
@@ -465,8 +455,7 @@ class Admission:
             )
             return None
         logger.info(
-            "Offloaded request %s from %s (%d reclaimed, policy=%s, in_batch=%s)",
-            victim_id, node_name, freed, self.eviction_policy.value,
-            victim_id in batch_ids,
+            "Offloaded request %s from %s (%d reclaimed, last in line, in_batch=%s)",
+            victim_id, node_name, freed, victim_id in batch_ids,
         )
         return victim_id

@@ -1,4 +1,5 @@
 import atexit
+import bisect
 import hashlib
 import itertools
 import logging
@@ -21,6 +22,7 @@ from mstar.api_server.request_types import (
     RequestFailed,
 )
 from mstar.communication.communicator import CommProtocol, make_communicator
+from mstar.conductor.admission_policy import admission_policy, order
 from mstar.conductor.lora_ops import LoraAdapterOps
 from mstar.conductor.mps import MpsDaemon
 from mstar.conductor.request_info import (
@@ -506,7 +508,9 @@ class Conductor:
         self.max_concurrent_requests: int = self.model_config.get(
             "max_concurrent_requests", None
         )
-        self._unpausable_outputs = frozenset(self.model_config.get("unpausable_outputs", model.UNPAUSABLE_OUTPUTS))
+        self.admission_policy = admission_policy(
+            self.model_config, frozenset(self.model_config.get("unpausable_outputs", model.UNPAUSABLE_OUTPUTS)),
+        )
         self._settle_lora_adapters(lora_adapter_digests)
         # Optional ``mps: true``: workers run as clients of a CUDA MPS daemon the
         # conductor owns, so workers sharing a GPU overlap their kernels instead
@@ -1263,6 +1267,7 @@ class Conductor:
             return
         try:
             _request_seed(body.model_kwargs or {}, _seed_id(body))
+            self.admission_policy.priority(body)
         except ValueError as exc:
             self._reject_request(body.request_id, str(exc), status=400)
             return
@@ -1281,7 +1286,8 @@ class Conductor:
                 body.request_id, len(self.requests),
                 self.max_concurrent_requests,
             )
-            self.waiting_queue.append(body)
+            # by priority, then in the order they came
+            bisect.insort(self.waiting_queue, body, key=self.admission_policy.priority)
             if self._status_interval_s is not None:
                 self._queued_since[body.request_id] = time.perf_counter()
             return
@@ -1409,7 +1415,7 @@ class Conductor:
         if not all(partition_states[name].is_done for name in self._streamed_partitions()):
             prefix_cache = False
         kv_layout = kwargs.get("kv_layout") or {}
-        arrival = next(self._arrivals)
+        arrival = order(self.admission_policy.priority(body), next(self._arrivals))
         refuse_undeclared_labels(type(self.model).__name__, self._kv_labels, kv_layout, resource_configs)
         for key, cfg in resource_configs.items():
             cfg.apply_conductor_config(
@@ -1430,10 +1436,7 @@ class Conductor:
             )
             for key, cfg in resource_configs.items():
                 cfg.apply_conductor_config(seed=seed, resource_key=key, loop_caps=loop_caps)
-        mark_unpausable(
-            resource_configs,
-            body.streaming and not self._unpausable_outputs.isdisjoint(body.initial_output_modalities),
-        )
+        mark_unpausable(resource_configs, self.admission_policy.unpausable(body))
         for specs in self._resource_specs():
             for key, cfg in resource_configs.items():
                 cfg.validate(specs.get(key))

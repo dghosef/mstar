@@ -1124,6 +1124,16 @@ def test_last_in_line_is_the_row_the_pick_would_reach_last(order, last):
     assert sched.last_in_line(NODE, WALK, ["r0", "r1", "r2"]) == last
 
 
+def test_last_in_line_follows_the_conductors_order_not_the_order_requests_reached_this_worker():
+    """r1 reached this worker first, but the conductor ordered it after r0, as a priority policy does, so the
+    offload-and-hold fallback takes r1."""
+    sched = _scheduler(_Engine(order=StepOrder.ARRIVAL))
+    sched.lifecycle.add("r1", "r1", 7)
+    sched.lifecycle.add("r0", "r0", 3)
+
+    assert sched.last_in_line(NODE, WALK, ["r0", "r1"]) == "r1"
+
+
 def test_a_refused_step_of_a_real_walk_reads_its_combined_walks_line():
     """Eviction asks with the step's label, which may be a real walk's."""
     sched = _combined_scheduler(_Engine(order=StepOrder.TURNS))

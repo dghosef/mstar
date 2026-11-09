@@ -261,6 +261,10 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
        below). Defaults to the model's ``UNPAUSABLE_OUTPUTS``, which is ``[audio]`` unless the
        model declares otherwise. ``[]`` gives a voice deployment a fast first chunk under KV
        pressure, at the cost of a pause when its requests are preempted.
+   * - ``admission_policy``
+     - *(optional, default* ``fcfs`` *)* The order requests are admitted and preempted in, and which are never
+       preempted (see below): ``fcfs``, ``priority``, or ``"package.module:Class"`` naming a subclass of
+       ``mstar.conductor.admission_policy.AdmissionPolicy``.
    * - ``routing_weights``
      - *(optional)* The weights of the data-parallel replica pick (see below), one per
        term: ``load`` for the live requests on a replica, and ``prefix`` for the share of
@@ -602,6 +606,28 @@ shares most of its prompt frees little. Offload helps a pool that runs short now
 doesn't replace the cap. With a host pool and the prefix cache on, a cached page is copied to the
 host once no request holds it, and a later request whose prefix the device evicted copies it back
 from there. So the host pool should hold more pages than the device's prefix cache.
+
+**Admission and cache policies.** "Newer" and "oldest" above mean later and earliest in one order
+the conductor sets when it takes a request in, the same on every worker. Under ``admission_policy:
+fcfs``, the default, that is arrival order. Under ``priority``, a request's ``priority`` field (an
+integer in [-262144, 262144), lower first, 0 when unset; send it in the request body, or as
+``extra_body`` from the OpenAI client) comes before its arrival: the conductor's queue and each
+pool's queue admit lower values first, and a request that runs short takes pages only from
+requests ordered after it, the highest priority value first, then the newest. A request with a bad
+``priority`` gets a 400. A waiting request still never moves a running one, so a high-priority
+prompt starts when room frees, not at once. Strict priority can hold a low-priority request back,
+and drop it again each time it returns, for as long as higher-priority requests keep arriving. A
+deployment's own subclass can order requests any other way that is fixed when they arrive
+(shortest job first, deadlines, tenants) and mark more requests as never preempted. Each paged KV
+cache also takes a ``cache_policy`` in its ``resources:`` block: ``lru`` (the default) evicts the
+least recently hit cached page first, and lets waiting requests pass the head and takes victims in
+the order above; ``lfu`` evicts the least often hit page first; ``cache_aware`` evicts as ``lru``,
+lets the passer with the most cached prefix try first, and takes first the victim that is cheapest
+to bring back (one the host pool holds whole, then the one with the fewest tokens to recompute).
+``"package.module:Class"`` names a subclass of
+``mstar.engine.resources.kv.cache_policy.CachePolicy``. A cache policy never takes a victim
+ordered before the request that ran short, and must compute its keys from their arguments alone,
+since every rank evicts.
 
 **Chunked prefill budgets.** A walk that supports chunked prefill runs at most its token
 budget per step, and a longer prompt is split across steps. Each model sets its own

@@ -65,12 +65,12 @@ def _stub_transfer(monkeypatch):
     monkeypatch.setattr(manager_mod, "KVTransferManager", _StubTransfer)
 
 
-def _manager(max_num_pages: int = 32, cpu_offload_pages: int = 0) -> KVManager:
+def _manager(max_num_pages: int = 32, cpu_offload_pages: int = 0, cache_policy: str = "lru") -> KVManager:
     kv = KVManager(
         cfg=PagedKVConfig(
             num_layers=1, num_kv_heads=1, head_dim=8, max_seq_len=4096,
             max_num_pages=max_num_pages, page_size=PAGE_SIZE,
-            cpu_offload_pages=cpu_offload_pages,
+            cpu_offload_pages=cpu_offload_pages, cache_policy=cache_policy,
         ),
         name="kv", joint_comm_group=None, transfer_engine_info=None,
         device=torch.device("cuda" if cpu_offload_pages else "cpu"),

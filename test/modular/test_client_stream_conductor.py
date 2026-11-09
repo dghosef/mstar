@@ -158,11 +158,11 @@ def _msg(kind, body):
     return ConductorMessage(message_type=kind, body=body)
 
 
-def _new_request(rid, input_open=True):
+def _new_request(rid, input_open=True, **model_kwargs):
     """An opening; a live call's leaves input open."""
     return _msg(ConductorMessageType.NEW_REQUEST, NewRequestConductor(
         request_id=rid, initial_signals={}, initial_input_modalities=["audio"],
-        initial_output_modalities=["text"], input_metadata={}, model_kwargs={},
+        initial_output_modalities=["text"], input_metadata={}, model_kwargs=model_kwargs,
         input_open=input_open,
     ))
 
@@ -255,6 +255,22 @@ def test_a_one_shot_waits_for_a_slot_and_is_routed_at_admission(tmp_path, monkey
     assert _routes(c, "b") == [{"audio_in": ["worker_0"]}]
     kinds = [(k, body.request_id) for k, _e, body in _sends(c, "NEW_REQUEST", "CLIENT_STREAM_ROUTE")]
     assert kinds.index(("NEW_REQUEST", "b")) < kinds.index(("CLIENT_STREAM_ROUTE", "b"))
+
+
+def test_the_priority_policy_admits_lower_priorities_first_and_orders_every_worker_by_them(tmp_path, monkeypatch):
+    c = _conductor(tmp_path, monkeypatch, max_concurrent_requests=1, admission_policy="priority")
+    _run(c, [
+        [_new_request("a", input_open=False)]
+        + [_new_request(rid, input_open=False, priority=p) for rid, p in (("b", 5), ("c", -1), ("bad", "high"))],
+        [_partition_done(c, "a")],
+        _reads_done("a", PREPROCESS, "worker_0"),
+    ])
+
+    assert "c" in c.requests and [body.request_id for body in c.waiting_queue] == ["b"], "c waited behind b"
+    arrivals = {body.request_id: body.request_info.arrival for _k, _e, body in _sends(c, "NEW_REQUEST")}
+    assert arrivals["c"] < arrivals["a"], "the workers would order c, which came later at a lower priority, after a"
+    failed = [m.body for e, m in c.comm.sent if getattr(m, "message_type", None) == "request_failed"]
+    assert [(f.request_id, f.status) for f in failed] == [("bad", 400)]
 
 
 def test_a_call_with_open_input_is_refused_at_the_cap(tmp_path, monkeypatch):

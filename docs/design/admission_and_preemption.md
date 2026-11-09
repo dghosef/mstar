@@ -18,6 +18,7 @@ A host tier for the prefix cache, which was on the roadmap regardless, is built 
 | Preemption on a failed grant | R2 | §3, §4 |
 | Guaranteed and preemptible requests | R3 | §1 |
 | TP followers | R4 | §6 |
+| Pluggable admission and cache policies | | §9 |
 
 ---
 
@@ -328,7 +329,7 @@ Take the oldest request O, once every older request has finished:
 3. While O waits, on the host or holding its pages, every other request that holds pages is newer, and no newer prompt starts in O's pools except one already allotted its room, which takes nothing more. Each one that runs either finishes, which grows the room, or runs short and, with nothing newer to cover its shortage, moves to the host or waits too. O then moves the newer requests that wait, chosen together as one set, and takes the room as their moves land. Until then the room their moves free is kept from passers. A newer request with images can be dropped only once its host copies have landed, and with every request waiting no step runs, so the worker starts those copies on its passes that run no step. None of them is guaranteed, since a guaranteed request never runs short, and one no drop can free moves into the room the host set aside for it (§1). O's footprint fits the pool, so those pages and the room cover it once every newer request has finished or waits.
 4. So O runs again each time it waits, and each time it has grown by at least a page. From the host it returns with every page its grant needed, so that grant can't fail again. Its footprint fits the pool, so it finishes.
 
-The next oldest request then takes its place in the argument. Two requests that hold pages and wait can't wait on each other for good, since the older one, or an older request still, moves the newer one. A dropped request returns with its whole history and one more page reserved, and no drop takes it again until a step writes past its rebuild, so each rebuild keeps at least one token, and once it is the oldest no newer prompt passes it. Until every older request has finished, newer prompts, guaranteed ones included, can start in O's pools. After that none does, so the argument holds while new requests keep arriving. `admit_waiting` tries every return that fits, oldest first, so it can admit returns newer than O ahead of O, and the argument survives that because each newer return grows by a page each time it is preempted, up to its footprint.
+The next oldest request then takes its place in the argument. Two requests that hold pages and wait can't wait on each other for good, since the older one, or an older request still, moves the newer one. A dropped request returns with its whole history and one more page reserved, and no drop takes it again until a step writes past its rebuild, so each rebuild keeps at least one token, and once it is the oldest no newer prompt passes it. Until every older request has finished, newer prompts, guaranteed ones included, can start in O's pools. After that none does, so under `fcfs` the argument holds while new requests keep arriving. Under an admission policy that orders some new requests before O (§9), it holds once such requests stop arriving: until then O can be held back, and dropped again each time it returns. `admit_waiting` tries every return that fits, oldest first, so it can admit returns newer than O ahead of O, and the argument survives that because each newer return grows by a page each time it is preempted, up to its footprint.
 
 For example, an older and a newer request hold 5 pages each of a 10-page pool, and the older needs a sixth. The newer one is dropped and needs 6 pages to return, so it waits until the older one finishes. Readmitted once its prompt fit, it would take back its own pages and the older one would fail again. Today both requests end with HTTP 500 at the 600 s timeout.
 
@@ -391,7 +392,44 @@ Under `MSTAR_KV_DEBUG_ASSERTS`:
 
 ---
 
-## 9. Next steps (Out of Scope here)
+## 9. Policies
+
+"Older" and "newer" in this document mean earlier and later in one order, and "guaranteed" has one input a deployment
+chooses. Both come from the deployment's admission policy, and a paged KV pool's prefix-cache choices come from its
+cache policy. The mechanisms above read only the order and the class, so a policy changes no mechanism.
+
+**Admission policy** ([admission_policy.py](../../mstar/conductor/admission_policy.py), serving config
+`admission_policy`). The conductor asks it once per request, when it takes the request in:
+
+- `priority(body)` places the request ahead of its arrival. The conductor packs both into the arrival number of §3.1,
+  `(priority + 2**18) << 40 | arrival`, so every queue, return and victim choice above, and the worker's line order,
+  read it as they read the arrival number. `fcfs` gives every request 0. `priority` reads the request's `priority`
+  kwarg, lower first, as vLLM does.
+- `unpausable(body)` is the conductor's mark of §1. A pool still guarantees a request it can't take pages back from.
+
+The order has to be fixed when the request arrives, and come from the conductor, since every worker must read the same
+order (§3.1). That rules out aging, and a queue ordered by each pool's cache hits.
+
+**Cache policy** ([cache_policy.py](../../mstar/engine/resources/kv/cache_policy.py), a pool's `cache_policy`):
+
+| Choice | Hook | Read by | Bound that keeps §5.5 |
+|---|---|---|---|
+| Which cached page is evicted | `evict_key(clock, previous)`, set at each filing and hit and never lowered by a hit | `PrefixIndex`, on every rank, on the host and in the routing mirror | evicts only pages the index alone holds |
+| Which request that may pass the head tries first | `pass_key(hit_pages, need_pages)`, through `Resource.pass_key` | `Admission`'s sweep, rank 0 | `_kept` keeps the head's room whatever the order |
+| Which victim moves first | `victim_key(VictimCost)` | `KVManager._choose`, rank 0 | candidates are only requests after the one short |
+
+`lru` keeps the choices of §2 to §4. `cache_aware` tries the passer with the most cached pages first and takes first
+the victim the host holds whole, then the one with the fewest tokens to recompute. That can drop a short request each
+time an older one runs short, which §3.2's newest-first order avoids. `lfu` evicts the least often hit page.
+
+Every rank evicts, so an eviction key is computed from its arguments alone. Above one rank a hit is stamped at commit,
+which every rank runs in step order, so every rank's keys move alike. The routing mirror counts one hit per placement,
+so its order drifts from the worker's under `lfu`.
+
+Later: a waiting request that preempts running requests ordered after it. A running request has steps in flight, so
+moving it needs a fence that a move for a waiting request doesn't need today.
+
+## 10. Next steps (Out of Scope here)
 
 - **Pool sizing.** Fixed, hand-set pool sizes can also cause thrashing, which this work surfaced. Each cache's `max_num_pages` comes from the config, 2048 pages by default, so a pool can fill and preempt long before memory runs out: Command A+'s TP8 config gets about 4 GB of KV per GPU where, by my estimate, about 20 GB is free after weights. Except for M*, every other engine sizes the pool from free memory instead.
 - **One pool per GPU.** SGLang has moved from a fixed pool per cache type to one physical pool, where full-attention KV and window or recurrent state grow from opposite ends and compaction remaps pages, since agent contexts vary too much in length for fixed ratios. M*'s caches on a worker could share one pool the same way, but the effects would need to be measured.
