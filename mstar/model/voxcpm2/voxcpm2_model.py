@@ -342,7 +342,8 @@ class VoxCPM2Model(Model):
         """A reference clip as 16 kHz mono float32, resampled as ``librosa.load`` does (soxr HQ)."""
         import soundfile
 
-        from mstar.model.media_limits import decoding_upload, read_sound_file, sound_file_seconds
+        from mstar.api_server.media_io import read_soundfile_capped
+        from mstar.model.media_limits import decoding_upload, sound_file_seconds
 
         rate = self.config.audio_vae.sample_rate
         with decoding_upload(filepath, "the reference audio"):
@@ -350,12 +351,9 @@ class VoxCPM2Model(Model):
             seconds = sound_file_seconds(info.frames, info.samplerate)
             if seconds is not None:
                 self._check_reference_seconds(seconds)
-                waveform, sample_rate = soundfile.read(filepath, dtype="float32", always_2d=True)
-            else:
-                # no sample count in the header (a FLAC written to a pipe): count it as it decodes
-                waveform, sample_rate = read_sound_file(filepath, self.REF_MAX_SECONDS)
-                self._check_reference_seconds(len(waveform) / sample_rate if sample_rate else 0.0)
-        audio = waveform.mean(axis=1)
+            audio, sample_rate = read_soundfile_capped(filepath, self.REF_MAX_SECONDS)
+            if seconds is None:   # no sample count in the header (a FLAC written to a pipe)
+                self._check_reference_seconds(len(audio) / sample_rate)
         # as Chatterbox does; cloned from digital silence, the model speaks about
         # three times the usual length of near silence
         if float(abs(audio - audio.mean()).max()) < self.REF_MIN_PEAK:

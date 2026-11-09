@@ -478,7 +478,7 @@ def load_reference_clip(
     import soundfile
 
     from mstar.api_server.media_io import read_soundfile_capped
-    from mstar.model.media_limits import read_sound_file, sound_file_seconds
+    from mstar.model.media_limits import sound_file_seconds
 
     with decoding_upload(path, "the reference audio"):
         info = soundfile.info(path)
@@ -486,14 +486,10 @@ def load_reference_clip(
         seconds = sound_file_seconds(info.frames, info.samplerate)
         if seconds is not None:
             check_seconds(seconds)
-            waveform, rate = read_soundfile_capped(path, max_seconds)
-            audio = torch.from_numpy(waveform)
-        else:
-            # no sample count in the header (a FLAC written to a pipe)
-            waveform, rate = read_sound_file(path, max_seconds)
+        waveform, rate = read_soundfile_capped(path, max_seconds)
+        if seconds is None:   # no sample count in the header (a FLAC written to a pipe)
             check_seconds(len(waveform) / rate)
-            audio = torch.from_numpy(waveform).mean(dim=1)
-    return _resample(audio, rate, sample_rate)
+    return _resample(torch.from_numpy(waveform), rate, sample_rate)
 
 
 SAMPLE_RATE = 16_000

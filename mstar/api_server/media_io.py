@@ -729,17 +729,17 @@ def read_soundfile_capped(path: str, max_seconds: float = MAX_AUDIO_SECONDS) -> 
     ``1..MAX_SAMPLE_RATE`` is refused (:class:`AudioRefusedError`) before
     any read. A container libsndfile cannot read raises soundfile's own error.
 
-    A FLAC whose header has no sample count cannot seek past its last block,
-    so libsndfile raises on the read that reaches it. Such a file is read in
-    small blocks and that read ends the clip, losing at most one block (as
-    ``media_limits.count_sound_file_seconds`` measures it).
+    A FLAC whose header has no sample count (written to a pipe) cannot seek
+    past its last block, and libsndfile raises on the read that reaches it,
+    losing that block; FFmpeg decodes it whole, so it does where available
+    (see :func:`_read_unsized`).
     """
     import soundfile as sf
 
     from mstar.model.media_limits import UNKNOWN_FRAMES
 
     with sf.SoundFile(path) as f:
-        rate = f.samplerate
+        rate, unsized = f.samplerate, f.frames >= UNKNOWN_FRAMES
         # the frame cap scales with the rate; the range alone here, the
         # kernel to the caller's target is checked after the decode
         try:
@@ -748,17 +748,9 @@ def read_soundfile_capped(path: str, max_seconds: float = MAX_AUDIO_SECONDS) -> 
             raise AudioRefusedError(str(exc)) from None
         limit = int(max_seconds * rate)
         block = max(1, _SOUNDFILE_BLOCK_SECONDS * rate // _SOUNDFILE_BLOCK_ALIGN) * _SOUNDFILE_BLOCK_ALIGN
-        no_length = f.frames >= UNKNOWN_FRAMES
-        if no_length:
-            block = 4 * _SOUNDFILE_BLOCK_ALIGN
         parts, frames = [], 0
-        while True:
-            try:
-                data = f.read(min(block, limit + 1 - frames), dtype="float32", always_2d=True)
-            except RuntimeError:  # soundfile.LibsndfileError
-                if not no_length:
-                    raise
-                break
+        while not unsized:
+            data = f.read(min(block, limit + 1 - frames), dtype="float32", always_2d=True)
             if not len(data):
                 break
             frames += len(data)
@@ -767,7 +759,30 @@ def read_soundfile_capped(path: str, max_seconds: float = MAX_AUDIO_SECONDS) -> 
             # a mono block is its own mean, and numpy's reduction over the
             # length-1 axis costs ~10x the copy
             parts.append(data[:, 0] if data.shape[1] == 1 else data.mean(axis=1))
+    if unsized:
+        return _read_unsized(path, max_seconds)
     return (np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)), rate
+
+
+def _read_unsized(path: str, max_seconds: float) -> tuple[np.ndarray, int]:
+    """``read_soundfile_capped`` for a FLAC with no sample count: FFmpeg's
+    whole decode, or without FFmpeg libsndfile's as ``media_limits.read_sound_file``
+    reads it, which ends the clip at the error on its last block (the same
+    error as on a corrupt block; libsndfile tells them apart by neither code
+    nor message). A clip shorter than that block decodes to nothing there,
+    which raises rather than return an empty clip."""
+    from mstar.model.media_limits import ffmpeg_unavailable, read_sound_file
+
+    if (no_ffmpeg := ffmpeg_unavailable()) is None:
+        # every channel, averaged as below: FFmpeg's own downmix scales stereo by 1/sqrt(2)
+        samples = torchcodec_samples_capped(path, max_seconds)
+        return samples.data.mean(dim=0).numpy(), samples.sample_rate
+    data, rate = read_sound_file(path, max_seconds)
+    if len(data) > max_seconds * rate:
+        raise AudioTooLongError(max_seconds)
+    if not len(data):
+        raise RuntimeError(f"libsndfile decodes none of this short FLAC with no sample count; FFmpeg: {no_ffmpeg}")
+    return (data[:, 0] if data.shape[1] == 1 else data.mean(axis=1)), rate
 
 
 def decode_torchcodec_capped(path: str, sample_rate: int, max_seconds: float = MAX_AUDIO_SECONDS):

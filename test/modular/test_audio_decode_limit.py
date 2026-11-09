@@ -489,16 +489,29 @@ def _flac_without_length(path: Path, seconds: float, rate: int = 16000) -> None:
     path.write_bytes(bytes(data))
 
 
-def test_flac_without_a_length_decodes_with_libsndfile(tmp_path):
-    # libsndfile raises on the read that reaches such a file's end (it cannot
-    # seek past it), which lost the whole clip to an FFmpeg fallback
+@pytest.mark.parametrize("seconds", [0.2, 3.0])
+@pytest.mark.parametrize("ffmpeg", [True, False], ids=["ffmpeg", "no_ffmpeg"])
+def test_flac_without_a_length_decodes(tmp_path, monkeypatch, seconds, ffmpeg):
+    """libsndfile raises on the read that reaches such a file's end, losing
+    that block: FFmpeg decodes it whole; without FFmpeg libsndfile keeps all
+    but its last block, and a clip shorter than that is an error, not empty."""
+    from mstar.model import media_limits
+
+    if not ffmpeg:
+        monkeypatch.setattr(media_limits, "ffmpeg_unavailable", lambda: "not installed")
+    elif reason := media_limits.ffmpeg_unavailable():
+        pytest.skip(f"torchcodec cannot decode here: {reason}")
     path = tmp_path / "speech.flac"
-    _flac_without_length(path, 3)
+    _flac_without_length(path, seconds)
+    frames = int(seconds * 16000)
+    if not ffmpeg and frames < 4096:   # libsndfile's FLAC encoder writes 4096 samples a frame
+        with pytest.raises(RuntimeError, match="no sample count"):
+            media_io.read_soundfile_capped(str(path))
+        return
     audio, rate = media_io.read_soundfile_capped(str(path))
-    # all but the last FLAC frame (4096 samples from libsndfile's encoder)
-    assert rate == 16000 and 3 * rate - 4096 <= audio.size <= 3 * rate
+    assert rate == 16000 and (audio.size == frames if ffmpeg else frames - 4096 <= audio.size < frames)
     with pytest.raises(AudioTooLongError):
-        media_io.read_soundfile_capped(str(path), max_seconds=2)
+        media_io.read_soundfile_capped(str(path), max_seconds=seconds / 2)
 
 
 def test_flac_without_a_length_is_measured_by_decoding_it(client, tmp_path):
