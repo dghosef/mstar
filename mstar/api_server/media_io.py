@@ -728,8 +728,15 @@ def read_soundfile_capped(path: str, max_seconds: float = MAX_AUDIO_SECONDS) -> 
     ``max_seconds`` it raises :class:`AudioTooLongError`. A rate outside
     ``1..MAX_SAMPLE_RATE`` is refused (:class:`AudioRefusedError`) before
     any read. A container libsndfile cannot read raises soundfile's own error.
+
+    A FLAC whose header has no sample count cannot seek past its last block,
+    so libsndfile raises on the read that reaches it. Such a file is read in
+    small blocks and that read ends the clip, losing at most one block (as
+    ``media_limits.count_sound_file_seconds`` measures it).
     """
     import soundfile as sf
+
+    from mstar.model.media_limits import UNKNOWN_FRAMES
 
     with sf.SoundFile(path) as f:
         rate = f.samplerate
@@ -741,9 +748,17 @@ def read_soundfile_capped(path: str, max_seconds: float = MAX_AUDIO_SECONDS) -> 
             raise AudioRefusedError(str(exc)) from None
         limit = int(max_seconds * rate)
         block = max(1, _SOUNDFILE_BLOCK_SECONDS * rate // _SOUNDFILE_BLOCK_ALIGN) * _SOUNDFILE_BLOCK_ALIGN
+        no_length = f.frames >= UNKNOWN_FRAMES
+        if no_length:
+            block = 4 * _SOUNDFILE_BLOCK_ALIGN
         parts, frames = [], 0
         while True:
-            data = f.read(min(block, limit + 1 - frames), dtype="float32", always_2d=True)
+            try:
+                data = f.read(min(block, limit + 1 - frames), dtype="float32", always_2d=True)
+            except RuntimeError:  # soundfile.LibsndfileError
+                if not no_length:
+                    raise
+                break
             if not len(data):
                 break
             frames += len(data)

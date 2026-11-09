@@ -981,6 +981,7 @@ class _WaveSoundFile:
 
     def __init__(self, data, rate):
         self._data, self.samplerate, self._pos = data, rate, 0
+        self.frames = len(data)
 
     def __enter__(self):
         return self

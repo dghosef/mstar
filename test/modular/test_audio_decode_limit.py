@@ -46,7 +46,7 @@ class _FakeSoundfile(types.ModuleType):
 
         class SoundFile:
             def __init__(self, path, *a, **k):
-                self.samplerate = fake.rate
+                self.samplerate, self.frames = fake.rate, fake.header_frames
                 self._pos = 0
 
             def __enter__(self):
@@ -487,6 +487,18 @@ def _flac_without_length(path: Path, seconds: float, rate: int = 16000) -> None:
     streaminfo &= ~(((1 << 36) - 1) << shift)
     data[8:42] = streaminfo.to_bytes(34, "big")
     path.write_bytes(bytes(data))
+
+
+def test_flac_without_a_length_decodes_with_libsndfile(tmp_path):
+    # libsndfile raises on the read that reaches such a file's end (it cannot
+    # seek past it), which lost the whole clip to an FFmpeg fallback
+    path = tmp_path / "speech.flac"
+    _flac_without_length(path, 3)
+    audio, rate = media_io.read_soundfile_capped(str(path))
+    # all but the last FLAC frame (4096 samples from libsndfile's encoder)
+    assert rate == 16000 and 3 * rate - 4096 <= audio.size <= 3 * rate
+    with pytest.raises(AudioTooLongError):
+        media_io.read_soundfile_capped(str(path), max_seconds=2)
 
 
 def test_flac_without_a_length_is_measured_by_decoding_it(client, tmp_path):
