@@ -476,6 +476,19 @@ def test_untimed_segments_carry_the_adapters_final_text():
     assert t.segments[0]["text"] == t.text == adapter.final_text(("hello " * 30).strip())
 
 
+def test_each_window_is_finished_once_for_its_segments_and_the_text():
+    # a loop across the cut is under the threshold in each window: the text the
+    # captions spell out is the response text, as the reference finishes each decode
+    adapter = adapters.Qwen3ASRAdapter()
+    req = TranscriptionRequest(model="qwen3_asr", response_format="verbose_json")
+    windows = [
+        serving_transcriptions.Window(path="", offset=0.0, duration=2.0, raw_text="hello " * 15),
+        serving_transcriptions.Window(path="", offset=2.0, duration=2.0, raw_text="hello " * 15),
+    ]
+    t = serving_transcriptions.merge_windows(windows, adapter, req)
+    assert t.text == " ".join(s["text"] for s in t.segments) == ("hello " * 30).strip()
+
+
 def test_window_timestamps_stay_inside_their_window():
     # Whisper can write a timestamp past the end of the audio it heard
     req = TranscriptionRequest(model="whisper_large", response_format="verbose_json")

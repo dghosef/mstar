@@ -562,21 +562,22 @@ def merge_windows(windows: list[Window], adapter, req) -> Transcript:
     the window's start time (segments also carry the temperature and
     compression ratio their window was accepted at; a window without
     timestamps is one segment), the language from the first window that
-    reported one, and the text, like an untimed window's segment, as the
-    adapter finishes it (``final_text``)."""
+    reported one. The adapter finishes each window's text once
+    (``final_text``, as the reference finishes each decode), and that text is
+    both the window's part of the response text and its untimed segment; a
+    timed segment's text is finished on its own."""
     texts: list[str] = []
     segments: list[dict] = []
     words: list[dict] = []
     language = None
     for window in windows:
         t = window.transcript or adapter.parse_transcript(window.raw_text, req)
-        if t.text:
-            texts.append(t.text)
+        finished = adapter.final_text(t.text)
+        if finished:
+            texts.append(finished)
         # a window of unknown length (a headerless upload to an unbounded model) gets none
-        untimed = [
-            {"start": 0.0, "end": window.duration, "text": adapter.final_text(t.text)},
-        ] if t.text and window.duration else []
-        window_segments = t.segments or untimed
+        untimed = [{"start": 0.0, "end": window.duration, "text": finished}] if finished and window.duration else []
+        window_segments = [{**seg, "text": adapter.final_text(seg["text"])} for seg in t.segments] or untimed
         for seg in window_segments:
             start, end = _in_window(seg["start"], seg["end"], window)
             segments.append({
@@ -589,8 +590,7 @@ def merge_windows(windows: list[Window], adapter, req) -> Transcript:
         language = language or t.language
     for idx, seg in enumerate(segments):
         seg["id"] = idx
-    text = adapter.final_text(" ".join(texts))
-    return Transcript(text=text, language=language or req.language, segments=segments, words=words)
+    return Transcript(text=" ".join(texts), language=language or req.language, segments=segments, words=words)
 
 
 async def create_transcription(
