@@ -20,7 +20,7 @@ import torch
 from torch import nn
 from torch.nn.utils import weight_norm
 
-from mstar.model.components.snake import snake
+from mstar.model.components.snake import fold_snake, snake
 
 
 class Snake1d(nn.Module):
@@ -33,11 +33,16 @@ class Snake1d(nn.Module):
         self.logscale = logscale
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        alpha = self.alpha.reshape(-1).float()
-        beta = self.beta.reshape(-1).float()
-        if self.logscale:
-            alpha, beta = alpha.exp(), beta.exp()
-        return snake(hidden_states, alpha, (beta + 1e-9).reciprocal())
+        return snake(hidden_states, *_snake_terms(self))
+
+
+def _snake_terms(activation: Snake1d) -> tuple[torch.Tensor, torch.Tensor]:
+    """The kernel's fp32 ``[C]`` ``alpha`` and ``inv_beta``."""
+    alpha = activation.alpha.reshape(-1).float()
+    beta = activation.beta.reshape(-1).float()
+    if activation.logscale:
+        alpha, beta = alpha.exp(), beta.exp()
+    return alpha, (beta + 1e-9).reciprocal()
 
 
 class OobleckResidualUnit(nn.Module):
@@ -203,7 +208,9 @@ class Cosmos3SoundTokenizer(nn.Module):
             )
         model.load_state_dict(state_dict, strict=True)
         model.eval().requires_grad_(False)
-        return model.to(device=device, dtype=dtype)
+        model = model.to(device=device, dtype=dtype)
+        fold_snake(model, Snake1d, _snake_terms)
+        return model
 
     def get_audio_num_samples(self, num_latent_frames: int) -> int:
         return int(num_latent_frames) * self.hop_size

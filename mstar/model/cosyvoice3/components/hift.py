@@ -60,6 +60,7 @@ from torch import nn
 
 from mstar.model.chatterbox.components.s3gen_hift import Snake
 from mstar.model.chatterbox.loader import fold_weight_norm, load_component
+from mstar.model.components.snake import fold_snake
 from mstar.model.cosyvoice3.config import CausalHiFTConfig
 
 
@@ -347,7 +348,9 @@ class CausalHiFTGenerator(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Stream ``hift.pt`` (weight-norm pairs folded) into this module."""
-        return load_component(self, fold_weight_norm(weights), component="CosyVoice3 HiFT")
+        loaded = load_component(self, fold_weight_norm(weights), component="CosyVoice3 HiFT")
+        fold_snake(self, Snake)
+        return loaded
 
 
 @dataclass

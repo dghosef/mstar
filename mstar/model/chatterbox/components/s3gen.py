@@ -31,11 +31,12 @@ from mstar.model.chatterbox.components.audio import MelSpectrogram24k, kaldi_fba
 from mstar.model.chatterbox.components.s3gen_cfm import CausalConditionalCFM, ConditionalDecoder
 from mstar.model.chatterbox.components.s3gen_flow import FlowTokenEncoder
 from mstar.model.chatterbox.components.s3gen_graphs import EncoderGraphs, SolveGraphs, VocoderGraphs
-from mstar.model.chatterbox.components.s3gen_hift import HiFTGenerator
+from mstar.model.chatterbox.components.s3gen_hift import HiFTGenerator, Snake
 from mstar.model.chatterbox.components.s3gen_xvector import CAMPPlus
 from mstar.model.chatterbox.config import S3GenConfig
 from mstar.model.chatterbox.loader import fold_weight_norm, load_component
 from mstar.model.components.masking import length_mask
+from mstar.model.components.snake import fold_snake
 
 
 @dataclass
@@ -351,6 +352,8 @@ class S3Gen(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Stream ``s3gen*.safetensors`` (``flow.*``, ``mel2wav.*``,
         ``speaker_encoder.*``; the tokenizer's keys are another component's)."""
-        return load_component(
+        loaded = load_component(
             self, fold_weight_norm(weights), component="S3Gen", name_remapper=self._remap,
         )
+        fold_snake(self.vocoder, Snake)
+        return loaded

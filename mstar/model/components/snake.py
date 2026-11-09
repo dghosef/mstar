@@ -10,7 +10,10 @@ decode keeps the eager numerics.
 
 from __future__ import annotations
 
+from typing import Callable
+
 import torch
+from torch import nn
 
 try:
     import triton
@@ -78,5 +81,39 @@ def snake(x: torch.Tensor, alpha: torch.Tensor, inv_beta: torch.Tensor) -> torch
 def snake_alpha(x: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
     """``x + sin(alpha * x)^2 / alpha``, with ``alpha`` per channel in any stored
     shape (checkpoints hold ``[C]`` or ``[1, C, 1]``) and dtype."""
+    return snake(x, *alpha_terms(alpha))
+
+
+def alpha_terms(alpha: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """The kernel's fp32 ``[C]`` ``alpha`` and ``inv_beta`` for the alpha-only form."""
     alpha = alpha.reshape(-1).float()
-    return snake(x, alpha, (alpha + 1e-9).reciprocal())
+    return alpha, (alpha + 1e-9).reciprocal()
+
+
+class FoldedSnake(nn.Module):
+    """A Snake whose per-channel terms were computed once, after its weights loaded,
+    so a call is the kernel's one launch. In a captured decoder, recomputing them
+    per call is two more graph nodes for each of dozens of activations."""
+
+    def __init__(self, alpha: torch.Tensor, inv_beta: torch.Tensor):
+        super().__init__()
+        self.register_buffer("alpha", alpha, persistent=False)
+        self.register_buffer("inv_beta", inv_beta, persistent=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return snake(x, self.alpha, self.inv_beta)
+
+
+@torch.no_grad()
+def fold_snake(
+    module: nn.Module,
+    snake_type: type[nn.Module],
+    terms: Callable[[nn.Module], tuple[torch.Tensor, torch.Tensor]] = lambda child: alpha_terms(child.alpha),
+) -> None:
+    """Swap every ``snake_type`` under ``module`` for a ``FoldedSnake``. Call it once
+    the weights are loaded and in their final dtype."""
+    for name, child in list(module.named_children()):
+        if isinstance(child, snake_type):
+            setattr(module, name, FoldedSnake(*terms(child)))
+        else:
+            fold_snake(child, snake_type, terms)

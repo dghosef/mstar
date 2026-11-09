@@ -18,7 +18,7 @@ from einops import rearrange
 from torch import nn
 from torch.nn.utils.parametrizations import weight_norm
 
-from mstar.model.components.snake import snake_alpha
+from mstar.model.components.snake import fold_snake, snake_alpha
 
 # ---------------------------------------------------------------------------
 # Utility layers
@@ -414,4 +414,5 @@ class SNAC(nn.Module):
         state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
         model.load_state_dict(state_dict)
         model.eval()
+        fold_snake(model, Snake1d)
         return model
