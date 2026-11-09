@@ -539,6 +539,16 @@ async def _sequential(api, adapter, req, planner: WindowPlanner, inflight: set[s
             return
 
 
+def _in_window(start: float, end: float, window: Window) -> tuple[float, float]:
+    """A segment's or word's times in the upload: kept inside its window
+    (Whisper can write a timestamp past the audio it heard, which would
+    overlap the next window), then shifted by the window's start."""
+    length = window.duration or math.inf
+    start = min(max(start, 0.0), length)
+    end = min(max(end, start), length)
+    return start + window.offset, end + window.offset
+
+
 def merge_windows(windows: list[Window], adapter, req) -> Transcript:
     """Stitch the windows: texts joined by a space, segments/words shifted by
     the window's start time (segments also carry the temperature and
@@ -557,12 +567,14 @@ def merge_windows(windows: list[Window], adapter, req) -> Transcript:
         untimed = [{"start": 0.0, "end": window.duration, "text": t.text}] if t.text and window.duration else []
         window_segments = t.segments or untimed
         for seg in window_segments:
+            start, end = _in_window(seg["start"], seg["end"], window)
             segments.append({
-                **seg, "start": seg["start"] + window.offset, "end": seg["end"] + window.offset,
+                **seg, "start": start, "end": end,
                 "temperature": window.temperature, "compression_ratio": window.compression_ratio,
             })
         for word in t.words:
-            words.append({**word, "start": word["start"] + window.offset, "end": word["end"] + window.offset})
+            start, end = _in_window(word["start"], word["end"], window)
+            words.append({**word, "start": start, "end": end})
         language = language or t.language
     for idx, seg in enumerate(segments):
         seg["id"] = idx

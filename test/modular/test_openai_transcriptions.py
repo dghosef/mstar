@@ -460,6 +460,14 @@ def test_windows_without_timestamps_are_one_segment_each(adapter):
     assert [(s["start"], s["end"], s["text"]) for s in t.segments] == [(0.0, 30.0, "one"), (30.0, 45.0, "two")]
 
 
+def test_window_timestamps_stay_inside_their_window():
+    # Whisper can write a timestamp past the end of the audio it heard
+    req = TranscriptionRequest(model="whisper_large", response_format="verbose_json")
+    window = serving_transcriptions.Window(path="", offset=7.0, duration=7.0, raw_text="<|0.00|>hello<|7.22|>")
+    t = serving_transcriptions.merge_windows([window], adapters.WhisperAdapter(), req)
+    assert (t.segments[0]["start"], t.segments[0]["end"]) == (7.0, 14.0)
+
+
 def test_cleanup_while_a_thread_cuts_leaves_no_files(tmp_path, monkeypatch):
     sf = pytest.importorskip("soundfile")
     import numpy as np
