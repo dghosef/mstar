@@ -62,11 +62,13 @@ def test_in_contract_values_pass(kwargs):
     # past 64 bits msgpack can't carry it to the conductor (#1221)
     ({"top_k": 2**64}, "top_k"),
     ({"max_tokens": 1e308}, "max_output_tokens"),
-    ({"extra": {"nested": [2**64]}}, "extra"),
+    ({"extra": {"nested": [2**64]}}, "nested"),
     ({"extra": -(2**63) - 1}, "extra"),
     # JSON's 1e400, which int() can't take
     ({"width": float("inf")}, "width"),
     ({"guidance_interval": [0, float("nan")]}, "guidance_interval"),
+    ({"voice": "\ud800"}, "voice"),
+    ({"\udc80": 1}, "udc80"),
 ])
 def test_out_of_contract_values_raise(kwargs, name):
     with pytest.raises(ValueError, match=name):
@@ -317,13 +319,21 @@ def test_bad_seeds_raise(seed):
         check_seed(seed)
 
 
-def test_submit_request_refuses_a_bad_seed_before_registering():
+def _submit(server, text="hi", **kwargs):
+    return server.submit_request(text=text, input_modalities=["text"], output_modalities=["text"], **kwargs)
+
+
+@pytest.mark.parametrize("call, match", [
+    (lambda server: _submit(server, model_kwargs={"seed": 2**64}), "64-bit"),
+    # JSON's "\ud800" parses to a lone surrogate, which reached the tokenizer (#703)
+    (lambda server: _submit(server, text="hi \ud800"), "surrogate"),
+    (lambda server: server.stream_input("k", text="\ud800"), "surrogate"),
+    (lambda server: server.stream_input("k", model_kwargs={"top_k": 2**64}), "64 bits"),
+])
+def test_the_api_server_refuses_a_bad_request_before_registering(call, match):
     server = APIServer.__new__(APIServer)   # no state: the check must come first
-    with pytest.raises(ValueError, match="64-bit"):
-        server.submit_request(
-            text="hi", input_modalities=["text"], output_modalities=["text"],
-            model_kwargs={"seed": 2**64},
-        )
+    with pytest.raises(ValueError, match=match):
+        call(server)
 
 
 def test_a_client_still_waiting_keeps_its_stream():

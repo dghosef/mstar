@@ -107,23 +107,29 @@ def normalize_generation_kwargs(model_kwargs: dict | None) -> dict:
             check_int_knob(key, value, *_INT_RULES[name])
         elif _knob(key, _BOOL_KNOBS) is not None:
             check_bool_knob(key, value)
-    _check_wire_numbers(kwargs)
+    check_request_values(kwargs)
     return kwargs
 
 
-def _check_wire_numbers(kwargs: dict) -> None:
-    """Raise ``ValueError`` for an integer msgpack can't carry to the conductor
-    (outside [-2**63, 2**64)) or a float that isn't finite (JSON has neither:
-    ``1e400`` parses as inf, and ``int(inf)`` raises OverflowError, a 500),
-    anywhere in ``kwargs``."""
-    pending = list(kwargs.items())
+def check_request_values(values: dict) -> None:
+    """Raise ``ValueError`` for what can't reach a model intact, anywhere in
+    ``values`` (keys too): an int msgpack can't carry to the conductor (outside
+    [-2**63, 2**64)), a float that isn't finite (JSON has none: ``1e400`` parses as
+    inf, which ``int()`` can't take), or a str with a lone surrogate (JSON's
+    ``"\\ud800"`` parses to one, which no tokenizer or encoder takes)."""
+    pending = [(key, item) for key, value in values.items() for item in (key, value)]
     while pending:
         key, value = pending.pop()
-        if isinstance(value, int) and not -(2**63) <= value < 2**64:
-            raise ValueError(f"{key} must fit in 64 bits, got {value}.")
-        if isinstance(value, float) and not math.isfinite(value):
-            raise ValueError(f"{key} must be a finite number, got {value}.")
-        if isinstance(value, dict):
-            pending.extend((key, v) for v in value.values())
+        if isinstance(value, str) and not value.isascii():
+            try:
+                value.encode()
+            except UnicodeEncodeError:
+                raise ValueError(f"{key!r} holds a lone surrogate, which is not text.") from None
+        elif isinstance(value, int) and not -(2**63) <= value < 2**64:
+            raise ValueError(f"{key!r} must fit in 64 bits, got {value}.")
+        elif isinstance(value, float) and not math.isfinite(value):
+            raise ValueError(f"{key!r} must be a finite number, got {value}.")
+        elif isinstance(value, dict):
+            pending.extend((k, item) for k, v in value.items() for item in (k, v))
         elif isinstance(value, (list, tuple)):
             pending.extend((key, v) for v in value)

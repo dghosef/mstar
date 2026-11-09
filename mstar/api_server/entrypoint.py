@@ -76,7 +76,7 @@ from mstar.utils import cpus, knobs, profiler
 from mstar.utils.client_errors import client_error_text, scrub_paths
 from mstar.utils.exitcode import describe_exitcode
 from mstar.utils.gc_freeze import freeze_after_setup
-from mstar.utils.generation_kwargs import normalize_generation_kwargs
+from mstar.utils.generation_kwargs import check_request_values, normalize_generation_kwargs
 from mstar.utils.logging_config import log_off_thread, quiet_noisy_loggers
 from mstar.utils.orphan import watch_parent
 from mstar.utils.socket_prefix import per_port_socket_prefix
@@ -843,6 +843,7 @@ class APIServer:
         # here, before anything is queued: null is unset, types and ranges are
         # checked once for every endpoint, and an over-wide seed cannot be packed
         model_kwargs = normalize_generation_kwargs(model_kwargs)
+        check_request_values({"text": text, "prompt_parts": [p.text for p in prompt_parts or ()]})
         model_kwargs, prefix_root = self.lora_kwargs(model, model_kwargs)
         self._report_ignored_params(model_kwargs)
 
@@ -995,6 +996,7 @@ class APIServer:
         ended; raises ``ValueError`` for input past the call's budget
         (``max_call_input_mb``) or a stream the model doesn't have.
         """
+        check_request_values({"text": text, "model_kwargs": model_kwargs})
         named = self._check_streams(
             name for names in (file_streams or {}).values() for name in names if name is not None
         ) | self._check_streams(samples or ())
