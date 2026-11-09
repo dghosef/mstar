@@ -37,12 +37,17 @@ def test_unsupported_output_format_fails_at_intake():
         model.process_prompt("a cat", ["text"], ["image"], output_format="gif")
 
 
-@pytest.mark.parametrize("size", [{"width": 8}, {"height": 15}, {"width": 0}, {"height": True}, {"width": "512"}])
-def test_an_image_under_one_latent_patch_fails_at_intake(size):
+@pytest.mark.parametrize("size", [
+    {"width": 8}, {"height": 15}, {"width": 0}, {"height": True}, {"width": "512"},
+    {"width": 1040}, {"height": 1040},
+])
+def test_an_image_outside_the_latent_grid_fails_at_intake(size):
     """Under 16 pixels a side, the image is no latent patch at all, and the
-    request would otherwise fail deep in the denoise loop."""
+    request would otherwise fail deep in the denoise loop. Over 1024 a side, its
+    latent positions run past the position table: a device assert that fails
+    every later request."""
     model = _model()
-    with pytest.raises(ValueError, match="width|height|16 pixels"):
+    with pytest.raises(ValueError, match="width|height|16 pixels|position table"):
         model.process_prompt("a cat", ["text"], ["image"], **size)
     model.process_prompt("a cat", ["text"], ["image"], width=16, height=512)
 
