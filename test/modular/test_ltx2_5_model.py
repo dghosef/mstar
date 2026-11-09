@@ -214,7 +214,8 @@ def test_process_prompt_tokenizes_the_stripped_prompt():
 @pytest.mark.parametrize(
     "kwargs,message",
     [({"height": 500}, "multiple of 32"), ({"width": 0}, "positive"), ({"num_frames": 120}, "8k\\+1"),
-     ({"fps": 0}, "fps must be positive"), ({"num_frames": 1, "fps": 120}, "no audio latent frames"),
+     ({"fps": 0}, "fps must be positive"),
+     ({"fps": 1e-6}, "audio latent frames, above"), ({"num_frames": 1, "fps": 120}, "no audio latent frames"),
      ({"height": 2048, "width": 4096, "num_frames": 257}, "max_video_tokens")],
 )
 def test_process_prompt_rejects_bad_geometry(kwargs, message):

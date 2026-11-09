@@ -360,6 +360,13 @@ class LTX25Model(Model):
             raise ValueError(f"LTX-2.5 fps must be a number; got {raw_fps!r}") from None
         if fps <= 0:
             raise ValueError(f"LTX-2.5 fps must be positive; got {raw_fps!r}")
+        # the audio stream lasts num_frames / fps: a tiny fps keeps the video small and makes the audio huge
+        audio_tokens = num_frames / fps * geo.audio_latents_per_second
+        if audio_tokens > self.max_video_tokens:
+            raise ValueError(
+                f"LTX-2.5 num_frames={num_frames} at fps={fps:g} is {audio_tokens:.0f} audio latent frames, above "
+                f"this server's max_video_tokens of {self.max_video_tokens}"
+            )
         if geo.audio_frames(num_frames, fps) < 1:
             raise ValueError(
                 f"LTX-2.5 num_frames={num_frames} at fps={fps:g} is {num_frames / fps:.3f} s of video, which rounds "
