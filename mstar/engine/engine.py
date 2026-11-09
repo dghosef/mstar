@@ -90,7 +90,6 @@ from mstar.utils.profiler import (
     mark,
     nvtx_enabled,
     phase_end,
-    phase_record,
     phase_start,
     range_pop,
     range_push,
@@ -199,8 +198,6 @@ class SubmoduleManagement:
     fp32_precision: Fp32Precision | None = None
     # the node's request slots and device tables, where it runs on them
     resident: ResidentPlanner | None = None
-    # walk -> how a step of it that repeats carries each loop-back signal (output -> input)
-    repeat_carries: dict[str, dict[str, str]] = field(default_factory=dict)
     # walk -> the stop policy its device runs read ``ignore_eos`` through
     run_policies: dict[str, StopPolicy] = field(default_factory=dict)
 
@@ -2212,11 +2209,7 @@ class Engine:
                 plan_done_event=batch.preplan_event,
                 launch_started_event=release_event,
             )
-            carries = submodule_mgmt.repeat_carries.get(graph_walk)
-            if run is None and carries is None:
-                return out
-            phase_record(f"repeats.{graph_walk}#", ctx.repeats)
-            return cg_runner.repeat(lease, out, carries, ctx.repeats)
+            return cg_runner.repeat(lease, out, ctx.repeats)
         if release_event is not None:
             release_event.set()
         if running_batched:
@@ -2870,7 +2863,7 @@ class Engine:
             step.ctx.resident = mgmt.resident  # the capture's context; its step is over
             refusal = self._runner.repeat_refusal(step)
         if refusal is None:
-            mgmt.repeat_carries[graph_walk] = carries
+            mgmt.accelerator_graph_runner.accept_repeats(graph_walk, carries)
         return refusal
 
     def batch_cap_varies(self, node_name: str, graph_walk: str) -> bool:

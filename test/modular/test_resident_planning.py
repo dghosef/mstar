@@ -292,7 +292,9 @@ def test_a_repeat_feeds_each_replay_the_last_one_s_token_and_keeps_a_column_per_
     slot = SimpleNamespace(run=None, graph=Graph(), static_inputs={"input_ids": ids}, static_outputs=outputs)
     runner = AcceleratorGraphRunner.__new__(AcceleratorGraphRunner)
     runner.slot_for = lambda lease: slot
-    wide = runner.repeat(None, outputs, {"new_token": "input_ids"}, 3).check_stop_buffers
+    runner._repeat_carries = {WALK: {"new_token": "input_ids"}}
+    lease = SimpleNamespace(bucket=SimpleNamespace(graph_walk=WALK))
+    wide = runner.repeat(lease, outputs, 3).check_stop_buffers
     assert wide["new_token"].tolist() == [[5, 6, 7], [7, 8, 9]]
     assert wide["text_inputs"] is wide["new_token"]
 

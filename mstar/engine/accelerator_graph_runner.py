@@ -765,6 +765,9 @@ class AcceleratorGraphRunner:
         self._compiled_forwards: dict[int, Any] = {}
         # walk -> why it couldn't have a device run
         self._run_failures: dict[str, str] = {}
+        # walk -> how a step of it that repeats carries each loop-back signal
+        # (output -> static input), once ``accept_repeats`` has said it may
+        self._repeat_carries: dict[str, Mapping[str, str]] = {}
 
         # Plan-overlap stream. Lazily created the first time pre_plan
         # is called from Worker.plan_executor.
@@ -1664,16 +1667,23 @@ class AcceleratorGraphRunner:
         """This slot's device run, or None."""
         return self.slot_for(lease).run
 
-    def repeat(
-        self, lease: SlotLease, out: BatchedModelOutput, carries: Mapping[str, str] | None, repeats: int,
-    ) -> BatchedModelOutput:
+    def accept_repeats(self, walk: str, carries: Mapping[str, str]) -> None:
+        """A step of ``walk`` may repeat, carrying its signals as ``carries``."""
+        self._repeat_carries[walk] = carries
+
+    def repeat(self, lease: SlotLease, out: BatchedModelOutput, repeats: int) -> BatchedModelOutput:
         """``out``, the step's first launch, with the rest of its iterations:
         its stop buffers gain a column per iteration. A device run has run them
         all and says how many; a host run replays the graph, copying every
         loop-back signal's output into the static input it feeds before each
-        replay (``carries``, output -> input), and each column out on the
-        stream before the next replay overwrites it."""
+        replay, and each column out on the stream before the next replay
+        overwrites it. A walk that can't repeat returns ``out`` as it is."""
         slot = self.slot_for(lease)
+        walk = lease.bucket.graph_walk
+        carries = self._repeat_carries.get(walk)
+        if slot.run is None and carries is None:
+            return out
+        profiler.phase_record(f"repeats.{walk}#", repeats)
         if slot.run is not None:
             buffers = slot.run.results(repeats, slot.run_names)
             return replace(out, check_stop_buffers=buffers, run_replays=slot.run.index)
