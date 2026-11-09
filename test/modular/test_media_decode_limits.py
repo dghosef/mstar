@@ -817,3 +817,30 @@ def test_a_16_bit_png_reads_as_uint8(tmp_path, color_type, channels):
         assert torch.equal(image, torch.from_numpy(np.asarray(Image.open(path).convert("RGB"))).permute(2, 0, 1))
     loaded = Model.load_image(None, path, "cpu").data
     assert 0.0 <= loaded.min() and loaded.max() <= 1.0
+
+
+@pytest.mark.parametrize("reader", ["qwen3_omni", "cosmos3"])
+def test_an_audio_only_container_is_not_a_video(tmp_path, monkeypatch, reader):
+    pytest.importorskip("av")
+    import wave
+
+    path = tmp_path / "audio.wav"
+    with wave.open(str(path), "wb") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(16000)
+        f.writeframes(bytes(3200))
+    if reader == "qwen3_omni":
+        vision = types.ModuleType("qwen_omni_utils.v2_5.vision_process")
+        vision.smart_nframes = lambda *args, **kwargs: 4
+        for name in ("qwen_omni_utils", "qwen_omni_utils.v2_5"):
+            monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+        monkeypatch.setitem(sys.modules, "qwen_omni_utils.v2_5.vision_process", vision)
+        load = lambda: read_video_whole_budgeted({"video": str(path)})  # noqa: E731
+    else:
+        from mstar.model.cosmos3.cosmos3_model import Cosmos3Model
+
+        monkeypatch.setitem(sys.modules, "torchcodec.decoders", None)  # take the PyAV path
+        load = lambda: object.__new__(Cosmos3Model).load_video(str(path), "cpu")  # noqa: E731
+    with pytest.raises(ValueError, match="no video stream"):
+        load()
