@@ -562,7 +562,8 @@ def merge_windows(windows: list[Window], adapter, req) -> Transcript:
     the window's start time (segments also carry the temperature and
     compression ratio their window was accepted at; a window without
     timestamps is one segment), the language from the first window that
-    reported one, and the text as the adapter finishes it (``final_text``)."""
+    reported one, and the text, like an untimed window's segment, as the
+    adapter finishes it (``final_text``)."""
     texts: list[str] = []
     segments: list[dict] = []
     words: list[dict] = []
@@ -572,7 +573,9 @@ def merge_windows(windows: list[Window], adapter, req) -> Transcript:
         if t.text:
             texts.append(t.text)
         # a window of unknown length (a headerless upload to an unbounded model) gets none
-        untimed = [{"start": 0.0, "end": window.duration, "text": t.text}] if t.text and window.duration else []
+        untimed = [
+            {"start": 0.0, "end": window.duration, "text": adapter.final_text(t.text)},
+        ] if t.text and window.duration else []
         window_segments = t.segments or untimed
         for seg in window_segments:
             start, end = _in_window(seg["start"], seg["end"], window)

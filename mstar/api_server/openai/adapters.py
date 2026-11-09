@@ -386,9 +386,10 @@ class OpenAIAdapter:
         return Transcript(text=text.strip())
 
     def final_text(self, text: str) -> str:
-        """The finished transcript's text as the client gets it (a response,
-        or the stream's ``transcript.text.done``); not applied to partial
-        text, which only grows. The default passes it through."""
+        """The finished transcript's text as the client gets it (a response
+        and its untimed segments, the stream's ``transcript.text.done``, a
+        realtime item's ``completed``); not applied to partial text, which
+        only grows. The default passes it through."""
         return text
 
     def stream_text(self, raw: str) -> str:

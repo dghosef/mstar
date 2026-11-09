@@ -468,6 +468,15 @@ def test_windows_without_timestamps_are_one_segment_each(adapter):
     assert [(s["start"], s["end"], s["text"]) for s in t.segments] == [(0.0, 30.0, "one"), (30.0, 45.0, "two")]
 
 
+def test_untimed_segments_carry_the_adapters_final_text():
+    # Qwen3-ASR collapses a repetition loop: the captions as well as the text
+    adapter = adapters.Qwen3ASRAdapter()
+    req = TranscriptionRequest(model="qwen3_asr", response_format="srt")
+    window = serving_transcriptions.Window(path="", offset=0.0, duration=2.0, raw_text="hello " * 30)
+    t = serving_transcriptions.merge_windows([window], adapter, req)
+    assert t.segments[0]["text"] == t.text == adapter.final_text(("hello " * 30).strip())
+
+
 def test_window_timestamps_stay_inside_their_window():
     # Whisper can write a timestamp past the end of the audio it heard
     req = TranscriptionRequest(model="whisper_large", response_format="verbose_json")

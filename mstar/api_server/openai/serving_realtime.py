@@ -790,7 +790,7 @@ class RealtimeTranscription:
         await self.send(server_event("input_audio_buffer.committed", item_id=s.item_id))
         await self.send(server_event(
             "conversation.item.input_audio_transcription.completed",
-            item_id=s.item_id, transcript=self.current_text(),
+            item_id=s.item_id, transcript=self.adapter.final_text(self.current_text()),
         ))
         s.clear()
 

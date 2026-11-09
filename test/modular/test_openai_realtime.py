@@ -272,6 +272,20 @@ def test_null_or_falsy_audio_is_an_invalid_audio_error(client_and_stub, audio):
     assert _close_to(heard[-1], tone)
 
 
+def test_completed_transcript_is_the_adapters_final_text(client_and_stub, monkeypatch):
+    # Qwen3-ASR collapses a repetition loop in every finished transcript
+    client, stub = client_and_stub
+    adapter = adapters.Qwen3ASRAdapter()
+    monkeypatch.setitem(adapters.ADAPTER_REGISTRY, "rt_test", adapter)
+    stub.answers = ["hello " * 30]
+    with client.websocket_connect("/v1/realtime?intent=transcription") as ws:
+        ws.receive_text()
+        ws.send_text(json.dumps({"type": "input_audio_buffer.append", "audio": _pcm(0.5)}))
+        ws.send_text(json.dumps({"type": "input_audio_buffer.commit"}))
+        done = _recv_until(ws, "conversation.item.input_audio_transcription.completed")[-1]
+    assert done["transcript"] == adapter.final_text(("hello " * 30).strip()) != ("hello " * 30).strip()
+
+
 def _step_samples(stub) -> list[np.ndarray]:
     """Make the stub keep the int16 samples each engine step heard."""
     heard: list[np.ndarray] = []
