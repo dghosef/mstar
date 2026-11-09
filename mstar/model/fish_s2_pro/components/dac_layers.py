@@ -57,8 +57,7 @@ class Snake1d(nn.Module):
         self.alpha = nn.Parameter(torch.ones(1, channels, 1))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        shape = x.shape
-        return snake_alpha(x.reshape(shape[0], shape[1], -1), self.alpha).reshape(shape)
+        return snake_alpha(x, self.alpha)
 
 
 class VectorQuantize(nn.Module):
