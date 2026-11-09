@@ -1498,4 +1498,5 @@ class MicroScheduler:
             del self.cached_prefix[key]
         for turns in self.last_ran.values():
             turns.pop(rid, None)
+        self.batch_builder.forget(rid)
         self._drop_backlogged_rid(rid)

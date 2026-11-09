@@ -152,6 +152,10 @@ class BaseBatchBuilder(ABC):
     def build_batch(self, request: BatchBuildRequest) -> BatchBuildResult:
         """One step's rows out of ``request``'s backlog and entries."""
 
+    def forget(self, rid: int) -> None:
+        """``rid`` is released and its handle may be reused: drop anything kept for it."""
+        return
+
     def chain_must_yield(
         self, backlog: "ScheduledBatch", live_rids: set[int], anchor: int,
         capture_group: Callable[[int], Any],
@@ -353,6 +357,64 @@ class FairShareBatchBuilder(FIFOBatchBuilder):
         min_chunk: int, start_order: dict[int, int],
     ) -> tuple[dict[int, int], set[int]]:
         return fill_token_budget(rids, tokens, chunkable, budget, min_chunk)
+
+
+class HRRNBatchBuilder(FIFOBatchBuilder):
+    """``FIFOBatchBuilder`` with the token budget going to the highest response
+    ratio first, (wait + remaining) / remaining: a short prompt passes a long
+    one, and a long one that has waited long enough passes everything.
+
+    Wait is measured in budgeted tokens run since the row was first measured,
+    the same unit as its remaining work, so the ratio needs no tokens-per-second
+    estimate. Only the leader of a lockstep instance builds steps, so the
+    clock need not agree across ranks. A step not under a token budget is
+    ``FIFOBatchBuilder``'s: nothing says how long such a row is.
+    """
+
+    def __init__(self) -> None:
+        self._tokens_run = 0
+        self._first_measured: dict[int, int] = {}
+
+    def forget(self, rid: int) -> None:
+        self._first_measured.pop(rid, None)
+
+    def build_batch(self, request: BatchBuildRequest) -> BatchBuildResult:
+        result = super().build_batch(request)
+        if request.max_batch_tokens is not None and result.scheduled is not None:
+            cut = result.chunk_tokens or {}
+            tokens = request.row_tokens
+            self._tokens_run += sum(
+                cut.get(rid, tokens.get(rid, 0)) for rid in result.scheduled.request_to_worker_graph
+            )
+        return result
+
+    # not static like its parents': the ratio reads this builder's clock
+    def share_token_budget(
+        self, rids: list[int], tokens: dict[int, int], chunkable: set[int], budget: int,
+        min_chunk: int, start_order: dict[int, int],
+    ) -> tuple[dict[int, int], set[int]]:
+        now, measured = self._tokens_run, self._first_measured
+
+        def ratio(rid: int) -> float:
+            need = max(tokens.get(rid, 0), 1)
+            return (now - measured.setdefault(rid, now) + need) / need
+        order = sorted(rids, key=ratio, reverse=True)
+        take: dict[int, int] = {}
+        dropped: set[int] = set()
+        left, cut = budget, False
+        for rid in order:
+            need = tokens.get(rid, 0)
+            if need <= left:
+                take[rid] = need
+                left -= need
+            elif rid in chunkable and not cut and left >= min_chunk:
+                cut = True
+                take[rid] = left
+                left = 0
+            else:
+                dropped.add(rid)
+        _run_head(order, tokens, chunkable, budget, min_chunk, take, dropped)
+        return take, dropped
 
 
 def _take_whole(
@@ -584,10 +646,12 @@ class _Composition:
 class BatchBuilderType(Enum):
     FIFO = "fifo"
     FAIR_SHARE = "fair_share"
+    HRRN = "hrrn"
 
 
 def make_batch_builder(kind: BatchBuilderType) -> BaseBatchBuilder:
     return {
         BatchBuilderType.FIFO: FIFOBatchBuilder,
         BatchBuilderType.FAIR_SHARE: FairShareBatchBuilder,
+        BatchBuilderType.HRRN: HRRNBatchBuilder,
     }[kind]()

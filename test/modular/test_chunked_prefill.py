@@ -16,7 +16,7 @@ import torch
 from mstar.engine.chunking import ChunkRange
 from mstar.model.submodule_base import ChunkingPolicy, NodeSubmodule
 from mstar.testing_utils.model import make_model
-from mstar.worker.batch_builder import fill_token_budget, fill_token_budget_in_start_order
+from mstar.worker.batch_builder import HRRNBatchBuilder, fill_token_budget, fill_token_budget_in_start_order
 
 # ── the token budget ────────────────────────────────────────────────────
 
@@ -784,3 +784,22 @@ def test_a_chunked_walk_that_reports_no_row_length_is_refused():
 
     with pytest.raises(ValueError, match="get_input_sequence_len"):
         _unchunkable_nodes({"LLM": _Unmeasured()}, _chunking_model(), _groups())
+
+
+def test_hrrn_serves_short_prompts_first_until_a_long_one_has_waited():
+    builder = HRRNBatchBuilder()
+    tokens = {"long": 4000, "short": 100}
+    chunkable = set(tokens)
+    # no wait yet: equal ratio of 1, so the listed order stands and the long prompt is cut
+    take, _ = builder.share_token_budget(["long", "short"], tokens, chunkable, 2048, 128, {})
+    assert take == {"long": 2048}
+    # 1000 tokens later the short prompt's ratio is 11 and the long one's 1.25
+    builder._tokens_run += 1000
+    take, _ = builder.share_token_budget(["long", "short"], tokens, chunkable, 2048, 128, {})
+    assert take == {"short": 100, "long": 1948}
+    # a short prompt arriving now has ratio 1, behind the long prompt that has waited
+    tokens["fresh"] = 100
+    chunkable.add("fresh")
+    builder._tokens_run += 4000
+    take, _ = builder.share_token_budget(["fresh", "long"], tokens, chunkable, 2048, 128, {})
+    assert take == {"long": 2048}

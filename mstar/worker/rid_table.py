@@ -11,7 +11,7 @@ harmless -- the string never recurred -- but a leaked handle silently attaches
 to whichever request gets that handle next. Known handle-keyed state:
 RequestLifecycle.{failed_rids, arrivals, pending_removes, _removes_awaiting_step,
 _unreported} (purged by removed), MicroScheduler.{backlog, last_ran, chunk_started,
-cached_prefix} (purged by clear_rid), Admission.{held_until, parked}
+cached_prefix} and its HRRNBatchBuilder._first_measured (purged by clear_rid), Admission.{held_until, parked}
 (purged by clear), Lockstep.read_failed_rids (purged by clear),
 Rebuilds.{_kept, _cursors}, RequestStateManager.{per_request_info, _fwd_by_partition}
 and StreamBufferManager._rids (purged by remove_request), the engine's and
