@@ -521,7 +521,7 @@ class Speculator:
         )
 
     def _stamp_repeats(
-        self, speculation: Speculation, pending: PendingBatch, in_chain: int, owes_run: bool,
+        self, speculation: Speculation, pending: PendingBatch, owes_run: bool,
     ) -> None:
         """Ask for as many iterations as the step can have; its resources narrow
         it at admit, and `StepPipeline._await_admit_settled` takes the answer.
@@ -530,7 +530,7 @@ class Speculator:
         batch = speculation.scheduled_batch
         batch.owed_run = owes_run
         batch.repeats = speculation.node_batch.step_context.repeats = self._step_repeats.ceiling(
-            speculation, max(in_chain, int(owes_run)),
+            speculation, max(self._consecutive, int(owes_run)),
             lambda: self._graph_runtime.loop_room(
                 batch.node_name, batch.graph_walk, self._innermost_loop_by_node[(batch.graph_walk, batch.node_name)],
                 list(speculation.continuing_rids), pending.batch.repeats,
@@ -1192,7 +1192,7 @@ class Speculator:
                 _t0 = _time.perf_counter() if self.timer.period else 0.0
                 speculation = self._try_speculate_next(pending, target, owes_run)
                 if speculation is not None and not speculation.is_yield_away and self._step_repeats is not None:
-                    self._stamp_repeats(speculation, pending, self._consecutive, owes_run)
+                    self._stamp_repeats(speculation, pending, owes_run)
                 if self.timer.period:
                     self.timer.record("speculate", _time.perf_counter() - _t0)
                 if self.enable_nvtx:
