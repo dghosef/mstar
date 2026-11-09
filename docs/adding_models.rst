@@ -1688,6 +1688,19 @@ methods are:
    model that runs another walk after its loop (an ``align`` walk, or image generation after
    thinking) or publishes final-only state at the loop's stop must not return it there. Keep
    ``check_stop_batched``, if you write one, in agreement.
+   A stop can also name the exit its walk ends through: ``TokenStop(exits={token_id: "tool_call"})``,
+   the token a stop id. In a loop the name rides with the loop's stop; in a ``prefill_walks``
+   walk it replaces ``END_PARTITION``, so the walk ends without ending the partition. The
+   plan's ``WalkStep(..., exits={"tool_call": j})`` then runs step ``j`` (a later step) instead
+   of the next one; an exit the step does not list runs the next one. It needs ``check_stop``
+   (not ``runtime_check``). A target may be any step, even an earlier one (``""``, the unnamed end,
+   is an exit too, so ``exits={"": 1}`` loops back), or ``len(plan)``, which ends the plan; the
+   tool round of ``mstar.model.components.python_tool`` is such a cycle (prefill, decode, route, tool,
+   prefill that continues the reply). A plan that comes back runs each step under the output
+   budget it has left (``max_tokens``), and a partition a stream moves cannot have one. A node that
+   is not an AR decoder names its exit through ``StopCheck(exit=...)``, as the tool router does.
+   A step a stream feeds that runs once per chunk may be followed by more steps: the stream's final chunk then moves
+   the plan on, where a stop check's ``END_PARTITION`` (reported with that exit) still ends the partition.
    To also keep some of this step's outputs from being routed, return
    ``StopCheck(stops, withheld=(names...))``, for example a frame streamed alongside the
    EOS token: its consumer then never receives it, instead of finding and dropping it with

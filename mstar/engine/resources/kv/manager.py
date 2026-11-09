@@ -590,6 +590,8 @@ class KVManager(AttentionResource):
         self.prefix_tokens: dict[str, tuple[int, int]] = {}
         # label -> the walks its keys describe; a label not here is not gated
         self._keyed_walks: dict[str, frozenset[str]] = {}
+        # the walks of each label that write past its layout's spans (a decode loop's)
+        self._growth_walks: dict[str, frozenset[str]] = {}
         # nodes already warned that a declared stream reached them unkeyed
         self._warned_unkeyed: set[str] = set()
         self._overran: set[tuple[str, bool]] = set()
@@ -773,7 +775,9 @@ class KVManager(AttentionResource):
     def enable_prefix_cache(self, root: bytes, walks: dict[str, KeyedWalks] | None = None) -> None:
         """Open the index under ``root``, the identity every key hangs from."""
         self._keyed_walks = {}
+        self._growth_walks = {}
         for label, named in (walks or {}).items():
+            self._growth_walks[label] = frozenset(named.growth)
             keyed = set(named.writes)
             # Above one rank a growth walk isn't keyed, since each rank reads its sampled ids at a
             # different step.
@@ -1125,6 +1129,12 @@ class KVManager(AttentionResource):
         walks = self._keyed_walks.get(segment.label)
         if walks is not None and walk not in walks:
             # another walk wrote this span (an edit's image, say), which the keys do not describe
+            stream.chain = None
+            return
+        growth = self._growth_walks.get(segment.label)
+        if growth is not None and not touched and stream.span_cursor is not None and walk not in growth:
+            # past every span of the layout, from a walk that is not its growth: a prefill the keys do
+            # not describe (a tool's text after a reply), and the pages from here would take the wrong ids
             stream.chain = None
             return
         # what was here before this write, not after: a decode step can commit

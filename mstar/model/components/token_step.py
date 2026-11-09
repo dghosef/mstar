@@ -23,6 +23,9 @@ class TokenStepNode:
 
     DECODE_WALK = "decode"
     DECODE_LOOP = "decode_loop"
+    # the signal the forward samples, and the one the decode loop feeds back
+    TOKEN_SIGNAL = "new_token"
+    FEEDBACK_SIGNAL = "text_inputs"
     # the walk that samples the first token, before DECODE_LOOP exists: a
     # subclass whose stop there ends the reply names it in ``prefill_walks``
     PREFILL_WALK = "prefill"
@@ -59,6 +62,6 @@ class TokenStepNode:
         outputs: dict[str, list[torch.Tensor]],
         **kwargs,
     ):
-        # the decode loop feeds the sampled token back in as text_inputs
-        if "new_token" in outputs:
-            outputs["text_inputs"] = outputs["new_token"]
+        # the decode loop feeds the sampled token back in
+        if self.TOKEN_SIGNAL in outputs:
+            outputs[self.FEEDBACK_SIGNAL] = outputs[self.TOKEN_SIGNAL]

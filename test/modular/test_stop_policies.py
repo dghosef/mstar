@@ -120,3 +120,55 @@ def test_a_nodes_stop_limits_come_from_its_own_partitions_info():
         info.partition_name, info.max_tokens = partition, 100
         runtime.register_stop_limits(7, info)
     assert set_calls == [("llm", [[True]])]
+
+
+def _exit_node(**kw):
+    from mstar.model.submodule_base import ARNodeSubmodule, TokenStop
+
+    class Node(ARNodeSubmodule):
+        token_stop = TokenStop(loop=LOOP, buffer="new_token", stop_ids=frozenset(EOS), sampler="s",
+                               prefill_walks=frozenset({"prefill"}), exits={7: "tool_call"}, **kw)
+
+        def prepare_inputs(self, *args, **kwargs):
+            raise NotImplementedError
+
+        def forward(self, *args, **kwargs):
+            raise NotImplementedError
+
+        def preprocess(self, *args, **kwargs):
+            raise NotImplementedError
+
+    return Node.__new__(Node)
+
+
+@pytest.mark.parametrize("walk, token, stops, exit_name", [
+    ("decode", 7, {LOOP}, "tool_call"),      # a loop's stop carries its exit
+    ("decode", 9, {LOOP}, ""),               # a stop id with no name leaves as ever
+    ("prefill", 7, set(), "tool_call"),      # a prefill takes the exit instead of ending the partition
+    ("prefill", 9, {"__end_partition__"}, ""),
+    ("prefill", 3, set(), ""),
+])
+def test_a_stop_token_names_the_exit_its_walk_ends_through(walk, token, stops, exit_name):
+    from mstar.model.submodule_base import BatchedStopCheck, HostRows, StopCheck
+
+    node = _exit_node()
+    info = SimpleNamespace(graph_walk=walk, max_tokens=100, step_metadata={},
+                           resource_configs={"s": SimpleNamespace(ignore_eos=False)})
+    got = node.check_stop("r", info, {"new_token": [torch.tensor([token])]})
+    got = got if isinstance(got, StopCheck) else StopCheck(got)
+    assert (got.stops, got.exit) == (stops, exit_name)
+    rows = HostRows((1,), {"new_token": torch.tensor([[token]])})
+    batched = node.check_stop_batched([1], {1: info}, rows)
+    if isinstance(batched, BatchedStopCheck):
+        assert (batched.stops.get(1, set()), (batched.exits or {}).get(1, "")) == (stops, exit_name)
+    else:
+        assert (batched.get(1, set()), "") == (stops, exit_name)
+
+
+def test_a_named_exit_refuses_the_runtime_check_and_a_token_that_is_no_stop_id():
+    from mstar.model.submodule_base import TokenStop
+
+    with pytest.raises(ValueError, match="runtime_check"):
+        TokenStop(loop=LOOP, buffer="t", stop_ids=frozenset(EOS), sampler="s", exits={7: "x"}, runtime_check=True)
+    with pytest.raises(ValueError, match="not stop ids"):
+        TokenStop(loop=LOOP, buffer="t", stop_ids=frozenset(EOS), sampler="s", exits={3: "x"})

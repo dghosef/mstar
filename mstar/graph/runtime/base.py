@@ -1052,6 +1052,13 @@ class GraphRuntime(PhasedPostprocess, ABC):
         pass
 
     @abstractmethod
+    def mark_exit(self, rid: int, partition: str, name: str):
+        """The partition's walk ends through the named exit
+        (``TokenStop.exits``). Reported once, on the WORKER_GRAPHS_DONE that
+        follows, unless the node was speculative."""
+        pass
+
+    @abstractmethod
     def get_worker_graph_id_for_node(
         self, node: str, graph_walk: str,
     ) -> int:

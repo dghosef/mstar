@@ -471,7 +471,138 @@ def _persisted_again_while_held():
     ]
 
 
+def _exit_jump(exit_name):
+    """``_persisted_again_while_held`` with an exit on its first step that skips the walk
+    persisting ``x`` afresh. Down that path nothing replaces the held ``x``, so it
+    is kept for the last step even though the default path shields it."""
+    model, signals, kwargs, _, _ = _persisted_again_while_held()
+    plan = [WalkStep("w0", exits={"skip": 2}), WalkStep("w1"), WalkStep("w2")]
+    model = _ToyModel(model.get_graph_walk_graphs(), {"default": plan}, {"default": ["w0", "w1", "w2"]})
+    jumped = exit_name == "skip"
+    script = [("default", "w0", {}, False, exit_name)] + [
+        ("default", "w2", {}, False) if jumped else ("default", "w1", {"x": EMB}, False),
+    ] + ([] if jumped else [("default", "w2", {}, False)])
+    if jumped:
+        expected = [
+            ("NEW_REQUEST", "default", "w0", {("n", "y"): [TAIL]}, False),
+            ("INPUT_SIGNALS", "default", "w2", {("n", "x"): [REF]}, False),
+            ("UNPERSIST_TENSORS", PREPROCESS, {REF: 1}),
+            # the skipped step still reads ``y`` on the default path, so it is held to the end
+            ("UNPERSIST_TENSORS", PREPROCESS, {TAIL: 1}),
+        ]
+    else:  # an exit the step does not list: the next step, as without one
+        expected = _persisted_again_while_held()[4]
+    return model, signals, kwargs, script, expected
+
+
+def _streamed_middle():
+    """Qwen3.5 on speech: the history's prefill, the transcript's chunks (a walk the stream feeds), then the
+    suffix's prefill, which the stream's end moves on to; the partition ends with the last step."""
+    walks = {
+        "a": GraphNode(name="na", input_names=["text_inputs"], outputs=[
+            StreamingGraphEdge(next_node="nb", name="tok", target_partition="B")]),
+        "h": GraphNode(name="nb", input_names=["hist"], outputs=[]),
+        # `go` is the empty edge the conductor sends with each pass, which tells the worker its walk
+        "c": GraphNode(name="nb", input_names=["tok", "go"], outputs=[]),
+        "s": GraphNode(name="nb", input_names=["suf"], outputs=[]),
+    }
+    model = _ToyModel(walks, {"A": [WalkStep("a")], "B": [WalkStep("h"), WalkStep("c"), WalkStep("s")]},
+                      {"A": ["a"], "B": ["h", "c", "s"]},
+                      connections=[Connection("A", "B", "tok", lambda: FixedChunkPolicy(chunk_size=1))])
+    return model, {"text_inputs": [PROMPT], "hist": [REF], "suf": [TAIL]}, {}, [
+        ("B", "h", {}, False), ("B", "c", {}, False), ("A", "a", {}, True), ("B", "c", {}, True), ("B", "s", {}, False),
+    ], [
+        ("NEW_REQUEST", "A", "a", {("na", "text_inputs"): [PROMPT]}, False),
+        ("NEW_REQUEST", "B", "h", {("nb", "hist"): [REF]}, False),
+        ("UNPERSIST_TENSORS", PREPROCESS, {PROMPT: 1, REF: 1}),
+        ("INPUT_SIGNALS", "B", "c", {("nb", "go"): []}, False),   # the history is in; the stream's step
+        ("INPUT_SIGNALS", "B", "c", {("nb", "go"): []}, False),   # a chunk's pass
+        ("INPUT_SIGNALS", "B", "c", {}, False),                    # producer_done
+        ("INPUT_SIGNALS", "B", "s", {("nb", "suf"): [TAIL]}, False),   # the stream's end moved the plan on
+        ("UNPERSIST_TENSORS", PREPROCESS, {TAIL: 1}),
+    ]
+
+
+def _a_reply_that_speaks():
+    """The tool walk of the reply's partition streams the text to say into the speech model's partition,
+    whose walk only a stream feeds: it waits at ingest and ends with the stream (the reply's partition
+    ending sends producer_done)."""
+    walks = {
+        "h": GraphNode(name="nb", input_names=["hist"], outputs=[]),
+        "t": GraphNode(name="nt", input_names=["x"], outputs=[
+            StreamingGraphEdge(next_node="nf", name="said", target_partition="T")]),
+        "f": GraphNode(name="nf", input_names=["said"], outputs=[
+            GraphEdge(next_node=EMIT_TO_CLIENT, name="audio", output_modality="audio")]),
+    }
+    model = _ToyModel(walks, {"B": [WalkStep("h"), WalkStep("t")], "T": [WalkStep("f")]},
+                      {"B": ["h", "t"], "T": ["f"]},
+                      connections=[Connection("B", "T", "said", lambda: FixedChunkPolicy(chunk_size=1))])
+    return model, {"hist": [REF], "x": [TAIL]}, {}, [
+        ("B", "h", {}, False), ("B", "t", {}, True), ("T", "f", {}, True),
+    ], [
+        ("NEW_REQUEST", "B", "h", {("nb", "hist"): [REF]}, False),
+        ("NEW_REQUEST", "T", "f", {}, False),                       # waits for the stream
+        ("UNPERSIST_TENSORS", PREPROCESS, {REF: 1}),
+        ("INPUT_SIGNALS", "B", "t", {("nt", "x"): [TAIL]}, False),
+        ("UNPERSIST_TENSORS", PREPROCESS, {TAIL: 1}),
+        ("INPUT_SIGNALS", "T", "f", {}, False),                      # producer_done: B ended
+    ]
+
+
+def _tool_round(rounds):
+    """Qwen3.5 with tools: prefill, decode, a router walk, a tool walk, then a prefill that continues the
+    reply and comes back to decode; the router ends the plan with ``answer`` when the turn made no call.
+    Each walk persists what the next reads and replaces its predecessor's, so a round releases the last
+    one's tensors."""
+    walks = {
+        "p": GraphNode(name="n", input_names=["x"], outputs=[
+            GraphEdge(next_node=EMPTY_DESTINATION, name="first", persist=True)]),
+        "d": GraphNode(name="n", input_names=["first"], outputs=[
+            GraphEdge(next_node=EMPTY_DESTINATION, name="turn", persist=True)]),
+        "r": GraphNode(name="router", input_names=["first", "turn"], outputs=[
+            GraphEdge(next_node=EMPTY_DESTINATION, name="calls", persist=True)]),
+        "t": GraphNode(name="tool", input_names=["calls"], outputs=[
+            GraphEdge(next_node=EMPTY_DESTINATION, name="tool_text", persist=True)]),
+        "pc": GraphNode(name="n", input_names=["x"], outputs=[
+            GraphEdge(next_node=EMPTY_DESTINATION, name="first", persist=True)]),
+    }
+    plan = [WalkStep("p"), WalkStep("d"), WalkStep("r", exits={"answer": 5, "tools": 3}), WalkStep("t"),
+            WalkStep("pc", bind={"x": "tool_text"}, exits={"": 1})]
+    model = _ToyModel(walks, {"default": plan}, {"default": list(walks)})
+    script = [("default", "p", {"first": 601}, False)]
+    expected = [("NEW_REQUEST", "default", "p", {("n", "x"): [PROMPT]}, False),
+                ("UNPERSIST_TENSORS", PREPROCESS, {PROMPT: 1})]
+    uuid = 602
+    for _ in range(rounds + 1):
+        # a decode, then the router: it sends the turn's calls to the tool, or ends the plan
+        last = _ == rounds
+        script += [("default", "d", {"turn": uuid}, False),
+                   ("default", "r", {"calls": uuid + 1}, False, "answer" if last else "tools")]
+        first = 601 if _ == 0 else uuid - 1
+        expected += [("INPUT_SIGNALS", "default", "d", {("n", "first"): [first]}, False),
+                     ("INPUT_SIGNALS", "default", "r", {("router", "first"): [first], ("router", "turn"): [uuid]},
+                      False),
+                     ("UNPERSIST_TENSORS", "worker_0", {first: 2, uuid: 1})]
+        if last:
+            # the answer's calls are read by no one; the request's end lets go of them
+            expected.append(("UNPERSIST_TENSORS", "worker_0", {}))
+            break
+        script += [("default", "t", {"tool_text": uuid + 2}, False), ("default", "pc", {"first": uuid + 3}, False)]
+        expected += [("INPUT_SIGNALS", "default", "t", {("tool", "calls"): [uuid + 1]}, False),
+                     ("UNPERSIST_TENSORS", "worker_0", {uuid + 1: 1}),
+                     ("INPUT_SIGNALS", "default", "pc", {("n", "x"): [uuid + 2]}, False),
+                     ("UNPERSIST_TENSORS", "worker_0", {uuid + 2: 1})]
+        uuid += 4
+    return model, {"x": [PROMPT]}, {}, script, expected
+
+
 _PLANS = {
+    "a reply that speaks": _a_reply_that_speaks,
+    "a stream's end moves the plan on": _streamed_middle,
+    "a tool round comes back to decode": lambda: _tool_round(1),
+    "an answer with no tool call ends the plan": lambda: _tool_round(0),
+    "an exit jumps over the step that re-persists a name": lambda: _exit_jump("skip"),
+    "an unlisted exit takes the next step": lambda: _exit_jump("typo"),
     "every partition's reads": _every_partitions_reads,
     "another partition's persist keeps it": _another_partitions_persist,
     "prefill then decode": _p2,
@@ -488,9 +619,9 @@ _PLANS = {
 }
 
 
-@pytest.mark.parametrize("case", list(_PLANS))
-def test_a_walk_plan_sends_each_steps_inputs_and_releases_their_last_read(tmp_path, monkeypatch, case):
-    model, signals, kwargs, script, expected = _PLANS[case]()
+def _play(model, signals, kwargs, script, tmp_path, monkeypatch, counts=None):
+    """A conductor given the request, then each report of ``script``; ``counts`` is the tokens each walk's
+    report counts."""
     walks = model.get_graph_walk_graphs()
     # each partition on a rank of its own
     groups = [sorted({n for w in p.graph_walks for n in walks[w].get_nodes()}) for p in model.get_partitions()]
@@ -499,12 +630,13 @@ def test_a_walk_plan_sends_each_steps_inputs_and_releases_their_last_read(tmp_pa
     signals = {name: [i if isinstance(i, TensorPointerInfo) else _info(i) for i in infos]
                for name, infos in signals.items()}
     reports = []
-    for partition, walk, persist, done in script:
+    for partition, walk, persist, done, *exit_name in script:
         node = next(iter(walks[walk].get_nodes()))
         wg = c.node_walk_to_wg[(node, walk)].worker_graph_id
         reports.append([_msg(ConductorMessageType.WORKER_GRAPHS_DONE, WorkerGraphsDone(
             request_id="r", worker_graph_ids=[wg], is_first_tp_rank=True, partition_name=partition,
-            partition_done=done, graph_walk=walk,
+            partition_done=done, graph_walk=walk, exit=exit_name[0] if exit_name else "",
+            new_token_counts={"new_token": (counts or {}).get(walk, 0)},
             persist_signals={name: [_info(u, entity=worker[node], node=node, walk=walk)]
                              for name, u in persist.items()},
         ))])
@@ -512,6 +644,13 @@ def test_a_walk_plan_sends_each_steps_inputs_and_releases_their_last_read(tmp_pa
         request_id="r", initial_signals=signals, initial_input_modalities=["text"],
         initial_output_modalities=["text"], input_metadata={}, model_kwargs=kwargs,
     ))], *reports])
+    return c
+
+
+@pytest.mark.parametrize("case", list(_PLANS))
+def test_a_walk_plan_sends_each_steps_inputs_and_releases_their_last_read(tmp_path, monkeypatch, case):
+    model, signals, kwargs, script, expected = _PLANS[case]()
+    c = _play(model, signals, kwargs, script, tmp_path, monkeypatch)
 
     got = []
     for kind, entity, body in _sends(c, ("NEW_REQUEST", "INPUT_SIGNALS", "UNPERSIST_TENSORS")):
@@ -526,6 +665,28 @@ def test_a_walk_plan_sends_each_steps_inputs_and_releases_their_last_read(tmp_pa
     assert got == expected
     assert any(getattr(msg, "message_type", None) == "request_complete" for _, msg in c.comm.sent), \
         "the plan's last step did not end the request"
+
+
+def test_a_stop_checks_end_at_a_step_the_stream_feeds_ends_the_partition(tmp_path, monkeypatch):
+    """The same report as a stream's end, but with the stop check's END_PARTITION exit: the first token of
+    the reply was a stop token, so the suffix's step is not run."""
+    from mstar.model.submodule_base import END_PARTITION
+
+    model, signals, kwargs, script, _ = _streamed_middle()
+    script = [*script[:3], ("B", "c", {}, True, END_PARTITION)]
+    c = _play(model, signals, kwargs, script, tmp_path, monkeypatch)
+    assert [(b.request_info.graph_walk) for _, _, b in _sends(c, ("INPUT_SIGNALS",))] == ["c", "c", "c"]
+    assert any(getattr(msg, "message_type", None) == "request_complete" for _, msg in c.comm.sent)
+
+
+def test_a_plan_that_comes_back_runs_under_the_budget_it_has_left(tmp_path, monkeypatch):
+    """Each step of a tool round's plan gets what is left of the output budget, so the rounds' decode
+    steps together stay in it."""
+    model, signals, kwargs, script, _ = _tool_round(1)
+    kwargs = {"max_output_tokens": 10}
+    c = _play(model, signals, kwargs, script, tmp_path, monkeypatch, counts={"p": 1, "d": 2, "t": 2, "pc": 1})
+    sent = [(b.request_info.graph_walk, b.request_info.max_tokens) for _, _, b in _sends(c, ("INPUT_SIGNALS",))]
+    assert sent == [("d", 9), ("r", 7), ("t", 7), ("pc", 5), ("d", 4), ("r", 2)]
 
 
 def _tok_stream():
@@ -545,9 +706,13 @@ _REFUSED = {
     # nothing tells B's worker its walk changed
     "a later step only a stream feeds": ({"A": [WalkStep("a")], "B": [WalkStep("b"), WalkStep("c")]}, _STREAMED,
                                          _tok_stream(), 500, "takes no input the conductor sends"),
-    # c runs once per chunk until the stream's end, which ends B's partition: b would never run
-    "a step after one that runs per chunk": ({"A": [WalkStep("a")], "B": [WalkStep("c"), WalkStep("b")]}, _STREAMED,
-                                             _tok_stream(), 500, "so it would never run"),
+    # an exit is an edge of the plan, or its end
+    "an exit past the plan's end": ({"default": [WalkStep("a", exits={"x": 2})]}, None, (), 500, "or its end"),
+    # the stream-moved lookup finds a step by walk name, going forward
+    "a back edge where a stream moves the walk": ({"A": [WalkStep("a")], "B": [WalkStep("c", exits={"x": 0})]},
+                                                  _STREAMED, [Connection(
+                                                      "A", "B", "tok", lambda: FixedChunkPolicy(chunk_size=1),
+                                                      consumer_walk=lambda ctx: "c")], 500, "that lead back"),
 }
 
 
@@ -591,3 +756,31 @@ def test_a_stream_moved_report_of_a_walk_its_plan_is_past_moves_nothing():
     pstate.graph_walk = "w"
     with pytest.raises(RuntimeError, match="which its plan doesn't run"):
         c._next_plan_args(request, "B", done=False)
+
+
+def test_a_stream_moved_partitions_exit_leads_from_the_step_its_walk_resolves_to():
+    """The report names a walk, not a step: the exit is looked up on the step the
+    conductor resolves that walk to, and leads past the step after it."""
+    c = Conductor.__new__(Conductor)
+    c.model, c.producer_triggered_partitions = SimpleNamespace(), {"B"}
+    c._walk_inputs = {w: (("t", "n"),) for w in ("x", "y", "z")}
+    c._walk_persists, c._repeating_walks = {w: frozenset() for w in "xyz"}, frozenset()
+    pstate = PartitionState("B", plan=[WalkStep("x", exits={"skip": 2}), WalkStep("y"), WalkStep("z")], cursor=0)
+    request = SimpleNamespace(partition_states={"B": pstate}, persist_signals={})
+    pstate.graph_walk, pstate.exit = "x", "skip"
+    args = c._next_plan_args(request, "B", done=False)
+    assert pstate.cursor == 2 and pstate.graph_walk == "z" and args.inputs
+
+
+def test_two_ranks_naming_different_exits_in_one_pass_fail_the_request():
+    c = Conductor.__new__(Conductor)
+    c.enable_prof, c.producer_triggered_partitions = False, set()
+    pstate = PartitionState("B")
+    c.requests = {"r": SimpleNamespace(
+        partition_states={"B": pstate}, output_chunk_counts={}, streaming_connections={})}
+    body = dict(request_id="r", worker_graph_ids=[], partition_name="B", is_first_tp_rank=True)
+    c._process_worker_graphs_done(WorkerGraphsDone(exit="a", **body))
+    assert pstate.exit == "a"
+    c._process_worker_graphs_done(WorkerGraphsDone(exit="a", **body))  # the same one from another report
+    with pytest.raises(RuntimeError, match="exits 'a' and 'b'"):
+        c._process_worker_graphs_done(WorkerGraphsDone(exit="b", **body))

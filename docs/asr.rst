@@ -37,7 +37,7 @@ requests batch together and are captured per batch size (1 to 64).
     the same with a prompt that stops at ``<|startoftranscript|>`` and
     sampling restricted to the language tokens; ``prefill_prompt`` then
     appends ``<|task|>[<|notimestamps|>]`` after the detected token.
-``decode``
+``decode`` (named ``asr_decode``, its loop ``asr_decode_loop``, its signals ``asr_token`` and ``asr_text``, and the decoder's caches ``asr_kv_cache``, ``cross_kv_cache``, ``asr_attn`` and ``asr_sampler``, which a serving config's ``resources:`` block uses, so Whisper can be one member of a multimodel beside a model on the shared decoder scaffold)
     a dynamic loop, one token per step, until ``<|endoftext|>``, the
     request's ``max_tokens`` or the end of the 448-position table.
     ``max_tokens`` counts the prompt walk's token, so a budget of one, or an

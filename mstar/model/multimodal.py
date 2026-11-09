@@ -24,9 +24,9 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 
-from mstar.conductor.request_info import FINAL_PREFILL, WalkStep
+from mstar.conductor.request_info import FINAL_PREFILL, TURN_IDS, WalkStep
 from mstar.graph.base import GraphEdge, GraphNode, GraphSection, Loop, Parallel, Sequential
-from mstar.graph.special_destinations import EMIT_TO_CLIENT
+from mstar.graph.special_destinations import EMIT_TO_CLIENT, EMPTY_DESTINATION
 from mstar.model.keys import MIXED, PREFILL_TEXT
 
 if TYPE_CHECKING:
@@ -521,15 +521,19 @@ def media_encoders(encoders: Sequence[MediaEncoder], layout: Mapping) -> list[Me
 
 def media_walks(
     max_iters: int, encoders: Sequence[MediaEncoder] = (), text: bool = True, node: str = "LLM",
+    tools: bool = False,
 ) -> dict[str, GraphSection]:
     """``prefill_text`` (unless ``text`` is False), one media walk per subset
     of ``encoders``, and ``decode``, over the decoder ``node`` and the
     encoders. ``max_iters`` bounds the decode loop; it is a safety bound, not
-    the per-request budget."""
+    the per-request budget. With ``tools`` the conductor counts the tokens it
+    emits toward the request's output budget and the decode loop accumulates
+    the turn's ids (`TURN_IDS`) for the router (`mstar.model.components.python_tool`)."""
 
     def emit_first_token() -> GraphEdge:
         return GraphEdge(
             next_node=EMIT_TO_CLIENT, name="new_token", persist=True, output_modality="text",
+            conductor_new_token=tools,
         )
 
     walks: dict[str, GraphSection] = {}
@@ -552,6 +556,8 @@ def media_walks(
                 outputs=[emit_first_token()],
             ),
         ])
+    # a request without tools never produces it (`SampledTokenDecoder.postprocess`): empty, it costs nothing
+    turn_ids = [GraphEdge(next_node=EMPTY_DESTINATION, name=TURN_IDS, persist=True)] if tools else []
     walks["decode"] = Loop(
         name="decode_loop",
         section=GraphNode(
@@ -559,11 +565,14 @@ def media_walks(
             input_names=["text_inputs"],
             outputs=[
                 GraphEdge(next_node=node, name="text_inputs"),
-                GraphEdge(next_node=EMIT_TO_CLIENT, name="text_inputs", output_modality="text"),
+                GraphEdge(
+                    next_node=EMIT_TO_CLIENT, name="text_inputs", output_modality="text", conductor_new_token=tools),
+                *turn_ids,
             ],
         ),
         max_iters=max_iters,
         outputs=[],
+        accumulated_outputs=list(turn_ids),
     )
     return walks
 

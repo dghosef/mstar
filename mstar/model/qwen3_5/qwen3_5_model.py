@@ -1,10 +1,13 @@
 import logging
+from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any
 
 import torch
 from jinja2 import TemplateError
 from transformers import AutoTokenizer
 
+from mstar.conductor.request_info import FINAL_PREFILL, WalkStep
 from mstar.engine.resources.attn.config import AttentionConfig, AttentionSpec
 from mstar.engine.resources.attn.ragged.config import (
     RaggedAttentionConfig,
@@ -19,15 +22,39 @@ from mstar.engine.resources.linear_attn.config import (
 from mstar.engine.resources.position.config import PositionConfig, PositionSpec
 from mstar.engine.resources.recurrent.config import DeltaNetGeometry, RecurrentStateConfig, RecurrentStateSpec
 from mstar.engine.resources.spec import NodeResourceSpec
-from mstar.model.base import TensorAndMetadata
+from mstar.graph.base import GraphNode, GraphSection, TensorPointerInfo
+from mstar.model.base import ProcessPromptOutput, TensorAndMetadata
 from mstar.model.components.mrope import layout_extent
-from mstar.model.keys import MIXED
+from mstar.model.components.python_tool import (
+    ROUTER_NODE,
+    SPEAK,
+    TOOL_HANDLERS,
+    TOOL_NODE,
+    TOOL_SCHEMAS,
+    ToolRouterSubmodule,
+    ToolSubmodule,
+    check_tools,
+    tool_plan,
+    tool_walks,
+)
+from mstar.model.components.text_glue import (
+    MAX_TRANSCRIPT_TOKENS,
+    STREAM_WALK,
+    SUFFIX,
+    TRANSCRIPT_RESERVE,
+    TRANSCRIPT_STREAM,
+)
+from mstar.model.keys import MIXED, PREFILL_TEXT
 from mstar.model.media_limits import read_image
 from mstar.model.multimodal import (
+    MEDIA_LAYOUT,
+    TEXT,
     VIDEO,
     PromptPart,
     as_uint8_chw,
+    media_walks,
     messages_from_parts,
+    parts_from_modalities,
     vision_encoder,
 )
 from mstar.model.multimodal_decoder import (
@@ -58,9 +85,17 @@ from mstar.utils.fast_tokenize import encode_ids
 
 logger = logging.getLogger(__name__)
 
+# the one token a spoken prompt's open user turn is rendered with, then cut at
+_OPEN_TURN = "<|fim_pad|>"
+
 # TODO: implement MoE variants
 class Qwen3_5DenseModel(MultimodalDecoderModel):
     NAME = "Qwen3.5"
+    tools: tuple[str, ...] = ()
+    # whether a request may bring its prompt as a stream (a spoken one, in a multimodel with a speech
+    # member): the model then has a streamed prefill walk, and `process_prompt` cuts the template at an open user turn
+    stream_in = False
+    INTERNAL_KWARGS = (*MultimodalDecoderModel.INTERNAL_KWARGS, TRANSCRIPT_STREAM, TRANSCRIPT_RESERVE)
     METADATA_FILES = (
         "config.json",
         "preprocessor_config.json",
@@ -78,9 +113,16 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
         self,
         model_path_hf: str,
         cache_dir: str | None = None,
+        tools: Sequence[str] = (),
+        stream_in: bool = False,
         **kwargs: Any,
     ):
         super().__init__(model_path_hf, cache_dir)
+        # The serving config's ``model_kwargs: {tools: [python]}``: the reply may call these tools
+        # (`mstar.model.components.python_tool`), on a ``Router`` and a ``Tool`` node the deployment places.
+        # Code the model wrote runs on the host, so serve ``python`` only where callers are trusted.
+        self.tools = check_tools(tools)
+        self.stream_in = bool(stream_in)
         self.config = Qwen3_5Config.from_hf(self.local_dir)
         # None on a text-only checkpoint (`_create_submodule` then refuses a
         # vision_encoder node)
@@ -367,6 +409,7 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
                 tokenize=False,
                 add_generation_prompt=True,
                 enable_thinking=kwargs.get("enable_thinking", True),
+                tools=[TOOL_SCHEMAS[name] for name in self.tools] or None,
             )
         except TemplateError as exc:
             # a chat the template refuses (a system message after the first turn,
@@ -419,6 +462,91 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
     # Model ABC: submodule loading
     # ------------------------------------------------------------------
 
+    def get_graph_walk_graphs(self) -> dict[str, GraphSection]:
+        walks = super().get_graph_walk_graphs()
+        if self.tools:
+            walks = {
+                **media_walks(self.config.max_position_embeddings, self.encoders, text=self.TEXT_PROMPTS, tools=True),
+                **tool_walks(),
+            }
+        if self.stream_in:
+            # the transcript's chunks, each one a prefill pass that appends to the KV; it samples nothing
+            walks[STREAM_WALK] = GraphNode(name="LLM", input_names=["text_inputs"], outputs=[])
+        return walks
+
+    def get_loop_caps(self, **model_kwargs) -> dict[str, int]:
+        if not self.tools:
+            caps = super().get_loop_caps(**model_kwargs)
+        else:
+            # Every id a tool request writes after its prompt counts toward the output budget (its decode
+            # steps, its tool text), and each step runs under what is left of it, so the reserve is the
+            # budget and the step speculated past a stop.
+            caps = {self.DECODE_LOOP: self.get_max_output_tokens(**model_kwargs) + 1}
+        # a spoken prompt's transcript and suffix are written after its prompt span too
+        return {loop: cap + int(model_kwargs.get(TRANSCRIPT_RESERVE, 0)) for loop, cap in caps.items()}
+
+    def walk_plan(
+        self,
+        partition_name: str,
+        input_modalities: list[str],
+        output_modalities: list[str],
+        input_signals: dict[str, list[TensorPointerInfo]],
+        model_kwargs: dict,
+    ) -> list[WalkStep]:
+        plan = super().walk_plan(
+            partition_name, input_modalities, output_modalities, input_signals, model_kwargs)
+        if not plan:
+            return plan
+        prefill, decode = plan
+        leading = [prefill]
+        if model_kwargs.get(TRANSCRIPT_STREAM):
+            # the history and the open user turn, then the transcript's chunks, then the template's suffix,
+            # whose sampled token is the reply's first
+            # (False, not absent: the decoder drops the token a prefill that is not the last samples)
+            metadata = {**prefill.step_metadata, FINAL_PREFILL: False}
+            leading = [
+                replace(prefill, step_metadata=metadata), WalkStep(STREAM_WALK),
+                WalkStep(PREFILL_TEXT, bind={"text_inputs": SUFFIX}, step_metadata={FINAL_PREFILL: True}),
+            ]
+        if not self.tools:
+            return [*leading, decode]
+        return tool_plan(
+            leading, "decode", PREFILL_TEXT, bool(model_kwargs.get("enable_thinking", True)),
+            speak=SPEAK in self.tools and "audio" in output_modalities,
+        )
+
+    def process_prompt(
+        self, prompt, input_modalities, output_modalities, tensors=None, prompt_parts=None, **kwargs,
+    ):
+        if "transcript" not in kwargs.pop("open_streams", ()):
+            return super().process_prompt(
+                prompt, input_modalities, output_modalities, tensors, prompt_parts=prompt_parts, **kwargs)
+        if not self.stream_in:
+            raise ValueError(f"{self.NAME} here takes its prompt whole; it was not built with stream_in")
+        # The history, and a user turn left open for the stream: the template rendered with one rare token
+        # as the turn's text, cut there. The prefix is an ordinary prompt (prefix-cached as a typed one is);
+        # the suffix (the turn's end and the reply's start) is prefilled after the transcript.
+        marker = self.tokenizer.convert_tokens_to_ids(_OPEN_TURN)
+        parts = [*(prompt_parts or parts_from_modalities(input_modalities, prompt)),
+                 PromptPart(modality=TEXT, text=_OPEN_TURN, role="user")]
+        out = super().process_prompt(
+            "", [*input_modalities, TEXT], output_modalities, tensors, prompt_parts=parts, **kwargs)
+        ids = out.new_input_tensors["text_inputs"][0]
+        (at,) = (ids == marker).nonzero().flatten().tolist()
+        prefix, suffix = ids[:at], ids[at + 1:]
+        layout = out.metadata[MEDIA_LAYOUT]
+        return ProcessPromptOutput(
+            {**out.new_input_tensors, "text_inputs": [prefix], SUFFIX: [suffix]},
+            {**out.metadata, "kv_layout": self.kv_layout(layout, int(prefix.numel())),
+             TRANSCRIPT_STREAM: True, TRANSCRIPT_RESERVE: MAX_TRANSCRIPT_TOKENS + int(suffix.numel())},
+        )
+
+    def validate_config_yaml(self, config: dict, config_path: str) -> None:
+        super().validate_config_yaml(config, config_path)
+        placed = {n for group in config.get("node_groups") or () for n in group.get("node_names", ())}
+        if self.tools and (missing := {ROUTER_NODE, TOOL_NODE} - placed):
+            raise ValueError(f"{config_path}: model_kwargs.tools needs the nodes {sorted(missing)} in node_groups")
+
     def _create_submodule(
         self, node_name: str, device: str, dtype: torch.dtype, tp_group,
     ) -> NodeSubmodule | None:
@@ -427,6 +555,10 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
             VisionEncoderSubmodule,
         )
 
+        if node_name == ROUTER_NODE and self.tools:
+            return ToolRouterSubmodule(self.tokenizer, device)
+        if node_name == TOOL_NODE and self.tools:
+            return ToolSubmodule(self.tokenizer, {name: TOOL_HANDLERS[name] for name in self.tools}, device)
         if node_name not in ("LLM", "vision_encoder"):
             return None
 
@@ -462,4 +594,6 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
         load_qwen3_5_weights(model, weights_dir, device=device)
         model.requires_grad_(False).eval()
         logger.info("Loaded Qwen3.5 LLM submodule onto %s", device)
-        return LLMSubmodule(model, self.config, self.vision_config, self.encoders)
+        llm = LLMSubmodule(model, self.config, self.vision_config, self.encoders)
+        llm.tool_rounds = bool(self.tools or self.stream_in)
+        return llm

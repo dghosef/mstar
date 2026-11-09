@@ -22,6 +22,7 @@ sys.path.insert(0, ".")
 import pytest
 import torch
 
+from mstar.engine.resources.base import KeyedWalks
 from mstar.engine.resources.kv import manager as manager_mod
 from mstar.engine.resources.kv.config import KVReqConfig, KVStep, PagedKVConfig, PrefixSpan, StreamLayout
 from mstar.engine.resources.kv.keys import chain
@@ -270,4 +271,53 @@ def test_a_request_that_opted_out_chains_nothing():
     assert _indexed(kv) == 0, (
         "a request that turned the cache off left its generated pages behind"
     )
+    kv.assert_pages_conserved()
+
+
+def test_a_prefill_the_layout_does_not_describe_ends_the_chain():
+    """A tool's text is prefilled after the reply it answers: its ids are no sampled id, so the keys
+    the chain would give the pages after it name other tokens. The chain ends there; what was keyed
+    before stays."""
+    kv = KVManager(
+        cfg=PagedKVConfig(num_layers=1, num_kv_heads=1, head_dim=8, max_seq_len=8192, max_num_pages=64,
+                          page_size=PAGE_SIZE),
+        name="kv", joint_comm_group=None, transfer_engine_info=None, device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    kv.enable_prefix_cache(ROOT, {"main": KeyedWalks(writes=("prefill",), growth=(WALK,))})
+    prompt = list(range(100))
+    kv.ingest_request("r0", KVReqConfig(
+        prefix_keys={"main": chain(_pages(prompt))}, prefix_tail={"main": prompt},
+        prefix_decode={"main": TENSOR},
+        kv_layout={"main": StreamLayout(
+            spans=(PrefixSpan(len(prompt), len(prompt), "prefill"),), growth=(("decode_loop", 1),), keyed_spans=1)},
+        loop_caps={"decode_loop": 400},
+    ))
+
+    def step(walk, span):
+        s = KVStep(segments=(Segment("r0", "main", span),))
+        ctx = StepContext(request_ids=("r0",), graph_walk=walk, slot=0, capture=False)
+        assert kv.admit(s, ctx).ok
+        kv.plan(s, ctx)
+        kv.commit(s, ctx)
+        _sampled(kv, "r0", 9000 + kv._streams["r0"]["main"].stored_len)
+
+    step("prefill", len(prompt))
+    for _ in range(156):
+        step(WALK, 1)
+    before = _indexed(kv)
+    assert before == 2
+    # the worker extends chains lazily, so the manager tolerates a lag of a few steps' ids between
+    # the chain and the stream; a short tail would hide inside it
+    from collections import Counter
+    class Lag(list):
+        __bool__ = lambda self: True  # noqa: E731
+    kv._chain_backlog, kv._chain_pending, kv._chain_backlog_width = Lag(), Counter({"r0": 8}), 4
+    step("prefill", 20)                   # the tool's text, past every span
+
+    assert kv._streams["r0"]["main"].chain is None
+    kv._chain_backlog, kv._chain_pending = [], Counter()
+    for _ in range(130):
+        step(WALK, 1)
+    assert _indexed(kv) == before, "a page written after the tool's text was filed under the chain's keys"
     kv.assert_pages_conserved()

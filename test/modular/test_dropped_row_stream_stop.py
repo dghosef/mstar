@@ -83,6 +83,7 @@ class _Runtime(PhasedPostprocess):
         self.stopped: list[int] = []
         self.loop_names: dict[int, set[str]] = {}
         self.partition_done: list[int] = []
+        self.exits: list[tuple[int, str]] = []
         self.pending_stops = set(pending_stops)
 
     def pending_loop_stop_rids(self, graph_walk, loop_name):
@@ -99,6 +100,9 @@ class _Runtime(PhasedPostprocess):
 
     def mark_partition_done(self, rid, partition):
         self.partition_done.append(rid)
+
+    def mark_exit(self, rid, partition, name):
+        self.exits.append((rid, name))
 
     def complete_and_route_batch(self, route_input):
         return RouteOutput(
@@ -275,6 +279,9 @@ def test_an_end_partition_stop_reports_the_partition_done():
     assert batch.partition_done_rids == {1}
     assert runtime.loop_names == {}
     assert not w.reported
+    # sent, it is the stop check's end, which a stream's end is not
+    _, runtime, _ = _postprocess(_Sub(stops={1: {END_PARTITION}}), streams=False, in_loop=False, through_send=True)
+    assert runtime.partition_done == [1] and runtime.exits == [(1, END_PARTITION)]
 
 
 def test_an_end_partition_stop_inside_a_loop_fails_the_request():
@@ -289,7 +296,8 @@ def test_a_failed_check_stop_row_does_not_report_its_partition_done():
     failed, which the STOPS break drops after the request was built."""
     _, runtime, w = _postprocess(_Sub(bad={2}, stage="check_stop"), through_send=True)
     assert set(w.reported) == {2}
-    assert runtime.partition_done == [1]
+    # a stream's end names no exit, which tells it from a stop check's END_PARTITION
+    assert runtime.partition_done == [1] and runtime.exits == []
 
 
 def test_an_end_partition_stop_on_a_rows_last_chunk_ends_its_partition():

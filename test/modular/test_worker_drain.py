@@ -132,7 +132,7 @@ def test_stopped_speculative_batch_cleans_inputs_without_unmatched_nvtx(
         ),
         node_batch=SimpleNamespace(
             node_name="LLM", request_ids=[7], per_request_info={7: object()}, no_forward_rids=set(),
-            final_stream_rids={7}, partition_done_rids={7},
+            final_stream_rids={7}, partition_done_rids={7}, exits={},
         ),
         speculative_new_iter=True, graph_walk="decode", loop_name="decode",
     )
@@ -181,7 +181,7 @@ def test_stopped_speculative_batch_still_waits_for_its_gpu_work(monkeypatch, has
         ),
         node_batch=SimpleNamespace(
             node_name="LLM", request_ids=[7], per_request_info={7: object()}, no_forward_rids=set(),
-            final_stream_rids=set(), partition_done_rids=set(),
+            final_stream_rids=set(), partition_done_rids=set(), exits={},
             completion_event=event,
         ),
         speculative_new_iter=True, graph_walk="decode", loop_name="decode",
