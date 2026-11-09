@@ -172,8 +172,9 @@ class _UploadServer(_RecordingServer):
     ([("clip.wav", b"RIFF")], {"input_modalities": "video_frame"}, "'video_frame' is an output-only modality"),
     ([("clip.wav", b"RIFF")], {"model_kwargs": "{"}, "model_kwargs must be valid JSON"),
     ([("clip.wav", b"RIFF")], {"model_kwargs": "[1]"}, "model_kwargs must be a JSON object"),
+    ([("clip.wav", b"RIFF")], {"model_kwargs": "[" * 100_000}, "model_kwargs must be valid JSON"),
     ([("clip.wav", b"RIFF"), ("x" * 300 + ".wav", b"RIFF")], {"model_kwargs": "{"}, "model_kwargs must be valid JSON"),
-], ids=["unknown-file", "video-frame-input", "bad-json", "not-an-object", "long-name"])
+], ids=["unknown-file", "video-frame-input", "bad-json", "not-an-object", "nested-too-deep", "long-name"])
 def test_a_refused_generate_leaves_no_upload_behind(monkeypatch, tmp_path, files, fields, detail):
     """A request refused after its files are saved is never submitted, so the
     deferred cleanup never sees them; the refusal deletes them."""

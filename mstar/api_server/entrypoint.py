@@ -2827,7 +2827,7 @@ async def generate(
 
     try:
         parsed_kwargs = json.loads(model_kwargs) if model_kwargs else None
-    except json.JSONDecodeError as e:
+    except (json.JSONDecodeError, RecursionError) as e:  # RecursionError: brackets nested too deep
         _remove_uploads(file_paths)
         raise HTTPException(
             status_code=400,
