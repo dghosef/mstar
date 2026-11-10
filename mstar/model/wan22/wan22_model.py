@@ -516,6 +516,10 @@ class Wan22Model(Model):
         system FFmpeg libraries. ``fps`` is a PLAYBACK rate, not a generation knob:
         the model always makes a fixed ``num_frames`` clip at an implied 24 fps, so
         another value only rescales its duration.
+
+        x264 runs at CRF 18 on the ultrafast preset, as LTX-2.5 and Cosmos3 do:
+        libx264's defaults (CRF 23, preset medium) took several times longer to
+        write a long clip, at lower quality.
         """
         if modality != "video":
             raise ValueError(f"Unsupported modality for Wan2.2: {modality!r}")
@@ -531,7 +535,7 @@ class Wan22Model(Model):
         if fps <= 0:
             raise ValueError(f"Wan2.2 fps must be positive; got {raw_fps!r}")
 
-        return encode_mp4(output.cpu().numpy(), fps)
+        return encode_mp4(output.cpu().numpy(), fps, options={"crf": "18", "preset": "ultrafast", "threads": "0"})
 
     # ------------------------------------------------------------------
     # Model ABC: forward pass orchestration
