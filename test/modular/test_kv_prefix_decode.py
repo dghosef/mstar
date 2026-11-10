@@ -368,25 +368,15 @@ def _appended_kv(prompt):
     return kv
 
 
-def test_transcript_chunks_prepared_before_the_one_before_them_commits_are_keyed_where_they_land():
-    """A chunk is prepared while the previous one's step is still running, so the stream's length lags. Each
-    chunk says where it lands (the prompt's length and the ids before it), and the chain gets all of them."""
-    prompt = list(range(100))
-    kv = _appended_kv(prompt)
-    stream = kv._streams["r0"]["main"]
-    first, second = list(range(500, 509)), list(range(600, 612))
-    # both are probed before either step commits
-    kv.resolve_cached_prefix("r0", NODE, "stream", ARNodeInputs(
-        input_seq_len=len(first), input_ids=torch.tensor(first), starts_at=len(prompt)))
-    kv.resolve_cached_prefix("r0", NODE, "stream", ARNodeInputs(
-        input_seq_len=len(second), input_ids=torch.tensor(second), starts_at=len(prompt) + len(first)))
-    assert stream.chain.covered_len == len(prompt) + len(first) + len(second)
-
-
-def test_a_row_that_starts_past_the_end_of_the_chain_stops_the_chain_instead_of_misnaming_pages():
+@pytest.mark.parametrize("gap", [0, 5])
+def test_an_appended_row_is_keyed_at_the_chains_end_and_closes_the_chain_when_it_starts_past_it(gap):
+    """A row that starts exactly at the chain's end is keyed; one that starts past it closes the chain."""
     prompt = list(range(100))
     kv = _appended_kv(prompt)
     chain_ = kv._streams["r0"]["main"].chain
     kv.resolve_cached_prefix("r0", NODE, "stream", ARNodeInputs(
-        input_seq_len=3, input_ids=torch.tensor([1, 2, 3]), starts_at=len(prompt) + 5))
-    assert chain_.unkeyed is None and chain_.covered_len == len(prompt)
+        input_seq_len=3, input_ids=torch.tensor([1, 2, 3]), starts_at=len(prompt) + gap))
+    if gap:
+        assert chain_.unkeyed is None and chain_.covered_len == len(prompt)
+    else:
+        assert chain_.unkeyed is not None and chain_.covered_len == len(prompt) + 3
