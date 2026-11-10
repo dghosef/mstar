@@ -41,7 +41,7 @@ from mstar.engine.resources.kv.config import mark_unpausable, refuse_undeclared_
 from mstar.engine.resources.lora.config import LoraSpec
 from mstar.graph.base import GraphEdge, NodeAndGraphWalk, TensorPointerInfo
 from mstar.model.base import Model, WorkerGraph, serving_resources, streamed_inputs
-from mstar.model.submodule_base import chunk_loop_name
+from mstar.model.submodule_base import END_PARTITION, chunk_loop_name
 from mstar.observability import catalog
 from mstar.observability.recorders import Gauge, MetricSnapshot, merge
 from mstar.platforms import apply_process_env_defaults, current_platform
@@ -1393,13 +1393,6 @@ class Conductor:
                         f"{type(self.model).__name__}'s plan binds {unknown} on {step.walk!r}, which are not "
                         f"inputs of that walk; its inputs are {sorted(inputs)}"
                     )
-                # a repeating step ends only on the worker's final-chunk report, which ends the partition
-                if k and not stream_moved and pstate.plan[k - 1].walk in self._repeating_walks:
-                    raise RuntimeError(
-                        f"{type(self.model).__name__}'s plan for partition {p.name!r} puts {step.walk!r} after "
-                        f"{pstate.plan[k - 1].walk!r}, which runs once per chunk until the stream ends the partition, "
-                        "so it would never run"
-                    )
                 # the conductor moves a worker onto a later step only by sending it inputs
                 if k and not stream_moved and not inputs:
                     raise RuntimeError(
@@ -2047,7 +2040,17 @@ class Conductor:
             )
             done = True
         prev_walk = pstate.graph_walk
-        fwd_args = self._next_plan_args(request_data, partition_name, done=done)
+        # A stream's end (not a stop check's END_PARTITION) at a step the stream feeds
+        # moves the plan on when steps are left, instead of ending the partition.
+        stream_ended = (
+            done and pstate.exit != END_PARTITION and pstate.worker_reported_done
+            and pstate.num_output_tokens < request_data.max_output_tokens
+            and partition_name not in self.producer_triggered_partitions
+            and pstate.graph_walk in self._repeating_walks and pstate.cursor + 1 < len(pstate.plan)
+        )
+        fwd_args = self._next_plan_args(
+            request_data, partition_name, done=done and not stream_ended, stream_ended=stream_ended,
+        )
 
         logger.debug(
             "Partition %s of request %s: %s -> %s (request_done=%s, tokens=%d)",
@@ -2116,11 +2119,15 @@ class Conductor:
         pstate.graph_walk = step.walk
         return ForwardPassArgs(inputs=inputs, step_metadata=dict(step.step_metadata))
 
-    def _next_plan_args(self, request_data: RequestData, partition_name: str, done: bool) -> ForwardPassArgs:
+    def _next_plan_args(
+        self, request_data: RequestData, partition_name: str, done: bool, stream_ended: bool = False,
+    ) -> ForwardPassArgs:
         """Where a report moves a partition's plan, as the args of its next step.
 
         A walk a stream feeds that runs no Loop but chunk loops runs once per chunk: its
-        step is sent again, and only the worker's final-chunk report ends it.
+        step is sent again until the worker reports the stream's final chunk, which moves
+        the plan on (``stream_ended``) or, at its last step or after a stop check's
+        END_PARTITION, ends the partition.
         Any other step advances on its report (a Loop walk reports once, when
         it ends), and the partition is done past the last step. In a partition
         whose walk the stream moves (`Connection.consumer_walk`), the report
@@ -2147,7 +2154,7 @@ class Conductor:
                 logger.debug("partition %s reported walk %s, which its plan is past", partition_name, walk)
                 return stay
             pstate.cursor = k
-        elif walk in self._repeating_walks:
+        elif walk in self._repeating_walks and not stream_ended:
             # each chunk's pass gets the step's edges, so its node is ready; the
             # tensors went with the first, and a later step may still hold them
             return self._plan_step(request_data, pstate, k, with_tensors=False)

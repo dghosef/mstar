@@ -135,9 +135,11 @@ class WhisperDetokenizer(ByteLevelDetokenizer):
     ``<|notimestamps|>``, ``<|endoftext|>``, ...) are dropped as before.
     """
 
-    def __init__(self, tokenizer, config: WhisperModelConfig):
+    def __init__(self, tokenizer, config: WhisperModelConfig, render: bool = True):
         super().__init__(tokenizer)
         self.config = config
+        # without ``render`` they are dropped, as the structural specials are: for a transcript read as text
+        self.render = render
         self._render_ids = set(config.language_token_ids)
 
     def _rendered(self, token_id: int) -> bool:
@@ -147,7 +149,8 @@ class WhisperDetokenizer(ByteLevelDetokenizer):
         raw = bytearray()
         for token_id in token_ids:
             if self._rendered(token_id):
-                raw.extend(self.tokenizer.convert_ids_to_tokens(token_id).encode("utf-8"))
+                if self.render:
+                    raw.extend(self.tokenizer.convert_ids_to_tokens(token_id).encode("utf-8"))
             elif token_id not in self.special_ids:
                 token = self.tokenizer.convert_ids_to_tokens(token_id)
                 raw.extend(self.byte_decoder[c] for c in token)
@@ -156,6 +159,9 @@ class WhisperDetokenizer(ByteLevelDetokenizer):
 
 class WhisperModel(Model):
     """Whisper ASR: native batched encoder + native AR decoder."""
+
+    stream_out = False
+    _plain_detokenizer: WhisperDetokenizer | None = None
 
     DECODE_LOOP = DECODE_LOOP
 
@@ -188,6 +194,9 @@ class WhisperModel(Model):
     ):
         self.cache_dir = cache_dir
         self.model_path_hf = model_path_hf
+        # whether the decode loop also emits each token as `asr_token`, for a stream into another model
+        # (a `Link` of a `MultiModel`); the prompt walks emit it already
+        self.stream_out = bool(kwargs.get("stream_out"))
 
         self.local_dir = _resolve_local_hf_snapshot(model_path_hf, cache_dir=cache_dir)
         self.config = WhisperModelConfig.from_pretrained(self.local_dir)
@@ -348,12 +357,11 @@ class WhisperModel(Model):
     def get_graph_walk_graphs(self) -> dict[str, GraphSection]:
         def emit_first_token() -> list[GraphEdge]:
             return [
-                GraphEdge(
-                    next_node=EMIT_TO_CLIENT,
-                    name=NEW_TOKEN,
-                    output_modality="text",
-                    persist=True,
-                ),
+                # the token the next walk binds as its input
+                GraphEdge(next_node=EMPTY_DESTINATION, name=NEW_TOKEN, persist=True),
+                # the client's copy, on the decode loop's signal: one signal carries the whole transcript, which a
+                # client of a multimodel tells from a reply by it
+                GraphEdge(next_node=EMIT_TO_CLIENT, name=TEXT_INPUTS, output_modality="text"),
                 # the timestamp rule state the first decode step continues from
                 GraphEdge(next_node=EMPTY_DESTINATION, name="ts_rules", persist=True),
             ]
@@ -588,6 +596,12 @@ class WhisperModel(Model):
         return super().postprocess(output, modality, **kwargs)
 
     def text_output(self) -> TextOutput:
+        # A transcript streamed into another model is read as text: its language and timestamp tokens are control
+        # ids there, as for the glue, and not the literal markup a transcription route lifts out.
+        if self.stream_out:
+            if self._plain_detokenizer is None:
+                self._plain_detokenizer = WhisperDetokenizer(self.tokenizer, self.config, render=False)
+            return TextOutput(self._plain_detokenizer)
         return TextOutput(self._detokenizer)
 
     def warmup_preprocess(self) -> None:
@@ -711,4 +725,4 @@ class WhisperModel(Model):
         decoder.eval()
 
         from mstar.model.whisper.submodules import WhisperDecoderSubmodule
-        return WhisperDecoderSubmodule(decoder=decoder, config=self.config)
+        return WhisperDecoderSubmodule(decoder=decoder, config=self.config, stream_out=self.stream_out)

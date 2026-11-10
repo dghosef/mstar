@@ -1041,6 +1041,19 @@ def test_only_turbo_turns_pre_plan_off():
         )
 
 
+@pytest.mark.parametrize("walk", [PREFILL_WALK, PREFILL_PROMPT_WALK])
+def test_a_prompt_walk_gives_its_token_to_the_client_where_the_transcripts_edge_is_declared(walk):
+    """The first transcript token leaves the walk as the next walk's input and as the client's copy, on the signal the
+    decode loop's tokens use, so the client's transcript holds it."""
+    sub = _decoder_submodule(_tiny_config())
+    tokens = torch.tensor([21, 22])
+    sub._forward = lambda **kwargs: (tokens, None)
+    out = sub.forward_batched(walk, _engine_inputs(["a", "b"]), input_ids=torch.zeros(2, dtype=torch.long))
+
+    assert set(out.row_outputs) == {NEW_TOKEN, TEXT_INPUTS}
+    assert all(torch.equal(rows, tokens) for rows in out.row_outputs.values())
+
+
 def test_decode_tokens_are_recorded_for_the_align_walk_until_the_stop():
     """The decode loop no longer persists its tokens: the stop check records
     them per request, and nothing past the step that stopped the loop (a
