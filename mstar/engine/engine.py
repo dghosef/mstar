@@ -440,8 +440,8 @@ class ExecutingBatch:
     # flow step for a request already past its own max iters. One that takes
     # its stream's final chunk still completes its node (see ``drop_rids``).
     skipped_rids: set[int] = field(default_factory=set)
-    # rids whose whole walk this node's resources already hold. They run no
-    # forward, but their node still completes so the request reaches its next walk.
+    # rids whose whole walk this node's resources already hold, or that have nothing to write. They run
+    # no forward, but their node still completes so the request reaches its next walk.
     cached_rids: set[str] = field(default_factory=set)
     # rid -> error, for per-rid stages that raised. The rid leaves the batch;
     # the rest of it runs.
@@ -1398,6 +1398,12 @@ class Engine:
                     input_metadata=metadata.get(rid, EMPTY_INPUT_METADATA),
                     has_loopback=loopback is not None and loopback[i],
                 )
+                ids = getattr(req_inputs, "input_ids", None)
+                if ids is not None and not ids.numel():
+                    # a row with no ids to write (a transcript with no finished word): it runs no
+                    # forward, and its node completes as if the cache held the walk
+                    batch.cached_rids.add(rid)
+                    req_inputs = None
                 if req_inputs is not None and probe_prefix:
                     req_inputs = self._skip_cached_prefix(batch, rid, req_inputs)
                 if req_inputs is not None and (probe_prefix or mixed):
@@ -1550,6 +1556,23 @@ class Engine:
     def after_output_copy(self, batch: ExecutingBatch) -> None:
         if batch.committed is not None:
             self._runner.after_output_copy(batch.committed)
+
+    def unreal_sample_rids(self, batch: ExecutingBatch) -> set[int]:
+        """The step's rows of a prefill that is not the last before decode (its plan step sets the
+        node's ``last_prefill_flag`` False): the token it samples is nobody's, so nothing keys or
+        keeps it."""
+        stop = getattr(self._submodules[batch.node_name].submodule, "token_stop", None)
+        if stop is None or stop.last_prefill_flag is None:
+            return set()
+        ctx = batch.step_context
+        if not ctx.request_walks and ctx.graph_walk not in stop.prefill_walks:
+            return set()
+        infos = batch.per_request_info_wrapped
+        return {
+            rid for rid in batch.request_ids
+            if infos[rid].graph_walk in stop.prefill_walks
+            and infos[rid].step_metadata.get(stop.last_prefill_flag, True) is False
+        }
 
     def step_finished(
         self, batch: ExecutingBatch, outputs: dict[str, NameToTensorList],

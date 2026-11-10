@@ -332,7 +332,7 @@ class SampledTokenDecoder(TokenStepNode, ARNodeSubmodule):
             if rows is not None:
                 media[e.output] = rows
         # the stream's counter is keyed by the worker's handle (AGENTS.md invariant 14)
-        start = self.node_resources[self.POS_KEY].position(rid=fwd_info.rid_handle, label="main")
+        start = self._position(fwd_info)
         pos_ids, advance = self.prompt_positions(start, layout, ids.shape[0])
         if pos_ids is not None:
             pos_ids = to_device_nonblocking(pos_ids, self.get_device())
@@ -343,6 +343,38 @@ class SampledTokenDecoder(TokenStepNode, ARNodeSubmodule):
             tensor_inputs=media,
             resource_step_info=advance,
         )
+
+    def _text_ids(self, fwd_info: CurrentForwardPassInfo, inputs: NameToTensorList) -> torch.Tensor:
+        """A text prefill row's ids. A row after a decode brings a second tensor: the position its first
+        id belongs at. That id is the one the decode sampled last (the stop token), which the step
+        speculated past it may already have written (its row is dropped after its forward), so the
+        position counter says whether to write it or leave it out."""
+        ids = inputs["text_inputs"][0]
+        if len(inputs["text_inputs"]) < 2:
+            return ids
+        written = self._position(fwd_info) - int(inputs["text_inputs"][1])
+        assert written in (0, 1), f"a prefill after a decode found its first id {written} ids already written"
+        return ids[written:]
+
+    def _position(self, fwd_info: CurrentForwardPassInfo) -> int:
+        # the stream's counter is keyed by the worker's handle (AGENTS.md invariant 14)
+        return self.node_resources[self.POS_KEY].position(rid=fwd_info.rid_handle, label="main")
+
+    def postprocess(
+        self,
+        request_id: str,
+        request_info: CurrentForwardPassInfo,
+        outputs: dict[str, list[torch.Tensor]],
+        **kwargs,
+    ):
+        super().postprocess(request_id, request_info, outputs, **kwargs)
+        if (
+            request_info.step_metadata.get(FINAL_PREFILL) is False
+            and request_info.graph_walk != self.DECODE_WALK
+        ):
+            # a prompt's earlier prefill (the history before a spoken turn): its sampled token is nobody's
+            outputs.pop(self.TOKEN_SIGNAL, None)
+            outputs.pop(self.FEEDBACK_SIGNAL, None)
 
     def prepare_inputs(
         self,
@@ -358,7 +390,7 @@ class SampledTokenDecoder(TokenStepNode, ARNodeSubmodule):
             # one token per row, read off the sampler's slot master in
             # `preprocess`; the routed signal is empty (or ignored) here
             return row
-        input_ids = inputs["text_inputs"][0]
+        input_ids = self._text_ids(fwd_info, inputs)
         return ARNodeInputs(input_seq_len=input_ids.shape[0], input_ids=input_ids)
 
     def get_input_sequence_len(
@@ -371,7 +403,7 @@ class SampledTokenDecoder(TokenStepNode, ARNodeSubmodule):
         # is left unmeasured, and admitted whole, unless the model chunks it
         media = self.CHUNKS_MEDIA and graph_walk in self._media_walks
         if (graph_walk == self.PREFILL_WALK or media) and "text_inputs" in inputs:
-            return InputSeqLenInfo(inputs["text_inputs"][0].shape[0])
+            return InputSeqLenInfo(self._text_ids(fwd_info, inputs).shape[0])
         return None
 
     def split_inputs(

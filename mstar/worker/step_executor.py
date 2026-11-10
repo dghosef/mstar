@@ -826,17 +826,17 @@ class StepExecutor:
             outputs, batch_N.node_batch.completion_event,
             request_ids=batch_N.node_batch.request_ids,
         )
+        # Until its last chunk, or after a prefill that is not the last before decode, a row's sampled
+        # token is not a real sample, so it keys no prefix, is kept for no rebuild and decides no stop
+        # (`_check_stops`).
+        unreal = batch_N.batch.incomplete_node_rids
+        if prefix_rows := engine.unreal_sample_rids(batch_N.node_batch):
+            unreal = unreal | prefix_rows
+        self._rebuilds.note_appended(batch_N.node_batch)
         for rid in self._rebuilds.keep_prompts(batch_N.node_batch, batch_N.batch.incomplete_node_rids):
             engine.keeps_no_ids(batch_N.node_name, rid)
-        # Until its last chunk a row's sampled token is not a real sample, so it
-        # keys no prefix and decides no stop (`_check_stops`).
-        engine.step_finished(
-            batch_N.node_batch, cpu_outputs, host_rows=host_rows,
-            skip_rids=batch_N.batch.incomplete_node_rids,
-        )
-        self._rebuilds.keep_samples(
-            batch_N.node_batch, cpu_outputs, host_rows, skip_rids=batch_N.batch.incomplete_node_rids,
-        )
+        engine.step_finished(batch_N.node_batch, cpu_outputs, host_rows=host_rows, skip_rids=unreal)
+        self._rebuilds.keep_samples(batch_N.node_batch, cpu_outputs, host_rows, skip_rids=unreal)
         _pp_stage("prematerialize")
         runtime_stops, tokens = self._runtime_stop_column(batch_N, host_rows)
         checked = None

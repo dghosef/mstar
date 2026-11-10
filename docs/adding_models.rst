@@ -1720,7 +1720,14 @@ methods are:
    target may be any step, even an earlier one (``""``, the unnamed end, is an exit too, so
    ``exits={"": 1}`` loops back), or ``len(plan)``, which ends the plan. A plan that comes back
    runs each step under the output budget it has left (``max_tokens``), and a partition a stream
-   moves cannot have one.
+   moves cannot have one. A prefill after a decode brings the ids to write and, as a second
+   ``text_inputs`` tensor, the position its first id belongs at: the decode's last id, which the
+   step speculated past the stop may have written already, so ``SampledTokenDecoder`` leaves it
+   out when the position counter is past it. A prefill whose row is empty runs no forward and
+   completes its node. Text written after the prompt is keyed for prefix caching when its walk
+   is in ``PrefixKeys.walks``. A step whose ``step_metadata`` sets ``APPENDS`` wrote text a
+   rebuild would not replay, so a preemption drop refuses its request
+   (``Rebuilds.note_appended``).
    To also keep some of this step's outputs from being routed, return
    ``StopCheck(stops, withheld=(names...))``, for example a frame streamed alongside the
    EOS token: its consumer then never receives it, instead of finding and dropping it with

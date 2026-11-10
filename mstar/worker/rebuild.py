@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import torch
 
 from mstar.communication.tensors import NameToTensorList
-from mstar.conductor.request_info import CurrentForwardPassInfo
+from mstar.conductor.request_info import APPENDS, CurrentForwardPassInfo
 from mstar.engine.chunking import ChunkRange
 from mstar.engine.resources import Rebuild
 from mstar.engine.resources.kv.config import StreamLayout, rebuild_refusal
@@ -40,6 +40,8 @@ class KeptIds:
     sampled since."""
     prompt: HostCopy
     sampled: array
+    # whether a step wrote ids after the prompt that neither the prompt nor the samples hold (`note_appended`)
+    appended: bool = False
 
 
 class Prefilling(NamedTuple):
@@ -184,6 +186,16 @@ class Rebuilds:
                     self._keeps_ids[node].add(rid)
         return rebuildable
 
+    def note_appended(self, node_batch: ExecutingBatch) -> None:
+        """Mark the requests whose step wrote ids past their prompt (`APPENDS`): their KV holds text no kept id
+        does, so a drop would rebuild it wrong, and `refusal` refuses them."""
+        kept = self._kept.get(node_batch.node_name)
+        if not kept:
+            return
+        for rid, info in node_batch.per_request_info_wrapped.items():
+            if rid in kept and info.step_metadata.get(APPENDS):
+                kept[rid].appended = True
+
     def keep_prompts(self, node_batch: ExecutingBatch, mid_prefill: Collection[int] = frozenset()) -> list[int]:
         """Copy a row's prompt to the host once the step that read the prompt completes, when the row is in the
         policy's walk, a drop here can free its request's pages, and the request keeps no ids yet. Returns the rows
@@ -294,6 +306,8 @@ class Rebuilds:
             return f"it keeps no ids on {node}"
         if not kept.prompt.has_landed():
             return "its ids haven't reached the host"
+        if kept.appended:
+            return "its KV holds text written after its prompt, which a rebuild would not replay"
         if walk not in self._loop_walks[node]:
             return f"it is in walk {walk!r}, where loop {policy.loop!r} doesn't run {node}"
         if len(kept.sampled) != loop_iters.get(policy.loop, 0) + 1:
