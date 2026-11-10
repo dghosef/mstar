@@ -157,6 +157,8 @@ class WhisperDetokenizer(ByteLevelDetokenizer):
 class WhisperModel(Model):
     """Whisper ASR: native batched encoder + native AR decoder."""
 
+    stream_out = False
+
     DECODE_LOOP = DECODE_LOOP
 
     # the checkpoint's sampling defaults, set by __init__; a model built without it has the built-in ones
@@ -188,6 +190,9 @@ class WhisperModel(Model):
     ):
         self.cache_dir = cache_dir
         self.model_path_hf = model_path_hf
+        # whether the decode loop also emits each token as `asr_token`, for a stream into another model
+        # (a `Link` of a `MultiModel`); the prompt walks emit it already
+        self.stream_out = bool(kwargs.get("stream_out"))
 
         self.local_dir = _resolve_local_hf_snapshot(model_path_hf, cache_dir=cache_dir)
         self.config = WhisperModelConfig.from_pretrained(self.local_dir)
@@ -708,4 +713,4 @@ class WhisperModel(Model):
         decoder.eval()
 
         from mstar.model.whisper.submodules import WhisperDecoderSubmodule
-        return WhisperDecoderSubmodule(decoder=decoder, config=self.config)
+        return WhisperDecoderSubmodule(decoder=decoder, config=self.config, stream_out=self.stream_out)

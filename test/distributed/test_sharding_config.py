@@ -580,3 +580,28 @@ class TestFanoutOffsetIsLocalToTheSourceShard:
             "w2": (0, 16),
             "w3": (16, 16),
         }
+
+
+class TestAReplicatedSignalIntoAnUnshardedNode:
+    """A tool node on a rank of its own reads the turn's ids from a TP2 LLM. Both LLM ranks report their
+    copy, but only rank 0's reaches the tool node: it sees the turn once, not twice."""
+
+    @pytest.mark.parametrize("src_rank, receives", [(0, True), (1, False)])
+    def test_only_rank_zeros_copy_reaches_it(self, src_rank, receives):
+        cfg = _make_config(
+            groups={(("LLM",), 2, ("decode",)): ["w0", "w1"], (("Tool",), 1, ("tool",)): ["w2"]},
+            node_to_worker={
+                NodeAndGraphWalk("LLM", "decode"): ["w0", "w1"], NodeAndGraphWalk("Tool", "tool"): ["w2"],
+            },
+            shard_dim={},
+        )
+        info = TensorPointerInfo(
+            dims=(3,), dtype=torch.int64, nbytes=24, address=0x1000, stride=(1,), uuid=1,
+            source_session_id="h:1", source_entity=f"w{src_rank}",
+        )
+        out = cfg.fanout_graph_edges(
+            GraphEdge(name="turn_ids", next_node="Tool", tensor_info=[info]), source_node="LLM",
+            source_graph_walk="decode", dest_graph_walk="tool", source_tp_rank=src_rank,
+        )
+        assert ("w2" in out) is receives
+        assert all(w == "w2" for w in out)

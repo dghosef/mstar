@@ -22,6 +22,7 @@ per call, so no call needs more memory than a capture did.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -40,6 +41,7 @@ from mstar.engine.accelerator_graph_config import (
     PiecewiseCaptureShape,
 )
 from mstar.engine.engine import ExecutingBatch
+from mstar.model.keys import SPEAK_TEXT
 from mstar.model.kokoro.components import KokoroTTS
 from mstar.model.kokoro.config import (
     AUDIO_CHUNK,
@@ -49,6 +51,7 @@ from mstar.model.kokoro.config import (
     PHONEME_LENS,
     REF_STYLE,
     SPEED,
+    STREAM_SYNTH_WALK,
     KokoroModelConfig,
 )
 from mstar.model.submodule_base import ModelInputsFromEngine, NodeInputs, NodeSubmodule
@@ -155,7 +158,19 @@ class KokoroSynthSubmodule(NodeSubmodule):
         **kwargs: Any,
     ) -> NodeInputs | None:
         """Select this iteration's chunk; ``None`` once the request has none left."""
-        del graph_walk, kwargs
+        del kwargs
+        if graph_walk == STREAM_SYNTH_WALK:
+            # one chunk a pass, as the front sent it; the stream's last pass is empty
+            if not inputs.get(PHONEME_IDS):
+                return None
+            ids = inputs[PHONEME_IDS][0].reshape(-1)
+            return NodeInputs(
+                tensor_inputs={
+                    "input_ids": ids, "style": inputs[REF_STYLE][0].reshape(-1),
+                    "speed": inputs[SPEED][0].reshape(()),
+                },
+                input_seq_len=ids.numel(),
+            )
         state = self.request_state(fwd_info.rid_handle)
         if "chunk_lengths" not in state:
             # One host read per request: the chunk lengths size every later slice.
@@ -182,6 +197,8 @@ class KokoroSynthSubmodule(NodeSubmodule):
         outputs: dict[str, list[torch.Tensor]],
     ) -> set[str]:
         del outputs
+        if request_info.graph_walk == STREAM_SYNTH_WALK:
+            return set()  # no loop: the stream's end ends the walk
         num_chunks = len(self.request_state(request_id).get("chunk_lengths", ()))
         if request_info.dynamic_loop_iter_counts.get(CHUNK_LOOP, 0) + 1 >= num_chunks:
             return {CHUNK_LOOP}
@@ -429,3 +446,54 @@ class KokoroSynthSubmodule(NodeSubmodule):
                 capture_batch_sizes=self.frame_capture_sizes(bucket),
             )
         return regions
+
+
+class KokoroFrontSubmodule(NodeSubmodule):
+    """Text a model said aloud -> the synth node's inputs, one sentence chunk a stream item.
+
+    Runs Kokoro's own prompt processing (G2P, voice, chunking) on a CPU node, where a plain request
+    runs it on the API server. The text arrives as one stream item, JSON bytes ``{"text", "voice"}``.
+    """
+
+    disable_torch_compile = True
+    disable_autocast = True
+
+    def __init__(self, model):
+        super().__init__()
+        self.kokoro = model
+        # the device the node's outputs are made on (`get_device` reads a parameter)
+        self._probe = torch.nn.Parameter(torch.zeros(1), requires_grad=False)
+
+    def can_batch(self, batch: ExecutingBatch, model_inputs: list[NodeInputs]) -> bool:
+        return True
+
+    def prepare_inputs(
+        self, graph_walk: str, fwd_info: CurrentForwardPassInfo, inputs: NameToTensorList, **kwargs: Any,
+    ) -> NodeInputs | None:
+        del graph_walk, fwd_info, kwargs
+        if not inputs.get(SPEAK_TEXT):
+            return None  # the stream's last pass, with nothing in it
+        said = json.loads(bytes(inputs[SPEAK_TEXT][0].reshape(-1).tolist()))
+        return NodeInputs(kwargs={"text": said["text"], "voice": said.get("voice")})
+
+    def preprocess(self, graph_walk: str, engine_inputs: ModelInputsFromEngine, inputs: list[NodeInputs]) -> dict:
+        return {"rows": [inp.kwargs for inp in inputs]}
+
+    def forward(self, graph_walk: str, engine_inputs: ModelInputsFromEngine, rows=(), **kwargs: Any):
+        (rid,) = engine_inputs.request_ids
+        return self.forward_batched(graph_walk, engine_inputs, rows=rows)[rid]
+
+    def forward_batched(
+        self, graph_walk: str, engine_inputs: ModelInputsFromEngine, rows=(), **kwargs: Any,
+    ) -> dict[str, NameToTensorList]:
+        out = {}
+        for rid, row in zip(engine_inputs.request_ids, rows, strict=True):
+            made = self.kokoro.process_prompt(
+                row["text"], ["text"], ["audio"], **({"voice": row["voice"]} if row["voice"] else {}))
+            lengths = made[PHONEME_LENS][0].tolist()
+            out[rid] = {
+                PHONEME_IDS: [made[PHONEME_IDS][0][i, :n] for i, n in enumerate(lengths)],
+                REF_STYLE: [row_ for row_ in made[REF_STYLE][0]],
+                SPEED: [made[SPEED][0]] * len(lengths),
+            }
+        return out

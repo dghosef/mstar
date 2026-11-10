@@ -262,6 +262,40 @@ class MultimodalDecoderModel(Model):
             {MEDIA_LAYOUT: layout, "kv_layout": self.kv_layout(layout, int(prompt_in.pads.ids.numel()))},
         )
 
+    # The one special token a prompt's open user turn is rendered with (`process_open_prompt`); a model
+    # whose chat template can be cut at an open turn names it.
+    OPEN_TURN: str | None = None
+
+    def process_open_prompt(
+        self,
+        prompt: str | None,
+        input_modalities: list[str],
+        output_modalities: list[str],
+        tensors: NameToTensorList | None,
+        prompt_parts: list[PromptPart] | None,
+        suffix: str,
+        **kwargs,
+    ) -> ProcessPromptOutput:
+        """`process_prompt` for a conversation whose last user turn a client stream is still filling: the
+        template rendered with `OPEN_TURN` as that turn's text and cut there. The prefix (the history and the
+        turn's start) is an ordinary prompt, prefix-cached as a typed one is, and its ``kv_layout`` is its
+        own; the suffix (the turn's end and the reply's start) is the output's ``suffix`` tensor, for the
+        prefill after the stream."""
+        if self.OPEN_TURN is None:
+            raise ValueError(f"{self.NAME} has no open-turn marker, so its prompt cannot be left open")
+        marker = self.tokenizer.convert_tokens_to_ids(self.OPEN_TURN)
+        parts = [*(prompt_parts or parts_from_modalities(input_modalities, prompt)),
+                 PromptPart(modality=TEXT, text=self.OPEN_TURN, role="user")]
+        out = self.process_prompt(
+            "", [*input_modalities, TEXT], output_modalities, tensors, prompt_parts=parts, **kwargs)
+        ids = out.new_input_tensors["text_inputs"][0]
+        (at,) = (ids == marker).nonzero().flatten().tolist()
+        before, after = ids[:at], ids[at + 1:]
+        return ProcessPromptOutput(
+            {**out.new_input_tensors, "text_inputs": [before], suffix: [after]},
+            {**out.metadata, "kv_layout": self.kv_layout(out.metadata[MEDIA_LAYOUT], int(before.numel()))},
+        )
+
     def intake(
         self,
         prompt: str | None,
