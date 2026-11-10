@@ -32,7 +32,8 @@ written it already, so the prefill leaves it out when the position counter says 
 tokens, tool text included, stay within the KV it reserved at intake.
 
 The ``python`` handler runs each call as ``python -I`` in a process of its own, killed on a
-timeout, with the CPU time and memory limited. That is no sandbox: it has no
+timeout, with an empty environment and scratch directory and the CPU time, memory, file size and (for a
+server that is not root) process count limited. That is no sandbox: it has no
 network or filesystem isolation, and the code is whatever the model wrote. Serve it
 only where the model's callers are trusted.
 """
@@ -45,6 +46,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
@@ -149,27 +151,32 @@ class QwenToolFormat:
 
 def run_python(
     code: str, timeout: float = 10.0, cpu_seconds: int = 10, memory_bytes: int = 1 << 30, max_chars: int = 4000,
+    file_bytes: int = 1 << 24,
 ) -> str:
-    """``code`` run by ``python -I`` in a process group of its own; its output (stdout and stderr), or
-    an error naming the limit it hit."""
+    """``code`` run by ``python -I`` in a process group of its own, with an empty environment (none of the
+    server's keys or tokens) in an empty scratch directory; its output (stdout and stderr), or an error naming
+    the limit it hit."""
 
     # the limits are set by the child itself, before it runs the code (no fork hook in a threaded process)
     wrapper = (
         "import resource, sys\n"
         f"resource.setrlimit(resource.RLIMIT_CPU, ({cpu_seconds}, {cpu_seconds}))\n"
         f"resource.setrlimit(resource.RLIMIT_AS, ({memory_bytes}, {memory_bytes}))\n"
+        f"resource.setrlimit(resource.RLIMIT_FSIZE, ({file_bytes}, {file_bytes}))\n"
+        "resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))\n"
         "exec(compile(sys.argv[1], '<tool>', 'exec'))\n"
     )
-    proc = subprocess.Popen(
-        [sys.executable, "-I", "-c", wrapper, code], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, text=True, start_new_session=True,
-    )
-    try:
-        out, _ = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
-        proc.communicate()
-        return f"Error: the code ran past {timeout:g} seconds and was stopped."
+    with tempfile.TemporaryDirectory(prefix="tool-") as scratch:
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-c", wrapper, code], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, start_new_session=True, env={}, cwd=scratch,
+        )
+        try:
+            out, _ = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.communicate()
+            return f"Error: the code ran past {timeout:g} seconds and was stopped."
     if len(out) > max_chars:
         out = out[:max_chars] + "\n[output cut]"
     if proc.returncode and not out:

@@ -73,6 +73,15 @@ def test_a_run_prints_stops_at_its_time_and_reports_a_crash():
     assert "ZeroDivisionError" in run_python("1 / 0")
 
 
+def test_the_code_sees_none_of_the_servers_environment_or_working_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv("SERVER_TOKEN", "hunter2")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "server_file").write_text("x")
+    seen = run_python("import os; print(sorted(os.environ), os.listdir('.'))")
+    assert "SERVER_TOKEN" not in seen and seen.endswith("[]\n")
+    assert "OSError" in run_python("f = open('f', 'w'); f.write('x' * 100); f.flush()", file_bytes=10)
+
+
 def _turn(tokenizer, text):
     stop = tokenizer.convert_tokens_to_ids("<|im_end|>")
     return torch.tensor(tokenizer.encode(text, add_special_tokens=False) + [stop])
