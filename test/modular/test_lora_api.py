@@ -709,6 +709,22 @@ def test_a_reload_in_place_that_fails_on_one_worker_keeps_the_old_weights(paths)
     assert all(pool.serves(a1) and not pool.serves(a2) for pool in d.pools.values())
 
 
+def test_weights_a_failed_retire_left_on_the_workers_can_be_loaded_again(paths):
+    """The old weights' unload after a reload in place fails (logged, not answered): the
+    workers still serve them though no name is on them. A later load of those weights
+    reaches the workers, which serve them already, and succeeds."""
+    d = _Deployment(paths)
+    a1 = _weights(paths["a1"])
+    d.load("sql", paths["a1"])
+    unload = d.ops.unload
+    d.ops.unload = lambda body: d.ops._answer(body.op_id, 500, "lost")
+    d.load("sql", paths["a2"], load_inplace=True)
+    d.ops.unload = unload
+    assert all(pool.serves(a1) for pool in d.pools.values()) and a1 not in d.served.digests
+    d.load("chat", paths["a1"])
+    assert d.served.check("chat") == a1 and all(pool.serves(a1) for pool in d.pools.values())
+
+
 def test_two_names_on_the_same_weights_share_them_on_the_workers(paths):
     d = _Deployment(paths)
     a1 = _weights(paths["a1"])

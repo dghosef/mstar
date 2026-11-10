@@ -642,16 +642,15 @@ class LoraAdapterPool(Resource):
         messages): read them on the reader thread, hold them to ``digest`` (of the weights
         the API server checked against the spec), and only then make them servable. The
         read stages no copy, since the host tier holds only what requests are on: the first
-        request reads them in as it is ingested. Weights still retiring (unloaded while
-        requests on them run) are served again at once. The future fails if they are served
-        already or cannot be read; a refusal visible now raises here. A request on them
-        takes a slot on its first admit, as for an adapter configured at startup."""
+        request reads them in as it is ingested. Weights served already, or still retiring
+        (unloaded while requests on them run), are served at once: a digest names the same
+        weights for good. The future fails if they cannot be read. A request on them takes
+        a slot on its first admit, as for an adapter configured at startup."""
         with self._lock:
-            self._refuse_reload(name, digest)
-            if digest in self._retiring:
-                del self._retiring[digest]
+            if digest in self._served or digest in self._retiring:
+                self._retiring.pop(digest, None)
                 self._served[digest] = path
-                logger.info("LoRA pool: serving %s (%s) again", name, digest.hex()[:12])
+                logger.info("LoRA pool: serving %s (%s)", name, digest.hex()[:12])
                 done: Future = Future()
                 done.set_result(None)
                 return done
@@ -660,16 +659,11 @@ class LoraAdapterPool(Resource):
     def _load(self, name: str, path: str, digest: bytes) -> None:
         rank = self._store.checked_rank(name, path, digest)
         with self._lock:
-            self._refuse_reload(name, digest)
             if rank == 0:
                 # no request can be on it before it is served, below
                 self._empty.add(digest)
             self._served[digest] = path
         logger.info("LoRA pool: loaded %s (%s) from %s", name, digest.hex()[:12], path)
-
-    def _refuse_reload(self, name: str, digest: bytes) -> None:
-        if digest in self._served:
-            raise ValueError(f"LoRA adapter {name!r}: these weights are already loaded")
 
     def unload_adapter(self, name: str, digest: bytes) -> bool:
         """Stop serving the weights ``digest`` names (``name`` labels them in messages) to
