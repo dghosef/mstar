@@ -882,6 +882,7 @@ class StepPipeline:
         """The teardown sequence: every remove and drain that no step in
         ``in_flight`` holds back."""
         self._apply_removes(in_flight)
+        self._apply_releases()
         self._apply_drains(in_flight)
 
     def _apply_removes(self, in_flight: Collection[int]) -> None:
@@ -892,11 +893,12 @@ class StepPipeline:
         # Rank 0 fans its removes out so that a follower tears down in the same
         # gap between steps, and can't tear down state rank 0 is still reading.
         wire_rid = self._graph_runtime.get_rid_string(rid)
+        keep = rid in self.lifecycle.keep_outputs
         self.lockstep.forward_teardown(rid, WorkerMessage(
             message_type=WorkerMessageType.REMOVE_REQUEST,
             body=RemoveRequest(
                 request_id=wire_rid, source=MessageSource.TP_RANK_0,
-                after_tp_seq=self.lockstep.last_broadcast_seq,
+                after_tp_seq=self.lockstep.last_broadcast_seq, keep_outputs=keep,
             ),
         ))
         # Hard cleanup: force-drop every tensor for the rid (unlink SHM),
@@ -907,20 +909,39 @@ class StepPipeline:
         laps = PhaseLaps("worker.msg.remove_request.")
         for message in self.lifecycle.removed(rid, wire_rid):
             self.ingest.drop_for_removed(message)
+        keep = rid in self.lifecycle.keep_outputs
+        self.lifecycle.keep_outputs.discard(rid)
         try:
-            self._release_request(rid, wire_rid, laps)
+            self._release_request(rid, wire_rid, laps, keep)
         except BaseException:
             self.lifecycle.teardown_failed(rid)
             raise
 
-    def _release_request(self, rid: int, wire_rid: str, laps: PhaseLaps) -> None:
+    def _apply_releases(self) -> None:
+        """Finish the requests removed with ``keep_outputs`` whose `ReleaseOutputs` has come, once their remove
+        has run."""
+        lifecycle = self.lifecycle
+        if not lifecycle.release_after_remove:
+            return
+        for rid in [r for r in lifecycle.release_after_remove if not lifecycle.removing(r)]:
+            lifecycle.release_after_remove.discard(rid)
+            self.release_outputs(rid)
+
+    def release_outputs(self, rid: int) -> None:
+        """The last of a request removed with ``keep_outputs``: its tensors, then its handle (which nothing
+        may follow, as the handle is reused)."""
+        self.tensor_manager.force_cleanup_request(rid)
+        self._graph_runtime.remove_request(rid)
+
+    def _release_request(self, rid: int, wire_rid: str, laps: PhaseLaps, keep_outputs: bool = False) -> None:
         freed = self.engine_manager.remove_request(rid)
         if freed:
             self.admission.lift_caps(freed)
         laps.lap("engine")
         self.streams.remove_request(rid)
         self.request_state.remove_request(rid)
-        self.tensor_manager.force_cleanup_request(rid)
+        if not keep_outputs:
+            self.tensor_manager.force_cleanup_request(rid)
         laps.lap("worker_state_tensors")
         self.profile_info.pop_request(rid)
         self.scheduler.clear_rid(rid)
@@ -933,8 +954,10 @@ class StepPipeline:
         # it, runs the server at DEBUG)
         logger.debug("Request cleanup complete: %s", wire_rid)
         laps.lap("log")
-        # Last: frees the handle for reuse, so nothing above may run after it.
-        self._graph_runtime.remove_request(rid)
+        # Last: frees the handle for reuse, so nothing above may run after it. (Kept with the tensors for a
+        # request removed with ``keep_outputs``: `release_outputs` frees both.)
+        if not keep_outputs:
+            self._graph_runtime.remove_request(rid)
         laps.lap("runtime")
 
     def _apply_drains(self, in_flight: Collection[int]) -> None:

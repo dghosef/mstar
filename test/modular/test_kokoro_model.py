@@ -862,3 +862,38 @@ def test_oversized_batch_calls_stay_bounded():
     assert sum(bs for bs, _ in frame_calls) == 7
     assert any(frames > 64 for _, frames in frame_calls)
     assert all(bs * frames <= submodule.config.max_batch_frames or bs == 1 for bs, frames in frame_calls)
+
+
+def test_the_front_turns_spoken_text_into_a_stream_item_a_sentence_chunk_and_the_synth_reads_one_a_pass():
+    """With `stream_in`, text said aloud (JSON bytes on a stream) becomes the synth node's inputs one
+    chunk at a time; the synth node reads a chunk per pass and declines the stream's empty last pass."""
+    import json
+
+    from mstar.model.kokoro.config import STREAM_SYNTH_WALK
+    from mstar.model.kokoro.submodules import KokoroFrontSubmodule
+
+    said = {}
+
+    def process_prompt(text, input_modalities, output_modalities, **kwargs):
+        said.update(text=text, **kwargs)
+        return {
+            PHONEME_IDS: [torch.tensor([[0, 5, 6, 0], [0, 7, 0, 0]])], PHONEME_LENS: [torch.tensor([4, 3])],
+            REF_STYLE: [torch.arange(6.0).reshape(2, 3)], SPEED: [torch.tensor([1.0])],
+        }
+
+    front = KokoroFrontSubmodule(SimpleNamespace(process_prompt=process_prompt))
+    item = torch.tensor(list(json.dumps({"text": "Hello. Bye.", "voice": "af_heart"}).encode()), dtype=torch.uint8)
+    info = SimpleNamespace(step_metadata={})
+    row = front.prepare_inputs("speak_front", info, {"speak_text": [item]})
+    out = front.forward_batched("speak_front", SimpleNamespace(request_ids=["r"]), rows=[row.kwargs])["r"]
+    assert said == {"text": "Hello. Bye.", "voice": "af_heart"}
+    assert [t.tolist() for t in out[PHONEME_IDS]] == [[0, 5, 6, 0], [0, 7, 0]]
+    assert [t.tolist() for t in out[REF_STYLE]] == [[0.0, 1.0, 2.0], [3.0, 4.0, 5.0]] and len(out[SPEED]) == 2
+    assert front.prepare_inputs("speak_front", info, {}) is None
+
+    synth = object.__new__(KokoroSynthSubmodule)
+    chunk = {PHONEME_IDS: [out[PHONEME_IDS][1]], REF_STYLE: [out[REF_STYLE][1]], SPEED: [out[SPEED][1]]}
+    got = synth.prepare_inputs(STREAM_SYNTH_WALK, info, chunk)
+    assert got.input_seq_len == 3 and got.tensor_inputs["speed"].shape == ()
+    assert synth.prepare_inputs(STREAM_SYNTH_WALK, info, {}) is None
+    assert synth.check_stop("r", SimpleNamespace(graph_walk=STREAM_SYNTH_WALK), {}) == set()

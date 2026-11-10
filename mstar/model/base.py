@@ -1093,6 +1093,11 @@ class Model(ABC):
         video = video.float().div_(255.0)
         return TensorAndMetadata(data=video, metadata=video_metadata_dict(decoder.metadata))
 
+    def postprocessor(self, signal: str) -> "Model":
+        """The model whose ``postprocess`` turns the output ``signal``'s tensors into bytes: this one,
+        and a multimodel's member that emits the signal."""
+        return self
+
     def text_output(self) -> TextOutput | None:
         """How this model's text output, token ids, becomes bytes, or None for a
         model that encodes text in its own ``postprocess``. ``postprocess`` and

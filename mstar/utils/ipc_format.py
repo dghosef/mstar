@@ -34,6 +34,7 @@ class WorkerMessageType(Enum):
     NEW_REQUEST = "new_request"
     DRAIN_REQUEST = "drain_request"
     REMOVE_REQUEST = "remove_request"
+    RELEASE_OUTPUTS = "release_outputs"
     INPUT_SIGNALS = "input_signals"
     EDGE_ITEMS = "edge_items"
     UNPERSIST_TENSORS = "unpersist"
@@ -55,6 +56,8 @@ class NewRequest(MessageBody):
     initial_inputs: list[GraphEdge]
     request_info: CurrentForwardPassInfo
     loop_caps: dict[str, int]
+    # a request nobody outside reads (a spawned agent): the worker sends nothing of it to the client
+    silent: bool = False
 
 
 class MessageSource(IntEnum):
@@ -70,6 +73,15 @@ class RemoveRequest(MessageBody):
     # broadcast, so they tear the request down at the same point in the step
     # sequence it did, maintaining KV cache state symmetry.
     after_tp_seq: int = -1
+    # Release the request's resources (KV, recurrent state, scheduler and stream state) but keep its tensors and
+    # its handle: a spawned agent's answer is read by its parent after the agent ended. `ReleaseOutputs` finishes it.
+    keep_outputs: bool = False
+
+
+@dataclass
+class ReleaseOutputs(MessageBody):
+    """Finish a request removed with ``keep_outputs``: drop its tensors and free its handle."""
+    request_id: str
 
 
 @dataclass
@@ -334,6 +346,8 @@ class WorkerGraphsDone(MessageBody):
     resource_publish_info: dict[str, PublishedInfo] = field(default_factory=dict)
     partition_name: str = field(default="default")
     partition_done: bool = field(default=False)
+    # The named exit the pass's walk took, "" for none (``StopCheck.exit``)
+    exit: str = field(default="")
     # The walk the completed pass ran under. The conductor follows it for a
     # partition whose walk the stream drives.
     graph_walk: str = field(default="")

@@ -243,6 +243,7 @@ pub struct WorkerGraphsDone<'a> {
     pub output_signal_names: Vec<Sym>,
     pub partition_name: &'a str,
     pub partition_done: bool,
+    pub exit: Option<String>,
     pub graph_walk: &'a str,
     /// `dict[str, dict[str, int]]`: stream edge -> destination worker -> items.
     pub stream_items_sent: Vec<(Sym, Vec<(Sym, i64)>)>,
@@ -278,6 +279,10 @@ impl WorkerGraphsDone<'_> {
             }
             w_str(m.key("partition_name"), self.partition_name);
             w_bool(m.key("partition_done"), self.partition_done);
+            // Omitted when absent, so the decoder's default stands.
+            if let Some(name) = &self.exit {
+                w_str(m.key("exit"), name);
+            }
             w_str(m.key("graph_walk"), self.graph_walk);
             w_map(m.key("stream_items_sent"), self.stream_items_sent.len() as u32);
             for (edge, per_worker) in &self.stream_items_sent {
