@@ -24,8 +24,6 @@ AGENT_CHILD = "agent_child"
 # A child's final turn, which its router persists; the answers of a parent's children, which its join step reads.
 AGENT_ANSWER = "agent_answer"
 AGENT_ANSWERS = "agent_answers"
-# How long the children of one spawn may run before the conductor ends them.
-CHILD_SECONDS = 600.0
 # The signal the decode loop of such a request accumulates: the ids of its turn after
 # the first (which the prefill sampled and persisted as ``new_token``).
 TURN_IDS = "turn_ids"

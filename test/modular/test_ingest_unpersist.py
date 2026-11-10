@@ -815,11 +815,11 @@ def _done_report(rid, walk, persist, exit_name="", done=False):
 _WGS: dict[str, int] = {}
 
 
-def _spawn_conductor(tmp_path, monkeypatch):
+def _spawn_conductor(tmp_path, monkeypatch, cap=3):
     model = _spawning_model()
     walks = model.get_graph_walk_graphs()
     nodes = sorted({n for w in walks.values() for n in w.get_nodes()})
-    c = _conductor(model, [{"node_names": nodes, "ranks": [0]}], tmp_path, monkeypatch, max_concurrent_requests=1)
+    c = _conductor(model, [{"node_names": nodes, "ranks": [0]}], tmp_path, monkeypatch, max_concurrent_requests=cap)
     _WGS.update({walk: c.node_walk_to_wg[(next(iter(g.get_nodes())), walk)].worker_graph_id
                  for walk, g in walks.items()})
     return c
@@ -836,10 +836,10 @@ def _joined(c, parent="r"):
     return {e.name: [i.uuid for i in e.tensor_info] for e in body.inputs}, body.request_info.step_metadata
 
 
-def _spawned(tmp_path, monkeypatch, name, *more):
+def _spawned(tmp_path, monkeypatch, name, *more, cap=3):
     """A conductor after the parent spawned and its first child answered, then the batches ``more`` makes."""
     (tmp_path / name).mkdir()
-    c = _spawn_conductor(tmp_path / name, monkeypatch)
+    c = _spawn_conductor(tmp_path / name, monkeypatch, cap)
     a0, a1, batches = _spawn_batches()
     _run(c, [*batches, *(batch for make in more for batch in make())])
     return c, a0, a1
@@ -848,12 +848,12 @@ def _spawned(tmp_path, monkeypatch, name, *more):
 def test_a_parent_that_spawns_starts_a_child_per_prompt_and_holds_its_join_until_all_end(tmp_path, monkeypatch):
     c, a0, a1 = _spawned(tmp_path, monkeypatch, "one")
 
-    # a child per prompt, on the prompt's tensor; inside the parent's slot
+    # a child per prompt, on the prompt's tensor; each counts against the cap while it runs
     starts = {b.request_id: b for b in _sent(c, "NEW_REQUEST")}
     assert list(starts) == ["r", a0, a1]
     assert [[i.uuid for i in e.tensor_info] for e in starts[a0].initial_inputs] == [[611]]
-    assert c.requests[a0].parent == "r" and c._counted_requests() == 1 and c.requests["r"].children == [a0, a1]
-    assert not c.waiting_queue, "a child queued behind the cap its parent holds a slot under"
+    assert c.requests[a0].parent == "r" and c._counted_requests() == 2 and c.requests["r"].children == [a0, a1]
+    assert not c.waiting_queue, "a child queued behind the cap, which its parent waits on"
     # one child has ended; the join waits for the other. The ended one has given up its resources, as any request
     # does when it ends, but keeps its tensors and its handle: its answer is the parent's to read
     assert not [b for b in _sent(c, "INPUT_SIGNALS") if b.request_info.graph_walk == "t"]
@@ -882,7 +882,7 @@ def test_the_join_reads_every_childs_answer_and_the_children_go_only_after_it_ha
     assert sorted(freed) == [611, 612]
 
 
-def test_a_child_that_fails_is_an_error_answer_and_one_that_runs_past_its_deadline_is_another(tmp_path, monkeypatch):
+def test_a_child_that_fails_is_an_error_answer_and_so_is_one_the_full_server_cannot_start(tmp_path, monkeypatch):
     def fail():
         return [[_msg(ConductorMessageType.FAIL_REQUESTS, FailRequests({"r-agent-1": "boom"}))]]
 
@@ -897,10 +897,13 @@ def test_a_child_that_fails_is_an_error_answer_and_one_that_runs_past_its_deadli
         [_msg(ConductorMessageType.READS_DONE, ReadsDone(request_id="r-agent-1", entity_id="worker_0"))]])
     assert _joined(c)[1]["agent_errors"] == {"1": "Error: the agent failed: boom"}
 
-    monkeypatch.setattr(conductor_mod, "CHILD_SECONDS", 0.0)
-    c, a0, a1 = _spawned(tmp_path, monkeypatch, "slow")
-    assert _joined(c)[1]["agent_errors"] == {
-        "0": "Error: the agent timed out", "1": "Error: the agent timed out"}
+    # The parent holds its slot while it waits for its children, so a child never queues behind the cap: with no
+    # room (the cap here is the parent's alone) its start fails instead, and the join runs on the errors.
+    c, a0, a1 = _spawned(tmp_path, monkeypatch, "full", cap=1)
+    inputs, metadata = _joined(c)
+    assert inputs == {"tool_calls": [603], "agent_answers": []} and metadata["agents"] == 2
+    assert all("at capacity" in error for error in metadata["agent_errors"].values())
+    assert list(metadata["agent_errors"]) == ["0", "1"] and not c.waiting_queue
 
 
 def test_a_parent_that_is_aborted_takes_its_children_with_it_and_tells_the_api_server_nothing_of_them(

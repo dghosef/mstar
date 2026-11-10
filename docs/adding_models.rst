@@ -1734,8 +1734,8 @@ methods are:
    requests of the same model, ``WalkStep(..., spawns=("agent_0", ...))``: when it ends, the
    conductor starts one from each of those persisted signals that it produced (the tensor is the
    child's ``text_inputs``; the model implements ``kv_layout(layout, length)`` as
-   ``MultimodalDecoderModel`` does, for the child's KV), inside the parent's slot and with no
-   client output. A later step with ``joins=True`` waits until every child has ended, then runs
+   ``MultimodalDecoderModel`` does, for the child's KV), counted against the concurrency cap (the start fails when the server is
+   full) and with no client output. A later step with ``joins=True`` waits until every child has ended, then runs
    with the children's persisted ``agent_answer`` tensors as its ``agent_answers`` input and
    ``step_metadata["agents"]`` and ``["agent_errors"]`` (a failed child's text, by index). The
    router and tool node of ``mstar.model.components.python_tool`` use this for ``spawn_agent``.

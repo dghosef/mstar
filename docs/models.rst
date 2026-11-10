@@ -780,10 +780,10 @@ is not spoken.
 one or several in one turn and once per request. The router ends the turn through its ``spawn`` exit and persists a
 prompt per task (the chat template, with the same tools as the parent's); the conductor starts a child request of the
 same model from each, on the workers, as it would any request (``WalkStep.spawns``), never registered with the API
-server and sending the client nothing. Children run inside the parent's concurrency slot and cannot spawn. The parent
+server and sending the client nothing. Children count against ``max_concurrent_requests`` like any request but never wait for a slot (their parent holds its own): if the server is full the agent fails, and cannot spawn. The parent
 waits at a join step (``WalkStep.joins``), which runs when every child has ended: the tool node frames each child's
-final turn, cut to 512 tokens, as a tool response, in task order, and the reply goes on. A child that fails, or is
-still running ten minutes after the spawn, is an ``Error:`` answer; a parent that ends first ends its children. A
+final turn, cut to 512 tokens, as a tool response, in task order, and the reply goes on. A child that fails, or finds the
+server full, is an ``Error:`` answer; a parent that ends first ends its children. A
 child's KV is freed when it ends, and its answer is kept for the join. The client sees the parent's reply (the
 ``spawn_agent`` markup included) and its final answer.
 

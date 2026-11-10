@@ -28,7 +28,6 @@ from mstar.conductor.request_info import (
     AGENT_ANSWER,
     AGENT_ANSWERS,
     AGENT_CHILD,
-    CHILD_SECONDS,
     CurrentForwardPassInfo,
     PartitionDefinition,
     PartitionState,
@@ -391,14 +390,12 @@ class RequestData:
     model_kwargs: dict = field(default_factory=dict)
     # The agents (`WalkStep.spawns`). A child names its parent and, once its plan ended, is parked: its
     # answer is held by its workers until the parent's join step has read it, and only then torn down.
-    # A parent lists its children in task order, those that have ended, the text of any that failed, and the
-    # time its children are given until.
+    # A parent lists its children in task order, those that have ended, and the text of any that failed.
     parent: str | None = None
     ended: bool = False
     children: list[str] = field(default_factory=list)
     children_ended: set[str] = field(default_factory=set)
     child_errors: dict[str, str] = field(default_factory=dict)
-    child_deadline: float = 0.0
 
     # Partition state (always populated — single-partition models use a "default" partition)
     partition_states: dict[str, PartitionState] = field(default_factory=dict)
@@ -542,7 +539,6 @@ class Conductor:
         self._next_liveness_check = 0.0
         self.waiting_queue: list[NewRequestConductor] = []
         # the requests with children that have not all been torn down
-        self._spawners: set[str] = set()
 
         if model_config is None:
             with open(model_config_file, "r") as f:
@@ -1241,8 +1237,9 @@ class Conductor:
             )
 
     def _counted_requests(self) -> int:
-        """The requests that hold a slot: the children of a spawn run inside their parent's."""
-        return sum(1 for request in self.requests.values() if request.parent is None)
+        """The requests that hold resources: every one but a child that has ended and waits for its parent's
+        join to read its answer."""
+        return sum(1 for request in self.requests.values() if not request.ended)
 
     # -- agents: children a plan step starts (`WalkStep.spawns`), held for by a later one (`WalkStep.joins`) --
 
@@ -1255,7 +1252,9 @@ class Conductor:
     def _start_children(self, request_id: str, step: WalkStep) -> None:
         """Start a child request of the same model from each prompt ``step`` persisted, on the parent's own
         workers, through the path every request takes. The prompt tensors stay the parent's to release; the child
-        reads them as its input. Children run inside the parent's slot and are invisible to the API server."""
+        reads them as its input. Children count against ``max_concurrent_requests`` like any request, but never wait
+        for a slot (their parent holds its own, waiting for them): when the server is full the agent fails, and its
+        parent reads that. They are invisible to the API server."""
         parent = self.requests[request_id]
         prompts = []
         for name in step.spawns:
@@ -1270,8 +1269,6 @@ class Conductor:
             key: value for key, value in parent.model_kwargs.items()
             if key not in self._NOT_INHERITED and key not in self.model.INTERNAL_KWARGS
         }
-        parent.child_deadline = time.perf_counter() + CHILD_SECONDS
-        self._spawners.add(request_id)
         for info in prompts:
             child_id = f"{request_id}-agent-{len(parent.children)}"
             parent.children.append(child_id)
@@ -1288,6 +1285,9 @@ class Conductor:
                 },
             )
             try:
+                if (self.max_concurrent_requests is not None
+                        and self._counted_requests() >= self.max_concurrent_requests):
+                    raise ValueError("the server is at capacity (max_concurrent_requests)")
                 self._do_ingest_request(body)
             except Exception as exc:  # noqa: BLE001  the parent reads it as the agent's answer
                 logger.warning("Could not start agent %s: %s", child_id, exc)
@@ -1372,7 +1372,6 @@ class Conductor:
     def _finish_children(self, parent_id: str) -> None:
         """The parent's join step has read the answers: tear down the children that were parked for it."""
         parent = self.requests.get(parent_id)
-        self._spawners.discard(parent_id)
         for child_id in parent.children if parent is not None else ():
             child = self.requests.get(child_id)
             if child is not None and child.ended:
@@ -1389,20 +1388,6 @@ class Conductor:
                 self._finish_child(child_id)
             else:
                 self._remove_request(child_id, child)
-
-    def _sweep_children(self, now: float) -> None:
-        """End the children of a spawn that has run past its deadline; their parent reads that."""
-        for parent_id in list(getattr(self, "_spawners", ())):
-            parent = self.requests.get(parent_id)
-            if parent is None or not parent.children:
-                self._spawners.discard(parent_id)
-            elif now >= parent.child_deadline:
-                for child_id in parent.children:
-                    child = self.requests.get(child_id)
-                    if child_id not in parent.children_ended and child is not None and child_id not in self.draining:
-                        parent.child_errors.setdefault(child_id, "Error: the agent timed out")
-                        self._remove_request(child_id, child, failure_error="timed out")
-                self._spawners.discard(parent_id)
 
     def _try_admit_waiting(self):
         """Drain the waiting queue up to the concurrency cap."""
@@ -1926,7 +1911,6 @@ class Conductor:
         a stalled drain barrier through, and drop stale early-message entries so
         they can't accumulate for requests that never come back."""
         now = time.perf_counter()
-        self._sweep_children(now)
         for request_id in self._pop_expired(self._draining_deadlines, now):
             dr = self.draining.get(request_id)
             if dr is None:

@@ -235,7 +235,7 @@ def test_a_model_with_the_tool_has_its_walk_its_cycle_and_a_reserve_that_is_the_
     model.tools, model.spawn = ("python", "spawn_agent"), True
     plan = model.walk_plan("LLM", ["text"], ["text"], {"text_inputs": [object()]}, {})
     assert [step.walk for step in plan] == [
-        "prefill_text", "decode", "route", "tool", "prefill_text", "tool", "prefill_text"]
+        "prefill_text", "decode", "route", "tool", "prefill_text", "join", "prefill_text"]
     assert plan[2].exits == {"answer": 7, "speak": 7, "tools": 3, "spawn": 5} and plan[2].spawns == AGENT_PROMPTS
     assert plan[5].joins and not plan[3].joins and plan[6].exits == {"": 1}
     child = model.walk_plan("LLM", ["text"], ["text"], {"text_inputs": [object()]}, {"agent_child": "parent"})
