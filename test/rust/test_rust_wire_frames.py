@@ -201,6 +201,19 @@ def test_a_completion_sends_the_conductor_a_worker_graphs_done(tmp_path):
     assert got["api_server"] == [] and got[PEER] == []
 
 
+def test_a_silent_request_emits_nothing_to_the_client_and_counts_none(tmp_path):
+    """A spawned agent's output is read by no client: its emits are dropped at the send, and the WGD that
+    follows names none, so the API server is told of nothing (it holds no state for the request)."""
+    mesh = _Mesh(tmp_path, outs=[("out", "emit_to_client", False)])
+    rid = mesh.admit()
+    mesh.rt.set_silent(rid)
+    _put(mesh, 1)
+    got = mesh.run(rid, uuids=[1])
+
+    assert got["api_server"] == []
+    assert got["conductor"][0].body.output_signal_names == []
+
+
 def test_an_emitted_signal_reaches_the_api_server(tmp_path):
     """``emit_to_client``: the frame carries the descriptors and the loop
     context, and the signal name is remembered for the WGD that follows.
@@ -411,6 +424,15 @@ def test_a_uuid_whose_descriptor_is_gone_is_skipped(tmp_path):
     mesh.book.put_tensor(2, info)
     got = mesh.run(rid, uuids=[1])
     assert got["conductor"][0].body.persist_signals == {"out": []}
+
+
+def test_a_persisted_output_nothing_produced_reaches_the_conductor_as_nothing(tmp_path):
+    """The router persists a spawn's prompts only on a spawn: on any other turn the edge is declared and
+    nothing is produced for it, which is not an error and holds no tensor."""
+    mesh = _Mesh(tmp_path, outs=[("out", "", True)])
+    rid = mesh.admit()
+    got = mesh.run(rid, uuids=[])
+    assert not got["conductor"][0].body.persist_signals.get("out")
 
 
 def _stream_mesh(tmp_path):

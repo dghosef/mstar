@@ -25,6 +25,9 @@ from mstar.communication.communicator import CommProtocol, make_communicator
 from mstar.conductor.lora_ops import LoraAdapterOps
 from mstar.conductor.mps import MpsDaemon
 from mstar.conductor.request_info import (
+    AGENT_ANSWER,
+    AGENT_ANSWERS,
+    AGENT_CHILD,
     CurrentForwardPassInfo,
     PartitionDefinition,
     PartitionState,
@@ -62,6 +65,7 @@ from mstar.utils.ipc_format import (
     NewRequest,
     NewRequestConductor,
     ReadsDone,
+    ReleaseOutputs,
     RemoveRequest,
     UnpersistTensors,
     WorkerGraphsDone,
@@ -382,6 +386,16 @@ class RequestData:
     # set once request_complete goes out; after that the client must never get
     # request_failed
     completion_sent: bool = False
+    # the request's own model kwargs, which a child it spawns inherits
+    model_kwargs: dict = field(default_factory=dict)
+    # The agents (`WalkStep.spawns`). A child names its parent and, once its plan ended, is parked: its
+    # answer is held by its workers until the parent's join step has read it, and only then torn down.
+    # A parent lists its children in task order, those that have ended, and the text of any that failed.
+    parent: str | None = None
+    ended: bool = False
+    children: list[str] = field(default_factory=list)
+    children_ended: set[str] = field(default_factory=set)
+    child_errors: dict[str, str] = field(default_factory=dict)
 
     # Partition state (always populated — single-partition models use a "default" partition)
     partition_states: dict[str, PartitionState] = field(default_factory=dict)
@@ -518,6 +532,7 @@ class Conductor:
         self._liveness_interval_s = 0.5
         self._next_liveness_check = 0.0
         self.waiting_queue: list[NewRequestConductor] = []
+        # the requests with children that have not all been torn down
 
         if model_config is None:
             with open(model_config_file, "r") as f:
@@ -1018,7 +1033,9 @@ class Conductor:
         are about to be terminated anyway, and waiting for a dead participant's
         READS_DONE would just hold the client until the request timeout."""
         pending = [body.request_id for body in self.waiting_queue]
-        for request_id in self.requests:
+        for request_id, request_data in self.requests.items():
+            if request_data.parent is not None:
+                continue  # an agent is no client's
             dr = self.draining.get(request_id)
             if dr is not None and dr.failure_error is None:
                 continue  # completed or aborted, the client has already heard
@@ -1213,11 +1230,164 @@ class Conductor:
                 )
             )
 
+    def _counted_requests(self) -> int:
+        """The requests that hold resources: every one but a child that has ended and waits for its parent's
+        join to read its answer."""
+        return sum(1 for request in self.requests.values() if not request.ended)
+
+    # -- agents: children a plan step starts (`WalkStep.spawns`), held for by a later one (`WalkStep.joins`) --
+
+    # a child gets the parent's request settings, less what is the parent's own prompt
+    _NOT_INHERITED = frozenset({
+        "prefix_keys", "prefix_tail", "prefix_decode", "kv_layout", "prefix_root", "stream_lead_items",
+        "open_streams", "prefix_cache",
+    })
+
+    def _start_children(self, request_id: str, step: WalkStep) -> None:
+        """Start a child request of the same model from each prompt ``step`` persisted, on the parent's own
+        workers, through the path every request takes. The prompt tensors stay the parent's to release; the child
+        reads them as its input. Children count against ``max_concurrent_requests`` like any request, but never wait
+        for a slot (their parent holds its own, waiting for them): when the server is full the agent fails, and its
+        parent reads that. They are invisible to the API server."""
+        parent = self.requests[request_id]
+        prompts = []
+        for name in step.spawns:
+            infos, parent.persist_signals[name] = parent.persist_signals.get(name, []), []
+            if infos:
+                if len(infos) != 1:
+                    raise RuntimeError(f"{name!r} holds {len(infos)} tensors; an agent's prompt is one")
+                prompts.append(infos[0])
+        if not prompts:
+            return
+        inherited = {
+            key: value for key, value in parent.model_kwargs.items()
+            if key not in self._NOT_INHERITED and key not in self.model.INTERNAL_KWARGS
+        }
+        for info in prompts:
+            child_id = f"{request_id}-agent-{len(parent.children)}"
+            parent.children.append(child_id)
+            layouts = self.model.kv_layout({}, int(info.dims[0]))
+            body = NewRequestConductor(
+                request_id=child_id, initial_signals={"text_inputs": [info]},
+                initial_input_modalities=["text"], initial_output_modalities=["text"], input_metadata={},
+                model_kwargs={
+                    **inherited, AGENT_CHILD: request_id, "prefix_cache": False,
+                    "kv_layout": {
+                        key: {label: layout.row() for label, layout in by_label.items()}
+                        for key, by_label in layouts.items()
+                    },
+                },
+            )
+            try:
+                if (self.max_concurrent_requests is not None
+                        and self._counted_requests() >= self.max_concurrent_requests):
+                    raise ValueError("the server is at capacity (max_concurrent_requests)")
+                self._do_ingest_request(body)
+            except Exception as exc:  # noqa: BLE001  the parent reads it as the agent's answer
+                logger.warning("Could not start agent %s: %s", child_id, exc)
+                child = self.requests.get(child_id)
+                if child is not None and child.dispatched:
+                    self._remove_request(child_id, child, failure_error=scrub_paths(str(exc)))
+                else:
+                    self._drop_request(child_id)
+                    self._child_failed(child_id, request_id, scrub_paths(str(exc)))
+
+    def _child_failed(self, child_id: str, parent_id: str, error: str | None) -> None:
+        """A child ended without an answer: its parent reads ``error`` in its place."""
+        parent = self.requests.get(parent_id)
+        if parent is None or child_id not in parent.children or child_id in parent.children_ended:
+            return
+        parent.child_errors.setdefault(
+            child_id, f"Error: the agent failed: {error}" if error else "Error: the agent was stopped")
+        parent.children_ended.add(child_id)
+        self._maybe_join(parent_id)
+
+    def _child_answered(self, child_id: str, child: RequestData) -> None:
+        """A child's plan ended. Its resources (KV and the rest) go now, as any request's do; what it persisted
+        stays with its workers until the parent's join step has read the answer (`_finish_child`), since a
+        request's tensors go with its removal."""
+        child.ended = True
+        parent = self.requests.get(child.parent)
+        if parent is None or child_id not in parent.children:
+            self._release_request(child_id)
+            return
+        # everything it still holds but the answer, which the parent reads
+        kept = child.persist_signals.get(AGENT_ANSWER, [])
+        child.persist_signals[AGENT_ANSWER] = []
+        self._un_persist_tensors(child_id, [info for infos in child.persist_signals.values() for info in infos])
+        child.persist_signals[AGENT_ANSWER] = kept
+        for worker in self._request_workers(child):
+            self._send_for_teardown(child_id, worker, WorkerMessage(
+                message_type=WorkerMessageType.REMOVE_REQUEST,
+                body=RemoveRequest(child_id, keep_outputs=True),
+            ))
+        parent.children_ended.add(child_id)
+        self._maybe_join(child.parent)
+
+    def _finish_child(self, child_id: str) -> None:
+        """The last of a child that ended: its tensors and handle, once nothing reads them."""
+        child = self.requests.get(child_id)
+        if child is None or child_id in self.draining:
+            return
+        for worker in self._request_workers(child):
+            self._send_for_teardown(child_id, worker, WorkerMessage(
+                message_type=WorkerMessageType.RELEASE_OUTPUTS, body=ReleaseOutputs(child_id),
+            ))
+        self._drop_request(child_id)
+
+    def _maybe_join(self, parent_id: str) -> None:
+        """Enter the parent's held join step once all its children have ended: the answers of those that
+        gave one are its inputs, and the text of those that failed rides in the step's metadata."""
+        parent = self.requests.get(parent_id)
+        if parent is None or parent_id in self.draining or not parent.children_ended.issuperset(parent.children):
+            return
+        for partition_name, pstate in parent.partition_states.items():
+            if pstate.pending_join is None:
+                continue
+            k, pstate.pending_join = pstate.pending_join, None
+            answers, errors = [], {}
+            for i, child_id in enumerate(parent.children):
+                child = self.requests.get(child_id)
+                held = child.persist_signals.get(AGENT_ANSWER) if child is not None else None
+                error = parent.child_errors.get(child_id) or (None if held else "Error: the agent gave no answer")
+                if error is not None:
+                    errors[str(i)] = error
+                    continue
+                answers += held
+                child.persist_signals[AGENT_ANSWER] = []   # the parent's from here: its join step releases them
+            parent.persist_signals[AGENT_ANSWERS] = answers
+            args = self._plan_step(parent, pstate, k)
+            args.step_metadata.update(agents=len(parent.children), agent_errors=errors)
+            args.unpersist_tensors = self._consumed(parent, [partition_name])
+            self._send_inputs(parent_id, partition_name, args.inputs, pstate.graph_walk, args.step_metadata)
+            self._un_persist_tensors(parent_id, args.unpersist_tensors)
+            self._set_partition_worker_graph_ids(parent_id, partition_name, pstate.graph_walk)
+
+    def _finish_children(self, parent_id: str) -> None:
+        """The parent's join step has read the answers: tear down the children that were parked for it."""
+        parent = self.requests.get(parent_id)
+        for child_id in parent.children if parent is not None else ():
+            child = self.requests.get(child_id)
+            if child is not None and child.ended:
+                self._finish_child(child_id)
+
+    def _abort_children(self, parent: RequestData) -> None:
+        """The parent is going: end every child it has, parked or running."""
+        children, parent.children = parent.children, []
+        for child_id in children:
+            child = self.requests.get(child_id)
+            if child is None or child_id in self.draining:
+                continue
+            if child.ended:
+                self._finish_child(child_id)
+            else:
+                self._remove_request(child_id, child)
+
     def _try_admit_waiting(self):
         """Drain the waiting queue up to the concurrency cap."""
         while self.waiting_queue:
             if (self.max_concurrent_requests is not None
-                    and len(self.requests) >= self.max_concurrent_requests):
+                    and self._counted_requests() >= self.max_concurrent_requests):
                 break
             body = self.waiting_queue.pop(0)
             logger.info(
@@ -1252,7 +1422,7 @@ class Conductor:
             self._reject_request(body.request_id, str(exc), status=400)
             return
         if (self.max_concurrent_requests is not None
-                and len(self.requests) >= self.max_concurrent_requests):
+                and self._counted_requests() >= self.max_concurrent_requests):
             if body.input_open:
                 # A live call that waited for a slot would start, and stay, as
                 # far behind its client as it waited.
@@ -1492,6 +1662,8 @@ class Conductor:
             conductor_ingest_time=ingest_time,
             conductor_arrival_time=arrival_time,
             prompt_tokens=body.prompt_tokens,
+            model_kwargs=dict(model_kwargs),
+            parent=model_kwargs.get(AGENT_CHILD),
         )
         self._register_request(body.request_id, request_data)
 
@@ -1530,6 +1702,7 @@ class Conductor:
                     worker_graph_to_workers=worker_graph_to_workers,
                     initial_inputs=initial_inputs,
                     loop_caps=loop_caps,
+                    silent=request_data.parent is not None,
                     request_info=CurrentForwardPassInfo(
                         request_id=body.request_id,
                         graph_walk=pstate.graph_walk,
@@ -1644,6 +1817,10 @@ class Conductor:
                 ),
             )
 
+    def _outputs_hub(self, request_data: RequestData) -> set[str]:
+        """Who else holds a request's outputs: the API server's data worker, for any request but an agent's."""
+        return set() if request_data.parent is not None else {self.PREPROCESS_WORKER}
+
     def _send_remove_to_preprocess_worker(self, request_id: str):
         self._send_for_teardown(
             request_id, self.PREPROCESS_WORKER,
@@ -1682,7 +1859,8 @@ class Conductor:
                     body=RemoveRequest(request_id),
                 ),
             )
-        if dr.failure_error is not None:
+        request_data = self.requests.get(request_id)
+        if dr.failure_error is not None and not (request_data is not None and request_data.parent is not None):
             self._send_for_teardown(
                 request_id, "api_server",
                 APIServerMessage(
@@ -1766,6 +1944,10 @@ class Conductor:
                     "or failed by another worker (%s)", rid, error_message,
                 )
                 continue
+            if request_data.ended:
+                # an agent that ended: its answer waits for its parent; a late word of its steps changes nothing
+                logger.info("Failure for ended agent %s ignored (%s)", rid, error_message)
+                continue
             logger.error("Request %s failed on a worker: %s", rid, error_message)
             try:
                 self._remove_request(rid, request_data, failure_error=error_message)
@@ -1816,8 +1998,11 @@ class Conductor:
         then (on the barrier's completion) hard-remove. Shared by the abort
         (client went away) and fail (worker can't serve it) paths.
         """
+        if request_data.parent is not None:
+            self._child_failed(request_id, request_data.parent, failure_error)
+        self._abort_children(request_data)
         workers = self._request_workers(request_data)
-        participants = workers | {self.PREPROCESS_WORKER}
+        participants = workers | self._outputs_hub(request_data)
         # The drain record below is what finishes this teardown (or its TTL
         # does), so a send that raises must not skip it. The sends go first: a
         # barrier whose READS_DONE all came early finalizes on registration,
@@ -1839,6 +2024,10 @@ class Conductor:
         logger.info("Request %s done", request_id)
         request_data = self.requests[request_id]
         request_data.conductor_finish_time = time.perf_counter()
+        if request_data.parent is not None:
+            # an agent: its parent, not a client, waits for it
+            self._child_answered(request_id, request_data)
+            return
 
         # Tell the client first, so nothing below adds to completion latency.
         self.communicator.send(
@@ -1860,7 +2049,12 @@ class Conductor:
             )
         )
         request_data.completion_sent = True
+        self._abort_children(request_data)
+        self._release_request(request_id)
 
+    def _release_request(self, request_id: str) -> None:
+        """Tear down a request whose plan ended: let go of what it still holds, then the drain barrier."""
+        request_data = self.requests[request_id]
         # Unpersist anything still held, with correct ref counts, so producers
         # reclaim it as the final reads ACK — before the hard teardown.
         still_persisted = [
@@ -1883,14 +2077,16 @@ class Conductor:
         # stream already does: the client can append after the model ended the
         # request, so a chunk can be in a worker's read at any point.
         workers = self._request_workers(request_data)
-        expected_acks = {self.PREPROCESS_WORKER}
-        if self._client_streams:
+        # (an agent is the API server's no more than any client's: nothing of it is held there)
+        hub = self._outputs_hub(request_data)
+        expected_acks = set(hub)
+        if self._client_streams or request_data.parent is not None:
             self._send_drain(request_id, workers)
             expected_acks |= workers
         self._register_draining(
             request_id,
             expected_acks=expected_acks,
-            participants=workers | {self.PREPROCESS_WORKER},
+            participants=workers | hub,
         )
 
     def _process_worker_graphs_done(
@@ -2048,9 +2244,15 @@ class Conductor:
             and partition_name not in self.producer_triggered_partitions
             and pstate.graph_walk in self._repeating_walks and pstate.cursor + 1 < len(pstate.plan)
         )
+        step = pstate.plan[pstate.cursor] if pstate.plan else None
+        if step is not None and step.spawns and not done:
+            self._start_children(request_id, step)
         fwd_args = self._next_plan_args(
             request_data, partition_name, done=done and not stream_ended, stream_ended=stream_ended,
         )
+        if step is not None and step.joins:
+            # the join step has run, so it has read what the children left
+            self._finish_children(request_id)
 
         logger.debug(
             "Partition %s of request %s: %s -> %s (request_done=%s, tokens=%d)",
@@ -2098,6 +2300,8 @@ class Conductor:
         pstate.fwd_pass_number += 1
 
         self._set_partition_worker_graph_ids(request_id, partition_name, pstate.graph_walk)
+        if pstate.pending_join is not None:
+            self._maybe_join(request_id)
 
         # Request done when ALL partitions are done
         return all(ps.is_done for ps in request_data.partition_states.values())
@@ -2166,6 +2370,10 @@ class Conductor:
         if nxt >= len(plan):
             stay.request_done = True
             return stay
+        if plan[nxt].joins:
+            # held until the request's children have ended (`_maybe_join`)
+            pstate.pending_join = nxt
+            return ForwardPassArgs()
         args = self._plan_step(request_data, pstate, nxt)
         args.unpersist_tensors = self._consumed(request_data, [partition_name])
         return args

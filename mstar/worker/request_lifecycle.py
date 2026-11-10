@@ -63,6 +63,10 @@ class RequestLifecycle:
         # to hold the rid. No step that still needs an input is ahead of these,
         # so inputs for them are dropped.
         self.pending_removes: dict[int, int] = {}
+        # the rids whose pending remove keeps their outputs (`RemoveRequest.keep_outputs`), and those whose
+        # outputs are to go once it has run (`ReleaseOutputs` came first)
+        self.keep_outputs: set[int] = set()
+        self.release_after_remove: set[int] = set()
         # step seq -> rids rank 0 released after that step, held until this rank
         # has consumed it, since rank 0 released their pages between two steps.
         self._removes_awaiting_step: dict[int, list[int]] = {}
@@ -136,9 +140,19 @@ class RequestLifecycle:
         released between two steps until it has consumed the earlier one."""
         if not self._is_tp_follower:
             self.pending_removes.setdefault(rid, -1)
+            self._note_keep(rid, body)
         elif body.source == MessageSource.TP_RANK_0:
             self._removes_awaiting_step.setdefault(body.after_tp_seq, []).append(rid)
+            self._note_keep(rid, body)
             self._land_removes(last_consumed_seq)
+
+    def _note_keep(self, rid: int, body: RemoveRequest) -> None:
+        if body.keep_outputs:
+            self.keep_outputs.add(rid)
+
+    def removing(self, rid: int) -> bool:
+        """Whether a remove of ``rid`` is yet to run."""
+        return rid in self.pending_removes or any(rid in rids for rids in self._removes_awaiting_step.values())
 
     def _land_removes(self, last_consumed_seq: int) -> None:
         if self._removes_awaiting_step:
@@ -168,6 +182,10 @@ class RequestLifecycle:
         """Forget a request that was torn down, or never admitted (``rid`` None).
         Returns the messages that were parked for it, for the caller to drop."""
         if rid is not None:
+            # a handle the remove frees takes its marks with it; one kept for `ReleaseOutputs` keeps its release
+            if rid not in self.keep_outputs:
+                self.release_after_remove.discard(rid)
+            self.keep_outputs.discard(rid)
             self.arrivals.pop(rid, None)
             self.failed_rids.discard(rid)
             self.pending_removes.pop(rid, None)
