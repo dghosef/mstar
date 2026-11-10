@@ -34,7 +34,7 @@ from mstar.conductor.request_info import PartitionDefinition
 from mstar.distributed.base import ShardingConfig
 from mstar.graph.base import GraphSection
 from mstar.graph.special_destinations import EMIT_TO_CLIENT
-from mstar.model.base import Model, ProcessPromptOutput
+from mstar.model.base import Model, ProcessPromptOutput, keyed_labels
 from mstar.model.components.python_tool import SPEAK
 from mstar.model.components.text_glue import GLUE_NODE, GlueSubmodule, glued_walk
 from mstar.model.keys import SPEAK_TEXT
@@ -320,6 +320,17 @@ class MultiModel(Model):
 
     def get_sampling_config(self, node_name, model_kwargs=None):
         return self._owner(node_name).get_sampling_config(node_name, model_kwargs)
+
+    def checkpoint_path(self) -> str | None:
+        """The weights a prefix cache hangs from: those of the one member that keys a cache, since its pages do
+        not depend on the others' weights. Without this the deployment names no checkpoint, and every cache
+        stays shut."""
+        keyed = [member for member in self.members.values() if keyed_labels(member)]
+        if len(keyed) > 1:
+            raise ValueError(
+                "more than one member keys a prefix cache, and a deployment's cache root hangs from one "
+                "checkpoint: serve them apart")
+        return keyed[0].checkpoint_path() if keyed else None
 
     def preprocess_fingerprint(self) -> str:
         return "+".join(f"{name}:{m.preprocess_fingerprint()}" for name, m in self.members.items())

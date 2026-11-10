@@ -10,6 +10,8 @@ from test_startup_graph_validation import (
     _whisper,
 )
 
+from mstar.engine.resources.kv.config import prefix_caches_by_rank
+from mstar.model.base import names_checkpoint
 from mstar.model.components.text_glue import GLUE_NODE, STREAM_WALK, TRANSCRIPT_STREAM
 from mstar.model.keys import SPEAK_TEXT
 from mstar.model.kokoro.config import FRONT_NODE, FRONT_WALK
@@ -56,6 +58,10 @@ def test_whisper_qwen_and_kokoro_start_as_one_model(tmp_path, monkeypatch, _drop
     assert [step.walk for step in plan] == ["prefill_text", "decode", "route", "tool", "prefill_text"]
     assert {"asr_decode", "decode", "synth"} <= set(model.get_graph_walk_graphs())
     assert {"asr_kv_cache", "kv_cache"} <= {spec.resource_key for spec in model.get_node_resources()}
+    # Qwen's prefix cache opens: the deployment names the weights it hangs from (a shut cache serves no multi-turn
+    # reuse and counts no lookups)
+    kv = [spec for spec in model.get_node_resources() if spec.resource_key == "kv_cache"]
+    assert prefix_caches_by_rank(kv, [([1], 1, ["LLM"])], names_checkpoint(model))[1] == {"kv_cache"}
 
 
 def test_a_member_that_repeats_another_members_names_is_refused(tmp_path, monkeypatch, _drop_stubbed_imports):  # noqa: F811
