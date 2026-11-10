@@ -199,6 +199,8 @@ class InlineTokens:
     logprobs: list[float | None] | None = None
     # per request, the loop context of the step that produced the value
     loop_indices: list[NestedLoopIndices | None] | None = None
+    # the output edge's name, which picks the model that postprocesses it and labels the chunk
+    signal: str = ""
 
 
 def _answer_late(on_late: Callable[[str], None] | None, streams: list[str]) -> None:
@@ -481,7 +483,7 @@ class PreprocessWorker:
                 kept_loops.append(loop_indices[i])
         if kept_ids:
             self.result_tensor_input_queue.put(
-                InlineTokens(kept_ids, kept_values, modality, kept_logprobs or None, kept_loops or None)
+                InlineTokens(kept_ids, kept_values, modality, kept_logprobs or None, kept_loops or None, signal)
             )
             self._signal()
 
@@ -1647,6 +1649,9 @@ class PreprocessWorkerThread:
     def _read_result_tensor(
         self, result: ResultTensors
     ):
+        # the output edge's own name goes to the client as the chunk's `signal`, which tells a
+        # model's streams of one modality apart (a transcript and a reply are both text)
+        signal = result.graph_edge.name
         result.graph_edge.name = f"{result.modality}_output"
         futures = self.tensor_manager.start_read_tensors(
             request_id=result.request_id,
@@ -1663,7 +1668,7 @@ class PreprocessWorkerThread:
         )
         for tensor_info in result.graph_edge.tensor_info:
             self.tensor_uuid_to_metadata_per_request[result.request_id][
-                tensor_info.uuid] = result.metadata
+                tensor_info.uuid] = {**result.metadata, "signal": signal}
             state.order[tensor_info.uuid] = (state.next_sequence, result.loop_indices)
             state.next_sequence += 1
 
@@ -1682,7 +1687,7 @@ class PreprocessWorkerThread:
         # a failed call a row is also charged its own retry
         start = time.perf_counter() if self.enable_prof else None
         try:
-            datas = self.model.postprocess_inline(
+            datas = self.model.postprocessor(item.signal).postprocess_inline(
                 values, item.modality, [kwargs.get(rid) for rid in rids],
             )
         except Exception:  # noqa: BLE001 — retried row by row below
@@ -1702,14 +1707,16 @@ class PreprocessWorkerThread:
             try:
                 if datas is None:
                     row_start = time.perf_counter() if start is not None else None
-                    data = self.model.postprocess_inline(
+                    data = self.model.postprocessor(item.signal).postprocess_inline(
                         [values[i]], item.modality, [kwargs.get(request_id)],
                     )[0]
                     if row_start is not None:
                         postprocess_s = share + time.perf_counter() - row_start
                 else:
                     data = datas[i]
-                metadata = {} if not logprobs or logprobs[i] is None else {"logprobs": [logprobs[i]]}
+                metadata = {"signal": item.signal} if item.signal else {}
+                if logprobs and logprobs[i] is not None:
+                    metadata["logprobs"] = [logprobs[i]]
                 if self._wants_token_ids(request_id, item.modality):
                     metadata["token_ids"] = [values[i]]
                 if self._turn_tokens:
@@ -1795,7 +1802,8 @@ class PreprocessWorkerThread:
         if self.enable_nvtx:
             profiler.range_push(f"dataworker.postprocess.{modality}")
         start = time.perf_counter() if read_time is not None else None
-        postprocessed = self.model.postprocess(
+        signal = (self.tensor_uuid_to_metadata_per_request[request_id][uuid] or {}).get("signal", "")
+        postprocessed = self.model.postprocessor(signal).postprocess(
             tensor, modality,
             request_kwargs=self.request_model_kwargs.get(request_id),
         )

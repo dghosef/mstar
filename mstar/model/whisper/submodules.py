@@ -53,10 +53,12 @@ from mstar.model.whisper.config import (
     DECODE_WALK,
     DETECT_LANGUAGE_WALK,
     KV_CACHE,
+    NEW_TOKEN,
     POS,
     PREFILL_PROMPT_WALK,
     PREFILL_WALK,
     SAMPLER,
+    TEXT_INPUTS,
     TS_RULES,
     WhisperModelConfig,
 )
@@ -260,6 +262,8 @@ class WhisperDecoderSubmodule(TokenStepNode, ARNodeSubmodule):
     SAMPLER = SAMPLER
     DECODE_WALK = DECODE_WALK
     DECODE_LOOP = DECODE_LOOP
+    TOKEN_SIGNAL = NEW_TOKEN
+    FEEDBACK_SIGNAL = TEXT_INPUTS
     DECODE_CAPTURE_BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64]
     # `can_batch` would otherwise take the whole ready set. A set too big for
     # the context cache can't be admitted. With offload configured it evicts and
@@ -282,7 +286,7 @@ class WhisperDecoderSubmodule(TokenStepNode, ARNodeSubmodule):
         self.config = config
         # a stop on the first transcript token ends the partition (`_token_stops`)
         self.token_stop = TokenStop(
-            loop=self.DECODE_LOOP, buffer="new_token",
+            loop=self.DECODE_LOOP, buffer=NEW_TOKEN,
             stop_ids=frozenset({config.eos_token_id}), sampler=self.SAMPLER,
             prefill_walks=frozenset(FIRST_TOKEN_WALKS),
         )
@@ -290,7 +294,7 @@ class WhisperDecoderSubmodule(TokenStepNode, ARNodeSubmodule):
         # its timestamp rule state from the sampler's declared loop-back state
         # beside it (`device_loopback_signals`).
         self.device_loopback = DeviceLoopback(
-            walk=DECODE_WALK, signal="text_inputs", sampler=self.SAMPLER, buffer="new_token",
+            walk=DECODE_WALK, signal=TEXT_INPUTS, sampler=self.SAMPLER, buffer=NEW_TOKEN,
         )
         self._suppress_ids: torch.Tensor | None = None
         self._begin_suppress_ids: torch.Tensor | None = None
@@ -399,7 +403,7 @@ class WhisperDecoderSubmodule(TokenStepNode, ARNodeSubmodule):
         device = self.get_device()
         if graph_walk == ALIGN_WALK:
             return self._prepare_alignment(fwd_info, inputs)
-        token_ids = to_device_nonblocking(inputs["text_inputs"][0], device).reshape(-1)
+        token_ids = to_device_nonblocking(inputs[TEXT_INPUTS][0], device).reshape(-1)
         seq_len = token_ids.shape[0]
 
         tensor_inputs = {}
@@ -687,7 +691,7 @@ class WhisperDecoderSubmodule(TokenStepNode, ARNodeSubmodule):
             ts_rules=ts_rules,
             row_lens=row_lens,
         )
-        out: NameToTensorList = {"new_token": [new_tokens]}
+        out: NameToTensorList = {NEW_TOKEN: [new_tokens]}
         if next_rules is not None:
             out["ts_rules"] = [next_rules[0]]
         return out
@@ -730,16 +734,16 @@ class WhisperDecoderSubmodule(TokenStepNode, ARNodeSubmodule):
         # step's token is its loop's `text_inputs`; the prefill's is the
         # persisted first token.
         if graph_walk == DECODE_WALK:
-            rows = {"text_inputs": new_tokens}
+            rows = {TEXT_INPUTS: new_tokens}
             if next_rules is not None and self._reads_loopback(graph_walk):
                 engine_inputs.resources[SAMPLER].store_loopback_state(
                     TS_RULES, engine_inputs.request_ids, next_rules,
                 )
         else:
-            rows = {"new_token": new_tokens}
+            rows = {NEW_TOKEN: new_tokens}
         if next_rules is not None:
             rows["ts_rules"] = next_rules
-        return BatchedModelOutput(row_outputs=rows, check_stop_buffers={"new_token": new_tokens})
+        return BatchedModelOutput(row_outputs=rows, check_stop_buffers={NEW_TOKEN: new_tokens})
 
     def _token_stops(self, request_id: str, token: int, info: CurrentForwardPassInfo) -> bool:
         """A stop id on a decode row's token, or on the first transcript token,

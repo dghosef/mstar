@@ -5,7 +5,7 @@ max_seq_len: 448
 # queue; uncapped, the worker would offload decoding requests to admit them.
 max_concurrent_requests: 64
 resources:
-  kv_cache:
+  asr_kv_cache:
     cpu_offload_pages: 128
   cross_kv_cache:
     cpu_offload_pages: 128

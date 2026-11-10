@@ -27,6 +27,14 @@ projected once per request into a separate paged cross-attention cache
 (written at prefill, read by every later step), so decode steps of many
 requests batch together and are captured per batch size (1 to 64).
 
+**Names.** The decode walk is named ``asr_decode`` (its loop ``asr_decode_loop``, its signals ``asr_token`` and
+``asr_text``), and the decoder's caches are ``asr_kv_cache``, ``cross_kv_cache``, ``asr_attn`` and ``asr_sampler``, so
+Whisper can be one member of a multimodel beside a model on the shared decoder scaffold, whose names are ``decode``,
+``decode_loop``, ``kv_cache``, ``attn`` and ``sampler``. The walk list below uses the walks' role names. **Migrating:**
+a serving config's ``resources:`` block must name ``asr_kv_cache`` (it was ``kv_cache``), ``asr_attn`` (``attn``) and
+``asr_sampler`` (``sampler``); a config still using the old keys is refused at startup as overriding an unknown
+resource.
+
 **Walks.**
 
 ``prefill``

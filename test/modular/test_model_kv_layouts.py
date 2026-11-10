@@ -254,7 +254,9 @@ def test_canary_decode_cap_leaves_the_prefills_token_in_the_budget(model_name, m
 def _first_token_at_prefill(model_name):
     """(model, decode loop) for a model whose prefill samples the reply's first token."""
     if model_name == "whisper":
-        return _whisper(), "decode_loop"
+        from mstar.model.whisper.config import DECODE_LOOP
+
+        return _whisper(), DECODE_LOOP
     from mstar.model.higgs_audio.higgs_audio_model import HiggsAudioModel
     from mstar.model.orpheus.orpheus_model import OrpheusModel
     from mstar.model.qwen3_5.qwen3_5_model import Qwen3_5DenseModel
@@ -718,7 +720,10 @@ def test_a_token_decoder_replies_with_max_tokens_tokens(name, max_tokens):
     """The prefill samples the first token and the decode loop's cap runs the
     rest: the stop check counts no budget of its own, so the cap alone must
     leave max_tokens tokens (a budget of 1 ends at the prefill)."""
-    assert 1 + _token_decoder(name).get_loop_caps(max_output_tokens=max_tokens)["decode_loop"] == max_tokens
+    from mstar.model.whisper.config import DECODE_LOOP
+
+    loop = DECODE_LOOP if name == "whisper" else "decode_loop"
+    assert 1 + _token_decoder(name).get_loop_caps(max_output_tokens=max_tokens)[loop] == max_tokens
 
 
 def _whisper():
@@ -746,6 +751,7 @@ def test_whisper_lays_out_the_forced_prompt_and_the_encoders_whole_window(second
         KV_CACHE,
         PREFILL_PROMPT_WALK,
         PREFILL_WALK,
+        TEXT_INPUTS,
     )
 
     model = _whisper()
@@ -755,7 +761,7 @@ def test_whisper_lays_out_the_forced_prompt_and_the_encoders_whole_window(second
     output = model.process_prompt(None, ["audio"], ["text"], tensors={"audio_inputs": [clip]}, **kwargs)
 
     layout, tensors = output.metadata["kv_layout"], output.new_input_tensors
-    prompt = len(tensors["text_inputs"][0])
+    prompt = len(tensors[TEXT_INPUTS][0])
     spans = [(span.walk, span.length) for span in layout[KV_CACHE]["main"].spans]
     if language is None:
         # detection commits the prompt up to <|sot|>; the prompt walk, the detected token and the tail

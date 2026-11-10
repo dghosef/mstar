@@ -15,9 +15,9 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Resource label constants (decoder node)
 # ---------------------------------------------------------------------------
-KV_CACHE = "kv_cache"
-ATTN = "attn"
-SAMPLER = "sampler"
+KV_CACHE = "asr_kv_cache"
+ATTN = "asr_attn"
+SAMPLER = "asr_sampler"
 # The sampler's loop-back state holding each request's timestamp rule state
 TS_RULES = "ts_rules"
 # Positions: Whisper has no RoPE. The resource is declared for its
@@ -32,6 +32,13 @@ CROSS_KV_CACHE = "cross_kv_cache"
 CROSS_ATTN = "cross_attn"
 CONTEXT_LABEL = "main"
 
+# Whisper's walks, loop, signals and decoder resources carry their own names, so that it can be a
+# member of a `MultiModel` beside a model on the shared scaffolds (which use `decode`, `decode_loop`,
+# `new_token`, `text_inputs`, `kv_cache`, `attn` and `sampler`): no name is shared deployment-wide.
+# The decoder's sampled token, and the ids fed back and prefilled (each also what the client reads).
+NEW_TOKEN = "asr_token"
+TEXT_INPUTS = "asr_text"
+
 # Graph node names, shared by the model, the submodules and the configs.
 ENCODER_NODE = "audio_encoder"
 DECODER_NODE = "decoder"
@@ -43,8 +50,8 @@ DECODER_NODE = "decoder"
 PREFILL_WALK = "prefill"
 DETECT_LANGUAGE_WALK = "detect_language"
 PREFILL_PROMPT_WALK = "prefill_prompt"
-DECODE_WALK = "decode"
-DECODE_LOOP = "decode_loop"
+DECODE_WALK = "asr_decode"
+DECODE_LOOP = "asr_decode_loop"
 # ``align`` runs after the decode loop when word timestamps were asked for:
 # one teacher-forced pass over the transcript whose cross-attention gives
 # every word its start and end (see ``components/alignment.py``).

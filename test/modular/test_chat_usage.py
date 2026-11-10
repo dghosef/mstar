@@ -71,6 +71,7 @@ class _Model:
 
     prompt_tokens = Model.prompt_tokens
     postprocess_inline = Model.postprocess_inline
+    postprocessor = Model.postprocessor
     text_output = Model.text_output
 
     def postprocess(self, output, modality, request_kwargs=None):
@@ -182,7 +183,7 @@ def test_a_whisper_request_gets_through_the_data_worker(tmp_path):
     ))
 
     [msg] = worker.communicator.sent
-    assert msg.body.prompt_tokens == worker.tensor_manager.stored["text_inputs"][0].numel() > 0
+    assert msg.body.prompt_tokens == worker.tensor_manager.stored["asr_text"][0].numel() > 0
 
 
 @pytest.mark.parametrize("module, cls", sorted(set(MODEL_REGISTRY.values())))
