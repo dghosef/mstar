@@ -10,6 +10,24 @@ DEFAULT_PARTITION = "default"
 # Step metadata a walk plan sets on the step that samples the reply's first
 # token, the last prefill before decode (`TokenStop.last_prefill_flag`).
 FINAL_PREFILL = "final_prefill"
+# Step metadata of every step of a request whose reply may call a tool: its
+# prefills persist where their state ends (`PREFILL_END`), and its decode loop
+# accumulates the turn's ids.
+TOOLS = "tools"
+# The request kwarg of a child request of a spawned agent: the id of its parent (a model's INTERNAL_KWARGS, so a
+# client cannot send it).
+AGENT_CHILD = "agent_child"
+# A child's final turn, which its router persists; the answers of a parent's children, which its join step reads.
+AGENT_ANSWER = "agent_answer"
+AGENT_ANSWERS = "agent_answers"
+# How long the children of one spawn may run before the conductor ends them.
+CHILD_SECONDS = 600.0
+# The signal the decode loop of such a request accumulates: the ids of its turn after
+# the first (which the prefill sampled and persisted as ``new_token``).
+TURN_IDS = "turn_ids"
+# The signal a prefill of such a request persists: how many ids the request's KV and state
+# hold once it ran. The router measures where the turn's last id belongs from it.
+PREFILL_END = "prefill_end"
 
 
 @dataclass
@@ -102,11 +120,26 @@ class WalkStep:
     persisted signal of the same name, or an empty edge when there is none.
     ``bind`` renames: ``{"text_inputs": "new_token"}`` feeds a decode loop's
     ``text_inputs`` the prefill's ``new_token``. ``step_metadata`` reaches
-    every node of the walk.
+    every node of the walk. ``exits`` maps the name a stop check gave the
+    walk's end (`StopCheck.exit`) to the index of the step to run next; an
+    unnamed or unlisted exit runs the next step in the list. A target is a
+    step of the plan (``len(plan)`` ends it; ``""`` names the unnamed end, so
+    ``exits={"": 1}`` loops back), and a plan that comes back runs its steps
+    under the output budget it has left.
+
+    ``spawns`` names persisted signals this step may produce, each the prompt of a child
+    request of the same model: when the step ends, the conductor starts one child per
+    non-empty signal, in the partition's workers. ``joins`` holds the step until every child
+    the request started has ended; the conductor then enters it with the children's persisted
+    ``agent_answer`` tensors as its ``agent_answers`` input and, for a child that failed or timed
+    out, its error text in ``step_metadata["agent_errors"]``.
     """
     walk: str
     bind: Mapping[str, str] = MappingProxyType({})
     step_metadata: Mapping[str, Any] = MappingProxyType({})
+    exits: Mapping[str, int] = MappingProxyType({})
+    spawns: tuple[str, ...] = ()
+    joins: bool = False
 
 
 @dataclass
@@ -142,6 +175,12 @@ class PartitionState:
     # the walks this request runs here (`Model.walk_plan`), and the step running
     plan: list[WalkStep] = field(default_factory=list)
     cursor: int = 0
+    # the named exit a report since the last advance gave the walk's end, "" for none
+    exit: str = ""
+    # whether the plan has an exit that leads back; its steps then run under the token budget left
+    cyclic: bool = False
+    # the step (`WalkStep.joins`) held until the request's children have ended, else None
+    pending_join: int | None = None
     num_output_tokens: int = 0
     # resource label -> PublishedInfo, accumulated across all TP ranks and
     # handed back out on the next forward

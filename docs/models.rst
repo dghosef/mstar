@@ -686,6 +686,30 @@ supported yet. On any deployment,
 (``{"token_ids": [...]}``), stop tokens included, so a trainer need not
 re-tokenize the text.
 
+**A Python tool the reply can call.** ``model_kwargs: {tools: [python]}`` in the serving config
+(``configs/qwen3_5_0.8b_tool.yaml``) lets a reply run Python: the chat template is given a ``python(code)`` tool,
+a reply that writes ``<tool_call>`` blocks ends its turn, a ``Tool`` node on a rank of its own (listed in
+``node_groups``; it shares a GPU through ``rank_devices`` and runs no CUDA work) runs every call of the turn at once in
+``python -I`` processes with a timeout and CPU and memory limits), and the reply continues from the results,
+under the same ``max_output_tokens``, until it answers without a call. The tool text counts toward that budget. The
+``<tool_call>`` markup still reaches the client as text (no ``tool_calls`` deltas yet). The tool text is keyed for
+prefix caching like the reply's own tokens, so the pages that hold it are shared; a hybrid model's recurrent-state
+snapshots end with the reply, so a later request that repeats the tool text recomputes its state from there. **The code is whatever the model wrote and runs on the host with
+no network or filesystem isolation: serve this only where every caller is trusted.**
+
+**Speech in (a multimodel).** ``mstar.model.multimodel.MultiModel`` joins registered models into one
+(Whisper, Qwen3.5 with tools), each on workers of its own; it is a library, not a registered model yet. A
+``Link`` streams Whisper's tokens into Qwen3.5's streamed prefill walk: the ``Glue`` node (first in that walk, on the
+LLM's rank) turns Whisper's ids into text and the text into Qwen's ids a word at a time, so the prompt is
+prefilled while Whisper still decodes. The request's plan is the history's prefill, the transcript's chunks, the
+chat template's suffix (whose sampled token is the reply's first), then decode and the tool rounds; a typed request
+is Qwen's alone. A ``/generate`` chunk's ``metadata["signal"]`` names the output it came from (Whisper's transcript, Qwen's reply), so a client tells the streams apart; tool-call markup stays in the reply text.
+Audio out: a member that lists ``speak`` in ``tools`` (and a second, unglued ``Link`` from its ``Router`` node's
+``speak_text`` signal to Kokoro, built with ``stream_in``) lets a reply that asks for an audio output call
+``speak(text)``: the router exits through ``speak``, writes the text onto that stream edge (it writes nothing on any
+other exit, so a request that never speaks leaves Kokoro idle and closes it) and the turn ends, spoken and not
+answered to the model. A turn that mixes ``speak`` with other calls runs the others and is not spoken.
+
 **LoRA adapters.** A ``resources: lora:`` block in the serving config serves
 per-request LoRA adapters (PEFT ``adapter_model.safetensors``; the scaling comes
 from the ``adapter_config.json`` beside it). The OpenAI ``model`` field picks one,

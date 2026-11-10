@@ -32,9 +32,12 @@ from mstar.streaming.chunk_policy import FixedChunkPolicy  # noqa: E402
 from mstar.streaming.topology import Connection, PartitionTopology, StreamingGraphEdge  # noqa: E402
 from mstar.testing_utils.model import StubModel  # noqa: E402
 from mstar.utils.ipc_format import (  # noqa: E402
+    AbortRequest,
     ConductorMessage,
     ConductorMessageType,
+    FailRequests,
     NewRequestConductor,
+    ReadsDone,
     SetupDone,
     WorkerGraphsDone,
 )
@@ -100,14 +103,17 @@ class _ToyModel(StubModel):
             return super().get_partition_topology()
         return PartitionTopology(partitions=[p.name for p in self._partitions], connections=self._connections)
 
+    def kv_layout(self, layout, length):
+        return {}   # (a model that spawns has one: the conductor asks it for an agent's)
+
     def walk_plan(self, partition_name, input_modalities, output_modalities, input_signals, model_kwargs):
-        plan = self._plans[partition_name]
+        plan = self._plans["agent" if model_kwargs.get("agent_child") else partition_name]
         return list(plan)
 
 
-def _conductor(model, node_groups, tmp_path, monkeypatch) -> Conductor:
+def _conductor(model, node_groups, tmp_path, monkeypatch, **config) -> Conductor:
     path = tmp_path / "cfg.yaml"
-    path.write_text(yaml.safe_dump({"max_seq_len": 1024, "node_groups": node_groups}))
+    path.write_text(yaml.safe_dump({"max_seq_len": 1024, "node_groups": node_groups, **config}))
     comm = _StubComm()
     monkeypatch.setattr(Conductor, "_launch_workers", lambda self: None)
     monkeypatch.setattr(conductor_mod, "make_communicator", lambda **kw: comm)
@@ -471,7 +477,113 @@ def _persisted_again_while_held():
     ]
 
 
+def _exit_jump(exit_name):
+    """``_persisted_again_while_held`` with an exit on its first step that skips the walk
+    persisting ``x`` afresh. Down that path nothing replaces the held ``x``, so it
+    is kept for the last step even though the default path shields it."""
+    model, signals, kwargs, _, _ = _persisted_again_while_held()
+    plan = [WalkStep("w0", exits={"skip": 2}), WalkStep("w1"), WalkStep("w2")]
+    model = _ToyModel(model.get_graph_walk_graphs(), {"default": plan}, {"default": ["w0", "w1", "w2"]})
+    jumped = exit_name == "skip"
+    script = [("default", "w0", {}, False, exit_name)] + [
+        ("default", "w2", {}, False) if jumped else ("default", "w1", {"x": EMB}, False),
+    ] + ([] if jumped else [("default", "w2", {}, False)])
+    if jumped:
+        expected = [
+            ("NEW_REQUEST", "default", "w0", {("n", "y"): [TAIL]}, False),
+            ("INPUT_SIGNALS", "default", "w2", {("n", "x"): [REF]}, False),
+            ("UNPERSIST_TENSORS", PREPROCESS, {REF: 1}),
+            # the skipped step still reads ``y`` on the default path, so it is held to the end
+            ("UNPERSIST_TENSORS", PREPROCESS, {TAIL: 1}),
+        ]
+    else:  # an exit the step does not list: the next step, as without one
+        expected = _persisted_again_while_held()[4]
+    return model, signals, kwargs, script, expected
+
+
+def _streamed_middle():
+    """Qwen3.5 on speech: the history's prefill, the transcript's chunks (a walk the stream feeds), then the
+    suffix's prefill, which the stream's end moves on to; the partition ends with the last step."""
+    walks = {
+        "a": GraphNode(name="na", input_names=["text_inputs"], outputs=[
+            StreamingGraphEdge(next_node="nb", name="tok", target_partition="B")]),
+        "h": GraphNode(name="nb", input_names=["hist"], outputs=[]),
+        # `go` is the empty edge the conductor sends with each pass, which tells the worker its walk
+        "c": GraphNode(name="nb", input_names=["tok", "go"], outputs=[]),
+        "s": GraphNode(name="nb", input_names=["suf"], outputs=[]),
+    }
+    model = _ToyModel(walks, {"A": [WalkStep("a")], "B": [WalkStep("h"), WalkStep("c"), WalkStep("s")]},
+                      {"A": ["a"], "B": ["h", "c", "s"]},
+                      connections=[Connection("A", "B", "tok", lambda: FixedChunkPolicy(chunk_size=1))])
+    return model, {"text_inputs": [PROMPT], "hist": [REF], "suf": [TAIL]}, {}, [
+        ("B", "h", {}, False), ("B", "c", {}, False), ("A", "a", {}, True), ("B", "c", {}, True), ("B", "s", {}, False),
+    ], [
+        ("NEW_REQUEST", "A", "a", {("na", "text_inputs"): [PROMPT]}, False),
+        ("NEW_REQUEST", "B", "h", {("nb", "hist"): [REF]}, False),
+        ("UNPERSIST_TENSORS", PREPROCESS, {PROMPT: 1, REF: 1}),
+        ("INPUT_SIGNALS", "B", "c", {("nb", "go"): []}, False),   # the history is in; the stream's step
+        ("INPUT_SIGNALS", "B", "c", {("nb", "go"): []}, False),   # a chunk's pass
+        ("INPUT_SIGNALS", "B", "c", {}, False),                    # producer_done
+        ("INPUT_SIGNALS", "B", "s", {("nb", "suf"): [TAIL]}, False),   # the stream's end moved the plan on
+        ("UNPERSIST_TENSORS", PREPROCESS, {TAIL: 1}),
+    ]
+
+
+def _tool_round(rounds, ending="answer"):
+    """Qwen3.5 with tools: prefill, decode, a router walk, a tool walk, then a prefill that continues the
+    reply and comes back to decode; the router ends the plan with ``answer`` when the turn made no call, or
+    with ``speak`` when the turn is spoken.
+    Each walk persists what the next reads and replaces its predecessor's, so a round releases the last
+    one's tensors."""
+    walks = {
+        "p": GraphNode(name="n", input_names=["x"], outputs=[
+            GraphEdge(next_node=EMPTY_DESTINATION, name="first", persist=True)]),
+        "d": GraphNode(name="n", input_names=["first"], outputs=[
+            GraphEdge(next_node=EMPTY_DESTINATION, name="turn", persist=True)]),
+        "r": GraphNode(name="router", input_names=["first", "turn"], outputs=[
+            GraphEdge(next_node=EMPTY_DESTINATION, name="calls", persist=True)]),
+        "t": GraphNode(name="tool", input_names=["calls"], outputs=[
+            GraphEdge(next_node=EMPTY_DESTINATION, name="tool_text", persist=True)]),
+        "pc": GraphNode(name="n", input_names=["x"], outputs=[
+            GraphEdge(next_node=EMPTY_DESTINATION, name="first", persist=True)]),
+    }
+    plan = [WalkStep("p"), WalkStep("d"), WalkStep("r", exits={"answer": 5, "speak": 5, "tools": 3}), WalkStep("t"),
+            WalkStep("pc", bind={"x": "tool_text"}, exits={"": 1})]
+    model = _ToyModel(walks, {"default": plan}, {"default": list(walks)})
+    script = [("default", "p", {"first": 601}, False)]
+    expected = [("NEW_REQUEST", "default", "p", {("n", "x"): [PROMPT]}, False),
+                ("UNPERSIST_TENSORS", PREPROCESS, {PROMPT: 1})]
+    uuid = 602
+    for _ in range(rounds + 1):
+        # a decode, then the router: it sends the turn's calls to the tool, or ends the plan
+        last = _ == rounds
+        script += [("default", "d", {"turn": uuid}, False),
+                   ("default", "r", {"calls": uuid + 1}, False, ending if last else "tools")]
+        first = 601 if _ == 0 else uuid - 1
+        expected += [("INPUT_SIGNALS", "default", "d", {("n", "first"): [first]}, False),
+                     ("INPUT_SIGNALS", "default", "r", {("router", "first"): [first], ("router", "turn"): [uuid]},
+                      False),
+                     ("UNPERSIST_TENSORS", "worker_0", {first: 2, uuid: 1})]
+        if last:
+            # the answer's calls are read by no one; the request's end lets go of them
+            expected.append(("UNPERSIST_TENSORS", "worker_0", {}))
+            break
+        script += [("default", "t", {"tool_text": uuid + 2}, False), ("default", "pc", {"first": uuid + 3}, False)]
+        expected += [("INPUT_SIGNALS", "default", "t", {("tool", "calls"): [uuid + 1]}, False),
+                     ("UNPERSIST_TENSORS", "worker_0", {uuid + 1: 1}),
+                     ("INPUT_SIGNALS", "default", "pc", {("n", "x"): [uuid + 2]}, False),
+                     ("UNPERSIST_TENSORS", "worker_0", {uuid + 2: 1})]
+        uuid += 4
+    return model, {"x": [PROMPT]}, {}, script, expected
+
+
 _PLANS = {
+    "a stream's end moves the plan on": _streamed_middle,
+    "a tool round comes back to decode": lambda: _tool_round(1),
+    "an answer with no tool call ends the plan": lambda: _tool_round(0),
+    "a spoken turn ends the plan": lambda: _tool_round(0, "speak"),
+    "an exit jumps over the step that re-persists a name": lambda: _exit_jump("skip"),
+    "an unlisted exit takes the next step": lambda: _exit_jump("typo"),
     "every partition's reads": _every_partitions_reads,
     "another partition's persist keeps it": _another_partitions_persist,
     "prefill then decode": _p2,
@@ -488,9 +600,9 @@ _PLANS = {
 }
 
 
-@pytest.mark.parametrize("case", list(_PLANS))
-def test_a_walk_plan_sends_each_steps_inputs_and_releases_their_last_read(tmp_path, monkeypatch, case):
-    model, signals, kwargs, script, expected = _PLANS[case]()
+def _play(model, signals, kwargs, script, tmp_path, monkeypatch, counts=None):
+    """A conductor given the request, then each report of ``script``; ``counts`` is the tokens each walk's
+    report counts."""
     walks = model.get_graph_walk_graphs()
     # each partition on a rank of its own
     groups = [sorted({n for w in p.graph_walks for n in walks[w].get_nodes()}) for p in model.get_partitions()]
@@ -499,12 +611,13 @@ def test_a_walk_plan_sends_each_steps_inputs_and_releases_their_last_read(tmp_pa
     signals = {name: [i if isinstance(i, TensorPointerInfo) else _info(i) for i in infos]
                for name, infos in signals.items()}
     reports = []
-    for partition, walk, persist, done in script:
+    for partition, walk, persist, done, *exit_name in script:
         node = next(iter(walks[walk].get_nodes()))
         wg = c.node_walk_to_wg[(node, walk)].worker_graph_id
         reports.append([_msg(ConductorMessageType.WORKER_GRAPHS_DONE, WorkerGraphsDone(
             request_id="r", worker_graph_ids=[wg], is_first_tp_rank=True, partition_name=partition,
-            partition_done=done, graph_walk=walk,
+            partition_done=done, graph_walk=walk, exit=exit_name[0] if exit_name else "",
+            new_token_counts={"new_token": (counts or {}).get(walk, 0)},
             persist_signals={name: [_info(u, entity=worker[node], node=node, walk=walk)]
                              for name, u in persist.items()},
         ))])
@@ -512,6 +625,13 @@ def test_a_walk_plan_sends_each_steps_inputs_and_releases_their_last_read(tmp_pa
         request_id="r", initial_signals=signals, initial_input_modalities=["text"],
         initial_output_modalities=["text"], input_metadata={}, model_kwargs=kwargs,
     ))], *reports])
+    return c
+
+
+@pytest.mark.parametrize("case", list(_PLANS))
+def test_a_walk_plan_sends_each_steps_inputs_and_releases_their_last_read(tmp_path, monkeypatch, case):
+    model, signals, kwargs, script, expected = _PLANS[case]()
+    c = _play(model, signals, kwargs, script, tmp_path, monkeypatch)
 
     got = []
     for kind, entity, body in _sends(c, ("NEW_REQUEST", "INPUT_SIGNALS", "UNPERSIST_TENSORS")):
@@ -526,6 +646,28 @@ def test_a_walk_plan_sends_each_steps_inputs_and_releases_their_last_read(tmp_pa
     assert got == expected
     assert any(getattr(msg, "message_type", None) == "request_complete" for _, msg in c.comm.sent), \
         "the plan's last step did not end the request"
+
+
+def test_a_stop_checks_end_at_a_step_the_stream_feeds_ends_the_partition(tmp_path, monkeypatch):
+    """The same report as a stream's end, but with the stop check's END_PARTITION exit: the first token of
+    the reply was a stop token, so the suffix's step is not run."""
+    from mstar.model.submodule_base import END_PARTITION
+
+    model, signals, kwargs, script, _ = _streamed_middle()
+    script = [*script[:3], ("B", "c", {}, True, END_PARTITION)]
+    c = _play(model, signals, kwargs, script, tmp_path, monkeypatch)
+    assert [(b.request_info.graph_walk) for _, _, b in _sends(c, ("INPUT_SIGNALS",))] == ["c", "c", "c"]
+    assert any(getattr(msg, "message_type", None) == "request_complete" for _, msg in c.comm.sent)
+
+
+def test_a_plan_that_comes_back_runs_under_the_budget_it_has_left(tmp_path, monkeypatch):
+    """Each step of a tool round's plan gets what is left of the output budget, so the rounds' decode
+    steps together stay in it."""
+    model, signals, kwargs, script, _ = _tool_round(1)
+    kwargs = {"max_output_tokens": 10}
+    c = _play(model, signals, kwargs, script, tmp_path, monkeypatch, counts={"p": 1, "d": 2, "t": 2, "pc": 1})
+    sent = [(b.request_info.graph_walk, b.request_info.max_tokens) for _, _, b in _sends(c, ("INPUT_SIGNALS",))]
+    assert sent == [("d", 9), ("r", 7), ("t", 7), ("pc", 5), ("d", 4), ("r", 2)]
 
 
 def _tok_stream():
@@ -545,9 +687,13 @@ _REFUSED = {
     # nothing tells B's worker its walk changed
     "a later step only a stream feeds": ({"A": [WalkStep("a")], "B": [WalkStep("b"), WalkStep("c")]}, _STREAMED,
                                          _tok_stream(), 500, "takes no input the conductor sends"),
-    # c runs once per chunk until the stream's end, which ends B's partition: b would never run
-    "a step after one that runs per chunk": ({"A": [WalkStep("a")], "B": [WalkStep("c"), WalkStep("b")]}, _STREAMED,
-                                             _tok_stream(), 500, "so it would never run"),
+    # an exit is an edge of the plan, or its end
+    "an exit past the plan's end": ({"default": [WalkStep("a", exits={"x": 2})]}, None, (), 500, "or its end"),
+    # the stream-moved lookup finds a step by walk name, going forward
+    "a back edge where a stream moves the walk": ({"A": [WalkStep("a")], "B": [WalkStep("c", exits={"x": 0})]},
+                                                  _STREAMED, [Connection(
+                                                      "A", "B", "tok", lambda: FixedChunkPolicy(chunk_size=1),
+                                                      consumer_walk=lambda ctx: "c")], 500, "that lead back"),
 }
 
 
@@ -591,3 +737,172 @@ def test_a_stream_moved_report_of_a_walk_its_plan_is_past_moves_nothing():
     pstate.graph_walk = "w"
     with pytest.raises(RuntimeError, match="which its plan doesn't run"):
         c._next_plan_args(request, "B", done=False)
+
+
+def test_a_stream_moved_partitions_exit_leads_from_the_step_its_walk_resolves_to():
+    """The report names a walk, not a step: the exit is looked up on the step the
+    conductor resolves that walk to, and leads past the step after it."""
+    c = Conductor.__new__(Conductor)
+    c.model, c.producer_triggered_partitions = SimpleNamespace(), {"B"}
+    c._walk_inputs = {w: (("t", "n"),) for w in ("x", "y", "z")}
+    c._walk_persists, c._repeating_walks = {w: frozenset() for w in "xyz"}, frozenset()
+    pstate = PartitionState("B", plan=[WalkStep("x", exits={"skip": 2}), WalkStep("y"), WalkStep("z")], cursor=0)
+    request = SimpleNamespace(partition_states={"B": pstate}, persist_signals={})
+    pstate.graph_walk, pstate.exit = "x", "skip"
+    args = c._next_plan_args(request, "B", done=False)
+    assert pstate.cursor == 2 and pstate.graph_walk == "z" and args.inputs
+
+
+def test_two_ranks_naming_different_exits_in_one_pass_fail_the_request():
+    c = Conductor.__new__(Conductor)
+    c.enable_prof, c.producer_triggered_partitions = False, set()
+    pstate = PartitionState("B")
+    c.requests = {"r": SimpleNamespace(
+        partition_states={"B": pstate}, output_chunk_counts={}, streaming_connections={})}
+    body = dict(request_id="r", worker_graph_ids=[], partition_name="B", is_first_tp_rank=True)
+    c._process_worker_graphs_done(WorkerGraphsDone(exit="a", **body))
+    assert pstate.exit == "a"
+    c._process_worker_graphs_done(WorkerGraphsDone(exit="a", **body))  # the same one from another report
+    with pytest.raises(RuntimeError, match="exits 'a' and 'b'"):
+        c._process_worker_graphs_done(WorkerGraphsDone(exit="b", **body))
+
+
+# --- agents: a plan that spawns children, holds a join step for them, and tears them down after it -----------
+
+
+def _spawning_model():
+    """The parent's plan: prefill, decode, router (exit ``spawn``), the tool walk that joins the children (held
+    until they end), a continuation prefill, back to decode. An agent's: prefill, decode, router (it answers)."""
+    def walk(node, inputs, persists=()):
+        return GraphNode(name=node, input_names=inputs, outputs=[
+            GraphEdge(next_node=EMPTY_DESTINATION, name=name, persist=True) for name in persists])
+
+    walks = {
+        "p": walk("n", ["text_inputs"], ["first"]), "d": walk("n", ["first"], ["turn"]),
+        "r": walk("router", ["first", "turn"], ["tool_calls", "agent_0", "agent_1", "agent_answer"]),
+        "t": walk("tool", ["tool_calls", "agent_answers"], ["tool_text"]),
+        "pc": walk("n", ["text_inputs"], ["first"]),
+    }
+    router = WalkStep("r", exits={"answer": 5, "spawn": 3}, spawns=("agent_0", "agent_1"))
+    parent = [WalkStep("p"), WalkStep("d"), router, WalkStep("t", joins=True),
+              WalkStep("pc", bind={"text_inputs": "tool_text"}, exits={"": 1})]
+    agent = [WalkStep("p"), WalkStep("d"), WalkStep("r", exits={"answer": 3})]
+    return _ToyModel(walks, {"default": parent, "agent": agent}, {"default": list(walks)})
+
+
+def _spawn_batches(parent="r"):
+    """The reports of a parent that spawns two agents, which each answer: up to the join."""
+    a0, a1 = f"{parent}-agent-0", f"{parent}-agent-1"
+    return a0, a1, [
+        [_new_request(parent, {"text_inputs": [_info(101)]})],
+        [_done_report(parent, "p", {"first": 601})],
+        [_done_report(parent, "d", {"turn": 602})],
+        [_done_report(parent, "r", {"tool_calls": 603, "agent_0": 611, "agent_1": 612}, exit_name="spawn")],
+        [_done_report(a0, "p", {"first": 621}), _done_report(a1, "p", {"first": 631})],
+        [_done_report(a0, "d", {"turn": 622}), _done_report(a1, "d", {"turn": 632})],
+        [_done_report(a0, "r", {"agent_answer": 623}, exit_name="answer")],
+    ]
+
+
+def _done_report(rid, walk, persist, exit_name="", done=False):
+    return _msg(ConductorMessageType.WORKER_GRAPHS_DONE, WorkerGraphsDone(
+        request_id=rid, worker_graph_ids=[_WGS[walk]], is_first_tp_rank=True, partition_name="default",
+        partition_done=done, graph_walk=walk, exit=exit_name,
+        persist_signals={name: [_info(u, entity="worker_0", node="n", walk=walk)] for name, u in persist.items()},
+    ))
+
+
+_WGS: dict[str, int] = {}
+
+
+def _spawn_conductor(tmp_path, monkeypatch):
+    model = _spawning_model()
+    walks = model.get_graph_walk_graphs()
+    nodes = sorted({n for w in walks.values() for n in w.get_nodes()})
+    c = _conductor(model, [{"node_names": nodes, "ranks": [0]}], tmp_path, monkeypatch, max_concurrent_requests=1)
+    _WGS.update({walk: c.node_walk_to_wg[(next(iter(g.get_nodes())), walk)].worker_graph_id
+                 for walk, g in walks.items()})
+    return c
+
+
+def _sent(c, kind):
+    return [body for entity, msg in c.comm.sent for body in [msg.body]
+            if getattr(msg.message_type, "name", msg.message_type) == kind]
+
+
+def _joined(c, parent="r"):
+    """The inputs the parent's join step was sent: {signal: uuids}, and its step metadata."""
+    (body,) = [b for b in _sent(c, "INPUT_SIGNALS") if b.request_id == parent and b.request_info.graph_walk == "t"]
+    return {e.name: [i.uuid for i in e.tensor_info] for e in body.inputs}, body.request_info.step_metadata
+
+
+def _spawned(tmp_path, monkeypatch, name, *more):
+    """A conductor after the parent spawned and its first child answered, then the batches ``more`` makes."""
+    (tmp_path / name).mkdir()
+    c = _spawn_conductor(tmp_path / name, monkeypatch)
+    a0, a1, batches = _spawn_batches()
+    _run(c, [*batches, *(batch for make in more for batch in make())])
+    return c, a0, a1
+
+
+def test_a_parent_that_spawns_starts_a_child_per_prompt_and_holds_its_join_until_all_end(tmp_path, monkeypatch):
+    c, a0, a1 = _spawned(tmp_path, monkeypatch, "one")
+
+    # a child per prompt, on the prompt's tensor; inside the parent's slot
+    starts = {b.request_id: b for b in _sent(c, "NEW_REQUEST")}
+    assert list(starts) == ["r", a0, a1]
+    assert [[i.uuid for i in e.tensor_info] for e in starts[a0].initial_inputs] == [[611]]
+    assert c.requests[a0].parent == "r" and c._counted_requests() == 1 and c.requests["r"].children == [a0, a1]
+    assert not c.waiting_queue, "a child queued behind the cap its parent holds a slot under"
+    # one child has ended; the join waits for the other, and the ended one is parked: no teardown yet
+    assert not [b for b in _sent(c, "INPUT_SIGNALS") if b.request_info.graph_walk == "t"]
+    assert a0 not in c.draining and c.requests[a0].ended
+
+
+def test_the_join_reads_every_childs_answer_and_the_children_go_only_after_it_has(tmp_path, monkeypatch):
+    def last():
+        return [[_done_report("r-agent-1", "r", {"agent_answer": 633}, "answer")]]
+
+    c, a0, a1 = _spawned(tmp_path, monkeypatch, "two", last)
+    inputs, metadata = _joined(c)
+    assert inputs == {"tool_calls": [603], "agent_answers": [623, 633]}
+    assert metadata["agents"] == 2 and metadata["agent_errors"] == {}
+    assert a0 not in c.draining and a1 not in c.draining, "the children went before the join step read their answers"
+
+    c, a0, a1 = _spawned(tmp_path, monkeypatch, "three", last, lambda: [[_done_report("r", "t", {"tool_text": 641})]])
+    assert a0 in c.draining and a1 in c.draining
+    # nothing of a child reached the API server, and each prompt was let go of once, by its child
+    assert not [m for e, m in c.comm.sent if e == "api_server" and "agent" in str(getattr(m.body, "request_id", ""))]
+    freed = [u for body in _sent(c, "UNPERSIST_TENSORS") for u in body.uuid_to_ref_count if u in (611, 612)]
+    assert sorted(freed) == [611, 612]
+
+
+def test_a_child_that_fails_is_an_error_answer_and_one_that_runs_past_its_deadline_is_another(tmp_path, monkeypatch):
+    def fail():
+        return [[_msg(ConductorMessageType.FAIL_REQUESTS, FailRequests({"r-agent-1": "boom"}))]]
+
+    c, a0, a1 = _spawned(tmp_path, monkeypatch, "fails", fail)
+    inputs, metadata = _joined(c)
+    assert inputs == {"tool_calls": [603], "agent_answers": [623]}
+    assert metadata["agents"] == 2 and metadata["agent_errors"] == {"1": "Error: the agent failed: boom"}
+    assert a1 in c.draining, "a failed child is torn down at once"
+    # late word from a child that is gone is ignored
+    c, a0, a1 = _spawned(tmp_path, monkeypatch, "late", fail, lambda: [
+        [_done_report("r-agent-1", "d", {"turn": 999})],
+        [_msg(ConductorMessageType.READS_DONE, ReadsDone(request_id="r-agent-1", entity_id="worker_0"))]])
+    assert _joined(c)[1]["agent_errors"] == {"1": "Error: the agent failed: boom"}
+
+    monkeypatch.setattr(conductor_mod, "CHILD_SECONDS", 0.0)
+    c, a0, a1 = _spawned(tmp_path, monkeypatch, "slow")
+    assert _joined(c)[1]["agent_errors"] == {
+        "0": "Error: the agent timed out", "1": "Error: the agent timed out"}
+
+
+def test_a_parent_that_is_aborted_takes_its_children_with_it_and_tells_the_api_server_nothing_of_them(
+    tmp_path, monkeypatch,
+):
+    abort = [[_msg(ConductorMessageType.ABORT_REQUEST, AbortRequest("r"))]]
+    c, a0, a1 = _spawned(tmp_path, monkeypatch, "abort", lambda: abort)
+    assert {"r", a0, a1} <= set(c.draining)
+    assert not [m for e, m in c.comm.sent if e == "api_server" and "agent" in str(getattr(m.body, "request_id", ""))]
+    assert not [b for b in _sent(c, "INPUT_SIGNALS") if b.request_info.graph_walk == "t"], "the join ran"

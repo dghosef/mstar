@@ -197,3 +197,47 @@ def test_abandoned_loop_keeps_its_holds_until_hard_cleanup(nested):
         store.remove_tensor(uuid)
     assert store.get_all_uuids(rid) == []
     assert all(book.get_info(u) is None for u in produced)
+
+
+@pytest.mark.parametrize("persist", [False, True])
+def test_a_loop_walk_entered_twice_accumulates_each_entry_alone(persist):
+    """A tool round re-enters the decode walk of one request: the second entry counts its
+    iterations afresh and emits only its own accumulated frames. The first entry produced no
+    frame at all (a request without tools), which the loop's end accepts."""
+    node = GraphNode(name="producer", input_names=["token"], outputs=[
+        GraphEdge(name="token", next_node="producer"), GraphEdge(name="frame", next_node=EMPTY_DESTINATION),
+    ])
+    loop = Loop(name="decode_loop", section=node, max_iters=2, outputs=[],
+                accumulated_outputs=[GraphEdge(
+                    name="frame", next_node=EMPTY_DESTINATION if persist else EMIT_TO_CLIENT, persist=persist)])
+    runtime, book, store = _build(loop)
+    rid = runtime.add_request("again", "default", "decode", [0], ParallelList([0], [[WORKER]]), _caps(loop))
+
+    def entry(base, frames):
+        block = ColumnarEdgeSpecs.empty()
+        block.add_edge(rid, GraphEdge(name="token", next_node="producer"))
+        assert runtime.ingest_inputs_batch(block) == []
+        last = None
+        for i in range(2):
+            _finish_teardown(store, runtime.cleanup_consumed_inputs("producer", [rid], [0]))
+            uuids = [base + i, *([base + 50 + i] if frames else [])]
+            for uuid in uuids:
+                store.put_tensor(rid, uuid, torch.tensor([i]), _info(uuid))
+                store.increment_ref(uuid)
+            last = runtime.complete_and_route_batch(RouteInput(
+                partition="default", graph_walk="decode", node_name="producer",
+                output_signals=["token", "frame"], wg_ids=ParallelList([rid], [0]),
+                tensors=uuids, num_tensors=[1, int(frames)],
+            ))
+            _finish_teardown(store, last.freed_inputs)
+        return last
+
+    first = entry(100, frames=False)
+    assert first.register_uuids == []
+    runtime.set_walk(rid, "default", "decode")
+    second = entry(200, frames=True)
+    # a persisted frame is held for the conductor to ask for; a routed one is registered
+    assert sorted(second.register_uuids) == ([] if persist else [250, 251])
+    for uuid in (250, 251):
+        assert book.get_info(uuid) is not None and not book.can_gc(uuid), f"frame {uuid} was not kept"
+    runtime.remove_request(rid)

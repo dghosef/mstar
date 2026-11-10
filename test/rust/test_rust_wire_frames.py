@@ -413,6 +413,15 @@ def test_a_uuid_whose_descriptor_is_gone_is_skipped(tmp_path):
     assert got["conductor"][0].body.persist_signals == {"out": []}
 
 
+def test_a_persisted_output_nothing_produced_reaches_the_conductor_as_nothing(tmp_path):
+    """The router persists a spawn's prompts only on a spawn: on any other turn the edge is declared and
+    nothing is produced for it, which is not an error and holds no tensor."""
+    mesh = _Mesh(tmp_path, outs=[("out", "", True)])
+    rid = mesh.admit()
+    got = mesh.run(rid, uuids=[])
+    assert not got["conductor"][0].body.persist_signals.get("out")
+
+
 def _stream_mesh(tmp_path):
     return _Mesh(
         tmp_path, outs=[("out", "remote", False)], streaming=True,
@@ -449,6 +458,16 @@ def test_a_stream_item_whose_descriptor_is_gone_is_not_counted(tmp_path):
     frame = got[PEER][0].body
     assert [row_infos(frame, row) for row in rows(frame)] == [[_info(2)]]
     assert got["conductor"][0].body.stream_items_sent == {"out": {PEER: 1}}
+
+
+def test_a_row_with_nothing_on_its_stream_output_sends_no_item_and_counts_none(tmp_path):
+    """The Tool node answers one request with a call to speak and another with none: the second routes
+    no tensor on the stream edge into the speech model, so the consumer is sent nothing and told of nothing."""
+    mesh = _stream_mesh(tmp_path)
+    rid = mesh.admit(wgs=(WG_ID, 1), workers=(ME, PEER))
+    got = mesh.run(rid, uuids=[])
+    assert not [m for m in got[PEER] if m.message_type == WorkerMessageType.EDGE_ITEMS]
+    assert not got["conductor"][0].body.stream_items_sent
 
 
 # --- stop loops ---------------------------------------------------------------
@@ -641,6 +660,22 @@ def test_a_speculative_completion_does_not_report_the_partition_done(tmp_path):
     mesh.rt.set_in_flight("only", [rid], [WG_ID], True)
     body = mesh.run(rid, uuids=[])["conductor"][0].body
     assert not body.partition_done, "a speculative pass reported done"
+
+
+def test_a_named_exit_rides_one_report_and_waits_out_a_speculative_pass(tmp_path):
+    """A loop's stop names the exit while its next iteration was already run
+    speculatively. That pass is discarded with the stop and reports nothing, so
+    the exit stays for the frame that really ends the walk, and is taken once."""
+    mesh = _Mesh(tmp_path, outs=[("out", "", False)])
+    rid = mesh.admit()
+    mesh.rt.mark_exit(rid, "default", "tool_call")
+
+    mesh.rt.set_in_flight("only", [rid], [WG_ID], True)
+    assert mesh.run(rid, uuids=[])["conductor"][0].body.exit == ""
+
+    mesh.rt.set_in_flight("only", [rid], [WG_ID], False)
+    assert mesh.run(rid, uuids=[])["conductor"][0].body.exit == "tool_call"
+    assert mesh.run(rid, uuids=[])["conductor"][0].body.exit == ""
 
 
 # --- the fanout reaches each destination worker once, with its own slice -----

@@ -334,6 +334,8 @@ class WorkerGraphsDone(MessageBody):
     resource_publish_info: dict[str, PublishedInfo] = field(default_factory=dict)
     partition_name: str = field(default="default")
     partition_done: bool = field(default=False)
+    # The named exit the pass's walk took, "" for none (``StopCheck.exit``)
+    exit: str = field(default="")
     # The walk the completed pass ran under. The conductor follows it for a
     # partition whose walk the stream drives.
     graph_walk: str = field(default="")

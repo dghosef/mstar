@@ -9,7 +9,15 @@ import torch
 from torch import nn
 
 from mstar.model.submodule_base import END_PARTITION, HostRows
-from mstar.model.whisper.config import PREFILL_WALK, WhisperModelConfig
+from mstar.model.whisper.config import (
+    ATTN,
+    DECODE_LOOP,
+    DECODE_WALK,
+    NEW_TOKEN,
+    PREFILL_WALK,
+    SAMPLER,
+    WhisperModelConfig,
+)
 from mstar.model.whisper.submodules import WhisperDecoderSubmodule
 
 
@@ -47,12 +55,12 @@ def test_forward_suppresses_before_sampling():
     node, sampler = _node(), _Sampler()
     node.decoder = _Decoder()
     engine_inputs = SimpleNamespace(request_ids=["a"], resources={
-        "attn": SimpleNamespace(select_last_hidden=lambda hidden: hidden[-1:]),
+        ATTN: SimpleNamespace(select_last_hidden=lambda hidden: hidden[-1:]),
         "positions": SimpleNamespace(pos_ids=lambda label: None),
-        "sampler": sampler,
+        SAMPLER: sampler,
     })
     node.forward("prefill", engine_inputs, input_ids=torch.tensor([9, 9, 9, 9]))
-    node.forward("decode", engine_inputs, input_ids=torch.tensor([9]))
+    node.forward(DECODE_WALK, engine_inputs, input_ids=torch.tensor([9]))
     first, later = sampler.logits
     assert first.shape == later.shape == (1, 8)
     assert torch.isinf(first[0, [1, 2, 3, 5]]).all() and not torch.isinf(first[0, [0, 4, 6, 7]]).any()
@@ -76,16 +84,16 @@ def test_batched_stop_check_ends_the_loop_or_the_prefill():
     runs before the loop exists, ends the request."""
     node = _node()
     infos = {
-        rid: SimpleNamespace(graph_walk=walk, resource_configs={"sampler": SimpleNamespace(ignore_eos=False)},
-                             dynamic_loop_iter_counts={"decode_loop": n}, max_tokens=10,
+        rid: SimpleNamespace(graph_walk=walk, resource_configs={SAMPLER: SimpleNamespace(ignore_eos=False)},
+                             dynamic_loop_iter_counts={DECODE_LOOP: n}, max_tokens=10,
                              step_metadata={}, rid_handle=i)
-        for i, (rid, walk, n) in enumerate((("eos", "decode", 0), ("limit", "decode", 9), ("go", "decode", 0),
+        for i, (rid, walk, n) in enumerate((("eos", DECODE_WALK, 0), ("limit", DECODE_WALK, 9), ("go", DECODE_WALK, 0),
                                             ("prefill_eos", "prefill", 0)))
     }
     rows = HostRows(request_ids=("go", "limit", "eos", "prefill_eos"),
-                    buffers={"new_token": torch.tensor([[7], [7], [3], [3]])})
+                    buffers={NEW_TOKEN: torch.tensor([[7], [7], [3], [3]])})
     assert node.check_stop_batched(["eos", "limit", "go", "prefill_eos"], infos, rows) == {
-        "eos": {"decode_loop"}, "prefill_eos": {END_PARTITION},
+        "eos": {DECODE_LOOP}, "prefill_eos": {END_PARTITION},
     }
 
 

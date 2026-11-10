@@ -747,7 +747,7 @@ def _qwen3_5(name, model_kwargs, tmp_path, monkeypatch):
         vocab_size=1024, rms_norm_eps=1e-6, max_position_embeddings=262144,
     )
     return _bare(
-        Qwen3_5DenseModel, config=config, vision_config=None,
+        Qwen3_5DenseModel, config=config, vision_config=None, tools=tuple(model_kwargs.get("tools", ())),
         media=(MediaIntake("image", vision_encoder((0,)), 0, None),),
     )
 

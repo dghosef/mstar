@@ -16,7 +16,7 @@ knobs:
   # gains about 60% at the default one (docs/asr.rst).
   step_threads: serial
 resources:
-  kv_cache:
+  asr_kv_cache:
     cpu_offload_pages: 128
   cross_kv_cache:
     cpu_offload_pages: 128
