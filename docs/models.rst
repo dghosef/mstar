@@ -742,6 +742,13 @@ supported yet. On any deployment,
 (``{"token_ids": [...]}``), stop tokens included, so a trainer need not
 re-tokenize the text.
 
+**Several models in one server (a multimodel).** ``mstar.model.multimodel.MultiModel`` joins registered models into
+one (for example Whisper and Qwen3.5), each on workers of its own: a member's partitions are named
+``<member>.<partition>``, members whose walk, node, loop, signal or resource names clash are refused, a request's plan
+is its first member's, and every output is turned into bytes by the member that emits its signal
+(``Model.postprocessor``). A ``/generate`` chunk's ``metadata["signal"]`` names the output it came from, so a client
+tells a transcript from a reply. It is a library, not a registered model yet.
+
 **LoRA adapters.** A ``resources: lora:`` block in the serving config serves
 per-request LoRA adapters (PEFT ``adapter_model.safetensors``; the scaling comes
 from the ``adapter_config.json`` beside it). The OpenAI ``model`` field picks one,

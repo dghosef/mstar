@@ -248,6 +248,14 @@ def test_a_request_that_asks_gets_each_text_chunks_token_ids():
     assert worker._with_token_ids("req", "text", torch.rand(2, 3), {}) == {}
 
 
+def test_a_chunk_names_the_output_signal_it_came_from():
+    """A model with several text streams (a transcript and a reply) is read by the chunks' `signal`."""
+    worker, stop = _thread()
+    worker.result_tensor_queue.put(InlineTokens(["r"], [11], "text", signal="asr_token"))
+    (chunk,) = _run_until(worker, stop, 1)
+    assert chunk.metadata == {"signal": "asr_token"}
+
+
 def test_the_facade_accounts_an_inline_token_like_a_tensor():
     facade = PreprocessWorker.__new__(PreprocessWorker)
     facade.result_tensor_input_queue = queue.Queue()
