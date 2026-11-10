@@ -11,18 +11,20 @@ CPU-only: nothing here launches a kernel.
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from mstar.engine.resources.linear_attn.wrappers import GDNPrefillWrapper
 
 
-def build_wrapper(bs: int, num_tokens: int) -> GDNPrefillWrapper:
+def build_wrapper(bs: int, num_tokens: int, **kwargs) -> GDNPrefillWrapper:
     return GDNPrefillWrapper(
         device=torch.device("cpu"),
         pad_slot_id=0,
         num_tokens=num_tokens,
         bs=bs,
         accelerator_graph=True,
+        **kwargs,
     )
 
 
@@ -76,3 +78,21 @@ def test_eager_step_borrows_only_what_it_needs():
     cu = state.cu_seqlens.tolist()
     assert cu == [0, 128, 129, 193]
     assert all(b > a for a, b in zip(cu, cu[1:], strict=False)), cu
+
+
+@pytest.mark.parametrize("per_row, fits", [(2, False), (3, True)])
+def test_a_captured_step_has_room_for_the_snapshots_per_row_its_policy_keeps(per_row, fits):
+    """A graph is captured for a number of snapshots, a bound per row of its bucket. A row whose policy keeps a third
+    (a message boundary beside the row's end and the KV hit's) needs the capture to have counted it."""
+    every = 128
+    w = build_wrapper(bs=1, num_tokens=1024, **({} if per_row == 2 else {"snapshots_per_row": per_row}))
+    snapshots = [(0, offset, slot) for slot, offset in enumerate((128, 256, 384), 1)]
+    plan = lambda: w.plan(  # noqa: E731
+        [512], slots=torch.zeros(1, dtype=torch.int32), has_state=torch.zeros(1, dtype=torch.bool),
+        snapshots=snapshots, every=every, checkpoints=torch.zeros(1024 // every + 2, 4, 4))
+    if fits:
+        plan()
+        assert w._num_snapshots == per_row
+    else:
+        with pytest.raises(AssertionError, match="3 snapshots in a step captured for 2"):
+            plan()

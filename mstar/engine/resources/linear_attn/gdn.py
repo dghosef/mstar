@@ -251,6 +251,7 @@ class GDNManager(LinearAttnManager):
                         if lease is not None else None
                     ),
                     stage_inputs=self._stage_prefill,
+                    snapshots_per_row=self._snapshots_per_row(),
                 )
             elif is_decode:
                 store[key] = GDNDecodeWrapper(
@@ -275,8 +276,13 @@ class GDNManager(LinearAttnManager):
                     has_sink_state=self._has_sink,
                     null_slot_id=null_slot_id,
                     stage_inputs=self._stage_prefill,
+                    snapshots_per_row=self._snapshots_per_row(),
                 )
         return store[key]
+
+    def _snapshots_per_row(self) -> int:
+        """The most snapshots a prefill row keeps, from the pool's checkpoint policy."""
+        return 2 if self._pool is None else self._pool.snapshots_per_row
 
     def _build_plan(
         self,

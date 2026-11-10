@@ -18,11 +18,13 @@ rendered prompt ever does.
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
 import torch
+from jinja2 import TemplateError
 
 from mstar.conductor.request_info import FINAL_PREFILL, PREFILL_END, TURN_IDS, WalkStep
 from mstar.graph.base import GraphEdge, GraphNode, GraphSection, Loop, Parallel, Sequential
@@ -143,6 +145,43 @@ def messages_from_parts(
     if default_system is not None and not any(m["role"] == "system" for m in messages):
         messages.insert(0, {"role": "system", "content": default_system})
     return messages
+
+
+def message_boundaries(parts: list[PromptPart], ids: torch.Tensor, tokenizer, **template) -> list[int]:
+    """The token counts at which the prompt ``ids`` break between messages: for each turn but the last, where the
+    chat template's text for the turns up to it ends, as one tokenization of the whole prompt's text places it
+    (``template`` is the model's `apply_chat_template` arguments). A turn whose text is not a prefix of the whole
+    prompt's (a template that rewrites an earlier turn once a later one follows), or ends inside a token, or
+    which the template refuses (no user turn yet), leaves its boundary out. So does a prompt whose ids are not the
+    template's own, which returns none. Text chats only."""
+    turns = chat_turns(parts)
+    if len(turns) < 2 or any(part.modality != TEXT for part in parts):
+        return []
+
+    def render(head: list[PromptPart], generation_prompt: bool) -> str | None:
+        try:
+            return tokenizer.apply_chat_template(
+                messages_from_parts(head), tokenize=False, add_generation_prompt=generation_prompt, **template,
+            )
+        except TemplateError:
+            return None
+
+    text = render(parts, True)
+    if text is None:
+        return []
+    encoded = tokenizer(text, return_offsets_mapping=True)
+    if encoded["input_ids"] != ids.tolist():
+        return []
+    stops = [stop for _, stop in encoded["offset_mapping"]]
+    ends = []
+    for k in range(1, len(turns)):
+        head = render([part for turn in turns[:k] for part in turn.parts], False)
+        if head is None or not text.startswith(head):
+            continue
+        count = bisect_right(stops, len(head))
+        if 0 < count < len(stops) and stops[count - 1] == len(head):
+            ends.append(count)
+    return ends
 
 
 def prefill_plan(
