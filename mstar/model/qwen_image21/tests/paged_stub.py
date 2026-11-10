@@ -72,7 +72,7 @@ class PagedAttendStub:
             mask = None
             if self.causal:
                 n, total = qs.shape[0], ks.shape[0]
-                mask = torch.ones(n, total, dtype=torch.bool).tril(total - n)
+                mask = torch.ones(n, total, dtype=torch.bool, device=qs.device).tril(total - n)
             attn = F.scaled_dot_product_attention(
                 qs.transpose(0, 1)[None], ks.transpose(0, 1)[None], vs.transpose(0, 1)[None], attn_mask=mask,
             )
