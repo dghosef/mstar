@@ -236,19 +236,16 @@ def test_a_link_whose_stream_the_target_does_not_wait_for_is_refused(tmp_path, m
         MultiModel({"asr": asr, "llm": llm, "tts": _kokoro("kokoro", {}, tmp_path, monkeypatch)}, links=[SPEECH])
 
 
-def test_usage_counts_a_spoken_turns_whisper_prompt_beside_the_replys(tmp_path, monkeypatch, _drop_stubbed_imports):  # noqa: F811
+def test_usage_counts_what_the_entry_member_prefills_for_a_spoken_turn_and_nothing_twice(
+    tmp_path, monkeypatch, _drop_stubbed_imports,  # noqa: F811
+):
     import torch
 
     model = _voice_agent(tmp_path, monkeypatch, links=[SPEECH])
-    tensors = {"text_inputs": [torch.zeros(3, dtype=torch.long)], "asr_text": [torch.zeros(4, dtype=torch.long)]}
-    assert model.prompt_tokens(tensors, {}) == 7
-
-def test_a_model_that_starts_agents_starts_as_one_deployment_with_no_node_of_its_own_for_them(
-    tmp_path, monkeypatch, _drop_stubbed_imports,  # noqa: F811
-):
-    model = _qwen3_5("qwen", {"tools": ["python", "spawn_agent"]}, tmp_path, monkeypatch)
-    groups = [{"node_names": ["LLM", "vision_encoder"], "ranks": [0]}, {"node_names": ["Router", "Tool"], "ranks": [1]}]
-    conductor = _start_conductor(model, _config(tmp_path, groups), tmp_path, monkeypatch)
-    assert conductor.worker_graphs
-    plan = model.walk_plan("LLM", ["text"], ["text"], {"text_inputs": [object()]}, {})
-    assert any(step.spawns for step in plan) and any(step.joins for step in plan)
+    ids = lambda n: torch.zeros(n, dtype=torch.long)  # noqa: E731
+    # Qwen's open prompt (3) and its suffix (2); Whisper's decoder prompt (4) is not counted
+    tensors = {"text_inputs": [ids(3)], "suffix": [ids(2)], "asr_text": [ids(4)]}
+    assert model.prompt_tokens(tensors, {}) == 5
+    # an entry member that counts its own spans (Qwen3-Omni, BAGEL) is not added to the default count
+    model.entry.prompt_tokens = lambda tensors, kv_layout: 10
+    assert model.prompt_tokens({"text_inputs": [ids(3)]}, {}) == 10

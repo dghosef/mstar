@@ -24,6 +24,7 @@ from mstar.utils.socket_prefix import per_port_socket_prefix
 
 # Model name -> default config (relative to the repo's configs/).
 DEFAULT_CONFIGS: dict[str, str] = {
+    "voice_agent": "voice_agent.yaml",
     "bagel": "bagel_single_gpu.yaml",
     "bagel_cfg_parallel": "bagel_cfg_parallel.yaml",
     "command_a_plus": "command_a_plus_tp4.yaml",
