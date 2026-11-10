@@ -702,7 +702,7 @@ def test_a_configured_adapter_may_be_a_hugging_face_repo_id(adapters, tmp_path, 
     with pytest.raises(ValueError, match=r"'gone': the Hugging Face repo 'org/gone' is not in the HF cache"):
         resolve({"sql": "org/sql", "gone": "org/gone"})
     (repo / ".no_exist" / commit / "config.json").unlink()  # not known to be absent
-    with pytest.raises(ValueError, match=r"'sql': .*config.json could not be fetched"):
+    with pytest.raises(ValueError, match=r"'sql': config.json of the Hugging Face repo 'org/sql' could not be fetched"):
         resolve({"sql": "org/sql"})
     # a snapshot from `hf download`: no .no_exist marker for config.json, and none needed
     # as adapter_config.json gives the alpha
