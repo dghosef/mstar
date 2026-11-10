@@ -143,3 +143,12 @@ def test_a_member_that_can_speak_needs_a_link_for_its_text(tmp_path, monkeypatch
         MultiModel({"llm": llm, "tts": _kokoro("kokoro", {}, tmp_path, monkeypatch)})
 
 
+def test_a_model_that_starts_agents_starts_as_one_deployment_with_no_node_of_its_own_for_them(
+    tmp_path, monkeypatch, _drop_stubbed_imports,  # noqa: F811
+):
+    model = _qwen3_5("qwen", {"tools": ["python", "spawn_agent"]}, tmp_path, monkeypatch)
+    groups = [{"node_names": ["LLM", "vision_encoder"], "ranks": [0]}, {"node_names": ["Router", "Tool"], "ranks": [1]}]
+    conductor = _start_conductor(model, _config(tmp_path, groups), tmp_path, monkeypatch)
+    assert conductor.worker_graphs
+    plan = model.walk_plan("LLM", ["text"], ["text"], {"text_inputs": [object()]}, {})
+    assert any(step.spawns for step in plan) and any(step.joins for step in plan)

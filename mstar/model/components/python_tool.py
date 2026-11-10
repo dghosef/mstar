@@ -6,6 +6,7 @@ A model with ``tools`` adds a ``route`` walk of a ``Router`` node and a ``tool``
     prefill -> decode -> route -(tools)-> tool -> prefill that continues the reply -> decode ...
                            `-(answer)-> end
                            `-(speak)-> end
+                           `-(spawn)-> join the agents' answers -> prefill that continues the reply -> decode ...
 
 Decode ends on the turn-ending token, as it always does. The router reads the turn's ids
 (the first token the prefill sampled, then the decode loop's accumulated ``turn_ids``),
@@ -15,8 +16,11 @@ calls are all ``speak`` (when the request asks for audio) takes the ``speak`` ex
 router writes the text onto its ``speak_text`` stream edge, which a `MultiModel` link connects to
 a speech model, and the plan ends (the turn is spoken, not answered to the model); on every other
 exit it writes nothing there. A turn that mixes ``speak`` with other calls runs the others as tools,
-and the speech model hears nothing of it.
-The tool node runs the calls it is
+and the speech model hears nothing of it. A turn whose calls are all ``spawn_agent`` (once per request, and not in a
+child) takes the ``spawn`` exit: the router persists a prompt per task (``agent_0``, ...: the chat template's ids), the
+conductor starts a child request of the same model from each (the plan's ``spawns``) and holds the ``join`` step until
+all have ended, when the tool node frames their answers as tool responses. A child's router persists its final turn as
+``agent_answer`` when it answers. The tool node runs the calls it is
 given, each by the handler of its name (`TOOL_HANDLERS`), all of a turn's at once, and
 persists ``tool_text``: the rest of the conversation as the chat template writes it, for
 the next prefill. A call to a tool with no handler is an error the model reads.
@@ -48,6 +52,9 @@ import torch
 
 from mstar.communication.tensors import NameToTensorList
 from mstar.conductor.request_info import (
+    AGENT_ANSWER,
+    AGENT_ANSWERS,
+    AGENT_CHILD,
     APPENDS,
     FINAL_PREFILL,
     PREFILL_END,
@@ -80,6 +87,16 @@ TOOL_TEXT = "tool_text"
 ANSWER = "answer"
 TOOLS_EXIT = "tools"
 SPEAK = "speak"
+SPAWN = "spawn_agent"
+SPAWN_EXIT = "spawn"
+# the agents: a prompt per child (persisted by the router, one tensor each), the flag that the request has
+# spawned, a child's final turn, and the answers the join step's tool node reads
+MAX_AGENTS = 4
+AGENT_PROMPTS = tuple(f"agent_{i}" for i in range(MAX_AGENTS))
+SPAWNED = "spawned"
+# the most tokens one agent's answer may bring back to its parent (the rest is cut)
+ANSWER_TOKENS = 512
+
 PYTHON_TOOL_SCHEMA = {
     "type": "function",
     "function": {
@@ -182,11 +199,27 @@ SPEAK_SCHEMA = {
     },
 }
 
+SPAWN_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": SPAWN,
+        "description": (
+            "Start an agent that works on a task by itself and returns its answer. Call it once, with several "
+            "tasks if they are independent: the agents run at the same time. Use it once per conversation."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"task": {"type": "string", "description": "everything the agent needs to know"}},
+            "required": ["task"],
+        },
+    },
+}
+
 # The tools a serving config's ``tools`` can name: the schema the chat template shows the model, and for
-# those the tool node runs, a handler (arguments to the text the model reads back). ``speak`` has none:
-# the router sends its text to the speech model.
+# those the tool node runs, a handler (arguments to the text the model reads back). ``speak`` and
+# ``spawn_agent`` have none: the router sends their calls on.
 TOOL_HANDLERS: dict[str, Callable[[Mapping[str, str]], str]] = {"python": _python}
-TOOL_SCHEMAS = {"python": PYTHON_TOOL_SCHEMA, SPEAK: SPEAK_SCHEMA}
+TOOL_SCHEMAS = {"python": PYTHON_TOOL_SCHEMA, SPEAK: SPEAK_SCHEMA, SPAWN: SPAWN_SCHEMA}
 
 
 def check_tools(names: Sequence[str]) -> tuple[str, ...]:
@@ -195,16 +228,24 @@ def check_tools(names: Sequence[str]) -> tuple[str, ...]:
     return tuple(names)
 
 
-def tool_walks() -> dict[str, GraphSection]:
+def tool_walks(spawn: bool = False) -> dict[str, GraphSection]:
     """The ``route`` walk (the turn's ids in, the parsed calls out) and the ``tool`` walk (the calls
-    in, ``tool_text`` out, persisted and counted toward the request's output budget)."""
+    in, ``tool_text`` out, persisted and counted toward the request's output budget). With ``spawn`` the
+    router also persists a spawn's prompts and flag and a child's answer, and the tool node reads the
+    answers of the agents."""
+    outputs = [GraphEdge(next_node=EMPTY_DESTINATION, name=TOOL_CALLS, persist=True)]
+    if spawn:
+        outputs += [
+            GraphEdge(next_node=EMPTY_DESTINATION, name=name, persist=True)
+            for name in (*AGENT_PROMPTS, SPAWNED, AGENT_ANSWER)
+        ]
     return {
         ROUTE_WALK: GraphNode(
-            name=ROUTER_NODE, input_names=["new_token", TURN_IDS, PREFILL_END],
-            outputs=[GraphEdge(next_node=EMPTY_DESTINATION, name=TOOL_CALLS, persist=True)],
+            name=ROUTER_NODE, input_names=["new_token", TURN_IDS, PREFILL_END, *([SPAWNED] if spawn else [])],
+            outputs=outputs,
         ),
         TOOL_WALK: GraphNode(
-            name=TOOL_NODE, input_names=[TOOL_CALLS],
+            name=TOOL_NODE, input_names=[TOOL_CALLS, *([AGENT_ANSWERS] if spawn else [])],
             outputs=[GraphEdge(
                 next_node=EMPTY_DESTINATION, name=TOOL_TEXT, persist=True, conductor_new_token=True)],
         ),
@@ -213,16 +254,23 @@ def tool_walks() -> dict[str, GraphSection]:
 
 def tool_plan(
     prefills: list[WalkStep], decode_walk: str, prefill_walk: str, enable_thinking: bool, speak: bool = False,
+    spawn: bool = False, child: bool = False,
 ) -> list[WalkStep]:
     """The plan's own ``prefills`` (one, or a spoken prompt's several), decode, the router, the tool, and
-    the prefill that continues the reply and comes back to decode; the router's ``answer`` ends the plan."""
+    the prefill that continues the reply and comes back to decode; the router's ``answer`` ends the plan.
+    ``spawn``: the request may start agents; the plan then ends with their join (the tool step, held until
+    the children have ended) and a second continuation prefill. ``child``: the request is an agent, whose
+    router persists its final turn for its parent."""
     n = len(prefills)
-    return [
+    end = n + 4 + (2 if spawn else 0)
+    metadata = {SPEAK: speak, SPAWN: spawn, AGENT_CHILD: child, "enable_thinking": enable_thinking}
+    plan = [
         *(replace(step, step_metadata={**step.step_metadata, TOOLS: True}) for step in prefills),
         WalkStep(decode_walk, bind={"text_inputs": "new_token"}, step_metadata={TOOLS: True}),
         # ``speak``: whether the request has a speech output the router may send a spoken turn's text to
         WalkStep(
-            ROUTE_WALK, exits={ANSWER: n + 4, SPEAK: n + 4, TOOLS_EXIT: n + 2}, step_metadata={SPEAK: speak},
+            ROUTE_WALK, exits={ANSWER: end, SPEAK: end, TOOLS_EXIT: n + 2, **({SPAWN_EXIT: n + 4} if spawn else {})},
+            step_metadata=metadata, spawns=AGENT_PROMPTS if spawn else (),
         ),
         WalkStep(TOOL_WALK, step_metadata={"enable_thinking": enable_thinking}),
         WalkStep(
@@ -230,6 +278,15 @@ def tool_plan(
             step_metadata={FINAL_PREFILL: True, TOOLS: True, APPENDS: True},
         ),
     ]
+    if spawn:
+        plan += [
+            WalkStep(TOOL_WALK, step_metadata={"enable_thinking": enable_thinking}, joins=True),
+            WalkStep(
+                prefill_walk, bind={"text_inputs": TOOL_TEXT}, exits={"": n},
+                step_metadata={FINAL_PREFILL: True, TOOLS: True, APPENDS: True},
+            ),
+        ]
+    return plan
 
 
 class _CpuNode(NodeSubmodule):
@@ -273,10 +330,14 @@ class ToolRouterSubmodule(_CpuNode):
 
     def __init__(
         self, tokenizer, device: str | torch.device = "cpu", fmt: QwenToolFormat | None = None,
+        render_agent: Callable[[str, bool], list[int]] | None = None,
     ):
         super().__init__(device)
         self.tokenizer = tokenizer
         self.format = fmt or QwenToolFormat()
+        # a task (and whether it thinks) to the prompt ids of an agent that does it (the chat template, the
+        # parent's tools)
+        self.render_agent = render_agent
 
     def prepare_inputs(
         self, graph_walk: str, fwd_info: CurrentForwardPassInfo, inputs: NameToTensorList, **kwargs,
@@ -288,6 +349,10 @@ class ToolRouterSubmodule(_CpuNode):
         start = int(inputs[PREFILL_END][0]) + ids.numel() - 1
         return ARNodeInputs(input_seq_len=0, kwargs={
             "ids": ids, "start": start, SPEAK: bool(fwd_info.step_metadata.get(SPEAK, False)),
+            # a spawn is open to a request that has not spawned yet and is not itself an agent
+            SPAWN: bool(fwd_info.step_metadata.get(SPAWN, False)) and not inputs.get(SPAWNED),
+            "child": bool(fwd_info.step_metadata.get(AGENT_CHILD, False)),
+            "thinking": bool(fwd_info.step_metadata.get("enable_thinking", True)),
         })
 
     def forward_batched(
@@ -308,6 +373,15 @@ class ToolRouterSubmodule(_CpuNode):
                 # nothing there, so that model hears nothing of it.
                 text = " ".join(str(args["text"]).strip() for args in said)
                 out[rid][SPEAK_TEXT] = [self._tensor(_pack({"text": text, "voice": said[0].get("voice")}), torch.uint8)]
+            tasks = [str(c.arguments.get("task", "")).strip() for c in calls if c.name == SPAWN]
+            if row[SPAWN] and self.render_agent is not None and calls and len(tasks) == len(calls) and all(tasks):
+                # a spawn: a prompt per task, and the flag that the request has spawned
+                for name, task in zip(AGENT_PROMPTS, tasks, strict=False):
+                    out[rid][name] = [self._tensor(self.render_agent(task, row["thinking"]), torch.long)]
+                out[rid][SPAWNED] = [self._tensor([1], torch.long)]
+            elif row["child"] and not calls:
+                # an agent's final turn, for its parent
+                out[rid][AGENT_ANSWER] = [self._tensor(ids.tolist(), torch.long)]
         return out
 
     def check_stop(
@@ -315,6 +389,8 @@ class ToolRouterSubmodule(_CpuNode):
     ) -> StopCheck:
         if SPEAK_TEXT in outputs:
             return StopCheck(exit=SPEAK)
+        if AGENT_PROMPTS[0] in outputs:
+            return StopCheck(exit=SPAWN_EXIT)
         return StopCheck(exit=TOOLS_EXIT if _unpack(outputs[TOOL_CALLS][0])["calls"] else ANSWER)
 
 
@@ -341,7 +417,22 @@ class ToolSubmodule(_CpuNode):
             "payload": _unpack(inputs[TOOL_CALLS][0]),
             "enable_thinking": bool(fwd_info.step_metadata.get("enable_thinking", True)),
             "budget": int(fwd_info.max_tokens),
+            "answers": self._answers(fwd_info.step_metadata, inputs.get(AGENT_ANSWERS, ())),
         })
+
+    def _answers(self, metadata: Mapping, tensors: Sequence[torch.Tensor]) -> list[str] | None:
+        """The agents' answers, in task order, when this step joins them (the conductor says how many agents
+        there were, and which of them failed, in the step's metadata); else None."""
+        n = int(metadata.get("agents", 0))
+        if not n:
+            return None
+        errors = metadata.get("agent_errors") or {}
+        answers = iter(
+            self.tokenizer.decode(t.reshape(-1).tolist()[:ANSWER_TOKENS], skip_special_tokens=True).strip()
+            for t in tensors
+        )
+        return [errors[str(i)] if str(i) in errors else next(answers, "Error: the agent gave no answer")
+                for i in range(n)]
 
     def _text_ids(self, text: str) -> list[int]:
         return self.tokenizer.encode(text, add_special_tokens=False)
@@ -370,13 +461,16 @@ class ToolSubmodule(_CpuNode):
     def forward_batched(
         self, graph_walk: str, engine_inputs: ModelInputsFromEngine, rows=(), **kwargs,
     ) -> dict[str, NameToTensorList]:
-        # every call of every row at once; a row's results come back together
-        futures = [[self._pool.submit(self._run, name, args) for name, args in row["payload"]["calls"]]
+        # every call of every row at once; a row's results come back together. A row that joins agents
+        # has their answers in place of the calls' results
+        futures = [[] if row["answers"] is not None else
+                   [self._pool.submit(self._run, name, args) for name, args in row["payload"]["calls"]]
                    for row in rows]
         return {
             rid: {TOOL_TEXT: [
                 self._tensor(self._text(
-                    row["payload"]["tail"], [f.result() for f in row_futures],
+                    row["payload"]["tail"],
+                    row["answers"] if row["answers"] is not None else [f.result() for f in row_futures],
                     row["enable_thinking"], row["budget"]), torch.long),
                 self._tensor([row["payload"]["start"]], torch.long),
             ]}

@@ -824,3 +824,14 @@ def test_real_mooncake_tcp_keeps_a_failed_reads_buffers_until_its_running_transf
     finally:
         for mgr in (producer, consumer):
             mgr._async_reader._executor.shutdown(wait=True)
+
+
+def test_a_persisted_tensor_goes_with_the_request_that_stored_it(tmp_path):
+    """A request's removal drops what it persisted, so a tensor another request is still to read
+    (a subagent's answer, read by its parent) needs its owner kept until the reader is done."""
+    mgr, _ = _shm_manager(tmp_path)
+    (info,) = mgr.store_and_return_tensor_info("child", {"answer": [torch.arange(5)]})["answer"]
+    mgr.set_persist(info.uuid, True)
+    assert mgr.tensor_store.get_all_uuids("child")
+    mgr.force_cleanup_request("child")
+    assert not mgr.tensor_store.get_all_uuids("child")

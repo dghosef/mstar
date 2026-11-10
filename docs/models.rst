@@ -772,6 +772,17 @@ stream edge (it writes nothing on any other exit, so a request that never speaks
 the turn ends, spoken and not answered to the model. A turn that mixes ``speak`` with other calls runs the others and
 is not spoken.
 
+**Agents a reply starts.** ``model_kwargs: {tools: [python, spawn_agent]}`` lets a reply call ``spawn_agent(task)``,
+one or several in one turn and once per request. The router ends the turn through its ``spawn`` exit and persists a
+prompt per task (the chat template, with the same tools as the parent's); the conductor starts a child request of the
+same model from each, on the workers, as it would any request (``WalkStep.spawns``), never registered with the API
+server and sending the client nothing. Children run inside the parent's concurrency slot and cannot spawn. The parent
+waits at a join step (``WalkStep.joins``), which runs when every child has ended: the tool node frames each child's
+final turn, cut to 512 tokens, as a tool response, in task order, and the reply goes on. A child that fails, or is
+still running ten minutes after the spawn, is an ``Error:`` answer; a parent that ends first ends its children. A
+child's KV is freed when it ends, and its answer is kept for the join. The client sees the parent's reply (the
+``spawn_agent`` markup included) and its final answer.
+
 **LoRA adapters.** A ``resources: lora:`` block in the serving config serves
 per-request LoRA adapters (PEFT ``adapter_model.safetensors``; the scaling comes
 from the ``adapter_config.json`` beside it). The OpenAI ``model`` field picks one,
