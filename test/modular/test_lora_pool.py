@@ -735,7 +735,7 @@ def test_a_configured_adapter_may_be_a_hugging_face_repo_id(adapters, tmp_path, 
         resolve({"bin": "org/bin", "gone": "org/gone", "torn": "org/torn", "down": "org/down"})
     assert "'bin': the Hugging Face repo 'org/bin' has no adapter_model.safetensors" in str(err.value)
     assert "'gone': " in str(err.value) and "'torn': " in str(err.value)
-    assert "'down': the Hugging Face repo 'org/down''s adapter_config.json could not be fetched" in str(err.value)
+    assert "'down': adapter_config.json of the Hugging Face repo 'org/down' could not be fetched" in str(err.value)
 
 
 def test_a_lora_deployment_still_has_its_kv_pools_checked_against_its_cap(adapters):

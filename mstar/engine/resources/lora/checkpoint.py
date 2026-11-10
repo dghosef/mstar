@@ -83,7 +83,7 @@ def load_lora_file(path: str, device="cpu") -> dict[str, torch.Tensor]:
 
 KeyConverter = Callable[[dict[str, torch.Tensor]], dict[str, torch.Tensor]]
 
-_SIDECAR_CONFIGS = ("adapter_config.json", "config.json")
+SIDECAR_CONFIGS = ("adapter_config.json", "config.json")
 
 
 def _pattern_value(patterns: dict, module: str):
@@ -133,7 +133,7 @@ def sidecar_default_alpha(path: str) -> Callable[[str, int], float] | None:
     import json
     from pathlib import Path
 
-    for name in _SIDECAR_CONFIGS:
+    for name in SIDECAR_CONFIGS:
         candidate = Path(path).parent / name
         if not candidate.is_file():
             continue

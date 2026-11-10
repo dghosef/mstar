@@ -15,7 +15,7 @@ import os
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from mstar.engine.resources.lora.checkpoint import _SIDECAR_CONFIGS, sidecar_default_alpha
+from mstar.engine.resources.lora.checkpoint import SIDECAR_CONFIGS, sidecar_default_alpha
 from mstar.engine.resources.lora.config import ADAPTER_WEIGHTS_FILE, LORA_RESOURCE_KEY, LoraSpec, resolve_adapter_path
 
 logger = logging.getLogger(__name__)
@@ -94,7 +94,7 @@ def resolve_lora_adapters(spec: LoraSpec | None, model_config: dict) -> dict[str
 def fetch_adapter_path(source: str) -> str:
     """The local safetensors file ``source`` names: a local path as ``resolve_adapter_path``
     reads it, else a Hugging Face repo id (as vLLM's ``lora_path`` may be), whose
-    ``adapter_model.safetensors`` and the configs among ``_SIDECAR_CONFIGS`` it has (where
+    ``adapter_model.safetensors`` and the configs among ``SIDECAR_CONFIGS`` it has (where
     its alpha may be: ``sidecar_default_alpha``) alone are fetched into the HF cache, at one
     commit, from the cache alone under ``HF_HUB_OFFLINE``. A config is taken as absent only
     when the hub says so, now or in the cache's record of an earlier answer; one that could
@@ -133,7 +133,7 @@ def fetch_adapter_path(source: str) -> str:
             "or the hub cannot be reached"
         ) from exc
     commit = os.path.basename(os.path.dirname(path))
-    for config in _SIDECAR_CONFIGS:
+    for config in SIDECAR_CONFIGS:
         if sidecar_default_alpha(path) is not None:
             break  # the configs fetched so far give the alpha, as a local read takes it
         try:
@@ -143,5 +143,5 @@ def fetch_adapter_path(source: str) -> str:
         except LocalEntryNotFoundError as exc:
             # the hub could not be asked (offline, unreachable, an error answer)
             if try_to_load_from_cache(source, config, revision=commit) is not _CACHED_NO_EXIST:
-                raise OSError(f"the Hugging Face repo {source!r}'s {config} could not be fetched") from exc
+                raise OSError(f"{config} of the Hugging Face repo {source!r} could not be fetched") from exc
     return path
