@@ -403,6 +403,12 @@ class KVReqConfig(ResourceReqConfig):
     # page with it when the prompt filled none.
     prefix_root: bytes = b""
     prefix_cache: bool = True
+    # The request's prompt is keyed on the worker, from the ids its first row carries (`KVManager`), for a prompt the
+    # API server never saw: a child request's, which the router wrote.
+    key_from_ids: bool = False
+    # label -> the token counts, page-floored, where the prompt breaks into messages: where a recurrent pool's
+    # checkpoint policy may keep a snapshot (`CheckpointRow.marks`)
+    prefix_marks: dict[str, list[int]] | None = None
     kv_layout: dict[str, "StreamLayout"] | None = None
     loop_caps: dict[str, int] | None = None
     # `unpausable`: the request streams an output that can't pause, set by the conductor.
@@ -419,6 +425,8 @@ class KVReqConfig(ResourceReqConfig):
         prefix_decode: dict[str, str] | None=None,
         prefix_root: bytes | None=None,
         prefix_cache: bool | None=None,
+        key_from_ids: bool | None=None,
+        prefix_marks: dict[str, list[int]] | None=None,
         kv_layout: dict[str, list] | None=None,
         loop_caps: Mapping[str, int] | None=None,
         **kwargs,
@@ -433,6 +441,10 @@ class KVReqConfig(ResourceReqConfig):
             self.prefix_root = prefix_root
         if prefix_cache is not None:
             self.prefix_cache = prefix_cache
+        if key_from_ids is not None:
+            self.key_from_ids = key_from_ids
+        if prefix_marks is not None:
+            self.prefix_marks = prefix_marks
         if kv_layout is not None:
             # a model lays out every label the request could open on any deployment, so keep only the ones it opens
             opened = self.opened_labels()

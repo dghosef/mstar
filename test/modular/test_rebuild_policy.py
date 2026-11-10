@@ -27,6 +27,8 @@ from mstar.engine.resources.sampler.resource import SamplerResource
 from mstar.engine.resources.step import Segment
 from mstar.graph.base import GraphEdge, GraphNode, Loop
 from mstar.model.bagel.bagel_model import BagelModel
+from mstar.model.components.text_glue import STREAM_WALK
+from mstar.model.keys import PREFILL_TEXT
 from mstar.model.multimodal import vision_encoder
 from mstar.model.orpheus.orpheus_model import OrpheusModel
 from mstar.model.qwen3_5.qwen3_5_model import Qwen3_5DenseModel
@@ -299,7 +301,7 @@ def test_a_step_the_prefix_cache_served_whole_is_recorded():
 
     [record] = rebuilds._kept[NODE][B].records
     assert record.inputs["text_inputs"][0].tolist() == [9, 10, 11], "the rebuild would prefill other ids"
-    assert rebuilds.refusal(B, NODE, DECODE, {}, None) is None, "a request the pool counts on dropping can't be dropped"
+    assert rebuilds.refusal(B, NODE, None) is None, "a request the pool counts on dropping can't be dropped"
 
 
 def test_a_request_the_full_pool_cant_hold_is_not_rebuildable():
@@ -810,13 +812,13 @@ def test_a_host_copy_lands_whole_before_its_request_can_be_dropped():
     rebuilds.flush()
     rebuilds._kept[NODE][R].sampled.append(6)
 
-    assert "haven't reached the host" in rebuilds.refusal(R, NODE, DECODE, {}, None), (
+    assert "haven't reached the host" in rebuilds.refusal(R, NODE, None), (
         "the request could be dropped before its copy"
     )
     del step, texts, embeds
     torch.full((rows,), -1.0, device="cuda")
     torch.cuda.synchronize()
-    assert rebuilds.refusal(R, NODE, DECODE, {}, None) is None
+    assert rebuilds.refusal(R, NODE, None) is None
     [record] = rebuilds._kept[NODE][R].records
     assert torch.equal(record.inputs["embeds"][0], expected), "the next step's tensor took the memory before the copy"
 
@@ -839,6 +841,85 @@ def test_only_a_rows_kept_sample_is_appended(sampled):
     kept = rebuilds._kept[NODE]
     assert list(kept[R].sampled) == [4, 9], "a rebuild would prefill other ids than the request's"
     assert not (kept[A].sampled or kept[B].sampled), "it kept a discarded sample"
+
+
+def _appended(rid, ids, position=None, metadata=None, **step):
+    """A prefill row of ``ids`` after the prompt's steps, with its start as a second tensor when ``position`` is."""
+    row = {"text_inputs": [torch.tensor(ids), *([torch.tensor([position])] if position is not None else [])]}
+    batch = _ran(PREFILL, {rid: row}, **step)
+    batch.per_request_info = {rid: SimpleNamespace(step_metadata=metadata or {})}
+    return batch
+
+
+def _sample(rebuilds, rid, token):
+    rebuilds.keep_samples(_batch((rid,)), {rid: {"new_token": [torch.tensor([token])]}}, None)
+
+
+def test_a_request_is_rebuilt_past_a_tool_round_from_everything_it_wrote_in_order():
+    """Its prompt, the decode's samples, then a continuation row that starts with the decode's last sample (the stop
+    id, which a speculated step may have written already, so it is kept once), then the row's own sample. A decode
+    row, a rebuild row, an empty row and a later chunk of the row add nothing."""
+    rebuilds = _rebuilds()
+    rebuilds.record(_ran(PREFILL, {R: {"text_inputs": [torch.tensor([1, 2, 3])]}}))
+    for token in (50, 51, 99):
+        _sample(rebuilds, R, token)
+    ledger = rebuilds._kept[NODE][R]
+    ignored = [
+        _ran(DECODE, {R: {"text_inputs": [torch.tensor([99])]}}),
+        _appended(R, [99, 20, 21], 6, rebuild=frozenset({R})),
+        _appended(R, [], 6),
+    ]
+    late = _appended(R, [99, 20, 21], 6)
+    late.chunk_ranges = {R: ChunkRange(2, 3, 3, 1)}
+    for batch in (*ignored, late):
+        assert rebuilds.keep_appended(batch) == []
+    assert list(ledger.sampled) == [50, 51, 99] and not ledger.unsampled
+
+    assert rebuilds.keep_appended(_appended(R, [99, 20, 21], 6)) == []
+    assert list(ledger.sampled) == [50, 51, 99, 20, 21] and ledger.unsampled
+    assert "since its last sample" in rebuilds.refusal(R, NODE, None), "a drop between a row and its sample"
+    _sample(rebuilds, R, 22)
+    assert rebuilds.refusal(R, NODE, None) is None
+    assert rebuilds.tokens(R, NODE, None) == 3 + 5
+    assert list(rebuilds.start(R, NODE, None).sampled) == [50, 51, 99, 20, 21, 22]
+
+
+def test_a_spoken_turns_transcript_reaches_the_log_and_the_request_is_dropped_only_after_the_reply_samples():
+    """The model's own graphs and policy: the transcript's chunks run in a walk of their own that samples nothing,
+    so no policy lists it, and the history's prefill samples nothing either. The rows bring a start and follow no
+    decode, so none of their ids is left out; the suffix's row brings none."""
+    model = Qwen3_5DenseModel.__new__(Qwen3_5DenseModel)
+    vars(model).update(
+        config=SimpleNamespace(max_position_embeddings=4096, hidden_size=64), vision_config=None, media=(),
+        tools=(), stream_in="transcript",
+    )
+    rebuilds = Rebuilds(
+        model.rebuild_policies(), model.get_graph_walk_graphs(), HostPool(1 << 10, torch.device("cpu")),
+    )
+    writes = {"kv": {NODE: NodeWrites(frozenset({PREFILL_TEXT, STREAM_WALK, DECODE}), frozenset({"decode_loop"}))}}
+    layouts = {"kv": [StreamLayout(spans=(PrefixSpan(3, 3, PREFILL_TEXT),), growth=(("decode_loop", 1),))]}
+    assert rebuilds.ingest_request(R, writes, layouts, unpausable=False).rebuildable["kv"]
+    rebuilds.record(_ran(PREFILL_TEXT, {R: {"text_inputs": [torch.tensor([1, 2, 3])]}}))
+
+    for walk, ids, start in ((STREAM_WALK, [10, 11], 3), (STREAM_WALK, [12], 5), (STREAM_WALK, [], 6),
+                             (PREFILL_TEXT, [13, 14], None)):
+        batch = _appended(R, ids, start)
+        batch.step_context = replace(batch.step_context, graph_walk=walk)
+        assert rebuilds.keep_appended(batch) == []
+    ledger = rebuilds._kept[NODE][R]
+    assert list(ledger.sampled) == [10, 11, 12, 13, 14], "the transcript never reached the log"
+    assert "since its last sample" in rebuilds.refusal(R, NODE, None)
+    _sample(rebuilds, R, 15)
+    assert rebuilds.refusal(R, NODE, None) is None and rebuilds.tokens(R, NODE, None) == 3 + 5
+
+
+def test_a_row_that_does_not_start_with_the_sample_before_it_leaves_the_request_with_no_log():
+    rebuilds = _rebuilds()
+    rebuilds.record(_ran(PREFILL, {R: {"text_inputs": [torch.tensor([1, 2, 3])]}}))
+    _sample(rebuilds, R, 50)
+
+    assert rebuilds.keep_appended(_appended(R, [77, 20], 4)) == [R]
+    assert "keeps no log" in rebuilds.refusal(R, NODE, None)
 
 
 def test_a_sample_is_kept_from_the_host_outputs_the_worker_copies_on_read():
@@ -908,27 +989,26 @@ def test_a_request_of_ids_alone_that_samples_a_pad_id_stays_droppable():
 
     forgot = rebuilds.keep_samples(_batch((R,)), {}, HostRows((R,), {"new_token": torch.tensor([91])}))
 
-    assert not forgot and rebuilds.refusal(R, NODE, DECODE, {"decode_loop": 0}, None) is None, (
+    assert not forgot and rebuilds.refusal(R, NODE, None) is None, (
         "a text request whose rebuild would write the KV it holds was never dropped again"
     )
 
 
-@pytest.mark.parametrize("why, node, walk, sampled, iters", [
-    ("declares no rebuild policy", "vocoder", DECODE, 1, 0),
-    ("keeps no log", NODE, DECODE, None, 0),
-    ("doesn't run", NODE, PREFILL, 1, 0),
-    ("don't cover its KV", NODE, DECODE, 1, 1),
+@pytest.mark.parametrize("why, node, sampled", [
+    ("declares no rebuild policy", "vocoder", 1),
+    ("keeps no log", NODE, None),
+    ("has sampled nothing", NODE, 0),
 ])
-def test_a_drop_is_refused_unless_the_kept_ids_cover_the_kv(why, node, walk, sampled, iters):
+def test_a_drop_is_refused_unless_the_kept_ids_cover_the_kv(why, node, sampled):
     rebuilds = _rebuilds()
     if sampled is None:
         del rebuilds._kept[NODE][R]
     else:
         rebuilds._kept[NODE][R] = _kept([1, 2], *[5] * sampled)
 
-    assert why in rebuilds.refusal(R, node, walk, {"decode_loop": iters}, None)
+    assert why in rebuilds.refusal(R, node, None)
     rebuilds._kept[NODE][R] = _kept([1, 2], 5, 6)
-    assert rebuilds.refusal(R, NODE, DECODE, {"decode_loop": 1}, None) is None, "a request its ids cover was refused"
+    assert rebuilds.refusal(R, NODE, None) is None, "a request its ids cover was refused"
 
 
 def test_a_drop_is_refused_until_the_kept_ids_reach_the_host():
@@ -936,7 +1016,7 @@ def test_a_drop_is_refused_until_the_kept_ids_reach_the_host():
     copying = _record([1, 2], landed=SimpleNamespace(query=lambda: False))
     rebuilds._kept[NODE][R] = KeptIds((LayoutRow(PREFILL, 2),), [copying], array("i", [5]))
 
-    assert "haven't reached the host" in rebuilds.refusal(R, NODE, DECODE, {"decode_loop": 0}, None), (
+    assert "haven't reached the host" in rebuilds.refusal(R, NODE, None), (
         "a rebuild would read ids the copy hasn't written yet"
     )
 
@@ -959,7 +1039,7 @@ def test_a_request_mid_prefill_is_rebuilt_from_its_prompts_input_up_to_where_its
     rebuilds = _rebuilds()
     prefilling = Prefilling(PREFILL, 4, 10)
 
-    why = rebuilds.refusal(R, NODE, PREFILL, {}, prefilling)
+    why = rebuilds.refusal(R, NODE, prefilling)
     rebuild = rebuilds.start(R, NODE, prefilling)
     inputs, infos = {R: {}}, {R: CurrentForwardPassInfo(str(R), PREFILL, 0, 0, 8)}
     rebuilds.fill(NODE, {R}, {R: ChunkRange(0, 4, 4, 4)}, inputs, infos)
@@ -1099,7 +1179,7 @@ def test_a_drop_takes_the_slots_its_rebuild_writes_and_the_rebuild_writes_them(p
         _write_kv(kv, R, DECODE, 1, 1)
         rebuilds._kept[NODE][R].sampled.extend([100, 101, 102])
         prefilling, iters = None, {"decode_loop": 2}
-    assert rebuilds.refusal(R, NODE, walk if mid_prefill else DECODE, iters, prefilling) is None
+    assert rebuilds.refusal(R, NODE, prefilling) is None
 
     tokens = rebuilds.tokens(R, NODE, prefilling)
     assert kv.check_drop(R, tokens) is None, f"the drop refused {tokens} slots for a KV that holds them"
@@ -1206,7 +1286,7 @@ def test_a_step_other_than_its_layouts_next_leaves_the_request_never_dropped(ste
 
     rebuilds.record(first)
 
-    assert "keeps no log" in rebuilds.refusal(R, NODE, DECODE, {}, None), "a rebuild would write other slots"
+    assert "keeps no log" in rebuilds.refusal(R, NODE, None), "a rebuild would write other slots"
 
 
 def test_a_chunked_steps_first_chunk_records_it_and_its_later_chunks_record_nothing():
@@ -1232,7 +1312,7 @@ def test_a_request_dropped_in_a_later_prompt_step_reruns_the_steps_before_it_the
     rebuilds = _two_steps()
     prefilling = Prefilling(VISION, 4, 11)
 
-    why = rebuilds.refusal(R, NODE, VISION, {}, prefilling)
+    why = rebuilds.refusal(R, NODE, prefilling)
     rebuild = rebuilds.start(R, NODE, prefilling)
     cursor = rebuilds.cursor(R, NODE)
 

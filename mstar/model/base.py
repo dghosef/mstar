@@ -653,6 +653,9 @@ class Model(ABC):
     # the model's config.yaml overrides either. See
     # ``entrypoint._set_preprocess_threads``.
     PREPROCESS_TORCH_THREADS: int | None = None
+    # The most children one request of this model starts (`WalkStep.spawns`). The conductor numbers them
+    # just before their parent.
+    MAX_CHILDREN: int = 0
     # ``load_image`` / ``load_audio`` / ``load_video`` and ``process_prompt``
     # may run for several requests at once. The data worker then prepares
     # requests on a pool (``CpuPlan.prepare_workers`` at this process's intra-op
@@ -856,6 +859,12 @@ class Model(ABC):
                         )
                     out[(node, walk)] = name
         return out
+
+    def chat_template_kwargs(self, **kwargs) -> dict | None:
+        """The ``apply_chat_template`` arguments for a request's chat, for a model whose prompt is its tokenizer's
+        chat template over the chat's messages. None (the default) for one whose prompt is not, which has no message
+        boundaries for a recurrent pool's `messages` checkpoint policy: its deployment is refused at load."""
+        return None
 
     def kv_labels(self) -> dict[str, dict[str, KVLabel]]:
         """The paged KV labels the model's walks write, by resource and label.

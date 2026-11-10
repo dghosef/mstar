@@ -2437,7 +2437,7 @@
     {
       "type": "timeseries",
       "title": "Prefix cache hit share",
-      "description": "Prompt tokens the prefix cache already held over tokens looked up (once per request); dashed: tokens looked up per second.",
+      "description": "Prompt tokens the prefix cache every resource agreed to serve over tokens looked up (once per layout step; a rebuild is not counted); dashed: tokens looked up per second.",
       "datasource": {
         "type": "prometheus",
         "uid": "prom"

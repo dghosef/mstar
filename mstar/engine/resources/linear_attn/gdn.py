@@ -251,6 +251,7 @@ class GDNManager(LinearAttnManager):
                         if lease is not None else None
                     ),
                     stage_inputs=self._stage_prefill,
+                    snapshots_per_row=self._pool.snapshots_per_row,
                 )
             elif is_decode:
                 store[key] = GDNDecodeWrapper(
@@ -275,6 +276,7 @@ class GDNManager(LinearAttnManager):
                     has_sink_state=self._has_sink,
                     null_slot_id=null_slot_id,
                     stage_inputs=self._stage_prefill,
+                    snapshots_per_row=self._pool.snapshots_per_row,
                 )
         return store[key]
 
