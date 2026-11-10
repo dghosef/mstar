@@ -39,10 +39,11 @@ node_groups:
     ranks: [0]
   - node_names: [LLM, vision_encoder, Glue]
     ranks: [1]
-  # host work, no CUDA: the router and tool node, and Kokoro's front
-  - node_names: [Router, Tool, kokoro_front]
+  # host work, no CUDA: the router and tool node. A tool call waits for its code, up to its timeout, so nothing
+  # else shares the rank.
+  - node_names: [Router, Tool]
     ranks: [2]
-  - node_names: [kokoro]
+  - node_names: [kokoro_front, kokoro]
     ranks: [3]
 resources:
   gdn_state:
