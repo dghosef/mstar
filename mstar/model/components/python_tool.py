@@ -278,30 +278,37 @@ def tool_plan(
     the children have ended) and a second continuation prefill. ``child``: the request is an agent, whose
     router persists its final turn for its parent."""
     n = len(prefills)
-    end = n + 4 + (2 if spawn else 0)
+    # where each step after the prefills sits, for the exits that lead to them
+    labels = ["decode", "route", "tool", "continue", *(["join", "continue_joined"] if spawn else [])]
+    at = {label: n + i for i, label in enumerate(labels)}
+    end = n + len(labels)
     metadata = {SPEAK: speak, SPAWN: spawn, AGENT_CHILD: child, "enable_thinking": enable_thinking}
+
+    def resume() -> WalkStep:
+        """The prefill that continues the reply with the tool's text, and back to decode."""
+        return WalkStep(
+            prefill_walk, bind={"text_inputs": TOOL_TEXT}, exits={"": at["decode"]},
+            step_metadata={FINAL_PREFILL: True, TOOLS: True, APPENDS: True},
+        )
+
     plan = [
         *(replace(step, step_metadata={**step.step_metadata, TOOLS: True}) for step in prefills),
         WalkStep(decode_walk, bind={"text_inputs": "new_token"}, step_metadata={TOOLS: True}),
         # ``speak``: whether the request has a speech output the router may send a spoken turn's text to
         WalkStep(
-            ROUTE_WALK, exits={ANSWER: end, SPEAK: end, TOOLS_EXIT: n + 2, **({SPAWN_EXIT: n + 4} if spawn else {})},
+            ROUTE_WALK,
+            exits={ANSWER: end, SPEAK: end, TOOLS_EXIT: at["tool"], **({SPAWN_EXIT: at["join"]} if spawn else {})},
             step_metadata=metadata, spawns=AGENT_PROMPTS if spawn else (),
         ),
         WalkStep(TOOL_WALK, step_metadata={"enable_thinking": enable_thinking}),
-        WalkStep(
-            prefill_walk, bind={"text_inputs": TOOL_TEXT}, exits={"": n},
-            step_metadata={FINAL_PREFILL: True, TOOLS: True, APPENDS: True},
-        ),
+        resume(),
     ]
     if spawn:
         plan += [
             WalkStep(JOIN_WALK, step_metadata={"enable_thinking": enable_thinking}, joins=True),
-            WalkStep(
-                prefill_walk, bind={"text_inputs": TOOL_TEXT}, exits={"": n},
-                step_metadata={FINAL_PREFILL: True, TOOLS: True, APPENDS: True},
-            ),
+            resume(),
         ]
+    assert len(plan) == end
     return plan
 
 
