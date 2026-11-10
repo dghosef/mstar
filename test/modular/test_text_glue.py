@@ -172,3 +172,17 @@ def test_whispers_control_tokens_never_reach_the_transcript(whisper_tokenizer, t
     model = object.__new__(WhisperModel)
     model.tokenizer, model.stream_out, model.config = whisper_tokenizer, True, WhisperModelConfig()
     assert model.text_output().detokenizer.to_bytes(ids) == b" hello there"
+
+
+def test_only_a_deployment_that_serves_the_agent_loop_renders_history_as_it_was_generated():
+    template = "x" + Qwen3_5DenseModel._THINK_ONLY_AFTER_QUERY + "y"
+    model = object.__new__(Qwen3_5DenseModel)
+    model.tokenizer = SimpleNamespace(chat_template=template)
+    model.tools = model.stream_in = ()
+    assert model._exact_history(False) == {}         # a plain chat keeps the template's own rendering
+    model.tools = ("python",)
+    assert model._exact_history(True) == {}          # thinking keeps it too
+    assert "or true" in model._exact_history(False)["chat_template"]
+    model.tokenizer = SimpleNamespace(chat_template="a template that changed")
+    with pytest.raises(ValueError, match="earlier turns"):
+        model._exact_history(False)
