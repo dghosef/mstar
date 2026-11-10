@@ -78,7 +78,8 @@ def resolve_lora_adapters(spec: LoraSpec | None, model_config: dict) -> dict[str
     spec.apply_yaml_overrides(adapters=fetched)
     digests = check_adapters(spec)
     resolved: dict[str, Any] = {
-        "adapters": fetched, "adapter_digests": {name: d.hex() for name, d in digests.items()},
+        "adapters": fetched,
+        "adapter_digests": {name: d.hex() for name, d in digests.items()},
     }
     block = model_config["resources"][LORA_RESOURCE_KEY]
     # a YAML list is the deployment's own choice, which nothing narrows
@@ -124,8 +125,7 @@ def fetch_adapter_path(source: str) -> str:
         path = hf_hub_download(source, ADAPTER_WEIGHTS_FILE)
     except RemoteEntryNotFoundError as exc:
         raise ValueError(
-            f"the Hugging Face repo {source!r} has no {ADAPTER_WEIGHTS_FILE}: only safetensors "
-            "adapters are served"
+            f"the Hugging Face repo {source!r} has no {ADAPTER_WEIGHTS_FILE}: only safetensors adapters are served"
         ) from exc
     except LocalEntryNotFoundError as exc:
         raise OSError(
