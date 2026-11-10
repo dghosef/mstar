@@ -195,6 +195,7 @@ class AttentionManager(AttentionResource):
                 decode_tensor_cores=spec.config.decode_tensor_cores,
                 sliding_window=spec.config.sliding_window,
                 decode_fmha=spec.config.decode_fmha,
+                cascade_min_rows=spec.config.cascade_min_rows,
                 layers=spec.config.layers,
                 sm_scale=spec.config.sm_scale,
             )
