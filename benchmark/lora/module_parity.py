@@ -636,7 +636,7 @@ def _lora_logits(spec_: ModelSpec, model, adapters: dict[str, str], prompts, rop
     rids = [r for r, _, _ in rows]
     step = spec_.declare(sub, rids, [ids.cuda() for _, _, ids in rows])
     for rid, adapter, _ in rows:
-        pool.ingest_request(rid, None if adapter is None else LoraReqConfig(adapter))
+        pool.ingest_request(rid, None if adapter is None else LoraReqConfig(adapter, spec.adapter_digests[adapter]))
     ctx = StepContext(request_ids=rids, graph_walk="prefill", slot=0, capture=False)
     lora_step = step.get(LORA_RESOURCE_KEY)
     assert pool.admit(lora_step, ctx).ok
