@@ -77,8 +77,7 @@ class LoraLoads:
             return
         load = LoraLoad(body)
         digest = bytes.fromhex(body.lora_digest)
-        # a pool that refuses outright (the name already served) fails the load without
-        # the rest being asked
+        # a pool whose read cannot even start fails the load without the rest being asked
         for pool in lora_pools(self._engines.engine.resources):
             try:
                 load.reads.append((pool, pool.load_adapter_async(body.lora_name, body.lora_path, digest)))

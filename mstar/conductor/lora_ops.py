@@ -194,8 +194,9 @@ class LoraAdapterOps:
 
     def _roll_back(self, op: _PendingOp, workers) -> None:
         """Have ``workers`` forget a load: its weights only, so a name reloaded in place
-        keeps its old ones. Nothing can be running on it, so each forgets at once, and a
-        later load of the weights reaches each after this."""
+        keeps its old ones. A worker that served them at once (served or retiring there
+        already) may have requests on them, which run to the end on them as after any
+        unload (``unload_adapter``); a later load of the weights reaches each after this."""
         rollback = UnloadLoraAdapter(
             op_id=f"{op.body.op_id}:rollback", lora_name=op.body.lora_name, lora_digest=op.body.lora_digest,
         )

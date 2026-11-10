@@ -44,11 +44,10 @@ def lora_enabled(model_config: Mapping[str, Any]) -> bool:
 
 def describe_load_error(exc: BaseException) -> str:
     """What a failed adapter read tells a client: a refusal (a ``ValueError``: rank,
-    targets, shapes, weights changed on disk, a name already loaded) as itself, with
-    server paths cut to base names as every route's errors are (``scrub_paths``), anything
-    else (an I/O error naming the server's files, say) only that it could not be read.
-    Deterministic, so every rank of an instance says the same. The caller logs ``exc``
-    in full."""
+    targets, shapes, weights changed on disk) as itself, with server paths cut to base
+    names as every route's errors are (``scrub_paths``), anything else (an I/O error naming
+    the server's files, say) only that it could not be read. Deterministic, so every rank
+    of an instance says the same. The caller logs ``exc`` in full."""
     if isinstance(exc, ValueError):
         return scrub_paths(str(exc))
     return "the adapter could not be read (the server log has the details)"
