@@ -1623,14 +1623,12 @@ class Engine:
         if stop is None or stop.last_prefill_flag is None:
             return set()
         ctx = batch.step_context
-        if not ctx.request_walks and ctx.graph_walk not in stop.prefill_walks:
-            return set()
+        if not ctx.request_walks and ctx.graph_walk == stop.walk:
+            return set()      # a step of decode rows
         infos = batch.per_request_info_wrapped
-        return {
-            rid for rid in batch.request_ids
-            if infos[rid].graph_walk in stop.prefill_walks
-            and infos[rid].step_metadata.get(stop.last_prefill_flag, True) is False
-        }
+        # a row whose plan step says False is a prompt's earlier prefill, whatever walk it ran (a transcript's
+        # chunks too): a decode row carries no such flag
+        return {rid for rid in batch.request_ids if infos[rid].step_metadata.get(stop.last_prefill_flag, True) is False}
 
     def step_finished(
         self, batch: ExecutingBatch, outputs: dict[str, NameToTensorList],

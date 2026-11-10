@@ -19,7 +19,7 @@ Not in ``multimodal.py``: ``mstar.model.base`` imports that module, so a
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import NamedTuple
@@ -27,11 +27,37 @@ from typing import NamedTuple
 import torch
 
 from mstar.communication.tensors import NameToTensorList
+from mstar.conductor.request_info import AGENT_CHILD, APPENDS, FINAL_PREFILL
 from mstar.distributed.base import ShardingConfig
 from mstar.engine.resources.sampler.config import SamplerSpec, SamplingReqConfig
 from mstar.engine.resources.spec import CombinedSplit, ResourceReqConfig
-from mstar.graph.base import GraphSection, TensorPointerInfo
+from mstar.graph.base import GraphNode, GraphSection, TensorPointerInfo
 from mstar.model.base import KVLabel, LabelLayout, Model, PrefixKeys, ProcessPromptOutput, Span, WalkStep
+from mstar.model.components.python_tool import (
+    ANSWER_TOKENS,
+    MAX_AGENTS,
+    ROUTER_NODE,
+    SPAWN,
+    SPEAK,
+    TOOL_HANDLERS,
+    TOOL_NODE,
+    TOOL_SCHEMAS,
+    ToolFormat,
+    ToolRouterSubmodule,
+    ToolSubmodule,
+    check_tools,
+    tool_plan,
+    tool_walks,
+)
+from mstar.model.components.sampled_token_decoder import SampledTokenDecoder
+from mstar.model.components.text_glue import (
+    MAX_TRANSCRIPT_TOKENS,
+    STREAM_BASE,
+    STREAM_WALK,
+    SUFFIX,
+    TRANSCRIPT_RESERVE,
+    TRANSCRIPT_STREAM,
+)
 from mstar.model.keys import KV_CACHE, MIXED, PREFILL_TEXT, SAMPLER
 from mstar.model.multimodal import (
     MEDIA_LAYOUT,
@@ -55,6 +81,7 @@ from mstar.model.multimodal import (
 from mstar.model.rebuild import RebuildPolicy
 from mstar.model.submodule_base import NodeSubmodule
 from mstar.model.utils import TextOutput, load_generation_defaults
+from mstar.utils.fast_tokenize import encode_ids
 
 # the sampling knobs a request may set
 SAMPLING_KEYS = (
@@ -123,7 +150,9 @@ class MultimodalDecoderModel(Model):
     # 35-130 ms); at 4, preprocessing held at 7-10 ms and p95 at 49 ms. One
     # thread is steadier but slower (13 ms).
     PREPROCESS_TORCH_THREADS = 4
-    INTERNAL_KWARGS = (MEDIA_LAYOUT,)
+    INTERNAL_KWARGS = (MEDIA_LAYOUT, TRANSCRIPT_STREAM, TRANSCRIPT_RESERVE, AGENT_CHILD)
+    # the conversation so far (``process_prompt``'s ``history``) is in the prompt: the conductor needs none
+    PREPROCESS_ONLY_KWARGS = ("history",)
     # in errors and logs
     NAME: str
     # what the API and conductor processes download: enough to build the
@@ -142,10 +171,37 @@ class MultimodalDecoderModel(Model):
     # the checkpoint's sampling defaults, under whatever a request sets (set
     # by `__init__`; a model built without it reads none)
     sampling_defaults: Mapping[str, object] = MappingProxyType({})
+    # The agent loop, which a model takes by declaring these (a subclass lists ``tools`` and ``stream_in`` in its
+    # ``__init__`` arguments and passes them on).
+    # The grammar of the tool calls in its replies; None for a model that serves no tools.
+    TOOL_FORMAT: ToolFormat | None = None
+    # The one special token a prompt's open user turn is rendered with (`process_open_prompt`); a model
+    # whose chat template can be cut at an open turn names it.
+    OPEN_TURN: str | None = None
+    # the tools a reply may call (``model_kwargs: {tools: [python]}``), on a ``Router`` and a ``Tool`` node the
+    # deployment places (`mstar.model.components.python_tool`)
+    tools: tuple[str, ...] = ()
+    # The name of the client stream whose text a prompt waits for (`MultiModel`'s `Link.stream`), or "": the model
+    # then has a streamed prefill walk, and `process_prompt` cuts the template at an open user turn.
+    stream_in = ""
 
-    def __init__(self, model_path_hf: str, cache_dir: str | None = None):
+    @property
+    def spawn(self) -> bool:
+        """Whether a reply may start agents (``spawn_agent``): child requests of this model, one per task."""
+        return SPAWN in self.tools
+
+    def __init__(
+        self, model_path_hf: str, cache_dir: str | None = None, tools: Sequence[str] = (), stream_in: str = "",
+    ):
         self.model_path_hf = model_path_hf
         self.cache_dir = cache_dir
+        # Code the model wrote runs on the host, so serve ``python`` only where callers are trusted.
+        self.tools = check_tools(tools)
+        if self.tools and self.TOOL_FORMAT is None:
+            raise ValueError(f"{self.NAME} declares no tool format, so it cannot serve tools")
+        if stream_in and self.OPEN_TURN is None:
+            raise ValueError(f"{self.NAME} has no open-turn marker, so its prompt cannot wait for a stream")
+        self.stream_in = stream_in
         self.local_dir = self._resolve_model_metadata()
         # so weights are materialized at most once per node
         self._submodule_cache: dict[str, NodeSubmodule | None] = {}
@@ -191,7 +247,14 @@ class MultimodalDecoderModel(Model):
 
     def get_graph_walk_graphs(self) -> dict[str, GraphSection]:
         # a safety bound on decode, not the per-request budget
-        return media_walks(self.config.max_position_embeddings, self.encoders, text=self.TEXT_PROMPTS)
+        walks = media_walks(
+            self.config.max_position_embeddings, self.encoders, text=self.TEXT_PROMPTS, tools=bool(self.tools))
+        if self.tools:
+            walks.update(tool_walks(spawn=self.spawn))
+        if self.stream_in:
+            # the transcript's chunks, each one a prefill pass that appends to the KV; it samples nothing
+            walks[STREAM_WALK] = GraphNode(name="LLM", input_names=["text_inputs"], outputs=[])
+        return walks
 
     def rebuild_policies(self) -> dict[str, RebuildPolicy]:
         # A media prompt is rebuilt from host copies of its encoders' outputs, one embedding per pad. Its layout
@@ -213,10 +276,25 @@ class MultimodalDecoderModel(Model):
         # prefix cache never cuts.
         if not self.TEXT_PROMPTS:
             return {KV_CACHE: {"main": KVLabel(growth=(("decode", "decode_loop"),))}}
+        # (a spoken prompt's transcript is text ids written after the prompt's span, like the template's suffix)
+        walks = (PREFILL_TEXT, STREAM_WALK) if self.stream_in else (PREFILL_TEXT,)
         return {KV_CACHE: {"main": KVLabel(
             growth=(("decode", "decode_loop"),),
-            keys=PrefixKeys("text_inputs", (PREFILL_TEXT,), growth=True),
+            keys=PrefixKeys("text_inputs", walks, growth=True),
         )}}
+
+    def get_loop_caps(self, **model_kwargs) -> dict[str, int]:
+        if not self.tools:
+            caps = super().get_loop_caps(**model_kwargs)
+        else:
+            # Every id a tool request writes after its prompt counts toward the output budget (its decode
+            # steps, its tool text), and each step runs under what is left of it, so the reserve is the
+            # budget and the step speculated past a stop.
+            caps = {self.DECODE_LOOP: self.get_max_output_tokens(**model_kwargs) + 1}
+        # a spoken prompt's transcript and suffix are written after its prompt span too, and so are the answers
+        # of the agents a reply may start
+        agents = MAX_AGENTS * (ANSWER_TOKENS + 32) if self.spawn and not model_kwargs.get(AGENT_CHILD) else 0
+        return {loop: cap + int(model_kwargs.get(TRANSCRIPT_RESERVE, 0)) + agents for loop, cap in caps.items()}
 
     def checkpoint_path(self) -> str:
         return self._resolve_weights()
@@ -274,7 +352,24 @@ class MultimodalDecoderModel(Model):
         **kwargs,
     ) -> ProcessPromptOutput:
         """The prompt's ids, each attachment's encoder inputs, and the media
-        layout (`intake`)."""
+        layout (`intake`). A ``history`` kwarg, ``[{"role": ..., "content": ...}, ...]``, is the conversation
+        before this turn."""
+        if self.stream_in and self.stream_in in kwargs.pop("open_streams", ()):
+            # the transcript of a spoken prompt follows; its template's suffix waits for the stream's end
+            out = self.process_open_prompt(
+                prompt, input_modalities, output_modalities, tensors, prompt_parts, SUFFIX, **kwargs)
+            return ProcessPromptOutput(out.new_input_tensors, {
+                **out.metadata, TRANSCRIPT_STREAM: int(out.new_input_tensors["text_inputs"][0].numel()),
+                TRANSCRIPT_RESERVE: MAX_TRANSCRIPT_TOKENS + int(out.new_input_tensors[SUFFIX][0].numel()),
+            })
+        if history := kwargs.pop("history", None):
+            earlier = self._history_parts(history)
+            if prompt is None and prompt_parts is None and not input_modalities:
+                # the history ends the conversation (a tool's answer, say): the model replies to it
+                prompt_parts, prompt = [], ""
+            prompt_parts = [*earlier, *(prompt_parts if prompt_parts is not None
+                                        else parts_from_modalities(input_modalities, prompt))]
+            input_modalities = [TEXT] * len(earlier) + list(input_modalities)
         prompt_in = self.intake(prompt, input_modalities, tensors, prompt_parts, **kwargs)
         layout = self.prompt_layout(prompt_in)
         # the raw attachments are spent once prepared (the encoders read their
@@ -286,10 +381,6 @@ class MultimodalDecoderModel(Model):
             {"text_inputs": [prompt_in.pads.ids], **spent, **prompt_in.inputs},
             {MEDIA_LAYOUT: layout, "kv_layout": self.kv_layout(layout, int(prompt_in.pads.ids.numel()))},
         )
-
-    # The one special token a prompt's open user turn is rendered with (`process_open_prompt`); a model
-    # whose chat template can be cut at an open turn names it.
-    OPEN_TURN: str | None = None
 
     def process_open_prompt(
         self,
@@ -320,6 +411,16 @@ class MultimodalDecoderModel(Model):
             {**out.new_input_tensors, "text_inputs": [before], suffix: [after]},
             {**out.metadata, "kv_layout": self.kv_layout(out.metadata[MEDIA_LAYOUT], int(before.numel()))},
         )
+
+    @staticmethod
+    def _history_parts(history) -> list[PromptPart]:
+        roles = ("system", "user", "assistant", "tool")
+        if not isinstance(history, list) or not all(
+            isinstance(m, dict) and m.get("role") in roles and isinstance(m.get("content"), str) for m in history
+        ):
+            raise ValueError(
+                f"history must be a list of {{\"role\": one of {roles}, \"content\": text}} messages")
+        return [PromptPart(modality=TEXT, text=m["content"], role=m["role"]) for m in history]
 
     def intake(
         self,
@@ -451,7 +552,7 @@ class MultimodalDecoderModel(Model):
 
     def request_kwargs(self) -> frozenset[str]:
         # enable_thinking: what each subclass's chat template reads
-        return frozenset({"max_output_tokens", "enable_thinking", *SAMPLING_KEYS})
+        return frozenset({"max_output_tokens", "enable_thinking", "history", *SAMPLING_KEYS})
 
     # -----------------------------------------------------------------------
     # Walk plan
@@ -472,10 +573,52 @@ class MultimodalDecoderModel(Model):
         model_kwargs: dict,
     ) -> list[WalkStep]:
         # one prefill over the whole prompt, then decode until the stop check ends it
-        return [
-            self._prefill_step(input_signals, model_kwargs.get(MEDIA_LAYOUT)),
-            WalkStep("decode", bind={"text_inputs": "new_token"}),
-        ]
+        prefill = self._prefill_step(input_signals, model_kwargs.get(MEDIA_LAYOUT))
+        leading = [prefill]
+        if model_kwargs.get(TRANSCRIPT_STREAM):
+            # the history and the open user turn, then the transcript's chunks, then the template's suffix,
+            # whose sampled token is the reply's first
+            # (False, not absent: the decoder drops the token a prefill that is not the last samples)
+            metadata = {**prefill.step_metadata, FINAL_PREFILL: False}
+            base = int(model_kwargs[TRANSCRIPT_STREAM])
+            leading = [
+                replace(prefill, step_metadata=metadata),
+                # a chunk's sampled token is nobody's, like the history prefill's
+                WalkStep(STREAM_WALK, step_metadata={APPENDS: True, FINAL_PREFILL: False, STREAM_BASE: base}),
+                WalkStep(
+                    PREFILL_TEXT, bind={"text_inputs": SUFFIX},
+                    step_metadata={FINAL_PREFILL: True, APPENDS: True, STREAM_BASE: base}),
+            ]
+        if not self.tools:
+            return [*leading, WalkStep("decode", bind={"text_inputs": "new_token"})]
+        return tool_plan(
+            leading, "decode", PREFILL_TEXT, bool(model_kwargs.get("enable_thinking", True)),
+            speak=SPEAK in self.tools and "audio" in output_modalities,
+            spawn=self.spawn and not model_kwargs.get(AGENT_CHILD), child=bool(model_kwargs.get(AGENT_CHILD)),
+        )
+
+    def prompt_tokens(self, tensors: NameToTensorList, kv_layout) -> int:
+        # a spoken prompt's template suffix is prefilled after its transcript; the transcript streams in after
+        # this count is made, so it is not in it
+        return super().prompt_tokens(tensors, kv_layout) + sum(ids.numel() for ids in tensors.get(SUFFIX, ()))
+
+    def validate_config_yaml(self, config: dict, config_path: str) -> None:
+        super().validate_config_yaml(config, config_path)
+        placed = {n for group in config.get("node_groups") or () for n in group.get("node_names", ())}
+        if self.tools and (missing := {ROUTER_NODE, TOOL_NODE} - placed):
+            raise ValueError(f"{config_path}: model_kwargs.tools needs the nodes {sorted(missing)} in node_groups")
+
+    def tool_schemas(self) -> list[dict] | None:
+        """The tools the chat template shows the model, or None."""
+        return [TOOL_SCHEMAS[name] for name in self.tools] or None
+
+    def render_agent(self, task: str, enable_thinking: bool = True) -> list[int]:
+        """The prompt ids of an agent that does ``task``: the chat template, with the same tools as its parent's."""
+        text = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": task}], tokenize=False, add_generation_prompt=True,
+            enable_thinking=enable_thinking, tools=self.tool_schemas(),
+        )
+        return list(encode_ids(self.tokenizer, text))
 
     # -----------------------------------------------------------------------
     # Submodules
@@ -491,14 +634,30 @@ class MultimodalDecoderModel(Model):
         if node_name not in self._submodule_cache:
             # the weights' dtype, and the fused kernel's: they must agree
             dtype = autocast_dtype or torch.bfloat16
-            self._submodule_cache[node_name] = self._create_submodule(
+            self._submodule_cache[node_name] = self._tool_node(node_name, device) or self._create_submodule(
                 node_name, device, dtype, tp_group,
             )
+            if self.tools and node_name == "LLM":
+                node = self._submodule_cache[node_name]
+                if not isinstance(node, SampledTokenDecoder):
+                    raise ValueError(
+                        f"{self.NAME} serves tools, whose plan comes back to the decode loop under what is left of "
+                        f"the output budget, but its LLM node is a {type(node).__name__}, not a SampledTokenDecoder")
+                node.tool_budget = True
             if tp_group is not None and tp_group.world_size > 1:
                 # the LLM's norms reduce its row-parallel partial sums in one
                 # fused kernel; collective, and every rank builds the node here
                 tp_group.init_allreduce_fusion(self.config.hidden_size, dtype)
         return self._submodule_cache[node_name]
+
+    def _tool_node(self, node_name: str, device: str) -> NodeSubmodule | None:
+        """The ``Router`` or ``Tool`` node of a model that serves tools; None for any other."""
+        if node_name == ROUTER_NODE and self.tools:
+            return ToolRouterSubmodule(self.tokenizer, self.TOOL_FORMAT, device, render_agent=self.render_agent)
+        if node_name == TOOL_NODE and self.tools:
+            handlers = {name: TOOL_HANDLERS[name] for name in self.tools if name in TOOL_HANDLERS}
+            return ToolSubmodule(self.tokenizer, handlers, self.TOOL_FORMAT, device)
+        return None
 
     def _create_submodule(
         self, node_name: str, device: str, dtype: torch.dtype, tp_group,

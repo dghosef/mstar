@@ -368,19 +368,26 @@ def _appended_kv(prompt):
     return kv
 
 
-def test_transcript_chunks_prepared_before_the_one_before_them_commits_are_keyed_where_they_land():
-    """A chunk is prepared while the previous one's step is still running, so the stream's length lags. Each
-    chunk says where it lands (the prompt's length and the ids before it), and the chain gets all of them."""
+def test_a_spoken_turns_suffix_is_keyed_after_its_transcript_so_the_chain_survives_the_replys_first_decode():
     prompt = list(range(100))
     kv = _appended_kv(prompt)
     stream = kv._streams["r0"]["main"]
-    first, second = list(range(500, 509)), list(range(600, 612))
-    # both are probed before either step commits
-    kv.resolve_cached_prefix("r0", NODE, "stream", ARNodeInputs(
-        input_seq_len=len(first), input_ids=torch.tensor(first), starts_at=len(prompt)))
-    kv.resolve_cached_prefix("r0", NODE, "stream", ARNodeInputs(
-        input_seq_len=len(second), input_ids=torch.tensor(second), starts_at=len(prompt) + len(first)))
-    assert stream.chain.covered_len == len(prompt) + len(first) + len(second)
+
+    def row(walk, ids, start):
+        inputs = ARNodeInputs(input_seq_len=len(ids), input_ids=torch.tensor(ids), starts_at=start)
+        kv.resolve_cached_prefix("r0", NODE, walk, inputs)
+        s = KVStep(segments=(Segment("r0", "main", len(ids)),))
+        ctx = StepContext(request_ids=("r0",), graph_walk=walk, slot=0, capture=False)
+        assert kv.admit(s, ctx).ok
+        kv.plan(s, ctx)
+        kv.commit(s, ctx)
+
+    chunk, suffix = list(range(500, 509)), list(range(600, 605))
+    row("stream", chunk, len(prompt))
+    row("prefill", suffix, len(prompt) + len(chunk))        # the suffix: after the last chunk
+    assert stream.chain.covered_len == len(prompt) + len(chunk) + len(suffix)
+    row(WALK, [1], None)                                      # the reply's first decode step commits
+    assert stream.chain is not None, "the chain was dropped as behind the stream: nothing of the reply is keyed"
 
 
 def test_a_row_that_starts_past_the_end_of_the_chain_stops_the_chain_instead_of_misnaming_pages():
