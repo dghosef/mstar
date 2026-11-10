@@ -115,12 +115,14 @@ def _info(walk, **metadata):
 
 
 @pytest.mark.parametrize("speculated_step_ran", [False, True])
+@pytest.mark.parametrize("ran_before_prepare", [False, True])
 def test_a_prefill_after_a_decode_lands_after_the_stop_token_whether_or_not_the_speculated_step_ran(
-    speculated_step_ran,
+    speculated_step_ran, ran_before_prepare,
 ):
-    """A decode loop stopped by a token has its next iteration launched already, and that step's row is
-    dropped only after it ran: the stop token is in the request's state if it did and is not if it did not.
-    The prefill writes the same ids either way, and a plain request's row is not touched."""
+    """A decode loop stopped by a token has its next iteration launched already, and that step's row is dropped
+    only after it ran: the stop token is in the request's state if it did and is not if it did not. The row is
+    prepared on a host thread that may run before that step commits, so the prefill decides when it is declared,
+    in step order: the same ids land either way. A plain request's row is not touched."""
     from mstar.conductor.request_info import FINAL_PREFILL, PREFILL_END, TOOLS
 
     prompt, turn, tail = [11, 12, 13], [21, 22, 23, 99], [31, 32]      # 99 = <|im_end|>, the stop token
@@ -133,27 +135,39 @@ def test_a_prefill_after_a_decode_lands_after_the_stop_token_whether_or_not_the_
     (end,) = outputs[PREFILL_END]
     assert end.tolist() == [len(prompt)]
     state.tokens += turn[:-1]                                           # a decode step feeds each token but the stop
-    if speculated_step_ran:
-        state.tokens.append(turn[-1])                                   # the one speculated past the stop
+
+    def speculated_step():
+        if speculated_step_ran:
+            state.tokens.append(turn[-1])                               # the one speculated past the stop
 
     # what the router and tool node hand over: the ids to write from the stop token on, and where it belongs
     row = [torch.tensor([turn[-1], *tail]), torch.tensor([int(end) + len(turn) - 1])]
     info = _info("prefill_text", **{TOOLS: True})
-    ids = llm._text_ids(info, {"text_inputs": row})
-    assert llm.get_input_sequence_len("prefill_text", info, {"text_inputs": row}).seq_len == len(ids)
-    state.tokens += ids.tolist()
+    if ran_before_prepare:
+        speculated_step()
+    inp = llm.prepare_inputs("prefill_text", info, {"text_inputs": row})
+    assert llm.get_input_sequence_len("prefill_text", info, {"text_inputs": row}).seq_len == len(inp.input_ids)
+    if not ran_before_prepare:
+        speculated_step()                                               # it commits after the row was prepared
+    llm.declare_step("prefill_text", ["r"], [inp])
+    llm.declare_step("prefill_text", ["r"], [inp])                      # a retried declaration drops nothing more
+    assert inp.input_seq_len == inp.input_ids.numel()
+    state.tokens += inp.input_ids.tolist()
 
     assert state.tokens == prompt + turn + tail
-    plain = torch.tensor([1, 2, 3])
-    assert llm._text_ids(_info("prefill_text"), {"text_inputs": [plain]}) is plain
+    plain = llm.prepare_inputs("prefill_text", _info("prefill_text"), {"text_inputs": [torch.tensor([1, 2, 3])]})
+    llm.declare_step("prefill_text", ["r"], [plain])
+    assert plain.input_ids.tolist() == [1, 2, 3] and plain.input_seq_len == 3
 
 
 def test_a_prefill_after_a_decode_that_finds_its_request_off_by_more_than_the_speculated_step_fails():
     state = _State()
     llm = _decoder(state)
     state.tokens += [4, 5, 6]                       # three ids past where the row says its first belongs
+    inp = llm.prepare_inputs(
+        "prefill_text", _info("prefill_text"), {"text_inputs": [torch.tensor([99, 31]), torch.tensor([0])]})
     with pytest.raises(AssertionError, match="already written"):
-        llm._text_ids(_info("prefill_text"), {"text_inputs": [torch.tensor([99, 31]), torch.tensor([0])]})
+        llm.declare_step("prefill_text", ["r"], [inp])
 
 
 def test_a_prefill_that_is_not_the_last_before_decode_routes_no_token_with_or_without_tools():
