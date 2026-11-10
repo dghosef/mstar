@@ -226,27 +226,29 @@ def _warn_if_mooncake_unpatched() -> None:
             owner_unknown = True
     patched = Version(MOONCAKE_PATCHED_VERSION)
     unpatched = [(d, v) for d, v in installed if v < patched]
-    if unpatched and owner_unknown:
+    if not unpatched:
+        return
+    # name only the CVEs the oldest unpatched release still has, the worst first
+    if min(v for _, v in unpatched) < Version(_MOONCAKE_DATA_PORT_FIXED):
+        risk = ("any host that can reach the transfer engine can read or write this process's "
+                "memory through its TCP data port (CVE-2026-103764) and take the process down "
+                "through its handshake port (CVE-2026-103760, CVE-2026-103761)")
+    else:
+        risk = ("any host that can reach the transfer engine's handshake port can take this "
+                "process down (CVE-2026-103760, CVE-2026-103761)")
+    if owner_unknown:
         logger.warning(
             "Several Mooncake distributions are installed (%s) and none can be "
             "matched to the imported engine; if it comes from one that predates "
-            "%s, any host that can reach the transfer engine's handshake port can "
-            "take this process down (CVE-2026-103760, CVE-2026-103761), and before "
-            "%s read or write its memory through the TCP data port "
-            "(CVE-2026-103764). Uninstall the old ones, and keep the TCP and RDMA "
+            "%s, %s. Uninstall the old ones, and keep the TCP and RDMA "
             "transports on a trusted network.",
-            ", ".join(f"{d} {v}" for d, v in installed), MOONCAKE_PATCHED_VERSION,
-            _MOONCAKE_DATA_PORT_FIXED,
+            ", ".join(f"{d} {v}" for d, v in installed), MOONCAKE_PATCHED_VERSION, risk,
         )
-    elif installed and len(unpatched) == len(installed):
+    elif len(unpatched) == len(installed):
         logger.warning(
-            "Installed Mooncake (%s) predates %s: any host that can reach the "
-            "transfer engine's handshake port can take this process down "
-            "(CVE-2026-103760, CVE-2026-103761), and before %s read or "
-            "write its memory through the TCP data port (CVE-2026-103764). Upgrade "
-            "it, and keep the TCP and RDMA transports on a trusted network.",
-            ", ".join(f"{d} {v}" for d, v in installed), MOONCAKE_PATCHED_VERSION,
-            _MOONCAKE_DATA_PORT_FIXED,
+            "Installed Mooncake (%s) predates %s: %s. Upgrade it, and keep the "
+            "TCP and RDMA transports on a trusted network.",
+            ", ".join(f"{d} {v}" for d, v in installed), MOONCAKE_PATCHED_VERSION, risk,
         )
 
 

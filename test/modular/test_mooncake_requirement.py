@@ -46,7 +46,7 @@ def _problems(pyproject: str) -> list[str]:
         if not floors or max(floors) < patched:
             problems.append(f"[{group}] {req} allows Mooncake releases before {patched}")
         if not req.specifier.contains(tensors.MOONCAKE_PATCHED_VERSION):
-            problems.append(f"[{group}] {req} excludes {patched}, the release CI tests")
+            problems.append(f"[{group}] {req} excludes {patched}, the floor itself")
     return problems
 
 
@@ -87,8 +87,11 @@ def installed(monkeypatch):
     return install
 
 
-@pytest.mark.parametrize("version", ["0.3.11.post1", "0.3.13.post1", "0.3.14rc1"])
-def test_an_unpatched_mooncake_warns_once(installed, caplog, version):
+@pytest.mark.parametrize(("version", "memory_cve"), [
+    ("0.3.11.post1", True), ("0.3.13.post1", False), ("0.3.14rc1", False),
+])
+def test_an_unpatched_mooncake_warns_once(installed, caplog, version, memory_cve):
+    """The warning names the data-port CVE only for a release that still has it."""
     installed(version)
     with caplog.at_level(logging.WARNING, logger=tensors.logger.name):
         tensors._warn_if_mooncake_unpatched()
@@ -96,6 +99,7 @@ def test_an_unpatched_mooncake_warns_once(installed, caplog, version):
     warnings = [r.getMessage() for r in caplog.records]
     assert len(warnings) == 1
     assert f"mooncake-transfer-engine {version}" in warnings[0]
+    assert ("CVE-2026-103764" in warnings[0]) == memory_cve
 
 
 @pytest.mark.parametrize("version", ["0.3.14", "0.3.14.post1", "not-a-version"])
