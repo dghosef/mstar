@@ -121,7 +121,7 @@ _FAILED, _READING, _IN = 0, 1, 2
 class SlotState:
     index: int
     # the digest of the weights in the slot
-    adapter: bytes | None = None
+    digest: bytes | None = None
     # live requests holding the slot; only a slot at 0 may be given another adapter
     refcount: int = 0
     # the pool's admit count when the refcount last reached 0: eviction picks the oldest.
@@ -474,7 +474,7 @@ class LoraAdapterPool(Resource):
         self._live: dict[bytes, int] = {}  # digest -> live rids on it
         self._row_slot: dict = {}     # rid -> slot held, read by `plan`
         self._awaiting: set = set()   # rids with an adapter but no slot yet
-        # rid -> (slot the live admit took, the adapter it reserved), for rollback
+        # rid -> (slot the live admit took, the digest it reserved), for rollback
         self._admit_taken: dict = {}
         # rid -> digest: awaiting rows admission reserved for, counted against the free
         # slots until their admit takes one (the deciding rank only)
@@ -765,8 +765,8 @@ class LoraAdapterPool(Resource):
         negative when that promises more slots than exist."""
         pinned = {state.index for state in self._slots[1:] if state.refcount}
         misses = 0
-        for adapter in self._reserved_count.keys() | {digest}:
-            slot = self._resident.get(adapter)
+        for weights in self._reserved_count.keys() | {digest}:
+            slot = self._resident.get(weights)
             if slot is None:
                 misses += 1
             else:
@@ -994,7 +994,7 @@ class LoraAdapterPool(Resource):
         for state in self._slots[1:]:
             if state.refcount or state.index in exclude:
                 continue
-            if state.adapter is None:
+            if state.digest is None:
                 return state.index
             if victim is None or state.last_used_step < victim.last_used_step:
                 victim = state
@@ -1005,7 +1005,7 @@ class LoraAdapterPool(Resource):
         step's forward. Dropping the host copy from the store meanwhile is safe: torch's
         pinned-memory allocator holds a block until the copies recorded on it complete."""
         state = self._slots[slot]
-        evicted = state.adapter
+        evicted = state.digest
         if evicted is not None:
             logger.info(
                 "LoRA pool: evicting %s from slot %d for %s (%s)",
@@ -1039,7 +1039,7 @@ class LoraAdapterPool(Resource):
                 # 0 at a layer whose A or B is all zero, which adds nothing (the store's read)
                 self._ranks[name][:, slot].copy_(adapter.layer_ranks[name], non_blocking=True)
         self.scalings[slot] = adapter.scaling
-        state.adapter = adapter.digest
+        state.digest = adapter.digest
         self._resident[adapter.digest] = slot
 
     def _release(self, slot: int) -> None:

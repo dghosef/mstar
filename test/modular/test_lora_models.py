@@ -528,7 +528,7 @@ def test_qwen3_5_text_only_adapter_holds_no_vision_slot(tmp_path):
 
     assert encode("r0", "v") == 1  # the one slot, held
     assert encode("r1", "t") == 0 and encode("r2", "t") == 0  # ready with the pool full
-    assert lora_pool.slot_state(1).adapter == H.digest_of(lora_pool, "v") and lora_pool.slot_state(1).refcount == 1
+    assert lora_pool.slot_state(1).digest == H.digest_of(lora_pool, "v") and lora_pool.slot_state(1).refcount == 1
 
 
 # --- Qwen3.5: the tied head ------------------------------------------------------------------------

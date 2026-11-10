@@ -109,7 +109,7 @@ class _Rank:
             self.pool.rollback_admit(s, c)
         slots = map(self.pool.slot_state, range(self.pool.spec.num_slots))
         self.log.append((seq, tuple(rows), _verdict(outcome),
-                         tuple((x.adapter, x.refcount, x.last_used_step) for x in slots)))
+                         tuple((x.digest, x.refcount, x.last_used_step) for x in slots)))
         return outcome
 
     def land_commit(self, maybe: bool = False):
@@ -395,7 +395,7 @@ class _PicksSlotPerMiss(LoraAdapterPool):
 
 
 def _slots(pool):
-    return tuple((s.adapter, s.refcount, s.last_used_step)
+    return tuple((s.digest, s.refcount, s.last_used_step)
                  for s in (pool.slot_state(i) for i in range(pool.spec.num_slots)))
 
 
@@ -478,7 +478,7 @@ def test_a_teardown_inside_a_two_miss_admit_does_not_split_the_ranks(tmp_path, p
     settle_reads(follower)  # the retry, k gone on both, loads both adapters on both
     (v1, v2), errors = _on_both(lambda: admit(leader, ["rA", "rB"]), lambda: admit(follower, ["rA", "rB"]))
     assert not errors and v1 == v2 == "ok" and _slots(leader) == _slots(follower)
-    assert {leader.slot_state(i).adapter for i in (1, 2)} == {digest_of(leader, "a2"), digest_of(leader, "a3")}
+    assert {leader.slot_state(i).digest for i in (1, 2)} == {digest_of(leader, "a2"), digest_of(leader, "a3")}
 
 
 # --- the agreement over real gloo ----------------------------------------------------------
@@ -509,7 +509,7 @@ def _gloo_worker(rank: int, store: str, out_dir: str, lora_paths: dict):
     for rid, adapter in (("ok", "a1"), ("bad", "a2")):
         ingest(pool, rid, adapter)
     result = {"agree": [_verdict(pool.admit(step([rid]), ctx([rid]))) for rid in ("ok", "bad")],
-              "slots": [pool.slot_state(i).adapter for i in range(3)], "a2": digest_of(pool, "a2")}
+              "slots": [pool.slot_state(i).digest for i in range(3)], "a2": digest_of(pool, "a2")}
     torch.save(result, os.path.join(out_dir, f"rank{rank}.pt"))
     dist.destroy_process_group()
 
