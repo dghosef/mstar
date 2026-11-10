@@ -49,6 +49,7 @@ import sys
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from typing import Protocol
 
 import torch
 
@@ -118,6 +119,18 @@ PYTHON_TOOL_SCHEMA = {
 class ToolCall:
     name: str
     arguments: Mapping[str, str]
+
+
+class ToolFormat(Protocol):
+    """A model's tool grammar, which it declares as ``MultimodalDecoderModel.TOOL_FORMAT``: how calls read in a
+    reply, and how the results are written back into the conversation."""
+
+    def parse(self, text: str) -> list[ToolCall]: ...
+
+    def render_frame(self, enable_thinking: bool) -> tuple[str, str]:
+        """The text before and after the results (each `wrap`ped and tokenized apart)."""
+
+    def wrap(self, result: str) -> str: ...
 
 
 class QwenToolFormat:
@@ -352,12 +365,12 @@ class ToolRouterSubmodule(_CpuNode):
     """The ``Router`` node: parse the turn's tool calls and say where the plan goes."""
 
     def __init__(
-        self, tokenizer, device: str | torch.device = "cpu", fmt: QwenToolFormat | None = None,
+        self, tokenizer, fmt: ToolFormat, device: str | torch.device = "cpu",
         render_agent: Callable[[str, bool], list[int]] | None = None,
     ):
         super().__init__(device)
         self.tokenizer = tokenizer
-        self.format = fmt or QwenToolFormat()
+        self.format = fmt
         # a task (and whether it thinks) to the prompt ids of an agent that does it (the chat template, the
         # parent's tools)
         self.render_agent = render_agent
@@ -424,13 +437,13 @@ class ToolSubmodule(_CpuNode):
     MAX_WORKERS = 8
 
     def __init__(
-        self, tokenizer, handlers: Mapping[str, Callable[[Mapping[str, str]], str]],
-        device: str | torch.device = "cpu", fmt: QwenToolFormat | None = None,
+        self, tokenizer, handlers: Mapping[str, Callable[[Mapping[str, str]], str]], fmt: ToolFormat,
+        device: str | torch.device = "cpu",
     ):
         super().__init__(device)
         self.tokenizer = tokenizer
         self.handlers = dict(handlers)
-        self.format = fmt or QwenToolFormat()
+        self.format = fmt
         self._pool = ThreadPool(max_workers=self.MAX_WORKERS, thread_name_prefix="tool")
 
     def prepare_inputs(

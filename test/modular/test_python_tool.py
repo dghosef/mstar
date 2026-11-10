@@ -89,7 +89,7 @@ def _turn(tokenizer, text):
 
 def _routed(tokenizer, text, speak=False):
     """The router's output for a turn, and the exit it names."""
-    router = ToolRouterSubmodule(tokenizer)
+    router = ToolRouterSubmodule(tokenizer, QwenToolFormat())
     ids = _turn(tokenizer, text)
     row = {"ids": ids, "start": 100, "speak": speak, "spawn_agent": False, "child": False, "thinking": False}
     out = router.forward_batched("route", SimpleNamespace(request_ids=["r"]), rows=[row])["r"]
@@ -97,7 +97,7 @@ def _routed(tokenizer, text, speak=False):
 
 
 def _ran(tokenizer, calls, ids, budget=200, handlers=None):
-    tool = ToolSubmodule(tokenizer, handlers or TOOL_HANDLERS)
+    tool = ToolSubmodule(tokenizer, handlers or TOOL_HANDLERS, QwenToolFormat())
     row = {"payload": _unpack(calls), "enable_thinking": False, "budget": budget, "answers": None}
     return tool.forward_batched("tool", SimpleNamespace(request_ids=["r"]), rows=[row])["r"][TOOL_TEXT]
 
@@ -110,7 +110,7 @@ def test_the_router_sends_a_turn_with_calls_to_the_tools_and_one_without_to_its_
     assert _routed(tokenizer, "The answer is 42.")[2] == ANSWER
     assert SPEAK_TEXT not in _routed(tokenizer, CALLS, speak=True)[3]
     # the stop token is fed by the step after it: the turn's last id belongs at the prefill's end plus the rest
-    row = ToolRouterSubmodule(tokenizer).prepare_inputs(
+    row = ToolRouterSubmodule(tokenizer, QwenToolFormat()).prepare_inputs(
         "route", SimpleNamespace(step_metadata={}),
         {"new_token": [ids[:1]], TURN_IDS: [ids[1:]], PREFILL_END: [torch.tensor([95])]})
     assert row.kwargs["start"] == 95 + ids.numel() - 1
@@ -155,7 +155,8 @@ ASKS = (
 
 
 def _spawner(tokenizer, **flags):
-    router = ToolRouterSubmodule(tokenizer, render_agent=lambda task, thinking: [len(task), int(thinking)])
+    router = ToolRouterSubmodule(
+        tokenizer, QwenToolFormat(), render_agent=lambda task, thinking: [len(task), int(thinking)])
     ids = _turn(tokenizer, ASKS)
     row = {"ids": ids, "start": 100, "speak": False, "spawn_agent": True, "child": False, "thinking": False, **flags}
     out = router.forward_batched("route", SimpleNamespace(request_ids=["r"]), rows=[row])["r"]
@@ -174,7 +175,7 @@ def test_a_turn_that_only_spawns_agents_persists_a_prompt_per_task_and_the_spawn
 
 
 def test_an_agent_that_answers_persists_its_final_turn_for_its_parent_and_a_parent_does_not(tokenizer):
-    router = ToolRouterSubmodule(tokenizer)
+    router = ToolRouterSubmodule(tokenizer, QwenToolFormat())
     ids = _turn(tokenizer, "The sum is 55.")
     for child in (True, False):
         row = {"ids": ids, "start": 100, "speak": False, "spawn_agent": False, "child": child, "thinking": False}
@@ -185,7 +186,7 @@ def test_an_agent_that_answers_persists_its_final_turn_for_its_parent_and_a_pare
 
 
 def test_the_join_frames_each_agents_answer_as_a_tool_response_in_task_order_with_errors_in_place(tokenizer):
-    tool = ToolSubmodule(tokenizer, TOOL_HANDLERS)
+    tool = ToolSubmodule(tokenizer, TOOL_HANDLERS, QwenToolFormat())
     _, calls, *_ = _routed(tokenizer, ASKS)
     metadata = {"agents": 3, "agent_errors": {"1": "Error: the agent timed out"}, "enable_thinking": False}
     answers = [_turn(tokenizer, "55"), _turn(tokenizer, "210")]
