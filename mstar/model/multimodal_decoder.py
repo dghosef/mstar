@@ -118,6 +118,8 @@ class MultimodalDecoderModel(Model):
     # thread is steadier but slower (13 ms).
     PREPROCESS_TORCH_THREADS = 4
     INTERNAL_KWARGS = (MEDIA_LAYOUT,)
+    # the conversation so far (``process_prompt``'s ``history``) is in the prompt: the conductor needs none
+    PREPROCESS_ONLY_KWARGS = ("history",)
     # in errors and logs
     NAME: str
     # what the API and conductor processes download: enough to build the
@@ -249,7 +251,16 @@ class MultimodalDecoderModel(Model):
         **kwargs,
     ) -> ProcessPromptOutput:
         """The prompt's ids, each attachment's encoder inputs, and the media
-        layout (`intake`)."""
+        layout (`intake`). A ``history`` kwarg, ``[{"role": ..., "content": ...}, ...]``, is the conversation
+        before this turn."""
+        if history := kwargs.pop("history", None):
+            earlier = self._history_parts(history)
+            if prompt is None and prompt_parts is None and not input_modalities:
+                # the history ends the conversation (a tool's answer, say): the model replies to it
+                prompt_parts, prompt = [], ""
+            prompt_parts = [*earlier, *(prompt_parts if prompt_parts is not None
+                                        else parts_from_modalities(input_modalities, prompt))]
+            input_modalities = [TEXT] * len(earlier) + list(input_modalities)
         prompt_in = self.intake(prompt, input_modalities, tensors, prompt_parts, **kwargs)
         layout = self.prompt_layout(prompt_in)
         # the raw attachments are spent once prepared (the encoders read their
@@ -261,6 +272,50 @@ class MultimodalDecoderModel(Model):
             {"text_inputs": [prompt_in.pads.ids], **spent, **prompt_in.inputs},
             {MEDIA_LAYOUT: layout, "kv_layout": self.kv_layout(layout, int(prompt_in.pads.ids.numel()))},
         )
+
+    # The one special token a prompt's open user turn is rendered with (`process_open_prompt`); a model
+    # whose chat template can be cut at an open turn names it.
+    OPEN_TURN: str | None = None
+
+    def process_open_prompt(
+        self,
+        prompt: str | None,
+        input_modalities: list[str],
+        output_modalities: list[str],
+        tensors: NameToTensorList | None,
+        prompt_parts: list[PromptPart] | None,
+        suffix: str,
+        **kwargs,
+    ) -> ProcessPromptOutput:
+        """`process_prompt` for a conversation whose last user turn a client stream is still filling: the
+        template rendered with `OPEN_TURN` as that turn's text and cut there. The prefix (the history and the
+        turn's start) is an ordinary prompt, prefix-cached as a typed one is, and its ``kv_layout`` is its
+        own; the suffix (the turn's end and the reply's start) is the output's ``suffix`` tensor, for the
+        prefill after the stream."""
+        if self.OPEN_TURN is None:
+            raise ValueError(f"{self.NAME} has no open-turn marker, so its prompt cannot be left open")
+        marker = self.tokenizer.convert_tokens_to_ids(self.OPEN_TURN)
+        parts = [*(prompt_parts or parts_from_modalities(input_modalities, prompt)),
+                 PromptPart(modality=TEXT, text=self.OPEN_TURN, role="user")]
+        out = self.process_prompt(
+            "", [*input_modalities, TEXT], output_modalities, tensors, prompt_parts=parts, **kwargs)
+        ids = out.new_input_tensors["text_inputs"][0]
+        (at,) = (ids == marker).nonzero().flatten().tolist()
+        before, after = ids[:at], ids[at + 1:]
+        return ProcessPromptOutput(
+            {**out.new_input_tensors, "text_inputs": [before], suffix: [after]},
+            {**out.metadata, "kv_layout": self.kv_layout(out.metadata[MEDIA_LAYOUT], int(before.numel()))},
+        )
+
+    @staticmethod
+    def _history_parts(history) -> list[PromptPart]:
+        roles = ("system", "user", "assistant", "tool")
+        if not isinstance(history, list) or not all(
+            isinstance(m, dict) and m.get("role") in roles and isinstance(m.get("content"), str) for m in history
+        ):
+            raise ValueError(
+                f"history must be a list of {{\"role\": one of {roles}, \"content\": text}} messages")
+        return [PromptPart(modality=TEXT, text=m["content"], role=m["role"]) for m in history]
 
     def intake(
         self,
@@ -376,7 +431,7 @@ class MultimodalDecoderModel(Model):
 
     def request_kwargs(self) -> frozenset[str]:
         # enable_thinking: what each subclass's chat template reads
-        return frozenset(SAMPLING_KEYS) | {"enable_thinking"}
+        return frozenset(SAMPLING_KEYS) | {"enable_thinking", "history"}
 
     def get_request_resource_configs(
         self, input_modalities: list[str], output_modalities: list[str], model_kwargs: dict,

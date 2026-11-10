@@ -26,6 +26,7 @@ from mstar.utils.ipc_format import (
     DrainRequest,
     InputSignals,
     MessageSource,
+    ReleaseOutputs,
     RemoveRequest,
     ScheduleTPNode,
     WorkerMessage,
@@ -132,7 +133,7 @@ def test_stopped_speculative_batch_cleans_inputs_without_unmatched_nvtx(
         ),
         node_batch=SimpleNamespace(
             node_name="LLM", request_ids=[7], per_request_info={7: object()}, no_forward_rids=set(),
-            final_stream_rids={7}, partition_done_rids={7},
+            final_stream_rids={7}, partition_done_rids={7}, exits={},
         ),
         speculative_new_iter=True, graph_walk="decode", loop_name="decode",
     )
@@ -181,7 +182,7 @@ def test_stopped_speculative_batch_still_waits_for_its_gpu_work(monkeypatch, has
         ),
         node_batch=SimpleNamespace(
             node_name="LLM", request_ids=[7], per_request_info={7: object()}, no_forward_rids=set(),
-            final_stream_rids=set(), partition_done_rids=set(),
+            final_stream_rids=set(), partition_done_rids=set(), exits={},
             completion_event=event,
         ),
         speculative_new_iter=True, graph_walk="decode", loop_name="decode",
@@ -220,6 +221,7 @@ def test_a_walk_the_cache_served_whole_is_still_routed():
         check_stop_for_batch=lambda batch, outputs, **kwargs: {},
         after_output_copy=lambda batch: None,
         step_finished=lambda batch, outputs, **kwargs: None,
+        unreal_sample_rids=lambda batch: set(),
         materialize_publish=lambda batch, rids: None,
     )
     w.request_state.get_fwd_info = lambda rid, partition: None
@@ -396,6 +398,30 @@ def test_remove_force_cleans_and_clears_drain_state():
     assert "X" not in w.lifecycle._reads_done_sent
 
 
+@pytest.mark.parametrize("released_first", [False, True])
+def test_a_request_removed_to_keep_its_outputs_gives_up_the_rest_and_frees_tensors_and_handle_once_released(
+    released_first,
+):
+    """A spawned agent's resources go when it ends, but its answer is read by its parent after: the tensors and
+    the handle stay until `ReleaseOutputs`, whichever of the two messages is handled first."""
+    w = _worker()
+    handles = []
+    w._graph_runtime.remove_request = handles.append
+    release = WorkerMessage(WorkerMessageType.RELEASE_OUTPUTS, ReleaseOutputs("X"))
+    if released_first:
+        w.lifecycle.pending_removes["X"] = -1   # its remove is yet to run
+        w.ingest._release_outputs(release.body)
+        assert w.forced == [] and handles == []
+        w.lifecycle.pending_removes.clear()
+    _remove(w, request_id="X", keep_outputs=True)
+    if not released_first:
+        assert w.cleared == ["X"] and w.forced == [] and handles == []
+        deliver(w, release)
+    else:
+        w.pipeline._teardown(w.pipeline.in_flight_rids)
+    assert w.forced == ["X"] and handles == ["X"]
+
+
 def _input(uuid, streaming=True):
     """An input for request X: a stream item, or a plain one-pass input."""
     info = TensorPointerInfo(
@@ -471,7 +497,7 @@ def test_a_new_request_behind_the_drain_is_admitted_until_reads_done():
     info = SimpleNamespace(resource_configs={}, graph_walk="g", partition_name="p")
     w.ingest._add_new_request(SimpleNamespace(
         request_id="X", request_info=info, initial_inputs=[],
-        partition_worker_graph_ids=[], worker_graph_to_workers={}, loop_caps={},
+        partition_worker_graph_ids=[], worker_graph_to_workers={}, loop_caps={}, silent=False,
     ))
     # failed by the drain check, not by an ingest error
     assert known == ["X"] and w.lifecycle.failed_rids == {"X"}
@@ -517,7 +543,7 @@ def test_add_new_request_hands_off_the_handle_not_the_string():
     info = SimpleNamespace(resource_configs={}, graph_walk="g", partition_name="p")
     w.ingest._add_new_request(SimpleNamespace(
         request_id="X", request_info=info, initial_inputs=[],
-        partition_worker_graph_ids=[], worker_graph_to_workers={}, loop_caps={},
+        partition_worker_graph_ids=[], worker_graph_to_workers={}, loop_caps={}, silent=False,
     ))
 
     handle = w._graph_runtime.get_rid_handle("X")

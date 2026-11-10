@@ -46,13 +46,14 @@ its positions under ``POS_KEY`` (``ROPE`` by default).
 import functools
 import os
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from time import perf_counter
 from typing import Any
 
 import torch
 
 from mstar.communication.tensors import NameToTensorList
-from mstar.conductor.request_info import FINAL_PREFILL, CurrentForwardPassInfo
+from mstar.conductor.request_info import FINAL_PREFILL, PREFILL_END, TOOLS, TURN_IDS, CurrentForwardPassInfo
 from mstar.engine.accelerator_graph_config import (
     AcceleratorGraphConfig,
     BatchedAcceleratorGraphConfig,
@@ -73,9 +74,18 @@ from mstar.model.submodule_base import (
     DeviceLoopback,
     InputSeqLenInfo,
     ModelInputsFromEngine,
+    StopKind,
+    StopPolicy,
     TokenStop,
 )
 from mstar.utils.profiler import PHASE_PERIOD, PhaseLaps, phase_record
+
+_NO_LIMIT = (1 << 31) - 1
+
+
+def _decode_budget(info: CurrentForwardPassInfo) -> int:
+    """The iterations a decode loop may run: what is left of a tool request's budget, else the loop's cap."""
+    return int(info.max_tokens) if info.step_metadata.get(TOOLS) else _NO_LIMIT
 
 
 class SampledTokenDecoder(TokenStepNode, ARNodeSubmodule):
@@ -120,6 +130,11 @@ class SampledTokenDecoder(TokenStepNode, ARNodeSubmodule):
     # False: only decode is captured, and every prefill (text, media, mixed)
     # runs eagerly, for a model whose prefill captures are unmeasured
     CAPTURE_PREFILL = True
+
+    # Whether the decode loop runs under what is left of the request's output budget, which a plan that
+    # comes back to the loop (tool rounds) needs and the model sets on a node it builds for it. Every other
+    # node keeps its stop policy: EOS beside the loop's cap, which never speculates past the cap.
+    tool_budget = False
 
     # set by `__init__`; class defaults keep a text-only node's walks working
     _encoders: tuple[MediaEncoder, ...] = ()
@@ -310,7 +325,7 @@ class SampledTokenDecoder(TokenStepNode, ARNodeSubmodule):
             if rows is not None:
                 media[e.output] = rows
         # the stream's counter is keyed by the worker's handle (AGENTS.md invariant 14)
-        start = self.node_resources[self.POS_KEY].position(rid=fwd_info.rid_handle, label="main")
+        start = self._position(fwd_info)
         pos_ids, advance = self.prompt_positions(start, layout, ids.shape[0])
         return ARNodeInputs(
             input_seq_len=ids.shape[0],
@@ -319,6 +334,57 @@ class SampledTokenDecoder(TokenStepNode, ARNodeSubmodule):
             tensor_inputs=media,
             resource_step_info=advance,
         )
+
+    def _text_ids(self, fwd_info: CurrentForwardPassInfo, inputs: NameToTensorList) -> torch.Tensor:
+        """A text prefill row's ids. A row after a decode brings a second tensor: the position its first
+        id belongs at. That id is the one the decode sampled last (the stop token), which the step
+        speculated past it may already have written (its row is dropped after its forward), so the
+        position counter says whether to write it or leave it out."""
+        ids = inputs["text_inputs"][0]
+        if len(inputs["text_inputs"]) < 2:
+            return ids
+        written = self._position(fwd_info) - int(inputs["text_inputs"][1])
+        assert written in (0, 1), f"a prefill after a decode found its first id {written} ids already written"
+        return ids[written:]
+
+    def get_stop_policies(self, graph_walk: str) -> dict[str, StopPolicy] | None:
+        policies = super().get_stop_policies(graph_walk)
+        if not self.tool_budget or not policies or graph_walk != self.DECODE_WALK:
+            return policies
+        # A tool request comes back to this loop, and the loop's cap is set once, at intake. Each
+        # entry runs under what is left of the request's output budget (the conductor sends it as
+        # ``max_tokens``), which the runtime reads every pass.
+        return {loop: replace(policy, kind=StopKind.AR, max_iters=_decode_budget) for loop, policy in policies.items()}
+
+    def _position(self, fwd_info: CurrentForwardPassInfo) -> int:
+        # the stream's counter is keyed by the worker's handle (AGENTS.md invariant 14)
+        return self.node_resources[self.POS_KEY].position(rid=fwd_info.rid_handle, label="main")
+
+    def postprocess(
+        self,
+        request_id: str,
+        request_info: CurrentForwardPassInfo,
+        outputs: dict[str, list[torch.Tensor]],
+        **kwargs,
+    ):
+        super().postprocess(request_id, request_info, outputs, **kwargs)
+        metadata = request_info.step_metadata
+        flag, tools = metadata.get(FINAL_PREFILL), metadata.get(TOOLS)
+        if flag is None and not tools:
+            return          # a plain request's decode steps, which is nearly every step
+        if request_info.graph_walk == self.DECODE_WALK:
+            # the turn's tokens, accumulated by the decode loop for the tool node
+            if tools and "text_inputs" in outputs:
+                outputs[TURN_IDS] = outputs["text_inputs"]
+        elif flag is False:
+            # a prompt's earlier prefill (the history before a spoken turn): its sampled token is nobody's
+            outputs.pop(self.TOKEN_SIGNAL, None)
+            outputs.pop(self.FEEDBACK_SIGNAL, None)
+        elif tools and self.TOKEN_SIGNAL in outputs:
+            # where the request's state ends after this prefill (its step committed already), which
+            # the router measures the turn's last id from
+            outputs[PREFILL_END] = [torch.tensor(
+                [self._position(request_info)], dtype=torch.long, device=outputs[self.TOKEN_SIGNAL][0].device)]
 
     def prepare_inputs(
         self,
@@ -334,7 +400,7 @@ class SampledTokenDecoder(TokenStepNode, ARNodeSubmodule):
             # one token per row, read off the sampler's slot master in
             # `preprocess`; the routed signal is empty (or ignored) here
             return row
-        input_ids = inputs["text_inputs"][0]
+        input_ids = self._text_ids(fwd_info, inputs)
         return ARNodeInputs(input_seq_len=input_ids.shape[0], input_ids=input_ids)
 
     def get_input_sequence_len(
@@ -345,7 +411,7 @@ class SampledTokenDecoder(TokenStepNode, ARNodeSubmodule):
         if graph_walk == self.DECODE_WALK:
             return InputSeqLenInfo(1)
         if graph_walk == self.PREFILL_WALK and "text_inputs" in inputs:
-            return InputSeqLenInfo(inputs["text_inputs"][0].shape[0])
+            return InputSeqLenInfo(self._text_ids(fwd_info, inputs).shape[0])
         return None
 
     def speculative_input_seq_len(

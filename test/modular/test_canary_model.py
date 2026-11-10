@@ -312,7 +312,7 @@ def test_decoder_matches_hf():
             POS: SimpleNamespace(pos_ids=lambda label: positions), ATTN: last_rows,
             SAMPLER: SimpleNamespace(sample=lambda request_ids, logits: logits),
         })
-        rows = [node.prepare_inputs(walk, None, inputs)]
+        rows = [node.prepare_inputs(walk, SimpleNamespace(step_metadata={}), inputs)]
         return node.forward_batched(walk, engine_inputs, **node.preprocess(walk, engine_inputs, rows))
 
     torch.manual_seed(1)
@@ -414,7 +414,7 @@ def test_decoder_node_caps_captures_and_names(snapshot):
     (capture,) = node.get_accelerator_graph_configs(torch.device("cpu"))
     assert capture.capture_graph_walk == "decode" and capture.capture_batch_sizes == [1, 2, 4, 8, 16, 32, 64]
     outputs = {"new_token": [torch.tensor([5])]}
-    node.postprocess("a", None, outputs)
+    node.postprocess("a", type("Info", (), {"step_metadata": {}})(), outputs)
     assert outputs["text_inputs"] is outputs["new_token"]
     model = CanaryModel(str(snapshot))
     walks = model.get_graph_walk_graphs()

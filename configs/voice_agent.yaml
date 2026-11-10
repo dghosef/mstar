@@ -1,0 +1,54 @@
+# A voice agent in one server: Whisper listens, Qwen3.5-9B answers and may run Python, start agents (child requests
+# of itself) or speak, and Kokoro turns what it speaks into audio. One GPU: every rank shares device 0.
+#
+#   typed turn   -> Qwen3.5 (text out; audio too when the request asks for it and the reply calls `speak`)
+#   spoken turn  -> Whisper -> Glue -> Qwen3.5's prompt, a word at a time, while Whisper still decodes
+#
+# Python the model writes runs on this host with no network or filesystem isolation: serve only to trusted callers.
+# `spawn_agent` children run inside their parent's concurrency slot (see docs/models.rst, "Agents a reply starts").
+model: voice_agent
+model_kwargs:
+  members:
+    asr:
+      model: whisper_large_v3_turbo
+      stream_out: true            # the decode loop also streams its tokens, to the Glue node
+    llm:
+      model: qwen3_5_9b
+      tools: [python, speak, spawn_agent]
+      stream_in: transcript       # a spoken turn's prompt waits for the transcript
+    tts:
+      model: kokoro
+      stream_in: true             # its text comes from the LLM's router, not a request of its own
+  links:
+    # Whisper's tokens -> Qwen's streamed prefill (the Glue node turns Whisper's ids into Qwen's)
+    - {source: asr, node: decoder, signal: asr_token, target: llm, walk: prefill_stream,
+       walks: [prefill, detect_language, prefill_prompt, asr_decode]}
+    # the router's `speak` text -> Kokoro's front node
+    - {source: llm, node: Router, signal: speak_text, walks: [route], target: tts, walk: speak_front, glue: false}
+rank_devices: {0: 0, 1: 0, 2: 0, 3: 0}
+# Qwen's context; Whisper's and Kokoro's own limits are their models'.
+max_seq_len: 32768
+max_concurrent_requests: 64
+knobs:
+  gc_gen0_threshold: 50000
+  # Whisper's: global, and it wants them
+  pre_plan: false
+  step_threads: serial
+node_groups:
+  - node_names: [audio_encoder, decoder]
+    ranks: [0]
+  - node_names: [LLM, vision_encoder, Glue]
+    ranks: [1]
+  # host work, no CUDA: the router and tool node, and Kokoro's front
+  - node_names: [Router, Tool, kokoro_front]
+    ranks: [2]
+  - node_names: [kokoro]
+    ranks: [3]
+resources:
+  gdn_state:
+    max_slots: 129
+    prefix_slots: 128
+  asr_kv_cache:
+    cpu_offload_pages: 128
+  cross_kv_cache:
+    cpu_offload_pages: 128

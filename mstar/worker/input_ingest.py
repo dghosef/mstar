@@ -22,6 +22,7 @@ from mstar.utils.ipc_format import (
     InputSignals,
     MessageSource,
     NewRequest,
+    ReleaseOutputs,
     RemoveRequest,
     StopLoops,
     TensorReceived,
@@ -82,6 +83,7 @@ class InputIngest:
             WorkerMessageType.NEW_REQUEST: self._add_new_request,
             WorkerMessageType.DRAIN_REQUEST: self._drain_request,
             WorkerMessageType.REMOVE_REQUEST: self._remove_request,
+            WorkerMessageType.RELEASE_OUTPUTS: self._release_outputs,
             WorkerMessageType.INPUT_SIGNALS: self._process_new_inputs,
             WorkerMessageType.EDGE_ITEMS: self._process_edge_items,
             WorkerMessageType.TENSOR_RECEIVED: self._handle_tensor_received,
@@ -182,6 +184,8 @@ class InputIngest:
             loop_caps=body.loop_caps,
         )
         body.request_info.rid_handle = rid
+        if body.silent:
+            runtime.set_silent(rid)
         lifecycle.add(rid, wire_rid)
         laps.lap("runtime_add")
 
@@ -238,6 +242,11 @@ class InputIngest:
         for message in self._lifecycle.removed(None, body.request_id):
             self.drop_for_removed(message)
         self._lockstep.clear_wire_rid(body.request_id)
+
+    def _release_outputs(self, body: ReleaseOutputs) -> None:
+        # the pipeline finishes it once the request's remove has run (`StepPipeline._apply_releases`)
+        if (rid := self._runtime.get_rid_handle(body.request_id)) is not None:
+            self._lifecycle.release_after_remove.add(rid)
 
     def _drain_request(self, body: DrainRequest) -> None:
         self._lifecycle.drain(body)
