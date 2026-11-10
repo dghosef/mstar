@@ -1868,6 +1868,13 @@ impl GraphRuntime {
         self.pending_loop_stops.retain(|&(r, _, _)| r != rid);
     }
 
+    /// Drop `rid`'s client emits from here on (a request nobody outside reads).
+    fn set_silent(&mut self, rid: u32) {
+        if let Some(info) = self.requests.get_mut(rid as usize).and_then(|r| r.as_mut()) {
+            info.silent = true;
+        }
+    }
+
     fn get_rid_handle(&self, rid: &str) -> Option<u32> {
         self.rids.handle(rid)
     }
@@ -3686,9 +3693,11 @@ impl GraphRuntime {
                     _ => (None, 1),
                 }
             };
+            let silent = self.requests[rid as usize].as_ref().is_some_and(|i| i.silent);
             for e in edges {
                 let name = self.interner.name(e.name).to_string();
                 match e.dest {
+                    Dest::EmitToClient if silent => {}
                     Dest::EmitToClient => match emit_inline.get(&rid) {
                         Some(&(sig, modality, value)) if sig == e.name => {
                             plan.emit_inline.push((

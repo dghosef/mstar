@@ -18,6 +18,12 @@ TOOLS = "tools"
 # turn's transcript and suffix, a join). A rebuild replays the prompt and the samples only, so a request that ran
 # such a step is not rebuilt (`Rebuilds.note_appended`).
 APPENDS = "appends"
+# The request kwarg of a child request of a spawned agent: the id of its parent (a model's INTERNAL_KWARGS, so a
+# client cannot send it).
+AGENT_CHILD = "agent_child"
+# A child's final turn, which its router persists; the answers of a parent's children, which its join step reads.
+AGENT_ANSWER = "agent_answer"
+AGENT_ANSWERS = "agent_answers"
 # The signal the decode loop of such a request accumulates: the ids of its turn after
 # the first (which the prefill sampled and persisted as ``new_token``).
 TURN_IDS = "turn_ids"
@@ -126,11 +132,20 @@ class WalkStep:
     step of the plan (``len(plan)`` ends it; ``""`` names the unnamed end, so
     ``exits={"": 1}`` loops back), and a plan that comes back runs its steps
     under the output budget it has left.
+
+    ``spawns`` names persisted signals this step may produce, each the prompt of a child
+    request of the same model: when the step ends, the conductor starts one child per
+    non-empty signal, in the partition's workers. ``joins`` holds the step until every child
+    the request started has ended; the conductor then enters it with the children's persisted
+    ``agent_answer`` tensors as its ``agent_answers`` input and, for a child that failed or timed
+    out, its error text in ``step_metadata["agent_errors"]``.
     """
     walk: str
     bind: Mapping[str, str] = MappingProxyType({})
     step_metadata: Mapping[str, Any] = MappingProxyType({})
     exits: Mapping[str, int] = MappingProxyType({})
+    spawns: tuple[str, ...] = ()
+    joins: bool = False
 
 
 @dataclass
@@ -170,6 +185,8 @@ class PartitionState:
     exit: str = ""
     # whether the plan has an exit that leads back; its steps then run under the token budget left
     cyclic: bool = False
+    # the step (`WalkStep.joins`) held until the request's children have ended, else None
+    pending_join: int | None = None
     num_output_tokens: int = 0
     # resource label -> PublishedInfo, accumulated across all TP ranks and
     # handed back out on the next forward
