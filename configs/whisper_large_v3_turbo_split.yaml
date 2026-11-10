@@ -9,7 +9,7 @@ knobs:
 rank_devices: {0: 0, 1: 0}
 mps: true
 resources:
-  kv_cache:
+  asr_kv_cache:
     cpu_offload_pages: 128
   cross_kv_cache:
     cpu_offload_pages: 128

@@ -27,18 +27,24 @@ from typing import Any
 import torch
 
 from mstar.communication.tensors import NameToTensorList
+from mstar.conductor.request_info import PartitionDefinition
 from mstar.engine.resources import NodeResourceSpec
 from mstar.graph.base import GraphEdge, GraphNode, GraphSection, Loop, TensorPointerInfo
 from mstar.graph.special_destinations import EMIT_TO_CLIENT
 from mstar.model.base import Model, WalkStep
+from mstar.model.keys import SPEAK_TEXT
 from mstar.model.kokoro.config import (
     AUDIO_CHUNK,
     BOUNDARY_TOKEN_ID,
     CHUNK_LOOP,
+    FRONT_NODE,
+    FRONT_PARTITION,
+    FRONT_WALK,
     PHONEME_IDS,
     PHONEME_LENS,
     REF_STYLE,
     SPEED,
+    STREAM_SYNTH_WALK,
     SYNTH_NODE,
     SYNTH_WALK,
     KokoroModelConfig,
@@ -46,6 +52,8 @@ from mstar.model.kokoro.config import (
 from mstar.model.kokoro.g2p import LANG_NAMES, G2PFrontend, normalize_lang_code
 from mstar.model.kokoro.voices import VoiceRegistry
 from mstar.model.submodule_base import NodeSubmodule
+from mstar.streaming.chunk_policy import FixedChunkPolicy
+from mstar.streaming.topology import Connection, PartitionTopology, StreamingGraphEdge
 
 logger = logging.getLogger(__name__)
 
@@ -82,14 +90,21 @@ def _resolve_snapshot(repo_id: str, cache_dir: str | None, allow_patterns: list[
 class KokoroModel(Model):
     """Model contract for Kokoro-82M (``hexgrad/Kokoro-82M``)."""
 
+    stream_in = False
+
     def __init__(
         self,
         model_path_hf: str,
         cache_dir: str | None = None,
         lang_code: str | None = None,
         espeak_fallback: bool = True,
+        stream_in: bool = False,
         **config_overrides: Any,
     ) -> None:
+        # Whether the text comes as a stream, from another model's node (a `MultiModel` link): the model
+        # then has a front node and a streamed synth walk, in partitions of their own, and no request of
+        # its own (`walk_plan`).
+        self.stream_in = bool(stream_in)
         self.model_path_hf = model_path_hf
         self.cache_dir = cache_dir
         self.local_dir = _resolve_snapshot(model_path_hf, cache_dir, METADATA_PATTERNS)
@@ -128,7 +143,40 @@ class KokoroModel(Model):
             # an extra iteration would synthesize a chunk that does not exist.
             enable_async_scheduling=False,
         )
-        return {SYNTH_WALK: Loop(name=CHUNK_LOOP, section=synth, max_iters=self.config.max_chunks, outputs=[])}
+        walks = {SYNTH_WALK: Loop(name=CHUNK_LOOP, section=synth, max_iters=self.config.max_chunks, outputs=[])}
+        if self.stream_in:
+            streamed = (PHONEME_IDS, REF_STYLE, SPEED)
+            walks[FRONT_WALK] = GraphNode(
+                name=FRONT_NODE, input_names=[SPEAK_TEXT],
+                outputs=[StreamingGraphEdge(next_node=SYNTH_NODE, name=name, target_partition="default")
+                         for name in streamed],
+                enable_async_scheduling=False,
+            )
+            walks[STREAM_SYNTH_WALK] = GraphNode(
+                name=SYNTH_NODE, input_names=list(streamed),
+                outputs=[GraphEdge(next_node=EMIT_TO_CLIENT, name=AUDIO_CHUNK, output_modality="audio")],
+                enable_async_scheduling=False,
+            )
+        return walks
+
+    def get_partitions(self) -> list[PartitionDefinition]:
+        if not self.stream_in:
+            return super().get_partitions()
+        return [
+            PartitionDefinition(name=FRONT_PARTITION, graph_walks={FRONT_WALK}),
+            PartitionDefinition(name="default", graph_walks={SYNTH_WALK, STREAM_SYNTH_WALK}),
+        ]
+
+    def get_partition_topology(self):
+        if not self.stream_in:
+            return super().get_partition_topology()
+        return PartitionTopology(
+            partitions=[FRONT_PARTITION, "default"],
+            connections=[
+                Connection(FRONT_PARTITION, "default", name, lambda: FixedChunkPolicy(chunk_size=1))
+                for name in (PHONEME_IDS, REF_STYLE, SPEED)
+            ],
+        )
 
     # -- request preprocessing (API data worker) -----------------------------
 
@@ -219,8 +267,13 @@ class KokoroModel(Model):
         model_kwargs: dict,
     ) -> list[WalkStep]:
         """The single walk synthesizes every chunk (``process_prompt`` refuses a
-        request that asks for no audio)."""
-        return [WalkStep(SYNTH_WALK)]
+        request that asks for no audio). With `stream_in` the front and the streamed
+        synth walk run when the request wants audio (the text comes from the stream)."""
+        if not self.stream_in:
+            return [WalkStep(SYNTH_WALK)]
+        if "audio" not in output_modalities:
+            return []
+        return [WalkStep(FRONT_WALK if partition_name == FRONT_PARTITION else STREAM_SYNTH_WALK)]
 
     # -- output ------------------------------------------------------------
 
@@ -251,6 +304,10 @@ class KokoroModel(Model):
         sp_group=None,
     ) -> NodeSubmodule | None:
         del tp_group, autocast_dtype, sp_group
+        if node_name == FRONT_NODE and self.stream_in:
+            from mstar.model.kokoro.submodules import KokoroFrontSubmodule
+
+            return KokoroFrontSubmodule(self)
         if node_name != SYNTH_NODE:
             raise ValueError(f"Unknown Kokoro node: {node_name!r}")
         if node_name not in self._submodule_cache:

@@ -98,7 +98,7 @@ def _conductor(max_concurrent_requests: int | None) -> Conductor:
     c.max_concurrent_requests = max_concurrent_requests
     c._early_abort_requests = set()
     c.enable_nvtx = False
-    c._admit_request = lambda body: c.requests.__setitem__(body.request_id, body)
+    c._admit_request = lambda body: c.requests.__setitem__(body.request_id, SimpleNamespace(parent=None))
     return c
 
 

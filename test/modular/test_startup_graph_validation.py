@@ -756,8 +756,9 @@ def _qwen3_5(name, model_kwargs, tmp_path, monkeypatch):
         linear_value_head_dim=128, linear_conv_kernel_dim=4,
         vocab_size=1024, rms_norm_eps=1e-6, max_position_embeddings=262144,
     )
+    tools = tuple(model_kwargs.get("tools", ()))
     return _bare(
-        Qwen3_5DenseModel, config=config, vision_config=None,
+        Qwen3_5DenseModel, config=config, vision_config=None, tools=tools, spawn="spawn_agent" in tools,
         media=(MediaIntake("image", vision_encoder((0,)), 0, None),),
     )
 
@@ -900,7 +901,20 @@ def _default(name, model_kwargs, tmp_path, monkeypatch):
     return _constructed(name, model_kwargs)
 
 
+def _voice_agent(name, model_kwargs, tmp_path, monkeypatch):
+    """The three members on small stand-ins, linked as the shipped config links them."""
+    from mstar.model.multimodel import MultiModel
+
+    members = model_kwargs["members"]
+    asr = _whisper("whisper", {}, tmp_path, monkeypatch)
+    llm = _qwen3_5("qwen", {"tools": members["llm"]["tools"]}, tmp_path, monkeypatch)
+    tts = _kokoro("kokoro", {}, tmp_path, monkeypatch)
+    asr.stream_out, llm.stream_in, tts.stream_in = True, members["llm"]["stream_in"], True
+    return MultiModel({"asr": asr, "llm": llm, "tts": tts}, links=model_kwargs["links"])
+
+
 _FACTORIES = {
+    "MultiModel": _voice_agent,
     "BagelModel": _bagel,
     "CanaryModel": _canary,
     "CanaryQwenModel": _canary_qwen,

@@ -869,6 +869,12 @@ class GraphRuntime(PhasedPostprocess, ABC):
         pass
 
     @abstractmethod
+    def set_silent(self, rid: int):
+        """Send nothing of ``rid`` to the client from here on: its client emits are dropped. For a request
+        nobody outside reads (a spawned agent)."""
+        pass
+
+    @abstractmethod
     def remove_request(
         self, rid: int
     ):
@@ -1049,6 +1055,13 @@ class GraphRuntime(PhasedPostprocess, ABC):
         it takes no rid. A speculative batch uses it to know which of the
         in-flight batch's outputs it will consume.
         """
+        pass
+
+    @abstractmethod
+    def mark_exit(self, rid: int, partition: str, name: str):
+        """The partition's walk ends through the named exit
+        (``StopCheck.exit``). Reported once, on the WORKER_GRAPHS_DONE that
+        follows, unless the node was speculative."""
         pass
 
     @abstractmethod
