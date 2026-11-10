@@ -14,7 +14,7 @@ import logging
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from mstar.engine.resources.lora.config import LORA_RESOURCE_KEY, LoraSpec
+from mstar.engine.resources.lora.config import LORA_RESOURCE_KEY, LoraSpec, fetch_adapter_path
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +64,20 @@ def resolve_lora_adapters(spec: LoraSpec | None, model_config: dict) -> dict[str
         return {}
     from mstar.engine.resources.lora.store import check_adapters
 
+    # a repo id becomes its snapshot's file here, once, and the workers read that file
+    fetched, errors = {}, []
+    for name, source in spec.adapters.items():
+        try:
+            fetched[name] = fetch_adapter_path(source)
+        except ValueError as exc:
+            errors.append(f"{name!r}: {exc}")
+    if errors:
+        raise ValueError("the serving config's LoRA adapters cannot be fetched: " + "; ".join(errors))
+    spec.apply_yaml_overrides(adapters=fetched)
     digests = check_adapters(spec)
-    resolved: dict[str, Any] = {"adapter_digests": {name: d.hex() for name, d in digests.items()}}
+    resolved: dict[str, Any] = {
+        "adapters": fetched, "adapter_digests": {name: d.hex() for name, d in digests.items()},
+    }
     block = model_config["resources"][LORA_RESOURCE_KEY]
     # a YAML list is the deployment's own choice, which nothing narrows
     targets = None if "targets" in block else served_lora_targets(spec)

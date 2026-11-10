@@ -599,6 +599,41 @@ def test_the_api_server_pins_digests_and_narrows_targets_in_the_config_it_hands_
     assert lora_spec(serving_resources(model, {"resources": {}})) is None
 
 
+def test_a_configured_adapter_may_be_a_hugging_face_repo_id(adapters, tmp_path, monkeypatch):
+    """A repo id is fetched once, by the API server, through the HF cache (offline here, so
+    from the cache alone), and the config every worker builds from names its snapshot's
+    file. A repo that cannot be fetched fails startup, named."""
+    import shutil
+
+    import huggingface_hub.constants as hf
+
+    from mstar.engine.resources.lora.config import ADAPTER_WEIGHTS_FILE
+    from mstar.engine.resources.lora.serving import lora_spec, resolve_lora_adapters
+    from mstar.model.base import declared_resources, serving_resources
+
+    _, paths = adapters
+    repo = tmp_path / "hub" / "models--org--sql"
+    (repo / "snapshots" / "c0ffee").mkdir(parents=True)
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text("c0ffee")
+    shutil.copy(paths["a3"], repo / "snapshots" / "c0ffee" / ADAPTER_WEIGHTS_FILE)
+    monkeypatch.setattr(hf, "HF_HUB_CACHE", str(tmp_path / "hub"))
+    monkeypatch.setattr(hf, "HF_HUB_OFFLINE", True)
+    model = make_model(get_node_resources=lambda: [make_spec({})])
+
+    config = {"resources": {"lora": {"adapters": {"sql": "org/sql"}}}}
+    digests = resolve_lora_adapters(lora_spec(declared_resources(model, config)), config)
+    fetched = {"sql": str(repo / "snapshots" / "c0ffee" / ADAPTER_WEIGHTS_FILE)}
+    assert config["resources"]["lora"]["adapters"] == fetched
+    assert digests == {"sql": adapter_digest(read_lora_file(paths["a3"]))}
+    (worker,) = serving_resources(model, config)
+    assert worker.adapters == fetched and worker.adapter_digests == digests
+
+    config = {"resources": {"lora": {"adapters": {"sql": "org/sql", "gone": "org/gone"}}}}
+    with pytest.raises(ValueError, match=r"'gone': the Hugging Face repo 'org/gone' is not in the HF cache"):
+        resolve_lora_adapters(lora_spec(declared_resources(model, config)), config)
+
+
 def test_a_lora_deployment_still_has_its_kv_pools_checked_against_its_cap(adapters):
     """The `lora:` block is the LoRA specs' own, so the KV-fit check (which reads the
     specs as a server builds them) still refuses a cap the cache cannot hold."""
