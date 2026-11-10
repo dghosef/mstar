@@ -12,8 +12,8 @@ joins gives its names to itself (Whisper's carry ``asr_``); two members of one f
 need the names to be prefixable, which is not built.
 
 Members are ``Model`` instances, or ``{"model": <registered name>, **kwargs}`` specs the
-multimodel builds, so a registered multimodel could come from the serving YAML's
-``model_kwargs: {members: {...}}``; none is registered yet.
+multimodel builds, so a registered multimodel comes from the serving YAML's
+``model_kwargs: {members: {...}}`` (``voice_agent`` is one).
 
 A ``Link`` streams one member's tokens (a speech model's transcript) into another member's
 streamed prefill walk: the multimodel adds the stream edge to the source's walks, puts the

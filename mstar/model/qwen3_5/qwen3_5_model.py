@@ -480,8 +480,7 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
             self._THINK_ONLY_AFTER_QUERY, "{%- if loop.index0 > ns.last_query_index or true %}", 1)}
 
     def render_agent(self, task: str, enable_thinking: bool = True) -> list[int]:
-        """The prompt ids of an agent that does ``task``: the chat template, with the same tools as its parent's
-        (so the system and tools block is the one the prefix cache holds for it)."""
+        """The prompt ids of an agent that does ``task``: the chat template, with the same tools as its parent's."""
         text = self.tokenizer.apply_chat_template(
             [{"role": "user", "content": task}], tokenize=False, add_generation_prompt=True,
             enable_thinking=enable_thinking,

@@ -751,7 +751,7 @@ one (for example Whisper and Qwen3.5), each on workers of its own: a member's pa
 ``<member>.<partition>``, members whose walk, node, loop, signal or resource names clash are refused, a request's plan
 is its first member's, and every output is turned into bytes by the member that emits its signal
 (``Model.postprocessor``). A ``/generate`` chunk's ``metadata["signal"]`` names the output it came from, so a client
-tells a transcript from a reply. It is a library, not a registered model yet.
+tells a transcript from a reply. It is registered as ``voice_agent`` (``configs/voice_agent.yaml``).
 
 **A Python tool the reply can call.** ``model_kwargs: {tools: [python]}`` in the serving config
 (``configs/qwen3_5_0.8b_tool.yaml``) lets a reply run Python: the chat template is given a ``python(code)`` tool, a
