@@ -169,9 +169,11 @@ class StepAllowance:
 
 class KeyedWalks(NamedTuple):
     """A keyed label's walks, as a resource's prefix cache takes them: the walks whose
-    writes are keyed, and the growth walks whose sampled ids extend the keys."""
+    writes are keyed, the growth walks whose sampled ids extend the keys, and the input that
+    holds the ids a keyed ids span is keyed by."""
     writes: tuple[str, ...]
     growth: tuple[str, ...] = ()
+    tensor: str = ""
 
 
 class MoveKind(IntEnum):
@@ -251,6 +253,27 @@ class Resource(ResidentHooks, ABC):
         """Keep nothing across requests. The engine calls it, before any
         request, on every other resource."""
         return
+
+    def keeps_prefix(self, key: bytes) -> bool:
+        """Whether this resource still holds what a hit at the prefix index's ``key`` would restore from it: a
+        recurrent pool's snapshot under the key, the cache's own page. The default holds everything, for a resource
+        that restores nothing. A hit stops where any resource lacks its part, so the KV cache evicts first the pages
+        some resource has none for (`KVManager._evict`), and a pool drops first a snapshot whose page is gone.
+
+        It takes no lock, for the cache asks it under its own and a resource under its own. The answer is rank-local:
+        it reads what the other thread of this rank changes (the main thread's evictions and reloads, the GPU thread's
+        admits and commits), so two TP ranks can answer differently for the same step. The cache therefore binds
+        restorers only on one rank (`KVManager.bind_restorer`); a resource that restores a prefix above one rank must
+        first answer from state frozen at the step boundary."""
+        return True
+
+    def restorable(self, keys: Sequence[bytes]) -> int:
+        """How many of ``keys``' leading pages a hit can skip as far as this resource is concerned: up to the longest
+        prefix it holds state for. The default holds every one. Takes no lock, as `keeps_prefix` does not."""
+        return len(keys)
+
+    # the prefix entries this resource has ever filed (snapshots, for a pool), for the cache's counts
+    filed: int = 0
 
     def bind_dependencies(self, resources: Mapping[str, "Resource"]) -> None:
         """The live resources this one's spec names in `depends_on`, once all are built."""

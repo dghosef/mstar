@@ -602,6 +602,22 @@ the pool's ``resources:`` key. Each snapshot slot costs as much as a request slo
   so the slots hold about one prompt each. A decode snapshot that a later prompt restores
   is kept like a prompt's from then on.
 
+- Where a prefill keeps snapshots is a policy (``checkpoints:`` under the pool's ``resources:`` key, a built-in name
+  or ``"pkg.module:Class"`` of a ``CheckpointPolicy``, which must be deterministic over the row it is given).
+  ``rows`` is the default and keeps what the bullets above describe. ``messages`` also keeps the page floor of each
+  message boundary of the prompt that the row crosses, so a history that other requests share is restored from the
+  state at the end of its turns instead of recomputed by the first request that diverges inside it (for a template that
+  refuses a chat with no user turn, such as Qwen3.5's, the first boundary is after the first user turn). The API server derives the
+  boundaries from one tokenization of the chat template's text, and only when a pool's policy asks. A model supplies
+  its template's arguments (``Model.chat_template_kwargs``); a deployment whose model has none is
+  refused at startup when a pool asks for ``messages``.
+- A cache and its snapshots are evicted as a pair, through ``Resource.keeps_prefix(key)``: whether a resource still
+  holds what a hit at the index key restores from it. A full cache loses the pages some pool has no snapshot for first
+  (``KVManager._evict``, over every pool bound to it), and a full set of slots loses a snapshot whose page the cache
+  has lost before any other. The answer takes no lock and is rank-local (it reads what the other thread of the rank
+  changes), so the cache binds such resources on one rank only and refuses them above it; a resource that restores
+  prefixes at TP > 1 must first answer from state frozen at the step boundary.
+
 Snapshots stay off without ``prefix_slots``, and also above one rank, without a named KV
 cache, when that cache isn't on every node of the pool, or when its ``prefix_cache`` is
 off or can't open at the pool's world size; in those cases the pool allocates no snapshot
@@ -1788,16 +1804,20 @@ methods are:
    first id belongs at: the decode's last id, which the step speculated past the stop may have
    written already, so ``SampledTokenDecoder`` leaves it out when the position resource is past
    it as the step is declared (in step order, the same on every TP rank). A prefill whose row is empty runs no forward and completes its node. Text written after
-   the prompt is keyed for prefix caching when its walk is in ``PrefixKeys.walks``. A step whose
-   ``step_metadata`` sets ``APPENDS`` wrote text a rebuild would not replay, so a preemption
-   drop refuses its request (``Rebuilds.note_appended``). A step a stream feeds that runs once
+   the prompt is keyed for prefix caching when its walk is in ``PrefixKeys.walks``. A request's ids are kept on the host in write order (the records of its prefill steps, then the ids written since: each
+   sample and each row a later prefill wrote, such as a tool's text or a transcript), so a preemption drop rebuilds a request
+   past a tool round or a transcript. A row after a decode starts with the decode's last sample, which is kept as that sample;
+   a request is dropped only while what was written since ends in a sample, so not in the middle of a transcript. A rebuilt
+   request equals a prefill of the same ids that restores the same snapshot, which is not always a fresh prefill. A step a stream feeds that runs once
    per chunk may be followed by more steps: the stream's final chunk then moves the plan on,
    where a stop check's ``END_PARTITION`` still ends the partition. A step may start child
    requests of the same model, ``WalkStep(..., spawns=("agent_0", ...))``: when it ends, the
    conductor starts one from each of those persisted signals that it produced (the tensor is the
    child's ``text_inputs``; the model implements ``kv_layout(layout, length)`` as
    ``MultimodalDecoderModel`` does, for the child's KV), counted against the concurrency cap (the start fails when the server is
-   full) and with no client output. A later step with ``joins=True`` waits until every child has ended, then runs
+   full) and with no client output. A model that starts children sets ``Model.MAX_CHILDREN`` to the most one request
+   starts: the conductor numbers each child just before its parent in arrival order, so the parent never moves its
+   children. A later step with ``joins=True`` waits until every child has ended, then runs
    with the children's persisted ``agent_answer`` tensors as its ``agent_answers`` input and
    ``step_metadata["agents"]`` and ``["agent_errors"]`` (a failed child's text, by index). The
    router and tool node of ``mstar.model.components.python_tool`` use this for ``spawn_agent``.
@@ -2753,7 +2773,7 @@ that a misspelled setting is never silently ignored:
        draw takes each row's argmax in a step whose rows all sample greedily, in a twin of
        each batched capture)
    * - ``RecurrentStateSpec``
-     - ``max_slots``, ``state_dtype``, ``prefix_slots`` (see **Cross-request prefix reuse**).
+     - ``max_slots``, ``state_dtype``, ``prefix_slots``, ``checkpoints`` (see **Cross-request prefix reuse**).
        ``max_slots`` counts the sink unless ``disable_sink_slot``; a value that leaves no
        slot for a request is refused at startup.
    * - ``AttentionSpec``

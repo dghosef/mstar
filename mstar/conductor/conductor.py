@@ -28,6 +28,7 @@ from mstar.conductor.request_info import (
     AGENT_ANSWER,
     AGENT_ANSWERS,
     AGENT_CHILD,
+    KEY_FROM_IDS,
     CurrentForwardPassInfo,
     PartitionDefinition,
     PartitionState,
@@ -392,6 +393,8 @@ class RequestData:
     # answer is held by its workers until the parent's join step has read it, and only then torn down.
     # A parent lists its children in task order, those that have ended, and the text of any that failed.
     parent: str | None = None
+    # its number in the conductor's arrival order, which a child's is taken from
+    arrival: int = 0
     ended: bool = False
     children: list[str] = field(default_factory=list)
     children_ended: set[str] = field(default_factory=set)
@@ -479,6 +482,9 @@ def _request_kv_labels(
 
 
 class Conductor:
+    # the step between request numbers; a model that starts children raises it (`_arrival`)
+    _arrival_step = 1
+
     # Metrics are off unless __init__ gets an interval; class-level so an
     # object built without __init__ reads them as off too.
     _status_interval_s: float | None = None
@@ -502,7 +508,10 @@ class Conductor:
         ``model_config_file``, which the model's placement methods read in any case. A
         LoRA adapter without its digest is refused either way."""
         self.requests: dict[str, RequestData] = {}
-        self._arrivals = itertools.count()
+        # A model whose requests start children numbers them just before their parent (`_arrival`), so a
+        # child that runs short may move its parked parent: the counter steps over the numbers they take.
+        self._arrival_step = int(model.MAX_CHILDREN) + 1
+        self._arrivals = itertools.count(1 if model.MAX_CHILDREN else 0)
         # Requests in teardown: kept in self.requests (so they still count toward
         # concurrency until their GPU state is freed) with barrier state here.
         self.draining: dict[str, DrainingRequest] = {}
@@ -1238,6 +1247,19 @@ class Conductor:
                 )
             )
 
+    def _arrival(self, parent: str | None, request_id: str) -> int:
+        """The request's place in the arrival order (`CurrentForwardPassInfo.arrival`), the same on every worker.
+        The counter numbers requests in steps of ``MAX_CHILDREN + 1``, and a child takes the number
+        ``MAX_CHILDREN - i`` below its parent's, for its place ``i`` among the parent's children. The parked parent
+        is then newer than its children, so a child that runs short may move it, and the parent never moves its
+        children. Liveness needs this (a parent parked at its join holds pages its children wait for), so it is not
+        a policy."""
+        parent_data = self.requests.get(parent) if parent is not None else None
+        if parent_data is None:
+            return next(self._arrivals) * self._arrival_step
+        place = parent_data.children.index(request_id)
+        return parent_data.arrival - (self.model.MAX_CHILDREN - place)
+
     def _counted_requests(self) -> int:
         """The requests that hold resources: every one but a child that has ended and waits for its parent's
         join to read its answer."""
@@ -1247,8 +1269,8 @@ class Conductor:
 
     # a child gets the parent's request settings, less what is the parent's own prompt
     _NOT_INHERITED = frozenset({
-        "prefix_keys", "prefix_tail", "prefix_decode", "kv_layout", "prefix_root", "stream_lead_items",
-        "open_streams", "prefix_cache",
+        "prefix_keys", "prefix_tail", "prefix_decode", "prefix_marks", "kv_layout", "stream_lead_items",
+        "open_streams",
     })
 
     def _start_children(self, request_id: str, step: WalkStep) -> None:
@@ -1279,7 +1301,7 @@ class Conductor:
                 request_id=child_id, initial_signals={"text_inputs": [info]},
                 initial_input_modalities=["text"], initial_output_modalities=["text"], input_metadata={},
                 model_kwargs={
-                    **inherited, AGENT_CHILD: request_id, "prefix_cache": False,
+                    **inherited, AGENT_CHILD: request_id, KEY_FROM_IDS: True,
                     "kv_layout": {
                         key: {label: layout.row() for label, layout in by_label.items()}
                         for key, by_label in layouts.items()
@@ -1591,11 +1613,12 @@ class Conductor:
         prefix_keys = kwargs.get("prefix_keys") or {}
         prefix_tail = kwargs.get("prefix_tail") or {}
         prefix_decode = kwargs.get("prefix_decode") or {}
+        prefix_marks = kwargs.get("prefix_marks") or {}
         prefix_cache = kwargs.get("prefix_cache")
         if not all(partition_states[name].is_done for name in self._streamed_partitions()):
             prefix_cache = False
         kv_layout = kwargs.get("kv_layout") or {}
-        arrival = next(self._arrivals)
+        arrival = self._arrival(model_kwargs.get(AGENT_CHILD), body.request_id)
         # process_prompt's {stream edge: context-only lead items}; each worker
         # primes the streams its own partition consumes
         stream_lead_items = kwargs.get("stream_lead_items") or {}
@@ -1611,9 +1634,11 @@ class Conductor:
                 prefix_keys=prefix_keys.get(key),
                 prefix_tail=prefix_tail.get(key),
                 prefix_decode=prefix_decode.get(key),
+                prefix_marks=prefix_marks.get(key),
                 # what the chains hang from (a LoRA adapter's root), the same for all
                 prefix_root=kwargs.get("prefix_root"),
                 prefix_cache=prefix_cache,
+                key_from_ids=kwargs.get(KEY_FROM_IDS),
                 kv_layout=kv_layout.get(key),
                 loop_caps=loop_caps,
             )
@@ -1676,6 +1701,7 @@ class Conductor:
             prompt_tokens=body.prompt_tokens,
             model_kwargs=dict(model_kwargs),
             parent=model_kwargs.get(AGENT_CHILD),
+            arrival=arrival,
         )
         self._register_request(body.request_id, request_data)
 

@@ -142,6 +142,7 @@ def _apply_chain(cfg, key: str, model_kwargs: dict | None) -> None:
         prefix_keys=(kwargs.get("prefix_keys") or {}).get(key),
         prefix_tail=(kwargs.get("prefix_tail") or {}).get(key),
         prefix_decode=(kwargs.get("prefix_decode") or {}).get(key),
+        prefix_marks=(kwargs.get("prefix_marks") or {}).get(key),
         prefix_cache=kwargs.get("prefix_cache"),
     )
 
@@ -289,6 +290,60 @@ def test_a_clients_prefix_keys_never_reach_process_prompt():
         "process_prompt was handed keys the client made up, and a model that "
         f"reads them would key the prompt by them: {sorted(model.handed)}"
     )
+
+
+# ── where the prompt breaks into messages, for a recurrent pool's checkpoint policy ──
+
+
+class _Hybrid(_Model):
+    """A model with a recurrent pool over its cache, whose process_prompt reports its message boundaries when the
+    chat has any."""
+
+    def __init__(self, ends: bool = True):
+        super().__init__()
+        self._ends = ends
+
+    def get_node_resources(self):
+        from mstar.engine.resources.recurrent.config import (
+            RecurrentBlockConfig,
+            RecurrentStateConfig,
+            RecurrentStateSpec,
+        )
+
+        state = RecurrentStateSpec(resource_key="state", nodes={"LLM"}, config=RecurrentStateConfig(
+            num_layers=1, blocks={"state": RecurrentBlockConfig(shape=(3,), dtype=torch.float32)},
+            max_slots=2, prefix_slots=2, kv_cache="kv",
+        ))
+        return [*super().get_node_resources(), state]
+
+    def process_prompt(self, *args, **kwargs):
+        self.handed = kwargs
+        out = super().process_prompt(*args, **kwargs)
+        ends = {"message_ends": {"text_inputs": [130, 300, 301]}} if self._ends else {}
+        return ProcessPromptOutput(out.new_input_tensors, {**out.metadata, **ends})
+
+
+@pytest.mark.parametrize("checkpoints, ends, marks", [
+    ("messages", True, {"kv": {"main": [128, 288]}}), ("rows", True, None), ("messages", False, None),
+], ids=["messages", "rows", "single turn"])
+def test_a_pool_whose_policy_reads_message_boundaries_gets_their_page_floors(checkpoints, ends, marks):
+    """The policy decides whether the model is asked for the boundaries at all, so a deployment that keeps the
+    default pays nothing; a client's own marks, message ends and key flag never arrive, even where the model
+    reports no boundaries of its own."""
+    model = _Hybrid(ends)
+    deployment = _deployment()
+    deployment["resources"]["state"] = {"checkpoints": checkpoints}
+    worker = _worker(model, deployment)
+
+    kwargs = _run(worker, {
+        "prefix_marks": {"kv": {"main": [999]}}, "message_marks": True, "message_ends": {"text_inputs": [999]},
+        "key_from_ids": True,
+    })
+
+    assert kwargs.get("prefix_marks") == marks
+    assert _handed_over(kwargs).prefix_marks == (None if marks is None else marks["kv"])
+    assert bool(model.handed.get("message_marks")) is (checkpoints == "messages")
+    assert not {"message_ends", "key_from_ids"} & (model.handed.keys() | kwargs.keys())
 
 
 # ── the metadata fold ───────────────────────────────────────────────────
