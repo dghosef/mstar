@@ -157,7 +157,6 @@ def test_a_member_that_can_speak_needs_a_link_for_its_text(tmp_path, monkeypatch
         MultiModel({"llm": llm, "tts": _kokoro("kokoro", {}, tmp_path, monkeypatch)})
 
 
-
 def test_a_model_that_starts_agents_starts_as_one_deployment_with_no_node_of_its_own_for_them(
     tmp_path, monkeypatch, _drop_stubbed_imports,  # noqa: F811
 ):
