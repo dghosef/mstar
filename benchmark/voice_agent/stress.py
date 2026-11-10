@@ -1,6 +1,6 @@
 """Stress and parity harness for the voice agent, for the GPU run (configs/voice_agent.yaml).
 
-    python examples/voice_agent/stress.py --out results/ [--server URL | --launch] [--phases parity,paths,load,faults]
+    python benchmark/voice_agent/stress.py --out results/ [--server URL | --launch] [--phases parity,paths,load,faults]
 
 Each phase writes ``<out>/<phase>.json`` ({"phase", "ok", "checks": [...], "seconds"}) and, after it, checks that the
 server is healthy, no request is left running, and the KV pages are back to where they were before the phase.
@@ -118,7 +118,8 @@ class Server:
             head, _, value = line.rpartition(" ")
             if all(f'{k}="{v}"' in head for k, v in labels.items()):
                 total, found = total + float(value), True
-        return total if found else None
+        # a counter has no sample before its first count: with metrics served, that is zero
+        return total if found else 0.0 if "\nmstar_" in text else None
 
     def generate(self, text=None, wav: Path | None = None, history=None, speak=False, kwargs=None, timeout=150,
                  request_id=None, abort_after: float | None = None) -> dict:
