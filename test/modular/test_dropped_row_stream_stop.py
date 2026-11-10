@@ -291,6 +291,9 @@ def test_an_end_partition_stop_reports_the_partition_done():
     assert batch.partition_done_rids == {1}
     assert runtime.loop_names == {}
     assert not w.reported
+    # sent, it is the stop check's end, which a stream's end is not
+    _, runtime, _ = _postprocess(_Sub(stops={1: {END_PARTITION}}), streams=False, in_loop=False, through_send=True)
+    assert runtime.partition_done == [1] and runtime.exits == [(1, END_PARTITION)]
 
 
 def test_an_end_partition_stop_inside_a_loop_fails_the_request():
@@ -305,7 +308,8 @@ def test_a_failed_check_stop_row_does_not_report_its_partition_done():
     failed, which the STOPS break drops after the request was built."""
     _, runtime, w = _postprocess(_Sub(bad={2}, stage="check_stop"), through_send=True)
     assert set(w.reported) == {2}
-    assert runtime.partition_done == [1]
+    # a stream's end names no exit, which tells it from a stop check's END_PARTITION
+    assert runtime.partition_done == [1] and runtime.exits == []
 
 
 def test_an_end_partition_stop_on_a_rows_last_chunk_ends_its_partition():

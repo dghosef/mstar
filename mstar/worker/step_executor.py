@@ -1076,6 +1076,8 @@ class StepExecutor:
             else:
                 del stops[rid]
                 batch_N.node_batch.partition_done_rids.add(rid)
+                # a stream's end also reports partition_done; this one is a stop check's
+                self._graph_runtime.mark_exit(rid, batch_N.partition, END_PARTITION)
                 ended.append(rid)
         if not batch_N.node_batch.failed_requests:
             return ModelStops(stops, [], ended)

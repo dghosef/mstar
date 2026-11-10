@@ -15,20 +15,50 @@ Members are ``Model`` instances, or ``{"model": <registered name>, **kwargs}`` s
 multimodel builds, so a registered multimodel could come from the serving YAML's
 ``model_kwargs: {members: {...}}``; none is registered yet.
 
-The first member takes a request's input; the output chunks are postprocessed by the member whose graph
-emits their signal (`Model.postprocessor`).
+A ``Link`` streams one member's tokens (a speech model's transcript) into another member's
+streamed prefill walk: the multimodel adds the stream edge to the source's walks, puts the
+``Glue`` node ahead of the target walk (`mstar.model.components.text_glue`) and connects their
+partitions. A request that brings what the source member takes (audio) runs the source and the
+target together, the target's prompt left open for the stream; any other request is the target's
+alone. The first member that is not a link's source takes a request's input; the output
+chunks are postprocessed by the member whose graph emits their signal.
 """
 from __future__ import annotations
 
+import copy
 import dataclasses
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 
 from mstar.conductor.request_info import PartitionDefinition
 from mstar.distributed.base import ShardingConfig
 from mstar.graph.base import GraphSection
 from mstar.graph.special_destinations import EMIT_TO_CLIENT
-from mstar.model.base import Model, keyed_labels
-from mstar.streaming.topology import CLIENT, PartitionTopology
+from mstar.model.base import Model, ProcessPromptOutput, keyed_labels
+from mstar.model.components.python_tool import SPEAK
+from mstar.model.components.text_glue import GLUE_NODE, GlueSubmodule, glued_walk
+from mstar.model.keys import SPEAK_TEXT
+from mstar.streaming.chunk_policy import FixedChunkPolicy
+from mstar.streaming.topology import CLIENT, Connection, PartitionTopology, StreamingGraphEdge
+
+
+@dataclass(frozen=True)
+class Link:
+    """``source`` member's ``node`` streams its ``signal`` from its ``walks`` into the ``target`` member's
+    streamed ``walk``, ``chunk`` items at a time. With ``glue`` the items are token ids of the source's
+    vocabulary: the ``Glue`` node goes ahead of the target walk and makes them the target's, for the node
+    reading ``input``. Without, the target walk's first node reads the signal as it is (a speech model's text)."""
+    source: str
+    node: str
+    signal: str
+    walks: tuple[str, ...]
+    target: str
+    walk: str
+    input: str = "text_inputs"
+    chunk: int = 8
+    glue: bool = True
+    # the open stream the target's prompt waits for (a glued link; the target's ``stream_in``)
+    stream: str = "transcript"
 
 
 def _member(name: str, spec: Model | Mapping, cache_dir: str | None) -> Model:
@@ -72,14 +102,36 @@ def refuse_clashes(kind: str, named: Mapping[str, Iterable[str]]) -> dict[str, s
 class MultiModel(Model):
 
     def __init__(
-        self, members: Mapping[str, Model | Mapping], cache_dir: str | None = None, model_path_hf: str = "",
+        self, members: Mapping[str, Model | Mapping], links: Sequence[Link | Mapping] = (),
+        cache_dir: str | None = None, model_path_hf: str = "",
     ):
         del model_path_hf  # each member names its own checkpoint
         if not members:
             raise ValueError("a multimodel needs at least one member")
         self.members = {name: _member(name, spec, cache_dir) for name, spec in members.items()}
-        # the typed request's member: the first
-        self.entry = next(iter(self.members.values()))
+        self.links = tuple(
+            link if isinstance(link, Link) else Link(**link) for link in links)
+        if sum(link.glue for link in self.links) > 1:
+            raise ValueError("a multimodel takes one glued link: the glue node is one per deployment")
+        for link in self.links:
+            for name in (link.source, link.target):
+                if name not in self.members:
+                    raise ValueError(f"link names member {name!r}, which the multimodel does not have")
+        for name, member in self.members.items():
+            if SPEAK in getattr(member, "tools", ()) and not any(
+                link.source == name and link.signal == SPEAK_TEXT for link in self.links
+            ):
+                raise ValueError(f"member {name!r} can speak but no link carries its {SPEAK_TEXT!r} to a speech model")
+        for link in self.links:
+            if link.glue and getattr(self.members[link.target], "stream_in", "") != link.stream:
+                have = getattr(self.members[link.target], "stream_in", "")
+                raise ValueError(
+                    f"link into {link.target!r} opens the stream {link.stream!r}, but that member's stream_in is "
+                    f"{have!r}: a spoken prompt would take the typed path")
+        sources = {link.source for link in self.links if link.glue}
+        names = list(self.members)
+        # the typed request's member: the first that is not a stream's source
+        self.entry = self.members[next((n for n in names if n not in sources), names[0])]
         for attr in ("PREPROCESS_ONLY_KWARGS", "INTERNAL_KWARGS", "LENGTH_KWARGS",
                      "PREPROCESS_TORCH_THREADS", "PREPROCESS_PARALLEL"):
             setattr(self, attr, getattr(self.entry, attr))
@@ -94,6 +146,10 @@ class MultiModel(Model):
             name: {loop for g in graphs.values() for loop in g.get_loops()} for name, graphs in walks.items()
         })
         refuse_clashes("signal", {name: _signals(graphs.values()) for name, graphs in walks.items()})
+        if sum(bool(keyed_labels(m)) for m in self.members.values()) > 1:
+            raise ValueError(
+                "more than one member keys a prefix cache, and a deployment's cache root hangs from one "
+                "checkpoint: serve them apart")
         refuse_clashes("resource", {
             name: [spec.resource_key for spec in m.get_node_resources()] for name, m in self.members.items()
         })
@@ -109,6 +165,23 @@ class MultiModel(Model):
                     for edge in node.outputs:
                         if edge.next_node == EMIT_TO_CLIENT:
                             self._emitted[edge.name] = (name, edge.output_modality)
+        for link in self.links:
+            if link.glue:
+                self._node_owner[GLUE_NODE] = link.target
+
+    # -- links ---------------------------------------------------------------
+
+    def _partition_with(self, member: str, walk: str) -> str:
+        part = next(p for p in self.members[member].get_partitions() if walk in p.graph_walks)
+        return self._renamed(member, part.name)
+
+    def _active_links(self, input_modalities: Sequence[str]) -> list[Link]:
+        """The links whose source takes something this request brings."""
+        return [
+            link for link in self.links
+            if link.glue and any(
+                self.members[link.source].max_input_files().get(m, 0) > 0 for m in input_modalities if m != "text")
+        ]
 
     # -- the merged declarations ------------------------------------------------
 
@@ -122,7 +195,20 @@ class MultiModel(Model):
         return {key: value for part in parts.values() for key, value in part.items()}
 
     def get_graph_walk_graphs(self):
-        return self._merged("get_graph_walk_graphs")
+        graphs = self._merged("get_graph_walk_graphs")
+        for link in self.links:
+            target = self._partition_with(link.target, link.walk)
+            # the node the stream arrives at: the glue, ahead of the target walk, or the walk's own first node
+            into = GLUE_NODE if link.glue else next(iter(graphs[link.walk].get_nodes()))
+            for walk in link.walks:
+                graphs[walk] = graph = copy.deepcopy(graphs[walk])
+                for node in graph.get_nodes().values():
+                    if node.name == link.node:
+                        node.outputs.append(StreamingGraphEdge(
+                            next_node=into, name=link.signal, target_partition=target))
+            if link.glue:
+                graphs[link.walk] = glued_walk(graphs[link.walk], link.signal, link.input)
+        return graphs
 
     def get_partitions(self) -> list[PartitionDefinition]:
         return [
@@ -139,6 +225,13 @@ class MultiModel(Model):
                 c, from_partition=self._renamed(name, c.from_partition),
                 to_partition=self._renamed(name, c.to_partition),
             ) for c in topology.connections]
+        for link in self.links:
+            connections.append(Connection(
+                from_partition=self._partition_with(link.source, link.walks[0]),
+                to_partition=self._partition_with(link.target, link.walk),
+                edge_name=link.signal,
+                chunk_policy_factory=lambda link=link: FixedChunkPolicy(chunk_size=link.chunk),
+            ))
         return PartitionTopology(partitions=partitions, connections=connections)
 
     def get_node_resources(self):
@@ -187,6 +280,10 @@ class MultiModel(Model):
 
     def walk_plan(self, partition_name, input_modalities, output_modalities, input_signals, model_kwargs):
         member, own = self._partition_of[partition_name]
+        if any(link.source == member for link in self.links if link.glue) and not any(
+            link.source == member for link in self._active_links(input_modalities)
+        ):
+            return []  # a stream's source the request does not feed
         return self.members[member].walk_plan(own, input_modalities, output_modalities, input_signals, model_kwargs)
 
     # -- delegated by node -------------------------------------------------------
@@ -195,6 +292,11 @@ class MultiModel(Model):
         return self.members[self._node_owner[node]]
 
     def get_submodule(self, node_name, *args, **kwargs):
+        if node_name == GLUE_NODE:
+            (link,) = [link for link in self.links if link.glue]
+            device = kwargs.get("device", args[0] if args else "cpu")
+            return GlueSubmodule(
+                self.members[link.source].tokenizer, self.members[link.target].tokenizer, device)
         return self._owner(node_name).get_submodule(node_name, *args, **kwargs)
 
     def get_sampling_config(self, node_name, model_kwargs=None):
@@ -205,10 +307,6 @@ class MultiModel(Model):
         not depend on the others' weights. Without this the deployment names no checkpoint, and every cache
         stays shut."""
         keyed = [member for member in self.members.values() if keyed_labels(member)]
-        if len(keyed) > 1:
-            raise ValueError(
-                "more than one member keys a prefix cache, and a deployment's cache root hangs from one "
-                "checkpoint: serve them apart")
         return keyed[0].checkpoint_path() if keyed else None
 
     def preprocess_fingerprint(self) -> str:
@@ -223,8 +321,27 @@ class MultiModel(Model):
 
     # -- input -------------------------------------------------------------------
 
-    def process_prompt(self, *args, **kwargs):
-        return self.entry.process_prompt(*args, **kwargs)
+    def process_prompt(
+        self, prompt, input_modalities, output_modalities, tensors=None, prompt_parts=None,
+        open_streams=frozenset(), **kwargs,
+    ):
+        links = self._active_links(input_modalities)
+        if not links:
+            return self.entry.process_prompt(
+                prompt, input_modalities, output_modalities, tensors=tensors, prompt_parts=prompt_parts,
+                open_streams=open_streams, **kwargs,
+            )
+        (link,) = links
+        source, target = self.members[link.source], self.members[link.target]
+        taken = [m for m in input_modalities if source.max_input_files().get(m, 0) > 0]
+        heard = source.process_prompt(
+            None, taken, ["text"], tensors=tensors, **kwargs)
+        history = [p for p in prompt_parts or () if p.modality not in taken]
+        said = target.process_prompt(
+            prompt, [m for m in input_modalities if m not in taken], output_modalities, tensors=tensors,
+            prompt_parts=history or None, open_streams=frozenset(open_streams) | {link.stream}, **kwargs,
+        )
+        return _joined(heard, said)
 
     def process_stream_chunk(self, chunk):
         return self.entry.process_stream_chunk(chunk)
@@ -278,6 +395,12 @@ class MultiModel(Model):
     def postprocess(self, output, modality, request_kwargs=None):
         return self._emitting(modality).postprocess(output, modality, request_kwargs)
 
+    def prompt_tokens(self, tensors, kv_layout):
+        # the entry member's default count of ``text_inputs`` once, and each member that counts its own tensors
+        return Model.prompt_tokens(self, tensors, kv_layout) + sum(
+            m.prompt_tokens(tensors, kv_layout) for m in self.members.values()
+            if type(m).prompt_tokens is not Model.prompt_tokens)
+
     def postprocess_inline(self, values, modality, request_kwargs):
         return self._emitting(modality).postprocess_inline(values, modality, request_kwargs)
 
@@ -295,3 +418,19 @@ class MultiModel(Model):
 
     def get_default_voice(self):
         return self._emitting("audio").get_default_voice()
+
+
+def _parts(output) -> tuple[dict, dict]:
+    if isinstance(output, ProcessPromptOutput):
+        return dict(output.new_input_tensors), dict(output.metadata)
+    return dict(output or {}), {}
+
+
+def _joined(heard, said) -> ProcessPromptOutput:
+    """Two members' prompt processing as one: their tensors and metadata are disjoint, but for the
+    per-resource KV layouts, which are joined."""
+    (tensors_a, meta_a), (tensors_b, meta_b) = _parts(heard), _parts(said)
+    layouts = {**meta_a.get("kv_layout", {}), **meta_b.get("kv_layout", {})}
+    return ProcessPromptOutput(
+        {**tensors_a, **tensors_b}, {**meta_a, **meta_b, **({"kv_layout": layouts} if layouts else {})},
+    )
