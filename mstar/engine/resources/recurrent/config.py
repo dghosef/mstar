@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from mstar.engine.resources.recurrent.checkpoints import checkpoint_policy
 from mstar.engine.resources.spec import NodeResourceSpec, check_sizes
 from mstar.engine.resources.step import ResourceStep
 
@@ -302,6 +303,10 @@ class RecurrentStateConfig:
     # prompt reached at a page boundary of `kv_cache`, under that page's key.
     prefix_slots: int = 0
     kv_cache: str | None = None
+    # Which boundaries of a prefill row keep a snapshot (`mstar.engine.resources.recurrent.checkpoints`): "rows",
+    # the row's last boundary and the KV hit's; "messages", those and the page floor of each message boundary of
+    # the prompt; or "pkg.module:Class".
+    checkpoints: str = "rows"
 
     def __post_init__(self):
         if not self.blocks:
@@ -362,10 +367,10 @@ class RecurrentStateSpec(NodeResourceSpec):
 
     def apply_yaml_overrides(
         self, max_slots: int | None = None, state_dtype: str | None = None,
-        prefix_slots: int | None = None,
+        prefix_slots: int | None = None, checkpoints: str | None = None,
     ):
-        """How many slots this deployment gets, the state's dtype, and how
-        many snapshots it keeps for prefix reuse.
+        """How many slots this deployment gets, the state's dtype, how
+        many snapshots it keeps for prefix reuse, and where in a prompt it keeps them (``checkpoints``).
 
         Block shapes are the model's and not tunable. The dtype trades
         accumulated precision against bandwidth and decides which kernels the
@@ -375,6 +380,9 @@ class RecurrentStateSpec(NodeResourceSpec):
             self.config.max_slots = max_slots
         if prefix_slots is not None:
             self.config.prefix_slots = prefix_slots
+        if checkpoints is not None:
+            checkpoint_policy(checkpoints)  # refuses a name it cannot resolve
+            self.config.checkpoints = checkpoints
         self.config.check_slots()
         if state_dtype is not None:
             try:

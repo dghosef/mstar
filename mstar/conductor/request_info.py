@@ -14,10 +14,9 @@ FINAL_PREFILL = "final_prefill"
 # prefills persist where their state ends (`PREFILL_END`), and its decode loop
 # accumulates the turn's ids.
 TOOLS = "tools"
-# Step metadata of a step that writes ids into the request's KV after its prompt (a tool's text, a spoken
-# turn's transcript and suffix, a join). A rebuild replays the prompt and the samples only, so a request that ran
-# such a step is not rebuilt (`Rebuilds.note_appended`).
-APPENDS = "appends"
+# The request kwarg that asks the KV pools to key a prompt from the ids its first row carries: the prompt of a child
+# request, which the router wrote and the API server never saw.
+KEY_FROM_IDS = "key_from_ids"
 # The request kwarg of a child request of a spawned agent: the id of its parent (a model's INTERNAL_KWARGS, so a
 # client cannot send it).
 AGENT_CHILD = "agent_child"

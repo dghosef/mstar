@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import torch
 
 from mstar.communication.tensors import NameToTensorList
-from mstar.conductor.request_info import APPENDS, CurrentForwardPassInfo
+from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.engine.chunking import ChunkRange
 from mstar.engine.resources import Rebuild, StepAllowance
 from mstar.engine.resources.kv.config import SpanKind, StreamLayout, rebuild_refusal
@@ -62,15 +62,17 @@ class RowRecord:
 @dataclass(slots=True)
 class KeptIds:
     """A request's log on one node: the rows of its layout's prefill steps, a record of each step that has run, in
-    order, and each id sampled once the last has. ``used`` counts the bytes of its slice the records take, and
-    ``laid_out`` the samples its KV's layout already holds, which its last rebuild wrote."""
+    order, and then every id written since the last has, in write order: each id sampled, and each row a later
+    prefill wrote (a tool's text, a transcript), which `Rebuilds.keep_appended` adds. ``used`` counts the bytes of
+    its slice the records take, and ``laid_out`` the ids of ``sampled`` its KV's layout already holds, which its
+    last rebuild wrote. ``unsampled`` is whether the last row written has no sample after it yet: the id the
+    next step reads is then not the one a rebuild leaves out, so the request isn't dropped."""
     rows: tuple[LayoutRow, ...]
     records: list[RowRecord] = field(default_factory=list)
     sampled: array = field(default_factory=lambda: array("i"))
     used: int = 0
     laid_out: int = 0
-    # whether a step wrote ids after the prompt that neither the records nor the samples hold (`note_appended`)
-    appended: bool = False
+    unsampled: bool = False
 
 
 class QueuedCopy(NamedTuple):
@@ -203,7 +205,8 @@ class Rebuilds:
         self._policies = dict(policies)
         # node -> the dtype it runs in, which its host copies take. A node missing here copies nothing.
         self._node_dtypes = node_dtypes
-        self._loop_walks = {node: policy.loop_walks(node, graphs) for node, policy in policies.items()}
+        # node -> the walks outside the decode loop whose rows write ids after the prompt (`keep_appended`)
+        self._appended = {node: policy.appended_walks(node, graphs) for node, policy in policies.items()}
         assert pool is not None or not policies, "a node that rebuilds requests keeps their ids in the host pool"
         self._pool = pool
         # node -> handle -> its log. Per node, since a colocated node of another partition samples ids of its own.
@@ -343,15 +346,51 @@ class Rebuilds:
         self.forget(rid, node)
         return self._writes[rid][node]
 
-    def note_appended(self, node_batch: ExecutingBatch) -> None:
-        """Mark the requests whose step wrote ids past their prompt (`APPENDS`): their KV holds text no kept id
-        does, so a drop would rebuild it wrong, and `refusal` refuses them."""
-        kept = self._kept.get(node_batch.node_name)
-        if not kept:
-            return
-        for rid, info in node_batch.per_request_info_wrapped.items():
-            if rid in kept and info.step_metadata.get(APPENDS):
-                kept[rid].appended = True
+    def keep_appended(self, node_batch: ExecutingBatch) -> list[int]:
+        """Add to each kept request's log the ids a later prefill row wrote after its prompt's steps: a tool's text,
+        a spoken turn's transcript and suffix. Called with the step's host copies landed, before `keep_samples`, so a
+        row's ids precede its own sample.
+
+        A row that brings the position of its first id as a second ``ids_input`` tensor and follows a decode (the log
+        ends in a sample) starts with that sample, which the log holds already: it is left out. A row that brings a
+        position but doesn't start with it leaves the request with no log, which is returned, as `keep_samples`
+        returns them. Any other row is kept whole: a transcript's rows follow the history's prefill or each other,
+        and the suffix brings no position. A row of a chunked step is kept whole at its first chunk, and no sample
+        follows it until its last, so the request isn't dropped meanwhile."""
+        node = node_batch.node_name
+        kept_ids = self._kept.get(node)
+        if not kept_ids:
+            return []
+        ctx, appended = node_batch.step_context, self._appended.get(node, frozenset())
+        # nothing a decode step runs is appended
+        if ctx.graph_walk not in appended and appended.isdisjoint(ctx.request_walks.values()):
+            return []
+        ids_input, prefilling, forgot = self._policies[node].ids_input, self._prefilling[node], []
+        for rid, inputs in node_batch.per_request_input_tensors.items():
+            if ctx.walk_of(rid) not in appended:
+                continue
+            kept = kept_ids.get(rid)
+            if (
+                kept is None or rid in prefilling or not inputs or not ctx.is_real_row(rid) or rid in ctx.rebuild_rids
+            ):
+                continue
+            chunk = node_batch.chunk_ranges.get(rid)
+            if chunk is not None and not chunk.is_first:
+                continue
+            row = inputs.get(ids_input)
+            if not row or not row[0].numel():
+                continue  # a row with no ids (a transcript pass with no finished word) writes nothing
+            ids = row[0].reshape(-1).tolist()
+            if len(row) > 1 and kept.sampled and not kept.unsampled:
+                if kept.sampled[-1] != ids[0]:
+                    self.forget(rid, node)
+                    forgot.append(rid)
+                    continue
+                ids = ids[1:]
+            if ids:
+                kept.sampled.extend(ids)
+                kept.unsampled = True
+        return forgot
 
     def record(
         self, node_batch: ExecutingBatch, cached_infos: Mapping[int, CurrentForwardPassInfo] = MappingProxyType({}),
@@ -529,6 +568,7 @@ class Rebuilds:
                     forgot.append(rid)
                 else:
                     kept.sampled.append(token)
+                    kept.unsampled = False
         return forgot
 
     @staticmethod
@@ -538,32 +578,28 @@ class Rebuilds:
             "prefills one id per sample"
         )
 
-    def refusal(
-        self, rid: int, node: str, walk: str, loop_iters: Mapping[str, int], prefilling: Prefilling | None,
-    ) -> str | None:
-        """Why ``rid``, in ``walk``, can't be dropped on ``node`` now, or None. Its rebuild reruns each prefill step
+    def refusal(self, rid: int, node: str, prefilling: Prefilling | None) -> str | None:
+        """Why ``rid`` can't be dropped on ``node`` now, or None. Its rebuild reruns each prefill step
         recorded before the one in progress from its record, which has to be on the host. A request ``prefilling``
         its prompt reruns the step in progress from the input the engine keeps for the prompt. Any other reruns
-        every step its layout lays out, and its samples cover its KV when the prefill and each iteration of the
-        policy's loop sampled one id, since the KV holds all but the last."""
+        every step its layout lays out, and then writes every id it wrote since but the last, which the next step
+        reads: its log covers its KV once the last row it wrote has a sample after it."""
         policy = self._policies.get(node)
         if policy is None:
             return f"{node} declares no rebuild policy"
         kept = self._kept[node].get(rid)
         if kept is None:
             return f"it keeps no log on {node}"
-        if kept.appended:
-            return "its KV holds text written after its prompt, which a rebuild would not replay"
+        if kept.unsampled:
+            return "it has written ids since its last sample, so its rebuild would not know the one to leave out"
         if prefilling is None and len(kept.records) < len(kept.rows):
             return "its prefill hasn't run every step its layout lays out"
         if not all(record.ready() for record in (kept.records[:-1] if prefilling is not None else kept.records)):
             return "its prefill steps' inputs haven't reached the host"
         if prefilling is not None:
             return None
-        if walk not in self._loop_walks[node]:
-            return f"it is in walk {walk!r}, where loop {policy.loop!r} doesn't run {node}"
-        if len(kept.sampled) != loop_iters.get(policy.loop, 0) + 1:
-            return f"its {len(kept.sampled)} kept samples don't cover its KV"
+        if not kept.sampled:
+            return "its prefill has sampled nothing yet"
         return None
 
     def _plan(self, kept: KeptIds, prefilling: Prefilling | None) -> list[PlannedRow]:
