@@ -50,6 +50,7 @@ from mstar.utils.ipc_format import (
     NewRequest,
     NewRequestConductor,
     ReadsDone,
+    ReleaseOutputs,
     RemoveRequest,
     ScheduleTPNode,
     SetupDone,
@@ -74,6 +75,7 @@ _TYPES: dict[str, type] = {
     # worker-bound bodies
     "new_request": NewRequest,
     "remove_request": RemoveRequest,
+    "release_outputs": ReleaseOutputs,
     "drain_request": DrainRequest,
     "input_signals": InputSignals,
     "edge_items": EdgeItems,

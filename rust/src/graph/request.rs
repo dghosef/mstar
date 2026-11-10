@@ -73,6 +73,8 @@ impl LoopStopTime {
 /// Everything the runtime keeps for one request besides its walk state.
 #[derive(Default)]
 pub struct RequestInfo {
+    /// A request nobody on the outside reads (a spawned agent): its client emits are dropped at the send.
+    pub silent: bool,
     pub partitions: FxHashMap<PartitionId, RequestPartitionInfo>,
     /// Local worker graphs across every partition of this request.
     pub worker_graphs: Vec<WgIndex>,

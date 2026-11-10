@@ -32,9 +32,12 @@ from mstar.streaming.chunk_policy import FixedChunkPolicy  # noqa: E402
 from mstar.streaming.topology import Connection, PartitionTopology, StreamingGraphEdge  # noqa: E402
 from mstar.testing_utils.model import StubModel  # noqa: E402
 from mstar.utils.ipc_format import (  # noqa: E402
+    AbortRequest,
     ConductorMessage,
     ConductorMessageType,
+    FailRequests,
     NewRequestConductor,
+    ReadsDone,
     SetupDone,
     WorkerGraphsDone,
 )
@@ -100,14 +103,17 @@ class _ToyModel(StubModel):
             return super().get_partition_topology()
         return PartitionTopology(partitions=[p.name for p in self._partitions], connections=self._connections)
 
+    def kv_layout(self, layout, length):
+        return {}   # (a model that spawns has one: the conductor asks it for an agent's)
+
     def walk_plan(self, partition_name, input_modalities, output_modalities, input_signals, model_kwargs):
-        plan = self._plans[partition_name]
+        plan = self._plans["agent" if model_kwargs.get("agent_child") else partition_name]
         return list(plan)
 
 
-def _conductor(model, node_groups, tmp_path, monkeypatch) -> Conductor:
+def _conductor(model, node_groups, tmp_path, monkeypatch, **config) -> Conductor:
     path = tmp_path / "cfg.yaml"
-    path.write_text(yaml.safe_dump({"max_seq_len": 1024, "node_groups": node_groups}))
+    path.write_text(yaml.safe_dump({"max_seq_len": 1024, "node_groups": node_groups, **config}))
     comm = _StubComm()
     monkeypatch.setattr(Conductor, "_launch_workers", lambda self: None)
     monkeypatch.setattr(conductor_mod, "make_communicator", lambda **kw: comm)
@@ -761,3 +767,208 @@ def test_two_ranks_naming_different_exits_in_one_pass_fail_the_request():
         c._process_worker_graphs_done(WorkerGraphsDone(exit="b", **body))
 
 
+# --- agents: a plan that spawns children, holds a join step for them, and tears them down after it -----------
+
+
+def _spawning_model():
+    """The parent's plan: prefill, decode, router (exit ``spawn``), the tool walk that joins the children (held
+    until they end), a continuation prefill, back to decode. An agent's: prefill, decode, router (it answers)."""
+    def walk(node, inputs, persists=()):
+        return GraphNode(name=node, input_names=inputs, outputs=[
+            GraphEdge(next_node=EMPTY_DESTINATION, name=name, persist=True) for name in persists])
+
+    walks = {
+        "p": walk("n", ["text_inputs"], ["first"]), "d": walk("n", ["first"], ["turn"]),
+        "r": walk("router", ["first", "turn"], ["tool_calls", "agent_0", "agent_1", "agent_answer"]),
+        "t": walk("tool", ["tool_calls", "agent_answers"], ["tool_text"]),
+        "pc": walk("n", ["text_inputs"], ["first"]),
+    }
+    router = WalkStep("r", exits={"answer": 5, "spawn": 3}, spawns=("agent_0", "agent_1"))
+    parent = [WalkStep("p"), WalkStep("d"), router, WalkStep("t", joins=True),
+              WalkStep("pc", bind={"text_inputs": "tool_text"}, exits={"": 1})]
+    agent = [WalkStep("p"), WalkStep("d"), WalkStep("r", exits={"answer": 3})]
+    return _ToyModel(walks, {"default": parent, "agent": agent}, {"default": list(walks)})
+
+
+def _spawn_batches(parent="r"):
+    """The reports of a parent that spawns two agents, which each answer: up to the join."""
+    a0, a1 = f"{parent}-agent-0", f"{parent}-agent-1"
+    return a0, a1, [
+        [_new_request(parent, {"text_inputs": [_info(101)]})],
+        [_done_report(parent, "p", {"first": 601})],
+        [_done_report(parent, "d", {"turn": 602})],
+        [_done_report(parent, "r", {"tool_calls": 603, "agent_0": 611, "agent_1": 612}, exit_name="spawn")],
+        [_done_report(a0, "p", {"first": 621}), _done_report(a1, "p", {"first": 631})],
+        [_done_report(a0, "d", {"turn": 622}), _done_report(a1, "d", {"turn": 632})],
+        [_done_report(a0, "r", {"agent_answer": 623}, exit_name="answer")],
+    ]
+
+
+def _done_report(rid, walk, persist, exit_name="", done=False):
+    return _msg(ConductorMessageType.WORKER_GRAPHS_DONE, WorkerGraphsDone(
+        request_id=rid, worker_graph_ids=[_WGS[walk]], is_first_tp_rank=True, partition_name="default",
+        partition_done=done, graph_walk=walk, exit=exit_name,
+        persist_signals={name: [_info(u, entity="worker_0", node="n", walk=walk)] for name, u in persist.items()},
+    ))
+
+
+_WGS: dict[str, int] = {}
+
+
+def _spawn_conductor(tmp_path, monkeypatch, cap=3):
+    model = _spawning_model()
+    walks = model.get_graph_walk_graphs()
+    nodes = sorted({n for w in walks.values() for n in w.get_nodes()})
+    c = _conductor(model, [{"node_names": nodes, "ranks": [0]}], tmp_path, monkeypatch, max_concurrent_requests=cap)
+    _WGS.update({walk: c.node_walk_to_wg[(next(iter(g.get_nodes())), walk)].worker_graph_id
+                 for walk, g in walks.items()})
+    return c
+
+
+def _sent(c, kind):
+    return [body for entity, msg in c.comm.sent for body in [msg.body]
+            if getattr(msg.message_type, "name", msg.message_type) == kind]
+
+
+def _joined(c, parent="r"):
+    """The inputs the parent's join step was sent: {signal: uuids}, and its step metadata."""
+    (body,) = [b for b in _sent(c, "INPUT_SIGNALS") if b.request_id == parent and b.request_info.graph_walk == "t"]
+    return {e.name: [i.uuid for i in e.tensor_info] for e in body.inputs}, body.request_info.step_metadata
+
+
+def _spawned(tmp_path, monkeypatch, name, *more, cap=3):
+    """A conductor after the parent spawned and its first child answered, then the batches ``more`` makes."""
+    (tmp_path / name).mkdir()
+    c = _spawn_conductor(tmp_path / name, monkeypatch, cap)
+    a0, a1, batches = _spawn_batches()
+    _run(c, [*batches, *(batch for make in more for batch in make())])
+    return c, a0, a1
+
+
+def test_a_parent_that_spawns_starts_a_child_per_prompt_and_holds_its_join_until_all_end(tmp_path, monkeypatch):
+    c, a0, a1 = _spawned(tmp_path, monkeypatch, "one")
+
+    # a child per prompt, on the prompt's tensor; each counts against the cap while it runs
+    starts = {b.request_id: b for b in _sent(c, "NEW_REQUEST")}
+    assert list(starts) == ["r", a0, a1]
+    assert [[i.uuid for i in e.tensor_info] for e in starts[a0].initial_inputs] == [[611]]
+    assert c.requests[a0].parent == "r" and c._counted_requests() == 2 and c.requests["r"].children == [a0, a1]
+    assert not c.waiting_queue, "a child queued behind the cap, which its parent waits on"
+    # one child has ended; the join waits for the other. The ended one has given up its resources, as any request
+    # does when it ends, but keeps its tensors and its handle: its answer is the parent's to read
+    assert not [b for b in _sent(c, "INPUT_SIGNALS") if b.request_info.graph_walk == "t"]
+    assert a0 not in c.draining and c.requests[a0].ended
+    assert [(b.request_id, b.keep_outputs) for b in _sent(c, "REMOVE_REQUEST")] == [(a0, True)]
+    assert not _sent(c, "RELEASE_OUTPUTS")
+
+
+def test_the_join_reads_every_childs_answer_and_the_children_go_only_after_it_has(tmp_path, monkeypatch):
+    def last():
+        return [[_done_report("r-agent-1", "r", {"agent_answer": 633}, "answer")]]
+
+    c, a0, a1 = _spawned(tmp_path, monkeypatch, "two", last)
+    inputs, metadata = _joined(c)
+    assert inputs == {"tool_calls": [603], "agent_answers": [623, 633]}
+    assert metadata["agents"] == 2 and metadata["agent_errors"] == {}
+    assert not _sent(c, "RELEASE_OUTPUTS"), "the children's tensors went before the join step read their answers"
+    assert sorted(b.request_id for b in _sent(c, "REMOVE_REQUEST")) == [a0, a1]
+
+    c, a0, a1 = _spawned(tmp_path, monkeypatch, "three", last, lambda: [[_done_report("r", "t", {"tool_text": 641})]])
+    assert sorted(b.request_id for b in _sent(c, "RELEASE_OUTPUTS")) == [a0, a1]
+    assert a0 not in c.requests and a1 not in c.requests
+    # nothing of a child reached the API server, and each prompt was let go of once, by its child
+    assert not [m for e, m in c.comm.sent if e == "api_server" and "agent" in str(getattr(m.body, "request_id", ""))]
+    freed = [u for body in _sent(c, "UNPERSIST_TENSORS") for u in body.uuid_to_ref_count if u in (611, 612)]
+    assert sorted(freed) == [611, 612]
+
+
+def test_a_child_that_fails_is_an_error_answer_and_so_is_one_the_full_server_cannot_start(tmp_path, monkeypatch):
+    def fail():
+        return [[_msg(ConductorMessageType.FAIL_REQUESTS, FailRequests({"r-agent-1": "boom"}))]]
+
+    c, a0, a1 = _spawned(tmp_path, monkeypatch, "fails", fail)
+    inputs, metadata = _joined(c)
+    assert inputs == {"tool_calls": [603], "agent_answers": [623]}
+    assert metadata["agents"] == 2 and metadata["agent_errors"] == {"1": "Error: the agent failed: boom"}
+    assert a1 in c.draining, "a failed child is torn down at once"
+    # late word from a child that is gone is ignored
+    c, a0, a1 = _spawned(tmp_path, monkeypatch, "late", fail, lambda: [
+        [_done_report("r-agent-1", "d", {"turn": 999})],
+        [_msg(ConductorMessageType.READS_DONE, ReadsDone(request_id="r-agent-1", entity_id="worker_0"))]])
+    assert _joined(c)[1]["agent_errors"] == {"1": "Error: the agent failed: boom"}
+
+    # The parent holds its slot while it waits for its children, so a child never queues behind the cap: with no
+    # room (the cap here is the parent's alone) its start fails instead, and the join runs on the errors.
+    c, a0, a1 = _spawned(tmp_path, monkeypatch, "full", cap=1)
+    inputs, metadata = _joined(c)
+    assert inputs == {"tool_calls": [603], "agent_answers": []} and metadata["agents"] == 2
+    assert all("at capacity" in error for error in metadata["agent_errors"].values())
+    assert list(metadata["agent_errors"]) == ["0", "1"] and not c.waiting_queue
+
+
+def test_a_parent_that_is_aborted_takes_its_children_with_it_and_tells_the_api_server_nothing_of_them(
+    tmp_path, monkeypatch,
+):
+    abort = [[_msg(ConductorMessageType.ABORT_REQUEST, AbortRequest("r"))]]
+    c, a0, a1 = _spawned(tmp_path, monkeypatch, "abort", lambda: abort)
+    # the running child drains; the one that had ended (its resources already gone) has its tensors and handle freed
+    assert {"r", a1} <= set(c.draining)
+    assert [b.request_id for b in _sent(c, "RELEASE_OUTPUTS")] == [a0]
+    assert not [m for e, m in c.comm.sent if e == "api_server" and "agent" in str(getattr(m.body, "request_id", ""))]
+    assert not [b for b in _sent(c, "INPUT_SIGNALS") if b.request_info.graph_walk == "t"], "the join ran"
+
+
+def test_a_tool_step_after_a_join_is_not_sent_the_answers_the_join_read():
+    """The answers stay held to the request's end (the plan comes back to the join's name), and the children's
+    tensors are released after the join: a later tool step must not read them."""
+    from mstar.model.components.python_tool import AGENT_ANSWERS, tool_plan, tool_walks
+
+    walks = {**tool_walks(spawn=True), "p": GraphNode(name="n", input_names=["text_inputs"], outputs=[
+        GraphEdge(next_node=EMPTY_DESTINATION, name="first", persist=True)]), **_decoder_walks(())}
+    plan = tool_plan([WalkStep("p")], "decode", "p", False, spawn=True)
+    model = _ToyModel(walks, {"default": plan}, {"default": list(walks)})
+    held = {name: [_info(u)] for name, u in (("tool_calls", 1), (AGENT_ANSWERS, 2), ("text_inputs", 3))}
+    sent = {step.walk: [e.name for e in plan_step(model, plan, k, held).inputs]
+            for k, step in enumerate(plan) if step.walk in ("tool", "join")}
+    assert AGENT_ANSWERS not in sent["tool"] and AGENT_ANSWERS in sent["join"]
+
+
+def _after(tmp_path, monkeypatch, name, *more):
+    """A conductor after the parent spawned two agents (none has answered), then the batches ``more`` makes."""
+    (tmp_path / name).mkdir()
+    c = _spawn_conductor(tmp_path / name, monkeypatch)
+    _, _, batches = _spawn_batches()
+    _run(c, [*batches[:4], *(batch for make in more for batch in make())])
+    return c
+
+
+def test_a_late_word_for_a_request_that_was_aborted_changes_nothing(tmp_path, monkeypatch):
+    """The abort of a parent in the middle of its tool round, and of one in the middle of its join: the reports
+    its workers and its children's still send afterwards (a pass that finished, an agent's answer, a failure, the
+    reads they were draining) hit requests the conductor no longer has or is tearing down, and are dropped."""
+    def abort_then_late():
+        return [
+            [_msg(ConductorMessageType.ABORT_REQUEST, AbortRequest("r"))],
+            [_done_report("r-agent-0", "d", {"turn": 1}), _done_report("r", "r", {"tool_calls": 2}, "answer"),
+             _done_report("r-agent-1", "r", {"agent_answer": 3}, "answer"),
+             _msg(ConductorMessageType.FAIL_REQUESTS, FailRequests({"r-agent-0": "late", "r": "late"}))],
+            *([_msg(ConductorMessageType.READS_DONE, ReadsDone(request_id=rid, entity_id=entity))]
+              for rid in ("r", "r-agent-0", "r-agent-1") for entity in ("worker_0", "api_server_preprocess_worker")),
+            [],
+        ]
+
+    c = _after(tmp_path, monkeypatch, "late", abort_then_late)
+    assert not c.requests and not c.draining, "a request the abort took was left behind by a late word"
+    assert not [b for b in _sent(c, "INPUT_SIGNALS") if b.request_info.graph_walk == "t"], "the join ran"
+    assert not [m for e, m in c.comm.sent if e == "api_server" and getattr(m, "message_type", "") == "request_complete"]
+
+
+def test_an_agent_that_answers_after_its_parent_is_gone_is_torn_down_not_waited_for(tmp_path, monkeypatch):
+    abort = [[_msg(ConductorMessageType.ABORT_REQUEST, AbortRequest("r"))]]
+    c = _after(tmp_path, monkeypatch, "orphan", lambda: abort)
+    # the parent's drain ends, then its agent's report lands: nothing waits on the agent
+    _run(c, [[_msg(ConductorMessageType.READS_DONE, ReadsDone(request_id="r", entity_id="worker_0"))],
+             [_msg(ConductorMessageType.READS_DONE,
+                   ReadsDone(request_id="r", entity_id="api_server_preprocess_worker"))],
+             [_done_report("r-agent-0", "r", {"agent_answer": 5}, "answer")]])
+    assert "r" not in c.requests

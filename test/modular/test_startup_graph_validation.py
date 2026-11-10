@@ -756,8 +756,9 @@ def _qwen3_5(name, model_kwargs, tmp_path, monkeypatch):
         linear_value_head_dim=128, linear_conv_kernel_dim=4,
         vocab_size=1024, rms_norm_eps=1e-6, max_position_embeddings=262144,
     )
+    tools = tuple(model_kwargs.get("tools", ()))
     return _bare(
-        Qwen3_5DenseModel, config=config, vision_config=None, tools=tuple(model_kwargs.get("tools", ())),
+        Qwen3_5DenseModel, config=config, vision_config=None, tools=tools, spawn="spawn_agent" in tools,
         media=(MediaIntake("image", vision_encoder(), 0, None),),
     )
 
