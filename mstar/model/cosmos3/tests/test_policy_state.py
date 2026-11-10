@@ -349,7 +349,7 @@ def test_batched_action_step_outside_the_interval_runs_the_conditional_branch(st
     dit._action_scheduler_step = step
     dit._solver_state = ()
     ei = types.SimpleNamespace(
-        request_ids=rids, per_request_states=None, step=None, resources={"attn": None},
+        request_ids=rids, per_request_states=None, step=declared, resources={"attn": None},
         per_request_info={rid: types.SimpleNamespace(dynamic_loop_iter_counts={ACTION_GEN_LOOP: k})
                           for rid, k in zip(rids, steps, strict=True)},
     )

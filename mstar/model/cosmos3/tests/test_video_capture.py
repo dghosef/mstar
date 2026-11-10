@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from mstar.engine.windowing import WindowSchedule
@@ -111,6 +112,29 @@ def test_a_guidance_free_deployment_captures_the_one_branch_step(monkeypatch) ->
     row = ARNodeInputs(input_seq_len=4, resource_step_info=GenStepInfo(labels=ONE, cfg_active=False, capture_key=None))
     step = sub.declare_step(C.ACTION_GEN_WALK, ["a", "b"], [row, row])
     assert {seg.label for seg in step.segments} == {COND_LABEL} and CFG_BATCHED_LABEL not in repr(step)
+
+
+@pytest.mark.parametrize("walk, one_branch", [
+    (C.IMAGE_GEN_WALK, True), (C.PREFILL_WALK, True), (C.ACTION_GEN_WALK, True),
+    (C.VIDEO_GEN_WALK, False), (C.VIDEO_SOUND_GEN_WALK, False), (C.PREFILL_COND_VIDEO_WALK, False),
+])
+def test_rows_with_the_same_branches_batch(walk, one_branch) -> None:
+    """Rows with the same branches share one plan, whatever their count; a
+    mixed pair never batches, and a one-branch pair batches only on the walks
+    of image denoise, the text prefill and action, not video, sound or
+    a conditional prefill."""
+    cfg = Cosmos3Config(compile_denoise=False)
+    sub = Cosmos3DiTSubmodule(transformer=_fake_transformer(cfg), config=cfg, scheduler=None)
+    for rid, uncond in (("a", None), ("b", None), ("c", {}), ("d", {})):
+        sub.request_state(rid).add_all(cond={"num_vision_tokens": 4}, uncond=uncond, gs=1.0 if uncond is None else 6.0)
+    rows = [SimpleNamespace(resource_step_info=SimpleNamespace(commit=False))] * 2
+
+    def batches(*rids):
+        return sub.can_batch(SimpleNamespace(graph_walk=walk, request_ids=list(rids)), rows)
+
+    assert batches("c", "d")
+    assert batches("a", "b") is one_branch
+    assert not batches("a", "c")  # mixed branches
 
 
 def test_windowed_captured_inputs_carry_the_window_layout(monkeypatch) -> None:

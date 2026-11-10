@@ -32,7 +32,7 @@ from mstar.model.cosmos3.submodules import (
     Cosmos3DiTSubmodule,
     Cosmos3VAEDecoderARSubmodule,
 )
-from mstar.model.cosmos3.tests.stubs import StubSampler
+from mstar.model.cosmos3.tests.stubs import StubSampler, step_over
 from mstar.model.cosmos3.tests.test_rotary_table import stand_in_rotary
 
 
@@ -484,10 +484,10 @@ def test_windowed_can_batch_and_batched_boundary(monkeypatch) -> None:
     # path (not raise), while plain-only prefill batches still batch.
     noti = SimpleNamespace(tensor_inputs={})
     batch_pre = SimpleNamespace(graph_walk=C.PREFILL_WALK, request_ids=["a", "p"])
-    sub.request_state("p").add_all(cond={}, uncond={})
+    sub.request_state("p").add_all(cond={}, uncond={}, gs=6.0)
     assert not sub.can_batch(batch_pre, [noti, noti])
     batch_pp = SimpleNamespace(graph_walk=C.PREFILL_WALK, request_ids=["p", "q"])
-    sub.request_state("q").add_all(cond={}, uncond={})
+    sub.request_state("q").add_all(cond={}, uncond={}, gs=6.0)
     assert sub.can_batch(batch_pp, [noti, noti])
 
     # Batched forward: request "a" at its window-0 boundary (local 3),
@@ -506,7 +506,8 @@ def test_windowed_can_batch_and_batched_boundary(monkeypatch) -> None:
         lambda st, plan, dev: (dict(sub.request_states["a"]["cond"]), None),
     )
     ei = SimpleNamespace(
-        request_ids=["a", "b"], per_request_states=None, resources={ATTN: "paged"}, step=None,
+        request_ids=["a", "b"], per_request_states=None, resources={ATTN: "paged"},
+        step=step_over(["a", "b"], COND_LABEL, UNCOND_LABEL),
         per_request_info={
             r: SimpleNamespace(dynamic_loop_iter_counts={"video_gen_ar_loop": k}) for r, k in (("a", 3), ("b", 1))
         },

@@ -44,6 +44,7 @@ from mstar.model.cosmos3.submodules import (
     VIDEO_SOUND_GEN_LOOP,
     Cosmos3DiTSubmodule,
 )
+from mstar.model.cosmos3.tests.stubs import step_over
 from mstar.model.omnivoice.config import OmniVoiceConfig
 from mstar.model.omnivoice.submodules import UNMASK_LOOP_NAME, OmniVoiceBackboneSubmodule
 from mstar.model.submodule_base import NodeInputs
@@ -522,7 +523,7 @@ def _cosmos3_stepper(walk, loop, band, rows, steps, device, wrap=lambda sampler:
             prepared.append(sub.prepare_inputs(walk, fwds[rid], carried[rid]))
         engine_inputs = SimpleNamespace(
             request_ids=rids, per_request_info=fwds, per_request_states=None, resources={"attn": None},
-            step=None, captured=False,
+            step=step_over(rids, COND_LABEL, UNCOND_LABEL), captured=False,
         )
         stacked = sub.preprocess(walk, engine_inputs, prepared)
         out = sub.forward_batched(walk, engine_inputs, **stacked) if rows > 1 else {

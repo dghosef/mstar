@@ -20,7 +20,7 @@ from mstar.conductor.conductor import Conductor
 from mstar.engine.resources import SamplingReqConfig
 from mstar.model.base import MAX_OUTPUT_TOKENS
 from mstar.model.cosmos3.cosmos3_model import SAMPLER, Cosmos3Model
-from mstar.model.cosmos3.tests.stubs import StubSampler
+from mstar.model.cosmos3.tests.stubs import StubSampler, step_over
 from mstar.model.utils import load_generation_defaults
 
 NANO_DIR = Path(os.environ.get("COSMOS3_NANO_DIR", "/nonexistent-cosmos3-nano"))
@@ -659,7 +659,7 @@ def test_postprocess_finishes_captured_step() -> None:
     dit.cleanup_request("r")
 
 
-@pytest.mark.parametrize("path", ["captured", "batched", "sound"])
+@pytest.mark.parametrize("path", ["captured", "batched", "sound", "guidance_free", "sound_guidance_free"])
 def test_a_step_outside_the_guidance_interval_keeps_the_conditional_branch(path) -> None:
     """A captured or cross-request batched step runs both branches, but only a
     step inside the guidance_interval combines them, as the single eager path
@@ -673,7 +673,10 @@ def test_a_step_outside_the_guidance_interval_keeps_the_conditional_branch(path)
     from mstar.model.submodule_base import ARNodeInputs, ModelInputsFromEngine
 
     cond_v, uncond_v = torch.full((1, 1, 2, 2), 2.0), torch.ones(1, 1, 2, 2)
-    branches = (cond_v, uncond_v) if path != "sound" else ((cond_v, cond_v[0, 0]), (uncond_v, uncond_v[0, 0]))
+    sound, free = path.startswith("sound"), path.endswith("guidance_free")
+    branches = (cond_v, uncond_v) if not sound else ((cond_v, cond_v[0, 0]), (uncond_v, uncond_v[0, 0]))
+    if free:
+        branches = branches[:1]
     dit = Cosmos3DiTSubmodule(transformer=None, config=Cosmos3Model(
         model_path_hf="unused", skip_weight_loading=True).config, scheduler=None)
     dit.transformer = types.SimpleNamespace(
@@ -684,13 +687,13 @@ def test_a_step_outside_the_guidance_interval_keeps_the_conditional_branch(path)
     dit.node_resources = {"attn": None}
     # the step at t=100 is outside the t2i default interval [400, 1000]
     dit.request_state("r").add_all(
-        gs=2.0, guidance_interval=(400.0, 1000.0),
+        gs=1.0 if free else 2.0, guidance_interval=(400.0, 1000.0),
         scheduler=StubSampler(torch.tensor([900.0, 500.0, 100.0]), lambda lat, v: lat + v),
         cond={"vision_token_shapes": [(1, 2, 2)], "vision_noisy_frame_indexes": [torch.tensor([0])],
               "num_noisy_vision_tokens": 1, "rotary": None},
-        uncond={"rotary": None}, num_sound=1,
+        uncond=None if free else {"rotary": None}, num_sound=1,
     )
-    walk, loop = ("image_gen", IMAGE_GEN_LOOP) if path != "sound" else (VIDEO_SOUND_GEN_WALK, VIDEO_SOUND_GEN_LOOP)
+    walk, loop = (VIDEO_SOUND_GEN_WALK, VIDEO_SOUND_GEN_LOOP) if sound else ("image_gen", IMAGE_GEN_LOOP)
     info = types.SimpleNamespace(graph_walk=walk, dynamic_loop_iter_counts={loop: 2})
     lat = torch.ones(1, 1, 2, 2)
     if path == "captured":
@@ -698,12 +701,15 @@ def test_a_step_outside_the_guidance_interval_keeps_the_conditional_branch(path)
         dit.postprocess("r", info, out, inputs=ARNodeInputs(tensor_inputs={"latents": lat}))
     else:
         out = dit.forward_batched(
-            walk, ModelInputsFromEngine(request_ids=["r"], per_request_info={"r": info}), latents={"r": lat},
+            walk, ModelInputsFromEngine(
+                request_ids=["r"], per_request_info={"r": info},
+                step=step_over(["r"], *(("main",) if free else ("main", "uncond"))),
+            ), latents={"r": lat},
             sound_latents={"r": lat[0, 0]},
         )["r"]
     # 1 + cond (2), not 1 + the combine uncond + gs * (cond - uncond) (3)
     assert torch.equal(out["latents"][0], torch.full((1, 1, 2, 2), 3.0))
-    if path == "sound":
+    if sound:
         assert torch.equal(out["sound_latents"][0], torch.full((2, 2), 3.0))
 
 

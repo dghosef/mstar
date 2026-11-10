@@ -1057,11 +1057,16 @@ def test_windowed_kv_dense_matches_paged() -> None:
 
 
 @torch.no_grad()
-def _run_accelerator_graph_denoise(ctx, gs=GS):
-    """Capture the image denoise step and run the whole loop through the real
-    CudaGraphRunner (one captured forward per step covering the guidance
-    branches), returning the final latents. The deployment's default guidance
-    is ``gs``, which is what picks the branches the capture holds."""
+def _run_accelerator_graph_denoise(ctx, gs=GS, rows=None):
+    """Capture the image denoise step and prefill, then run each request's
+    prefill and the whole denoise loop through the real CudaGraphRunner (one
+    captured forward per step covering the guidance branches), returning the
+    final latents. The deployment's default guidance is ``gs``, which is what
+    picks the branches the capture holds. One request per entry of ``rows``
+    (``cond`` and ``uncond`` prompt ids, ``init`` noise, and the lockstep tick
+    it ``start``s at; default the context's single prompt), stepped together
+    as one batch, so more than one replays a batched capture. Every prefill and
+    every denoise step must replay a captured bucket."""
     from mstar.conductor.request_info import CurrentForwardPassInfo
     from mstar.distributed.communication import CommGroup, JointGroups
     from mstar.engine.accelerator_graph_runner import AcceleratorGraphRunner
@@ -1069,22 +1074,17 @@ def _run_accelerator_graph_denoise(ctx, gs=GS):
     model, dit = ctx["model"], ctx["dit"]
     device, dtype = ctx["device"], ctx["dtype"]
     dev = torch.device(device)
-    # Capture at this test's (H, W) regardless of the production default.
+    rows = rows or [dict(cond=ctx["cond"], uncond=ctx["uncond"], init=ctx["init"], start=0)]
+    rids = [f"cgr{i}" for i in range(len(rows))]
+    starts = {rid: row["start"] for rid, row in zip(rids, rows, strict=True)}
+    # Capture at this test's (H, W) regardless of the production default, at
+    # the batch sizes under test: one request alone, and all of them.
     dit.gen_capture_resolutions = ((H, W),)
-    rid = "cgr0"
-    resources = _engine_resources(model, [rid], device, dtype, max_num_pages=256)
+    dit.gen_capture_batch_sizes = tuple(sorted({1, len(rids)}))
+    resources = _engine_resources(model, rids, device, dtype, max_num_pages=256)
     dit.config.guidance_scale = gs
     md = {"height": H, "width": W, "num_frames": 1, "fps": 24.0,
           "guidance_scale": gs, "num_inference_steps": STEPS}
-    fwd = CurrentForwardPassInfo(
-        request_id=rid, rid_handle=rid, graph_walk="prefill", fwd_index=0,
-        random_seed=SEED, max_tokens=0, step_metadata=md,
-    )
-    ti = [torch.tensor(ctx["cond"], dtype=torch.long, device=device),
-          torch.tensor(ctx["uncond"], dtype=torch.long, device=device)]
-    ni = dit.prepare_inputs("prefill", fwd, {"text_inputs": ti})
-    _forward_step(dit, "prefill", resources, [rid], {rid: fwd}, [ni])
-
     groups = JointGroups(
         tp_group=CommGroup.trivial(), sp_group=CommGroup.trivial(), instance=CommGroup.trivial(),
     )
@@ -1097,29 +1097,45 @@ def _run_accelerator_graph_denoise(ctx, gs=GS):
         joint_comm_group=groups, num_slots=1,
     )
     cg_runner.warmup_and_capture(None)
-    assert cg_runner.any_graphs, "no CUDA graph captured for cosmos3 image_gen"
+    # A step that finds no bucket runs eager and would still pass the parity
+    # bar, so record every lease: (walk, the bucket's batch size or None).
+    leases = []
+    lease_slot = cg_runner.lease_slot
 
-    fwd.graph_walk = "image_gen"
-    latents = ctx["init"].clone()
-    # The loop state rides the loop-back edges: the latents and the scheduler's
-    # solver state. The step index is the engine's loop counter.
-    solver = dit._first_solver_state(dit.request_state(rid), latents)
-    for k in range(STEPS):
-        fwd.dynamic_loop_iter_counts["image_gen_loop"] = k
-        ni = dit.prepare_inputs(
-            "image_gen", fwd, {"latents": [latents], **{n: [t] for n, t in solver.items()}},
+    def recording_lease_slot(**kwargs):
+        lease = lease_slot(**kwargs)
+        leases.append((kwargs["graph_walk"], None if lease is None else lease.bucket.bs))
+        return lease
+
+    cg_runner.lease_slot = recording_lease_slot
+
+    fwds = {}
+    for rid, row in zip(rids, rows, strict=True):
+        fwds[rid] = CurrentForwardPassInfo(
+            request_id=rid, rid_handle=rid, graph_walk="prefill", fwd_index=0,
+            random_seed=SEED, max_tokens=0, step_metadata=md,
         )
-        out = _forward_step(
-            dit, "image_gen", resources, [rid], {rid: fwd}, [ni],
-            cg_runner=cg_runner,
-        )
-        # The engine finishes the captured step (CFG combine + scheduler) in
-        # the submodule's postprocess right after replay; mirror it here.
-        dit.postprocess(rid, fwd, out[rid], inputs=ni)
-        latents = out[rid]["latents"][0]
-        solver = {n: out[rid][n][0] for n in solver}
-    dit.cleanup_request(rid)
-    return latents
+        ti = [torch.tensor(row["cond"], dtype=torch.long, device=device),
+              torch.tensor(row["uncond"], dtype=torch.long, device=device)]
+        ni = dit.prepare_inputs("prefill", fwds[rid], {"text_inputs": ti})
+        _forward_step(dit, "prefill", resources, [rid], {rid: fwds[rid]}, [ni], cg_runner=cg_runner)
+
+    inits = {rid: row["init"].clone() for rid, row in zip(rids, rows, strict=True)}
+    latents = _denoise_loop(dit, resources, rids, fwds, "image_gen", STEPS, inits, cg_runner=cg_runner, starts=starts)
+    for rid in rids:
+        dit.cleanup_request(rid)
+    # each tick replays the smallest captured batch that holds the requests live at it
+    ticks = range(STEPS + max(starts.values()))
+    live = [sum(0 <= tick - start < STEPS for start in starts.values()) for tick in ticks]
+    live = [1 if n == 1 else len(rids) for n in live]
+    assert [bs for walk, bs in leases if walk == "prefill"] == [1] * len(rids), leases
+    assert [bs for walk, bs in leases if walk == "image_gen"] == live, leases
+    return [latents[rid] for rid in rids]
+
+
+def _skip_without_gpu_checks(ctx) -> None:
+    if ctx is None:
+        pytest.skip("needs COSMOS3_NANO_DIR + CUDA")
 
 
 @torch.no_grad()
@@ -1131,18 +1147,14 @@ def test_accelerator_graph_matches_eager() -> None:
     latent spread, but the decoded image is unchanged — so gate the decoded image
     against the fused pipeline, the same bar the eager engine path meets. Both
     regimes: guided (two branches) and guidance-free (one, a distilled
-    checkpoint's)."""
+    checkpoint's). The run itself asserts that every prefill and denoise step
+    replayed a captured bucket."""
     for gs in (GS, 1.0):
         ctx = _scenario(1, gs)
-        if ctx is None:
-            print("  (skipped cuda-graph parity: needs COSMOS3_NANO_DIR + CUDA)")
-            return
+        _skip_without_gpu_checks(ctx)
         default_gs = ctx["dit"].config.guidance_scale
         try:
-            lat_graph = _run_accelerator_graph_denoise(ctx, gs)
-        except Exception as exc:  # noqa: BLE001
-            print(f"  (skipped cuda-graph parity: FlashInfer/capture unavailable: {exc})")
-            return
+            (lat_graph,) = _run_accelerator_graph_denoise(ctx, gs)
         finally:
             ctx["dit"].config.guidance_scale = default_gs
         img_fused = ctx["mpipe"]._decode(ctx["lat_fused"]).squeeze().float().cpu()
@@ -1151,6 +1163,46 @@ def test_accelerator_graph_matches_eager() -> None:
         psnr = float("inf") if mse == 0 else -10 * math.log10(mse)
         assert psnr >= 25, f"cuda-graph denoise (guidance {gs}) PSNR {psnr:.2f} < 25 (MSE {mse:.3e})"
         print(f"  cuda-graph denoise (guidance {gs}) vs fused PSNR = {psnr:.2f} dB")
+
+
+@torch.no_grad()
+def test_batched_accelerator_graph_rows_match_single() -> None:
+    """Two guidance-free requests with prompts of different lengths, the second
+    starting a step later, replay one captured batch (and the batch of one at
+    each end); each ends where the same request does alone on the batch-size-1
+    bucket: a row sees only its own timestep, rotary table and text prefix."""
+    from mstar.model.cosmos3.components.packing import tokenize_prompt
+
+    ctx = _scenario(1, 1.0)
+    _skip_without_gpu_checks(ctx)
+    prompts = [PROMPT, "A small wooden sailboat on a calm turquoise sea at dawn, gulls overhead, long soft shadows."]
+    tokens = [
+        tokenize_prompt(
+            ctx["model"].tokenizer, p, "", num_frames=1, height=H, width=W,
+            use_system_prompt=False, add_resolution_template=False, add_duration_template=False,
+        )
+        for p in prompts
+    ]
+    assert len(tokens[0][0]) != len(tokens[1][0])
+    gen = torch.Generator(device=ctx["device"]).manual_seed(SEED + 1)
+    inits = [ctx["init"], torch.randn(ctx["init"].shape, generator=gen, device=ctx["device"], dtype=ctx["init"].dtype)]
+    rows = [
+        dict(cond=c, uncond=u, init=init, start=start)
+        for (c, u), init, start in zip(tokens, inits, (0, 1), strict=True)
+    ]
+    default_gs = ctx["dit"].config.guidance_scale
+    try:
+        both = _run_accelerator_graph_denoise(ctx, 1.0, rows)
+        alone = [_run_accelerator_graph_denoise(ctx, 1.0, [{**row, "start": 0}])[0] for row in rows]
+    finally:
+        ctx["dit"].config.guidance_scale = default_gs
+    for i, (b, a) in enumerate(zip(both, alone, strict=True)):
+        img_b = ctx["mpipe"]._decode(b.reshape(inits[i].shape)).squeeze().float().cpu()
+        img_a = ctx["mpipe"]._decode(a.reshape(inits[i].shape)).squeeze().float().cpu()
+        mse = (img_b - img_a).pow(2).mean().item()
+        psnr = float("inf") if mse == 0 else -10 * math.log10(mse)
+        assert psnr >= 30, f"batched row {i} vs the same request alone: PSNR {psnr:.2f} < 30"
+        print(f"  batched cuda-graph row {i} vs alone PSNR = {psnr:.2f} dB")
 
 
 def _main() -> None:
@@ -1170,6 +1222,7 @@ def _main() -> None:
         ("compile_vae_matches_eager", test_compile_vae_matches_eager),
         ("compile_vae_matches_eager_t2v", test_compile_vae_matches_eager_t2v),
         ("accelerator_graph_matches_eager", test_accelerator_graph_matches_eager),
+        ("batched_accelerator_graph_rows_match_single", test_batched_accelerator_graph_rows_match_single),
         ("cross_request_batch_matches_individual", test_cross_request_batch_matches_individual),
     ]:
         try:

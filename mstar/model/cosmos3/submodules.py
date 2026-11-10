@@ -154,6 +154,15 @@ ACTION_WALKS = (ACTION_GEN_WALK, ACTION_VIDEO_GEN_WALK)
 # the loop next to the video latents.
 SOUND_WALKS = (VIDEO_SOUND_GEN_WALK,)
 
+# Walks that keep main's rule, batching only when every row holds both guidance
+# branches, because one-branch batching on them is unmeasured: batched long
+# clips ran slower than serial on H100 (see ``max_batched_vision_tokens``), and
+# no deployment declares batched conditional-prefill captures. Image denoise,
+# the text prefill and action batch on any shared branches.
+TWO_BRANCH_BATCH_WALKS = (
+    VIDEO_GEN_WALK, VIDEO_GEN_AR_WALK, *SOUND_WALKS, PREFILL_COND_WALK, PREFILL_COND_VIDEO_WALK,
+)
+
 # Conditional prompt K/V lives under the primary label; the unconditional
 # (negative) prompt's K/V lives under a second label for classifier-free
 # guidance. Both are written once at prefill and read every denoise step.
@@ -358,8 +367,10 @@ class GenStepInfo:
     speedup; declaring the dense one for a step that does get a slot would try
     to capture an eager-only backend, so the safe direction over-declares.
 
-    ``cfg_active`` narrows the eager single-request declaration only. It is
-    deliberately not part of ``capture_key`` — see ``cg_key_info``.
+    ``cfg_active`` narrows the eager declaration of a single request and of an
+    action batch (no row inside its interval drops the batch to the conditional
+    branch) only. It is deliberately not part of ``capture_key`` — see
+    ``cg_key_info``.
     """
     labels: tuple[str, ...]   # the branches this request holds (``labels_for``)
     cfg_active: bool          # ...and this step is inside its guidance interval
@@ -1741,6 +1752,16 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         resources = engine_inputs.resources or self.node_resources
         return resources[key]
 
+    @staticmethod
+    def _plan_label(engine_inputs: ModelInputsFromEngine) -> str:
+        """The label of the plan this step's rows run under, read off the
+        step as `_gen_attn` reads the backend: the labels its segments hold, so
+        the forward cannot disagree with what ``declare_step`` planned (a batch
+        outside every row's guidance interval, say, planned only the
+        conditional branch). `forward_captured` cannot read it: a capture runs
+        with no step, and its branches are its buffers' shape."""
+        return plan_label(tuple(dict.fromkeys(seg.label for seg in engine_inputs.step.segments)))
+
     # Run the transformer in the model's native bf16, NOT the engine autocast:
     # autocast keeps norms in fp32, perturbing the velocity ~1 ULP/step, which
     # the multi-step denoise amplifies, and it would run the fp32 scheduler
@@ -2050,20 +2071,23 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         sts = [self.request_states.get(rid) for rid in batch.request_ids]
         if any(st is None for st in sts):
             return False
+        # Rows batch when they hold the same branches, so one plan covers the
+        # batch; the walks of `TWO_BRANCH_BATCH_WALKS` only when it is two.
+        branches = {labels_for(st["gs"]) for st in sts}
+        if len(branches) != 1:
+            return False
+        if batch.graph_walk in TWO_BRANCH_BATCH_WALKS and len(next(iter(branches))) < 2:
+            return False
         if (
             batch.graph_walk in GEN_WALKS
             or batch.graph_walk in SOUND_WALKS
             or batch.graph_walk in PREFILL_WALKS
         ):
-            # Image/video batch only in the two-branch guidance regime, so one
-            # batched-CFG plan covers them. (Batches are per graph walk, so
-            # sound requests only ever batch with sound requests.) Windowed
-            # requests join denoise batches — the batched forward maps their
-            # loop counter to the within-window step and handles chained
-            # window boundaries — but a kv commit iteration is a different
-            # step (an append) and drops the batch to the sequential path.
-            if not all(st["uncond"] is not None for st in sts):
-                return False
+            # Windowed requests join denoise batches — the batched forward
+            # maps their loop counter to the within-window step and handles
+            # chained window boundaries — but a kv commit iteration is a
+            # different step (an append) and drops the batch to the sequential
+            # path.
             cap = self.config.max_batched_vision_tokens
             if (
                 cap is not None
@@ -2078,12 +2102,10 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
                 return all("ar_schedule" not in st for st in sts)
             return not any(inp.resource_step_info.commit for inp in model_inputs)
         if batch.graph_walk in ACTION_WALKS:
-            # Action batches when all requests share the guidance regime (all
-            # single-branch -- guidance-scale-1 inverse/forward-dynamics and base
-            # policy -- or all two-branch), so one plan covers the batch. Modes
-            # and embodiment domains may differ: each request's masks, scheduler
-            # and domain-aware action projection are applied per request.
-            return len({st["uncond"] is not None for st in sts}) == 1
+            # Modes and embodiment domains may differ: each request's masks,
+            # scheduler and domain-aware action projection are applied per
+            # request.
+            return True
         return False
 
     def max_batch_size(self, graph_walk: str):
@@ -2136,16 +2158,16 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
                 st["cond"],
                 lat,
                 torch.full((st["cond"]["num_noisy_vision_tokens"],), t, device=lat.device),
-                (st["cond"]["rotary"], st["uncond"]["rotary"]),
+                tuple(s["rotary"] for s in (st["cond"], st["uncond"]) if s is not None),
             ))
             meta.append((rid, st, lat, k, step_index))
 
-        results = self.transformer.denoise_step_batched(reqs, CFG_BATCHED_LABEL, attn)
+        results = self.transformer.denoise_step_batched(reqs, self._plan_label(engine_inputs), attn)
 
         out = {}
-        for (rid, st, lat, k, local), (cond_v, uncond_v) in zip(meta, results, strict=True):
+        for (rid, st, lat, k, local), (cond_v, *uncond_v) in zip(meta, results, strict=True):
             if self._cfg_active(st, local):
-                velocity = _guided(cond_v, uncond_v, st["gs"], lat.dtype)
+                velocity = _guided(cond_v, uncond_v[0], st["gs"], lat.dtype)
             else:  # outside the guidance_interval, as in _forward_image_gen
                 velocity = cond_v.to(lat.dtype)
             solver = {name: kwargs[name][rid] for name in self._solver_state}
@@ -2184,22 +2206,23 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             # shared forward can't index past the schedule, and skip its
             # scheduler step below.
             t = timesteps[min(step_index, len(timesteps) - 1)]
-            cond, unc = st["cond"], st["uncond"]
+            cond = st["cond"]
             reqs.append(self.transformer.denoise_step_row(
                 cond,
                 lat,
                 torch.full((cond["num_noisy_vision_tokens"],), t, device=lat.device),
-                (cond["rotary"], unc["rotary"]),
+                tuple(s["rotary"] for s in (cond, st["uncond"]) if s is not None),
                 sound_latents=snd,
                 sound_timesteps=torch.full((st["num_sound"],), t, device=lat.device),
             ))
             meta.append((rid, st, lat, snd, step_index))
 
-        results = self.transformer.denoise_step_batched(reqs, CFG_BATCHED_LABEL, attn)
+        results = self.transformer.denoise_step_batched(reqs, self._plan_label(engine_inputs), attn)
 
         out = {}
-        for (rid, st, lat, snd, k), ((cond_v, s_c), (uncond_v, s_u)) in zip(meta, results, strict=True):
+        for (rid, st, lat, snd, k), ((cond_v, s_c), *uncond) in zip(meta, results, strict=True):
             if self._cfg_active(st, k):
+                uncond_v, s_u = uncond[0]
                 velocity = _guided(cond_v, uncond_v, st["gs"], lat.dtype)
                 sound_v = _guided(s_c, s_u, st["gs"], snd.dtype)
             else:  # outside the guidance_interval, as in _forward_image_gen
@@ -2224,10 +2247,8 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         states = self._states(engine_inputs)
         attn = self._gen_attn(engine_inputs)
         rids = engine_inputs.request_ids
-        with_cfg = states[rids[0]]["uncond"] is not None and any(
-            self._cfg_active(states[rid], _loop_step(engine_inputs.per_request_info[rid], graph_walk))
-            for rid in rids
-        )
+        plan = self._plan_label(engine_inputs)
+        with_cfg = plan == CFG_BATCHED_LABEL
         reqs, meta = [], []
         for rid in rids:
             st = states[rid]
@@ -2261,7 +2282,7 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             meta.append((rid, st, lat, act, step_index))
 
         results = self.transformer.denoise_step_action_batched(
-            reqs, CFG_BATCHED_LABEL if with_cfg else COND_LABEL, attn, with_cfg
+            reqs, plan, attn, with_cfg
         )
 
         out = {}

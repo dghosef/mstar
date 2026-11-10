@@ -23,7 +23,7 @@ from mstar.model.cosmos3.submodules import (
     UNCOND_LABEL,
     Cosmos3DiTSubmodule,
 )
-from mstar.model.cosmos3.tests.stubs import StubSampler
+from mstar.model.cosmos3.tests.stubs import StubSampler, step_over
 from mstar.model.cosmos3.tests.test_edge import _init_all, _tiny_edge_config
 from mstar.model.cosmos3.tests.test_engine_cache import _SdpaResources
 
@@ -267,7 +267,8 @@ def test_served_batched_paths_run_the_real_step() -> None:
     latents = {rid: torch.randn(sub._latent_shape(64, 64, 9)) for rid in rids}
     sound = {rid: torch.randn(1, cfg.sound_dim, 4) for rid in rids}
     ei = SimpleNamespace(
-        request_ids=rids, step=None, resources=res.as_dict(), per_request_states=None,
+        request_ids=rids, step=step_over(rids, COND_LABEL, UNCOND_LABEL), resources=res.as_dict(),
+        per_request_states=None,
         per_request_info={
             rid: SimpleNamespace(dynamic_loop_iter_counts={"video_sound_gen_loop": i, "video_gen_loop": i})
             for i, rid in enumerate(rids)

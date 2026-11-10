@@ -30,10 +30,12 @@ from mstar.model.cosmos3.submodules import (  # noqa: E402
     COND_LABEL,
     IMAGE_GEN_LOOP,
     LATENT_DTYPE,
+    UNCOND_LABEL,
     VIDEO_GEN_LOOP,
     VIDEO_SOUND_GEN_LOOP,
     Cosmos3DiTSubmodule,
 )
+from mstar.model.cosmos3.tests.stubs import step_over  # noqa: E402
 from mstar.model.cosmos3.tests.test_dit_step_guard import EDGE_SCHEDULER  # noqa: E402
 from mstar.model.submodule_base import ARNodeInputs  # noqa: E402
 
@@ -198,7 +200,7 @@ def test_batched_sound_step_combines_in_fp32() -> None:
         _gen_request(sub, rid, VIDEO_SHAPE, num_sound=5)
         inps[rid] = sub._prepare_video_sound_gen(_fwd(rid, VIDEO_SOUND_GEN_LOOP, seed=i), {}, "cpu").tensor_inputs
     ei = SimpleNamespace(
-        request_ids=rids, per_request_states=None, step=None, resources=None,
+        request_ids=rids, per_request_states=None, step=step_over(rids, COND_LABEL, UNCOND_LABEL), resources=None,
         per_request_info={rid: _fwd(rid, VIDEO_SOUND_GEN_LOOP) for rid in rids},
     )
     solvers = {name: {rid: inps[rid][name] for rid in rids} for name in sub._solver_state}
@@ -245,7 +247,8 @@ def test_batched_action_step_combines_in_fp32(cfg_branch) -> None:
         inps[rid] = sub._prepare_action_gen(C.ACTION_GEN_WALK, _fwd(rid, ACTION_GEN_LOOP, seed=i), {}, "cpu")
         inps[rid] = inps[rid].tensor_inputs
     ei = SimpleNamespace(
-        request_ids=rids, per_request_states=None, step=None, resources=None,
+        request_ids=rids, per_request_states=None, resources=None,
+        step=step_over(rids, *((COND_LABEL, UNCOND_LABEL) if cfg_branch else (COND_LABEL,))),
         per_request_info={rid: _fwd(rid, ACTION_GEN_LOOP) for rid in rids},
     )
     solvers = {name: {rid: inps[rid][name] for rid in rids} for name in sub._solver_state}
