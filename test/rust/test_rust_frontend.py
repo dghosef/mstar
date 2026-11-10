@@ -286,8 +286,9 @@ _GENERATE_FILES = [("a.png", b"\x89PNG-a"), ("b.wav", b"RIFF-b"), ("c.png", b"\x
     ({"input_modalities": "text,image"}, _GENERATE_FILES[:1]),
     ({"text": "", "input_modalities": "image,text"}, _GENERATE_FILES[:1]),
     ({"text": "hi", "input_modalities": ""}, _GENERATE_FILES[:1]),
+    ({"text": "and now?", "model_kwargs": json.dumps({"history": [{"role": "user", "content": "hi"}]})}, []),
 ], ids=["files-then-text", "text-only", "layout-without-text", "layout-text-no-text", "empty-text",
-        "empty-layout"])
+        "empty-layout", "history"])
 def test_generate_submits_the_layout_python_does(fields, files, tmp_path, monkeypatch):
     """Ordered parts (each file, then the text), the modalities in that order
     with repeats, and an explicit layout taken as given except that a text slot
@@ -320,6 +321,7 @@ def test_generate_submits_the_layout_python_does(fields, files, tmp_path, monkey
     want_files = {m: [Path(p).read_bytes() for p in ps] for m, ps in (want["file_paths"] or {}).items()}
     assert sub["text"] == want["text"]
     assert sub["in"] == want["input_modalities"]
+    assert (sub["mk"] or {}) == (want["model_kwargs"] or {})
     parts = lambda ps: None if ps is None else [dataclasses.asdict(p) for p in ps]  # noqa: E731
     assert parts(sub["parts"]) == parts(want["prompt_parts"])
     assert got_files == want_files
@@ -1442,7 +1444,7 @@ class _FailsAfterTwoChunksStub(_StubAPIServer):
     """Two chunks, then a backend failure after the 200 has gone out."""
 
     async def iter_result_chunks(self, request_id):
-        yield _Chunk("text", b"Hel", {"token_ids": [1]})
+        yield _Chunk("text", b"Hel", {"token_ids": [1], "signal": "heard"})
         yield _Chunk("audio", bytes(range(256)) * 4, {"sample_rate": 24000})
         yield _Chunk("error", b"Error in worker: boom", {"status": 500})
 
@@ -1460,7 +1462,7 @@ def test_a_generate_stream_reads_as_pythons_down_to_a_late_error(binary):
 
     stub = _FailsAfterTwoChunksStub()
     sent = [
-        _Chunk("text", b"Hel", {"token_ids": [1]}),
+        _Chunk("text", b"Hel", {"token_ids": [1], "signal": "heard"}),
         _Chunk("audio", bytes(range(256)) * 4, {"sample_rate": 24000}),
         _Chunk("error", b"Error in worker: boom", {"status": 500}),
     ]
