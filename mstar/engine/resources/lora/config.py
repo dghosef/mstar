@@ -66,6 +66,38 @@ def resolve_adapter_path(path: str) -> str:
     return path
 
 
+def fetch_adapter_path(source: str) -> str:
+    """The local safetensors file ``source`` names: a local path as ``resolve_adapter_path``
+    reads it, else a Hugging Face repo id (as vLLM's ``lora_path`` may be), fetched into the
+    HF cache with its weights in safetensors only, and from the cache alone under
+    ``HF_HUB_OFFLINE``. The file is in the snapshot of the commit fetched, so every worker
+    reads the bytes checked here. Called where the API server checks adapters (startup and
+    runtime loads), never while a config is parsed."""
+    if os.path.exists(source) or os.path.isabs(source) or source.startswith(("~", ".")):
+        return resolve_adapter_path(os.path.expanduser(source))
+    from huggingface_hub.errors import HFValidationError, HfHubHTTPError, LocalEntryNotFoundError
+    from huggingface_hub.utils import validate_repo_id
+
+    from mstar.utils.hf_snapshot import NON_SAFETENSORS_WEIGHTS, resolve_snapshot_dir
+
+    try:
+        validate_repo_id(source)
+    except HFValidationError:
+        return source  # neither a path nor a repo id: the read says it is not there
+    try:
+        snapshot = resolve_snapshot_dir(source, ignore_patterns=NON_SAFETENSORS_WEIGHTS)
+    except LocalEntryNotFoundError as exc:
+        raise ValueError(
+            f"the Hugging Face repo {source!r} is not in the HF cache, and downloads are off "
+            "or the hub cannot be reached"
+        ) from exc
+    except HfHubHTTPError as exc:
+        raise ValueError(
+            f"the Hugging Face hub refused the repo {source!r} ({type(exc).__name__})"
+        ) from exc
+    return os.path.join(snapshot, ADAPTER_WEIGHTS_FILE)
+
+
 @dataclass(frozen=True)
 class LoraTarget:
     """One family of linears an adapter may touch, e.g. every layer's fused ``qkv_proj``.

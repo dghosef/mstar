@@ -709,6 +709,12 @@ none, share a batch::
         adapters:
           sql: /adapters/qwen3_5-4b-sql/adapter_model.safetensors
           chat: /adapters/qwen3_5-4b-chat   # a PEFT directory names its adapter_model.safetensors
+          pirate: William-Gao1/qwen3.5-4b-pirate-lora   # a Hugging Face repo id
+
+A name that is no local path is read as a Hugging Face repo id, as vLLM reads one. The API
+server fetches it once into the HF cache, safetensors weights only (no ``.bin`` copies),
+and the workers read that snapshot's ``adapter_model.safetensors``. With
+``HF_HUB_OFFLINE=1`` it is taken from the cache alone.
 
 Every adapter the config names is checked at startup, before any worker starts (LoRA
 layers present, rank within ``max_rank``, only the targets below, shapes that fit them),
@@ -803,8 +809,9 @@ unless the ``lora`` block opts in, and answer 404 otherwise (as vLLM's do withou
     curl -X POST localhost:8000/v1/unload_lora_adapter -H 'Content-Type: application/json' \
         -d '{"lora_name": "sql"}'
 
-``lora_path`` is a PEFT directory (its ``adapter_model.safetensors`` is read) or a
-safetensors file, readable at the same path by the API server and every worker. A load is checked
+``lora_path`` is a PEFT directory (its ``adapter_model.safetensors`` is read), a
+safetensors file, or a Hugging Face repo id (fetched as at startup, above), readable at the
+same path by the API server and every worker. A load is checked
 first (LoRA layers present, rank within ``max_rank``, only the targets above, shapes
 that fit them), then read by every worker that hosts a node with a LoRA pool (the LLM's
 or the vision encoder's); the name is selectable, and listed by ``/v1/models``, once all
