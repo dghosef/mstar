@@ -415,6 +415,7 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
                 add_generation_prompt=True,
                 enable_thinking=enable_thinking,
                 tools=[TOOL_SCHEMAS[name] for name in self.tools] or None,
+                **self._exact_history(enable_thinking),
             )
         except TemplateError as exc:
             # a chat the template refuses (a system message after the first turn,
@@ -456,6 +457,22 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
         return PreparedMedia(
             {"pixel_values": video.pixel_values}, [int(group.prod()) // merge ** 2] * t, [group] * t,
         )
+
+    # The template's test for whether an assistant message gets its think block: only those after the last user
+    # query. An earlier turn is rendered without it, though it was generated after `<think>\n\n</think>\n\n`.
+    _THINK_ONLY_AFTER_QUERY = "{%- if loop.index0 > ns.last_query_index %}"
+
+    def _exact_history(self, thinking: bool) -> dict:
+        """`apply_chat_template` kwargs that render every assistant turn of the history as it was generated, for a
+        request without thinking: the empty think block the generation prompt ends in is kept, so the next turn's
+        prompt is the previous prompt and its reply, token for token, and the KV chain and the reply's state
+        snapshot are hit through the reply. Thinking keeps the template's behaviour: the client does not send the
+        reasoning, and the model was trained on history without it."""
+        template = getattr(self.tokenizer, "chat_template", None)
+        if thinking or not isinstance(template, str) or self._THINK_ONLY_AFTER_QUERY not in template:
+            return {}
+        return {"chat_template": template.replace(
+            self._THINK_ONLY_AFTER_QUERY, "{%- if loop.index0 > ns.last_query_index or true %}", 1)}
 
     def render_agent(self, task: str, enable_thinking: bool = True) -> list[int]:
         """The prompt ids of an agent that does ``task``: the chat template, with the same tools as its parent's

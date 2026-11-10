@@ -66,6 +66,10 @@ Registry keys live in ``mstar/model/registry.py`` (``MODEL_REGISTRY`` / ``HF_MOD
      - TTS (82M, not autoregressive): misaki G2P + PL-BERT prosody + iSTFTNet
        decoder, 54 bundled voices and voice blends, sentence-chunked streaming,
        batched across requests.
+   * - ``voice_agent``
+     - ``openai/whisper-large-v3-turbo`` + ``Qwen/Qwen3.5-9B`` + ``hexgrad/Kokoro-82M``
+     - A ``MultiModel`` (``mstar.model.multimodel``): speech in, a reply that may run Python, start agents or speak,
+       and audio out, in one server (``configs/voice_agent.yaml``, client in ``examples/voice_agent``).
    * - ``voxcpm2``
      - ``openbmb/VoxCPM2``
      - Tokenizer-free TTS: MiniCPM-4 base and residual LMs emit continuous latent
