@@ -194,14 +194,13 @@ class MiniCPMOModel(MultimodalDecoderModel):
     METADATA_FILES = ("*.json", "*.txt", "assets/*.wav")
     # the media layout, and a spoken reply's text cap, which process_prompt settles
     INTERNAL_KWARGS = (MEDIA_LAYOUT, SPEECH_TEXT_TOKENS)
+    # not the checkpoint's generation_config.json: upstream's `chat` sets its own
     sampling_defaults = SAMPLING_DEFAULTS
 
     def __init__(
         self, model_path_hf: str, cache_dir: str | None = None, max_seq_len: int | None = None, **kwargs: Any,
     ):
         super().__init__(model_path_hf, cache_dir)
-        # not the checkpoint's generation_config.json: upstream's `chat` sets its own
-        self.sampling_defaults = SAMPLING_DEFAULTS
         self.config = MiniCPMOConfig.from_hf(self.local_dir)
         limit = self.config.llm.max_position_embeddings
         self.max_seq_len = limit if max_seq_len is None else max_seq_len
