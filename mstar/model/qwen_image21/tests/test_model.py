@@ -131,3 +131,18 @@ def test_turbo_runs_only_its_fixed_grid():
     assert model.get_loop_caps() == {"denoise_loop": 3}
     with pytest.raises(ValueError, match="exactly 3"):
         model.process_prompt("p", ["text"], ["image"], {}, num_inference_steps=40)
+
+
+def test_vae_pixels_are_the_image_processors_to_the_bit_and_layout():
+    """The VAE's latents depend on its input's exact values and memory layout (cuDNN kernels)."""
+    image_processor = pytest.importorskip("diffusers.image_processor")
+    from PIL import Image
+
+    from mstar.model.qwen_image21.submodules import vae_pixels
+
+    rgba = _image(96, 64)
+    pil = Image.fromarray(rgba.permute(1, 2, 0).numpy(), mode="RGBA")
+    ref = image_processor.VaeImageProcessor(vae_scale_factor=16, vae_latent_channels=64).preprocess(
+        pil, height=64, width=96).unsqueeze(2)
+    ours = vae_pixels(rgba)
+    assert torch.equal(ours, ref) and ours.stride() == ref.stride()

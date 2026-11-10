@@ -157,6 +157,15 @@ class _LatentNorm(nn.Module):
         return latents * self.std.to(latents) + self.mean.to(latents)
 
 
+def vae_pixels(image: torch.Tensor) -> torch.Tensor:
+    """uint8 ``[C, H, W]`` -> ``[1, C, 1, H, W]`` in ``[-1, 1]`` fp32, as ``VaeImageProcessor.preprocess``
+    hands it to the VAE: the division on the CPU (CUDA divides by a scalar through its reciprocal,
+    which rounds differently) and the memory NHWC-strided (cuDNN picks its kernels by layout). Both
+    change the latents' bits."""
+    pixels = image.permute(1, 2, 0).contiguous().float() / 255.0
+    return (2.0 * pixels - 1.0)[None].permute(0, 3, 1, 2).unsqueeze(2)
+
+
 class QwenImage21VaeEncoderSubmodule(NodeSubmodule):
     """RGBA uint8 ``[4, H, W]`` references -> their normalized latents (the posterior's mode) as
     rows ``[h * w, C]``, every reference end to end. Images differ in size: one encode each."""
@@ -176,10 +185,7 @@ class QwenImage21VaeEncoderSubmodule(NodeSubmodule):
     def forward(self, graph_walk, engine_inputs, **images: torch.Tensor) -> NameToTensorList:
         device, rows = self.get_device(), []
         for key in sorted(images, key=lambda name: int(name.split("_")[1])):
-            # the image processor's [0, 1] -> [-1, 1] in fp32, then the VAE's dtype; NHWC-strided, as
-            # the processor hands it over (cuDNN picks its kernels by layout)
-            pixels = images[key].to(device).permute(1, 2, 0)[None].float().div(255.0).mul(2.0).sub(1.0)
-            pixels = pixels.permute(0, 3, 1, 2).to(self.vae.dtype)[:, :, None]
+            pixels = vae_pixels(images[key]).to(device=device, dtype=self.vae.dtype)
             latents = self.norm.normalize(self.vae.encode(pixels).latent_dist.mode())
             rows.append(latents.flatten(2).transpose(1, 2)[0])
         return {REF_LATENTS: [torch.cat(rows)]}
