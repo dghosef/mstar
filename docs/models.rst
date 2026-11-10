@@ -770,8 +770,9 @@ none, share a batch::
           pirate: William-Gao1/qwen3.5-4b-pirate-lora   # a Hugging Face repo id
 
 A name that is no local path is read as a Hugging Face repo id, as vLLM reads one. The API
-server fetches it once into the HF cache, safetensors weights only (no ``.bin`` copies),
-and the workers read that snapshot's ``adapter_model.safetensors``. With
+server fetches its ``adapter_model.safetensors`` (and its ``adapter_config.json``, if it has
+one) into the HF cache once, and nothing else of the repo, and the workers read that file.
+A repo without ``adapter_model.safetensors`` (a ``.bin`` adapter) is refused. With
 ``HF_HUB_OFFLINE=1`` it is taken from the cache alone.
 
 Every adapter the config names is checked at startup, before any worker starts (LoRA
@@ -879,10 +880,10 @@ or the vision encoder's); the name is selectable, and listed by ``/v1/models``, 
 of them have it. A load that fails on any worker is undone on all of them and answered
 with a 400, as is a name that is already loaded. A refusal says why the adapter cannot be
 served (its rank, its modules, its shapes); a file that cannot be read at all gets the
-same answer whether it is missing, unreadable or not an adapter, and the details go to
-the server log. A worker that does not answer within ``runtime_update_timeout_s``
-(default 120) fails the load with a 504, and the load is undone everywhere, so the name
-is free to try again.
+same answer whether it is missing, unreadable or not an adapter, as does a repo id that
+cannot be fetched, and the details go to the server log. A worker that does not answer
+within ``runtime_update_timeout_s`` (default 120) fails the load with a 504, and the load
+is undone everywhere, so the name is free to try again.
 
 To change an adapter's weights, load the name again with ``"load_inplace": true`` (vLLM's
 field; without it a loaded name is a 400 that says so). The new weights are read by every

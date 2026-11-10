@@ -70,7 +70,7 @@ def resolve_lora_adapters(spec: LoraSpec | None, model_config: dict) -> dict[str
     for name, source in spec.adapters.items():
         try:
             fetched[name] = fetch_adapter_path(source)
-        except ValueError as exc:
+        except Exception as exc:  # noqa: BLE001 - each adapter that cannot be fetched is named
             errors.append(f"{name!r}: {exc}")
     if errors:
         raise ValueError("the serving config's LoRA adapters cannot be fetched: " + "; ".join(errors))
@@ -92,31 +92,45 @@ def resolve_lora_adapters(spec: LoraSpec | None, model_config: dict) -> dict[str
 
 def fetch_adapter_path(source: str) -> str:
     """The local safetensors file ``source`` names: a local path as ``resolve_adapter_path``
-    reads it, else a Hugging Face repo id (as vLLM's ``lora_path`` may be), fetched into the
-    HF cache with its weights in safetensors only, and from the cache alone under
-    ``HF_HUB_OFFLINE``. The file is in the snapshot of the commit fetched, so every worker
-    reads the bytes checked here. Called where the API server checks adapters (startup and
-    runtime loads), never while a config is parsed."""
+    reads it, else a Hugging Face repo id (as vLLM's ``lora_path`` may be), whose
+    ``adapter_model.safetensors`` and, if it has one, ``adapter_config.json`` (where its
+    alpha may be: ``sidecar_default_alpha``) alone are fetched into the HF cache, at one
+    commit, from the cache alone under ``HF_HUB_OFFLINE``. Every worker reads the file
+    checked here. Called where the API server checks adapters (startup and runtime loads),
+    never while a config is parsed.
+
+    A repo with no safetensors adapter is a ``ValueError``. Any other failure is not, so a
+    client is told only that the adapter could not be read (``describe_load_error``), as
+    for a local path that cannot: the answer says nothing of whether a path exists."""
     if os.path.exists(source) or os.path.isabs(source) or source.startswith(("~", ".")):
         return resolve_adapter_path(os.path.expanduser(source))
-    from huggingface_hub.errors import HfHubHTTPError, HFValidationError, LocalEntryNotFoundError
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.errors import (
+        EntryNotFoundError,
+        HFValidationError,
+        LocalEntryNotFoundError,
+        RemoteEntryNotFoundError,
+    )
     from huggingface_hub.utils import validate_repo_id
-
-    from mstar.utils.hf_snapshot import NON_SAFETENSORS_WEIGHTS, resolve_snapshot_dir
 
     try:
         validate_repo_id(source)
     except HFValidationError:
         return source  # neither a path nor a repo id: the read says it is not there
     try:
-        snapshot = resolve_snapshot_dir(source, ignore_patterns=NON_SAFETENSORS_WEIGHTS)
-    except LocalEntryNotFoundError as exc:
+        path = hf_hub_download(source, ADAPTER_WEIGHTS_FILE)
+    except RemoteEntryNotFoundError as exc:
         raise ValueError(
+            f"the Hugging Face repo {source!r} has no {ADAPTER_WEIGHTS_FILE}: only safetensors "
+            "adapters are served"
+        ) from exc
+    except LocalEntryNotFoundError as exc:
+        raise OSError(
             f"the Hugging Face repo {source!r} is not in the HF cache, and downloads are off "
             "or the hub cannot be reached"
         ) from exc
-    except HfHubHTTPError as exc:
-        raise ValueError(
-            f"the Hugging Face hub refused the repo {source!r} ({type(exc).__name__})"
-        ) from exc
-    return os.path.join(snapshot, ADAPTER_WEIGHTS_FILE)
+    try:
+        hf_hub_download(source, "adapter_config.json", revision=os.path.basename(os.path.dirname(path)))
+    except EntryNotFoundError:
+        pass  # the weights' own alphas, or PEFT's default
+    return path

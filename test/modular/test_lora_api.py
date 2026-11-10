@@ -604,7 +604,9 @@ def test_a_failed_read_on_one_worker_is_undone_everywhere_without_leaking_the_io
     assert _weights(paths["a1"]) not in d.pools["worker_0"].store and d.served.adapters == ()
 
 
-def test_a_refused_path_tells_the_client_nothing_about_the_servers_files(paths, tmp_path, caplog):
+def test_a_refused_path_tells_the_client_nothing_about_the_servers_files(paths, tmp_path, caplog, monkeypatch):
+    import huggingface_hub.constants as hf
+
     d = _Deployment(paths)
     caplog.set_level(logging.WARNING, logger="mstar.api_server.lora_admin")
     other = tmp_path / "notes.txt"
@@ -633,17 +635,26 @@ def test_a_refused_path_tells_the_client_nothing_about_the_servers_files(paths, 
         env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2])},
     )
     assert child.stdout.count("refused:") == 3, child.stdout + child.stderr
+    # a relative path that is not there is a Hugging Face repo id (here, not in the cache)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(hf, "HF_HUB_CACHE", str(tmp_path / "hub"))
+    monkeypatch.setattr(hf, "HF_HUB_OFFLINE", True)
+    (tmp_path / "org" / "notes").mkdir(parents=True)
+    sources = (str(tmp_path / "missing.safetensors"), str(other), str(tmp_path), str(model), str(fifo),
+               "org/notes", "org/missing")
     answers = set()
-    for path in (str(tmp_path / "missing.safetensors"), str(other), str(tmp_path), str(model), str(fifo)):
+    for source in sources:
         with pytest.raises(REFUSED) as err:
-            d.load("x", path)
+            d.load("x", source)
         assert _status(err.value) == 400 and str(tmp_path) not in _message(err.value)
         answers.add(_message(err.value))
-    # a missing file, a file of another kind, a directory, a model's weights and a FIFO read the same
+    # a missing file, a file of another kind, a directory, a model's weights, a FIFO, and a
+    # relative path whether it is there or not, read the same
     assert len(answers) == 1 and "could not be read" in answers.pop()
     # and the server log has what the client is told it has: each cause, with the file
     logged = [r for r in caplog.records if r.name == "mstar.api_server.lora_admin"]
-    assert len(logged) == 5 and all(r.exc_info and str(tmp_path) in r.getMessage() for r in logged)
+    assert len(logged) == len(sources)
+    assert all(r.exc_info and source in r.getMessage() for r, source in zip(logged, sources, strict=True))
     # as they do on a worker, should the file change after the API server's check
     read = LoraAdapterPool(make_spec({}), "cpu").load_adapter_async("x", str(model), bytes(32))
     assert "could not be read" in describe_load_error(read.exception(timeout=30))
