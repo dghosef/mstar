@@ -5,7 +5,7 @@
 #   spoken turn  -> Whisper -> Glue -> Qwen3.5's prompt, a word at a time, while Whisper still decodes
 #
 # Python the model writes runs on this host with no network or filesystem isolation: serve only to trusted callers.
-# `spawn_agent` children run inside their parent's concurrency slot (see docs/models.rst, "Agents a reply starts").
+# `spawn_agent` children count against max_concurrent_requests (see docs/models.rst, "Agents a reply starts").
 model: voice_agent
 model_kwargs:
   members:
