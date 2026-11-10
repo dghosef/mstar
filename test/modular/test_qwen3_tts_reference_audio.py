@@ -48,9 +48,9 @@ def test_load_audio_decodes_a_clip_without_a_sample_count(tmp_path, monkeypatch,
     np.testing.assert_allclose(audio.numpy(), samples[: audio.numel()].mean(axis=1), atol=1e-6)
 
 
-def test_load_audio_refuses_a_long_clip_without_a_sample_count_after_about_30_s(tmp_path):
+def test_load_audio_refuses_a_long_clip_without_a_sample_count_at_its_decoded_length(tmp_path):
     path, _ = _headerless_flac(tmp_path / "long.flac", 45)
-    with pytest.raises(ValueError, match=r"reference clip is 30\.\d\d s; it must be between 1 and 30 s"):
+    with pytest.raises(ValueError, match=r"reference clip is 45\.\d\d s; it must be between 1 and 30 s"):
         _model().load_audio(path, "cpu")
 
 

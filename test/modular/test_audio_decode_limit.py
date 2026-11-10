@@ -275,17 +275,18 @@ def test_soundfile_loaders_are_capped(monkeypatch, clip):
 def test_qwen3_tts_reference_decode_stops_at_its_bound(monkeypatch, clip):
     from mstar.model.qwen3_tts.qwen3_tts_model import Qwen3TTSModel
 
-    # the header says 5 s and passes the model's check; the samples run on
-    sf = _use_soundfile(monkeypatch, _FakeSoundfile(60, rate=24000, header_seconds=5))
+    # the header says 5 s and passes the model's check; the samples run on past
+    # the API's 60 s reference cap, where the decode stops
+    sf = _use_soundfile(monkeypatch, _FakeSoundfile(90, rate=24000, header_seconds=5))
     config = types.SimpleNamespace(
         reference_min_seconds=1.0, reference_max_seconds=30.0,
         codec=types.SimpleNamespace(input_sample_rate=24000),
     )
     model = types.SimpleNamespace(config=config)
     model._check_reference_duration = lambda s: Qwen3TTSModel._check_reference_duration(model, s)
-    with pytest.raises(AudioTooLongError, match="30 s"):
+    with pytest.raises(AudioTooLongError, match="60 s"):
         Qwen3TTSModel.load_audio(model, clip, "cpu")
-    assert sf.frames_read <= 30 * 24000 + 1
+    assert sf.frames_read <= 60 * 24000 + 1
 
 
 def test_omnilingual_asr_decode_stops_at_its_clip_bound(monkeypatch, clip):

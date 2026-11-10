@@ -471,13 +471,13 @@ def load_reference_clip(
     ``check_seconds`` (the model's length rule, which raises; the model reuses
     it in ``process_prompt`` on the decoded clip) runs on the
     length the header declares before anything decodes: a small compressed
-    file can hold hours of audio. The header can understate it, so the decode
-    stops past ``max_seconds`` too; a header with no length is checked on what
-    decodes. A file libsndfile can't read is the client's error (400).
+    file can hold hours of audio. The header can understate it or have no
+    length, so the rule runs again on what decodes, which stops past the API's
+    reference cap. A file libsndfile can't read is the client's error (400).
     """
     import soundfile
 
-    from mstar.api_server.media_io import AudioTooLongError, read_soundfile_capped
+    from mstar.api_server.media_io import MAX_REF_AUDIO_SECONDS, read_soundfile_capped
     from mstar.model.media_limits import sound_file_seconds
 
     with decoding_upload(path, "the reference audio"):
@@ -486,14 +486,11 @@ def load_reference_clip(
         seconds = sound_file_seconds(info.frames, info.samplerate)
         if seconds is not None:
             check_seconds(seconds)
-        try:
-            waveform, rate = read_soundfile_capped(path, max_seconds)
-        except AudioTooLongError:
-            if seconds is None:   # refused by the model's rule, as a clip that names its length is
-                check_seconds(max_seconds + 1 / info.samplerate)
-            raise
-        if seconds is None:   # no sample count in the header (a FLAC written to a pipe)
-            check_seconds(len(waveform) / rate)
+        # decoded up to the API's reference cap at most, so the model's rule
+        # judges the length that decoded (a header can understate it, or have
+        # none: a FLAC written to a pipe); past the cap it is refused as too long
+        waveform, rate = read_soundfile_capped(path, max(max_seconds, MAX_REF_AUDIO_SECONDS))
+        check_seconds(len(waveform) / rate)
     return _resample(torch.from_numpy(waveform), rate, sample_rate)
 
 

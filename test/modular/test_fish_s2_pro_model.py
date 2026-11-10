@@ -233,7 +233,7 @@ def _headerless_flac(path: Path, seconds: float, channels: int = 1, rate: int = 
     return str(path), torch.from_numpy(samples).float() / 32768
 
 
-@pytest.mark.parametrize("seconds, shown", [(45, r"30\.\d\d"), (0.3, r"0\.\d\d")])
+@pytest.mark.parametrize("seconds, shown", [(45, r"45\.\d\d"), (0.3, r"0\.\d\d")])
 def test_load_audio_refuses_a_clip_without_a_sample_count_at_its_decoded_length(tmp_path, seconds, shown):
     path, _ = _headerless_flac(tmp_path / "piped.flac", seconds)
     with pytest.raises(ValueError, match=rf"reference clip is {shown} s; it must be between 0.5 and 30 s"):
