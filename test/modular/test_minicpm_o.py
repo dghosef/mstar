@@ -795,3 +795,15 @@ def test_tts_kv_must_hold_every_admitted_spoken_reply():
     for config in (a_deployment(tts_pages=32 * 32), a_deployment(cap=None)):
         with pytest.raises(ValueError, match="tts_kv"):
             model.validate_config_yaml(config, "minicpm_o.yaml")
+
+
+def test_the_model_pickles_for_its_workers(chat_model):
+    """The server pickles the Model into every worker process it spawns; a
+    mappingproxy on the instance, or a media intake's bound method, breaks that."""
+    import pickle
+
+    loaded = pickle.loads(pickle.dumps(chat_model))
+    assert [m.modality for m in loaded.media] == [m.modality for m in chat_model.media]
+    assert loaded.sampling_defaults == dict(
+        temperature=0.7, top_p=0.8, top_k=100, repetition_penalty=1.02, penalize_prompt=False,
+    )
