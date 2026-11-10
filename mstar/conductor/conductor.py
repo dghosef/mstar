@@ -470,6 +470,14 @@ def _message_request_ids(message) -> list[str | None]:
     return [getattr(body, "request_id", None)]
 
 
+def _request_kv_labels(
+    conductor, input_modalities: list[str], output_modalities: list[str], model_kwargs: dict,
+) -> dict[str, tuple[str, ...]]:
+    """The KV labels a request opens: the declared ones, less those of resources it never uses."""
+    keys = conductor.model.request_resource_keys(input_modalities, output_modalities, model_kwargs)
+    return {k: v for k, v in conductor._kv_labels.items() if keys is None or k in keys}
+
+
 class Conductor:
     # Metrics are off unless __init__ gets an interval; class-level so an
     # object built without __init__ reads them as off too.
@@ -784,7 +792,7 @@ class Conductor:
             getattr(cfg, "return_logprobs", False) for cfg in configs.values()
         ):
             raise ValueError("this model does not report logprobs; leave return_logprobs unset")
-        for key, labels in self._kv_labels.items():
+        for key, labels in _request_kv_labels(self, input_modalities, output_modalities, model_kwargs).items():
             configs.setdefault(key, KVReqConfig(needed_labels=list(labels)))
         # each declared resource builds its own config from the request's kwargs (a LoRA
         # pool's from the adapter it names), so a model needs no request code for one
@@ -1591,7 +1599,11 @@ class Conductor:
         # process_prompt's {stream edge: context-only lead items}; each worker
         # primes the streams its own partition consumes
         stream_lead_items = kwargs.get("stream_lead_items") or {}
-        refuse_undeclared_labels(type(self.model).__name__, self._kv_labels, kv_layout, resource_configs)
+        refuse_undeclared_labels(
+            type(self.model).__name__,
+            _request_kv_labels(self, body.initial_input_modalities, body.initial_output_modalities, model_kwargs),
+            kv_layout, resource_configs,
+        )
         for key, cfg in resource_configs.items():
             cfg.apply_conductor_config(
                 seed=seed,
