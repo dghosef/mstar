@@ -766,23 +766,30 @@ def read_soundfile_capped(path: str, max_seconds: float = MAX_AUDIO_SECONDS) -> 
 
 def _read_unsized(path: str, max_seconds: float) -> tuple[np.ndarray, int]:
     """``read_soundfile_capped`` for a FLAC with no sample count: FFmpeg's
-    whole decode, or without FFmpeg libsndfile's as ``media_limits.read_sound_file``
-    reads it, which ends the clip at the error on its last block (the same
-    error as on a corrupt block; libsndfile tells them apart by neither code
-    nor message). A clip shorter than that block decodes to nothing there,
-    which raises rather than return an empty clip."""
-    from mstar.model.media_limits import ffmpeg_unavailable, read_sound_file
+    whole decode, downmixed by FFmpeg, or without FFmpeg libsndfile's, which
+    ends the clip at the error on its last block (the same error as on a
+    corrupt block; libsndfile tells them apart by neither code nor message).
+    A clip shorter than that block decodes to nothing there, which raises
+    rather than return an empty clip."""
+    import soundfile as sf
 
+    from mstar.model.media_limits import ffmpeg_unavailable, sound_file_blocks
+
+    # either way the decode holds mono, not every channel at the native rate
     if (no_ffmpeg := ffmpeg_unavailable()) is None:
-        # every channel, averaged as below: FFmpeg's own downmix scales stereo by 1/sqrt(2)
-        samples = torchcodec_samples_capped(path, max_seconds)
-        return samples.data.mean(dim=0).numpy(), samples.sample_rate
-    data, rate = read_sound_file(path, max_seconds)
-    if len(data) > max_seconds * rate:
+        # FFmpeg's downmix, as main's fallback for these files: it sums stereo
+        # at 1/sqrt(2) where the libsndfile path averages
+        samples = torchcodec_samples_capped(path, max_seconds, num_channels=1)
+        return samples.data[0].numpy(), samples.sample_rate
+    with sf.SoundFile(path) as f:
+        rate = f.samplerate
+        parts = [data[:, 0] if data.shape[1] == 1 else data.mean(axis=1)
+                 for data in sound_file_blocks(f, max_seconds, "float32")]
+    if sum(map(len, parts)) > max_seconds * rate:
         raise AudioTooLongError(max_seconds)
-    if not len(data):
+    if not parts:
         raise RuntimeError(f"libsndfile decodes none of this short FLAC with no sample count; FFmpeg: {no_ffmpeg}")
-    return (data[:, 0] if data.shape[1] == 1 else data.mean(axis=1)), rate
+    return np.concatenate(parts), rate
 
 
 def decode_torchcodec_capped(path: str, sample_rate: int, max_seconds: float = MAX_AUDIO_SECONDS):

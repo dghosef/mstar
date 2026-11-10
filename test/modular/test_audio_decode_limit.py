@@ -474,12 +474,12 @@ def test_blockwise_mp3_decode_equals_one_read(tmp_path, monkeypatch):
     np.testing.assert_allclose(audio, whole.mean(axis=1), atol=1e-6, rtol=0)
 
 
-def _flac_without_length(path: Path, seconds: float, rate: int = 16000) -> None:
+def _flac_without_length(path: Path, seconds: float, rate: int = 16000, channels: int = 1) -> None:
     """A FLAC whose STREAMINFO leaves the total sample count out (0), which
     the format allows for streamed encoders."""
     sf = pytest.importorskip("soundfile")
     tone = (0.1 * np.sin(np.arange(int(seconds * rate)) * 2 * np.pi * 440 / rate)).astype(np.float32)
-    sf.write(path, tone, rate)
+    sf.write(path, np.repeat(tone[:, None], channels, axis=1), rate)
     data = bytearray(path.read_bytes())
     assert data[:4] == b"fLaC"
     streaminfo = int.from_bytes(data[8:42], "big")
@@ -512,6 +512,27 @@ def test_flac_without_a_length_decodes(tmp_path, monkeypatch, seconds, ffmpeg):
     assert rate == 16000 and (audio.size == frames if ffmpeg else frames - 4096 <= audio.size < frames)
     with pytest.raises(AudioTooLongError):
         media_io.read_soundfile_capped(str(path), max_seconds=seconds / 2)
+
+
+def test_flac_without_a_length_holds_its_channels_one_block_at_a_time(tmp_path, monkeypatch):
+    """A few MB of such a FLAC can declare 8 channels at 192 kHz for 30 min
+    (11 GB decoded natively): without FFmpeg each block is averaged as it
+    decodes, so the decode holds about its mono length, not every channel."""
+    import tracemalloc
+
+    from mstar.model import media_limits
+
+    monkeypatch.setattr(media_limits, "ffmpeg_unavailable", lambda: "not installed")
+    path = tmp_path / "wide.flac"
+    _flac_without_length(path, 20, rate=48000, channels=8)
+    tracemalloc.start()
+    try:
+        audio, _ = media_io.read_soundfile_capped(str(path))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    # the mono parts and their concatenation are 2/8 of every channel
+    assert peak < 8 * audio.nbytes / 2
 
 
 def test_flac_without_a_length_is_measured_by_decoding_it(client, tmp_path):

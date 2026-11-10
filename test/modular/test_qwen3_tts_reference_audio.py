@@ -39,7 +39,9 @@ def _headerless_flac(path, seconds, channels=1):
 
 
 @pytest.mark.parametrize("channels", [1, 2])
-def test_load_audio_decodes_a_clip_without_a_sample_count(tmp_path, channels):
+def test_load_audio_decodes_a_clip_without_a_sample_count(tmp_path, monkeypatch, channels):
+    # libsndfile's decode, which averages the channels (FFmpeg, where installed, downmixes)
+    monkeypatch.setattr(media_limits, "ffmpeg_unavailable", lambda: "not installed")
     path, samples = _headerless_flac(tmp_path / "piped.flac", 5, channels)
     audio = _model().load_audio(path, "cpu").data
     assert 5 * RATE - LAST_FRAME <= audio.numel() <= 5 * RATE

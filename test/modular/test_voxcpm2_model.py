@@ -687,14 +687,14 @@ def test_load_audio_bounds_a_flac_written_to_a_pipe_at_its_counted_length(
 
     path = _pipe_written_flac(tmp_path / "piped.flac", seconds, 16000)
     blocks = []
-    count = media_limits._sound_file_blocks
+    count = media_limits.sound_file_blocks
 
     def counting(*args):
         for block in count(*args):
             blocks.append(len(block))
             yield block
 
-    monkeypatch.setattr(media_limits, "_sound_file_blocks", counting)
+    monkeypatch.setattr(media_limits, "sound_file_blocks", counting)
     with pytest.raises(ValueError, match=refused):
         model.load_audio(str(path), "cpu")
     assert sum(blocks) <= 61 * 16000
