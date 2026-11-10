@@ -178,9 +178,12 @@ class MultiModel(Model):
     def _renamed(self, member: str, partition: str) -> str:
         return partition if partition == CLIENT else f"{member}.{partition}"
 
-    def _merged(self, method: str, *args, **kwargs) -> dict:
-        """The members' dicts as one; a key two members share is a clash, refused."""
-        parts = {name: getattr(m, method)(*args, **kwargs) for name, m in self.members.items()}
+    def _merged(self, method: str, *args, members: Sequence[str] | None = None, **kwargs) -> dict:
+        """The members' dicts as one (those named, else all); a key two members share is a clash, refused."""
+        parts = {
+            name: getattr(m, method)(*args, **kwargs) for name, m in self.members.items()
+            if members is None or name in members
+        }
         refuse_clashes(method, parts)
         return {key: value for part in parts.values() for key, value in part.items()}
 
@@ -257,10 +260,36 @@ class MultiModel(Model):
         return merged
 
     def get_loop_caps(self, **model_kwargs):
-        return self._merged("get_loop_caps", **model_kwargs)
+        # ``max_output_tokens`` is the reply's budget, the entry's; another member's loop (a transcript)
+        # runs under its own default
+        own = {k: v for k, v in model_kwargs.items() if k != "max_output_tokens"}
+        parts = {
+            name: m.get_loop_caps(**(model_kwargs if m is self.entry else own)) for name, m in self.members.items()
+        }
+        refuse_clashes("loop cap", parts)
+        return {key: value for part in parts.values() for key, value in part.items()}
 
     def get_request_resource_configs(self, input_modalities, output_modalities, model_kwargs):
-        return self._merged("get_request_resource_configs", input_modalities, output_modalities, model_kwargs)
+        used = self._used(input_modalities, output_modalities, model_kwargs)
+        return self._merged(
+            "get_request_resource_configs", input_modalities, output_modalities, model_kwargs, members=used)
+
+    def _used(self, input_modalities, output_modalities, model_kwargs) -> list[str]:
+        """The members whose plan is not empty for this request: the entry (a typed request is its
+        alone), a glued stream's source the request feeds, and any other member with a step to run."""
+        active = {link.source for link in self._active_links(input_modalities)}
+        glued = {link.source for link in self.links if link.glue}
+        entry = next(name for name, m in self.members.items() if m is self.entry)
+        return [
+            name for name, m in self.members.items()
+            if name == entry or name in active or (name not in glued and any(
+                m.walk_plan(p.name, input_modalities, output_modalities, {}, model_kwargs)
+                for p in m.get_partitions()))
+        ]
+
+    def request_resource_keys(self, input_modalities, output_modalities, model_kwargs):
+        used = self._used(input_modalities, output_modalities, model_kwargs)
+        return {spec.resource_key for name in used for spec in self.members[name].get_node_resources()}
 
     def request_kwargs(self):
         kwargs = [m.request_kwargs() for m in self.members.values()]
@@ -325,6 +354,10 @@ class MultiModel(Model):
             prompt_parts=history or None, open_streams=frozenset(open_streams) | {link.stream}, **kwargs,
         )
         return _joined(heard, said)
+
+    def kv_layout(self, layout, length, *args, **kwargs):
+        # a child request is one of the typed request's model (`Conductor._start_children`)
+        return self.entry.kv_layout(layout, length, *args, **kwargs)
 
     def process_stream_chunk(self, chunk):
         return self.entry.process_stream_chunk(chunk)

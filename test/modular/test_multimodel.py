@@ -152,3 +152,60 @@ def test_a_model_that_starts_agents_starts_as_one_deployment_with_no_node_of_its
     assert conductor.worker_graphs
     plan = model.walk_plan("LLM", ["text"], ["text"], {"text_inputs": [object()]}, {})
     assert any(step.spawns for step in plan) and any(step.joins for step in plan)
+
+
+def _ingested(model, tmp_path, monkeypatch, input_modalities, signals, kwargs):
+    """The real conductor ingests one request of the multimodel; returns the conductor (a request the
+    model's layouts do not cover fails with a 500 in `refuse_undeclared_labels`)."""
+    from test_ingest_unpersist import ConductorMessageType, NewRequestConductor, _conductor, _info, _msg, _run
+
+    walks = model.get_graph_walk_graphs()
+    groups = [sorted({n for w in p.graph_walks for n in walks[w].get_nodes()}) for p in model.get_partitions()]
+    c = _conductor(model, [{"node_names": g, "ranks": [i]} for i, g in enumerate(groups)], tmp_path, monkeypatch)
+    _run(c, [[_msg(ConductorMessageType.NEW_REQUEST, NewRequestConductor(
+        request_id="r", initial_signals={name: [_info(i + 1)] for i, name in enumerate(signals)},
+        initial_input_modalities=list(input_modalities), initial_output_modalities=["text", "audio"],
+        input_metadata={}, model_kwargs=kwargs,
+    ))]])
+    kinds = [getattr(msg.message_type, "name", msg.message_type) for _, msg in c.comm.sent]
+    failed = [msg.body for _, msg in c.comm.sent if getattr(msg.message_type, "name", "") == "request_failed"]
+    assert "NEW_REQUEST" in kinds and not failed, failed
+    return c
+
+
+@pytest.mark.parametrize("request_kind", ["typed", "spoken", "child"])
+def test_a_request_opens_only_the_resources_of_the_members_it_uses(
+    tmp_path, monkeypatch, _drop_stubbed_imports, request_kind,  # noqa: F811
+):
+    """A typed request, an agent's child, never opens Whisper's cross-attention cache or Kokoro; a spoken one
+    opens Whisper's too. (The conductor refuses a request whose layouts miss a label it opens.)"""
+    from mstar.conductor.request_info import AGENT_CHILD
+    from mstar.model.base import LabelLayout, Span
+    from mstar.model.whisper import config as asr
+
+    asr_model = _whisper("whisper", {}, tmp_path, monkeypatch)
+    llm = _qwen3_5("qwen", {"tools": ["python", "speak", "spawn_agent"]}, tmp_path, monkeypatch)
+    asr_model.stream_out, llm.stream_in = True, "transcript"
+    tts = _kokoro("kokoro", {}, tmp_path, monkeypatch)
+    tts.stream_in = True
+    model = MultiModel({"asr": asr_model, "llm": llm, "tts": tts}, links=[SPEECH, SPEAK])
+    layout = llm.kv_layout({}, 5)
+    if request_kind == "spoken":
+        layout = {**layout, asr.CROSS_KV_CACHE: {asr.CONTEXT_LABEL: LabelLayout(
+            spans=(Span("rows", asr.PREFILL_WALK, 8, 8, "encoder_states"),))}, asr.KV_CACHE: {"main": LabelLayout(
+                spans=(Span("ids", asr.PREFILL_WALK, 3, 3, "asr_text"),), growth=((asr.DECODE_LOOP, 1),))}}
+    layout = {key: {label: each.row() for label, each in by_label.items()} for key, by_label in layout.items()}
+    kwargs = {"kv_layout": layout, **({TRANSCRIPT_STREAM: True} if request_kind == "spoken" else {})}
+    signals = ("audio", "asr_text", "text_inputs", "suffix") if request_kind == "spoken" else ("text_inputs",)
+    c = _ingested(model, tmp_path, monkeypatch, ["audio"] if request_kind == "spoken" else ["text"], signals, kwargs)
+    if request_kind == "child":
+        # the parent's router step persists a prompt, and the conductor starts the child from it
+        from test_ingest_unpersist import _info
+
+        from mstar.conductor.request_info import WalkStep
+
+        parent = c.requests["r"]
+        parent.persist_signals["agent_0"] = [_info(900)]
+        c._start_children("r", WalkStep("route", spawns=("agent_0",)))
+        assert "r-agent-0" in c.requests and not parent.child_errors, parent.child_errors
+        assert c.requests["r-agent-0"].model_kwargs[AGENT_CHILD] == "r"

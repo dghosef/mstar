@@ -880,6 +880,15 @@ class Model(ABC):
         del input_modalities, output_modalities, model_kwargs
         return {}
 
+    def request_resource_keys(
+        self, input_modalities: list[str], output_modalities: list[str], model_kwargs: dict,
+    ) -> set[str] | None:
+        """The resources this request opens, or None for every declared one. A model whose request
+        runs only some of its nodes (a multimodel's members) names the rest out: a KV resource the
+        request never writes is given no label, so the request needs no layout for it."""
+        del input_modalities, output_modalities, model_kwargs
+        return None
+
     def get_sampling_config(
         self, node_name: str,
         model_kwargs: dict | None = None,
