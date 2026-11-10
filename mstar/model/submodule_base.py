@@ -124,10 +124,13 @@ class StopCheck(NamedTuple):
     request, e.g. a frame streamed beside a stop token: a streaming edge then
     gets no item for it, so its consumer needs no device read to find and drop
     it. A plain ``set`` return is the same as ``StopCheck(stops)``.
+
+    ``exit`` names the exit the step's walk ends through (``WalkStep.exits``).
     """
 
     stops: set[str] | frozenset[str] = frozenset()
     withheld: tuple[str, ...] = ()
+    exit: str = ""
 
 
 class BatchedStopCheck(NamedTuple):

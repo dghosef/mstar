@@ -381,6 +381,9 @@ class RustGraphRuntime(GraphRuntime):
     def mark_partition_done(self, rid: int, partition: str):
         self._rust.mark_partition_done(rid, partition)
 
+    def mark_exit(self, rid: int, partition: str, name: str):
+        self._rust.mark_exit(rid, partition, name)
+
     def get_worker_graph_id_for_node(self, node: str, graph_walk: str) -> int:
         return self._rust.get_worker_graph_id_for_node(node, graph_walk)
 

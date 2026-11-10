@@ -83,6 +83,7 @@ class _Runtime(PhasedPostprocess):
         self.stopped: list[int] = []
         self.loop_names: dict[int, set[str]] = {}
         self.partition_done: list[int] = []
+        self.exits: list[tuple[int, str]] = []
         self.pending_stops = set(pending_stops)
 
     def pending_loop_stop_rids(self, graph_walk, loop_name):
@@ -99,6 +100,9 @@ class _Runtime(PhasedPostprocess):
 
     def mark_partition_done(self, rid, partition):
         self.partition_done.append(rid)
+
+    def mark_exit(self, rid, partition, name):
+        self.exits.append((rid, name))
 
     def complete_and_route_batch(self, route_input):
         return RouteOutput(
