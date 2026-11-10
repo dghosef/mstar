@@ -1724,8 +1724,8 @@ methods are:
    cycle (prefill, decode, route, tool, prefill that continues the reply). A prefill after a
    decode brings the ids to write and, as a second ``text_inputs`` tensor, the position its
    first id belongs at: the decode's last id, which the step speculated past the stop may have
-   written already, so ``SampledTokenDecoder`` leaves it out when the position counter is past
-   it. A prefill whose row is empty runs no forward and completes its node. Text written after
+   written already, so ``SampledTokenDecoder`` leaves it out when the position resource is past
+   it as the step is declared (in step order, the same on every TP rank). A prefill whose row is empty runs no forward and completes its node. Text written after
    the prompt is keyed for prefix caching when its walk is in ``PrefixKeys.walks``. A step whose
    ``step_metadata`` sets ``APPENDS`` wrote text a rebuild would not replay, so a preemption
    drop refuses its request (``Rebuilds.note_appended``). A step a stream feeds that runs once
