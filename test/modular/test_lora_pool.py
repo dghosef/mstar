@@ -229,7 +229,8 @@ def test_an_adapter_with_nothing_for_the_pools_targets_takes_no_slot(adapters, t
     assert admitted(runner, "r1") and run_step(pool, ["r1"]).ok
     assert admitted(runner, "e1") and pool.lean_for(["e1"]) and not pool.lean_for(["e1", "r1"])
     assert run_step(pool, ["r1", "e1"]).ok and pool.slot_of("e1") == ZERO_SLOT
-    assert pool.slot_state(1).refcount == 1 and pool.resident_slot(digest_of(pool, "mlp")) is None and digest_of(pool, "mlp") not in pool.store
+    mlp = digest_of(pool, "mlp")
+    assert pool.slot_state(1).refcount == 1 and pool.resident_slot(mlp) is None and mlp not in pool.store
 
 
 def test_a_spec_over_two_nodes_builds_a_pool_per_node(adapters):
