@@ -704,12 +704,22 @@ def test_a_configured_adapter_may_be_a_hugging_face_repo_id(adapters, tmp_path, 
     (repo / ".no_exist" / commit / "config.json").unlink()  # not known to be absent
     with pytest.raises(ValueError, match=r"'sql': .*config.json could not be fetched"):
         resolve({"sql": "org/sql"})
+    # a snapshot from `hf download`: no .no_exist marker for config.json, and none needed
+    # as adapter_config.json gives the alpha
+    peft = tmp_path / "hub" / "models--org--peft"
+    (peft / "snapshots" / commit).mkdir(parents=True)
+    (peft / "refs").mkdir()
+    (peft / "refs" / "main").write_text(commit)
+    shutil.copy(paths["a3"], peft / "snapshots" / commit / ADAPTER_WEIGHTS_FILE)
+    (peft / "snapshots" / commit / "adapter_config.json").write_text('{"lora_alpha": 8}')
+    resolve({"peft": "org/peft"})
 
     with open(paths["a1"], "rb") as f:
         weights = f.read()
     asked = _fake_hub(monkeypatch, request, {
         "org/chat": {ADAPTER_WEIGHTS_FILE: weights, "adapter_config.json": b'{"lora_alpha": 8}',
                      "model.safetensors": bytes(1 << 16)},
+        "org/bare": {ADAPTER_WEIGHTS_FILE: weights},
         "org/bin": {"adapter_model.bin": weights},
         "org/torn": {ADAPTER_WEIGHTS_FILE: weights},
         "org/down": {ADAPTER_WEIGHTS_FILE: weights, "adapter_config.json": 503},
@@ -717,6 +727,9 @@ def test_a_configured_adapter_may_be_a_hugging_face_repo_id(adapters, tmp_path, 
     config, digests = resolve({"chat": "org/chat"})
     path = config["resources"]["lora"]["adapters"]["chat"]
     assert os.path.isfile(os.path.join(os.path.dirname(path), "adapter_config.json"))
+    assert set(asked) == {ADAPTER_WEIGHTS_FILE, "adapter_config.json"}  # its alpha is known
+    asked.clear()
+    resolve({"bare": "org/bare"})  # no adapter_config.json: config.json is asked too
     assert set(asked) == {ADAPTER_WEIGHTS_FILE, "adapter_config.json", "config.json"}
     with pytest.raises(ValueError) as err:
         resolve({"bin": "org/bin", "gone": "org/gone", "torn": "org/torn", "down": "org/down"})

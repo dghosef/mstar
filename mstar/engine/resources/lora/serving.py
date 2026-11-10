@@ -15,7 +15,7 @@ import os
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from mstar.engine.resources.lora.checkpoint import _SIDECAR_CONFIGS
+from mstar.engine.resources.lora.checkpoint import _SIDECAR_CONFIGS, sidecar_default_alpha
 from mstar.engine.resources.lora.config import ADAPTER_WEIGHTS_FILE, LORA_RESOURCE_KEY, LoraSpec, resolve_adapter_path
 
 logger = logging.getLogger(__name__)
@@ -134,6 +134,8 @@ def fetch_adapter_path(source: str) -> str:
         ) from exc
     commit = os.path.basename(os.path.dirname(path))
     for config in _SIDECAR_CONFIGS:
+        if sidecar_default_alpha(path) is not None:
+            break  # the configs fetched so far give the alpha, as a local read takes it
         try:
             hf_hub_download(source, config, revision=commit)
         except RemoteEntryNotFoundError:
