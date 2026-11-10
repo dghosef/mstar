@@ -514,6 +514,35 @@ def test_flac_without_a_length_decodes(tmp_path, monkeypatch, seconds, ffmpeg):
         media_io.read_soundfile_capped(str(path), max_seconds=seconds / 2)
 
 
+def test_flac_without_a_length_is_ffmpegs_to_decode_where_it_is_installed(tmp_path, monkeypatch):
+    """CI has no torchcodec, so FFmpeg's branch runs on a stub here: it decodes
+    the whole file, downmixed to mono, and libsndfile decodes none of it."""
+    import types
+
+    import torch
+
+    from mstar.model import media_limits
+
+    path = tmp_path / "stereo.flac"
+    _flac_without_length(path, 3.0, channels=2)
+    decoded = torch.linspace(-0.5, 0.5, 3 * 16000)
+    asked = []
+
+    def ffmpeg(_path, _max_seconds, **decoder_args):
+        asked.append(decoder_args)
+        return types.SimpleNamespace(data=decoded.expand(decoder_args.get("num_channels", 2), -1), sample_rate=16000)
+
+    def libsndfile(*_):
+        raise AssertionError("libsndfile decoded a FLAC that FFmpeg decodes whole")
+
+    monkeypatch.setattr(media_limits, "ffmpeg_unavailable", lambda: None)
+    monkeypatch.setattr(media_io, "torchcodec_samples_capped", ffmpeg)
+    monkeypatch.setattr(media_limits, "sound_file_blocks", libsndfile)
+    audio, rate = media_io.read_soundfile_capped(str(path))
+    assert rate == 16000 and np.array_equal(audio, decoded.numpy())
+    assert asked == [{"num_channels": 1}]   # so the decode holds mono, not every channel
+
+
 def test_flac_without_a_length_holds_its_channels_one_block_at_a_time(tmp_path, monkeypatch):
     """A few MB of such a FLAC can declare 8 channels at 192 kHz for 30 min
     (11 GB decoded natively): without FFmpeg each block is averaged as it
