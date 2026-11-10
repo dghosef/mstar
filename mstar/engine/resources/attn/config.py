@@ -60,8 +60,8 @@ class AttentionConfig:
     # prefix-cache pages their rows share once per group of rows rather than once per row
     # (cascade attention, `FlashInferCascadeDecodeWrapper`). It pays off for long prompts many
     # running requests share (an agent's system prompt and tools), from about 32 rows; a bucket
-    # with nothing shared pays ~10 us a layer for it. None keeps every bucket on the plain
-    # decode kernel.
+    # with nothing shared pays ~10 us a layer for it. Smaller buckets keep the plain (or fmha)
+    # decode kernel; None keeps every bucket on it.
     cascade_min_rows: int | None = None
     # Each query attends to the last ``sliding_window`` positions, its own included, and the
     # pool keeps about that window of K/V per request for this attention's layers and frees
@@ -77,10 +77,10 @@ class AttentionConfig:
                 raise ValueError(
                     f"cascade_min_rows must be an integer of at least 2 or None, got {self.cascade_min_rows!r}"
                 )
-            if self.decode_fmha or self.sliding_window is not None or not self.decode_tensor_cores:
+            if self.sliding_window is not None or not self.decode_tensor_cores:
                 raise ValueError(
                     "cascade_min_rows reads shared pages whole on the tensor-core paged kernel: it runs "
-                    "with neither decode_fmha, a sliding_window nor decode_tensor_cores=False"
+                    "with neither a sliding_window nor decode_tensor_cores=False"
                 )
         if self.sliding_window is not None and (
             type(self.sliding_window) is not int or self.sliding_window <= 0

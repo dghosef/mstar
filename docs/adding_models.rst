@@ -760,8 +760,8 @@ The spec types are:
        pages their rows share once per group of rows, not once per row (cascade attention).
        It pays off for long prompts that many running requests share, such as an agent's
        system prompt and tools, from about 32 rows; a bucket with nothing shared pays about
-       10 us a layer for it. It runs with neither ``decode_fmha``, ``sliding_window`` nor
-       ``decode_tensor_cores=False``.
+       10 us a layer for it. Smaller buckets keep the plain or ``decode_fmha`` kernel. It runs
+       with neither ``sliding_window`` nor ``decode_tensor_cores=False``.
        ``sm_scale`` (default
        ``1/sqrt(head_dim)``) sets the softmax scale; FlashInfer and ``FLASHINFER_MLA``
        read it, and the other backends refuse it. ``FLASHINFER_MLA`` is

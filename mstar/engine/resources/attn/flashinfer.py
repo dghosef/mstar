@@ -196,6 +196,7 @@ class FlashInferManager(AttentionManager):
                 **kv_kwargs,
             )
         elif bucket.bs == bucket.num_tokens and not force_prefill and (
+            # ahead of fmha: a bucket this large gains more from reading shared pages once
             self._cascade_min_rows is not None and num_rows >= self._cascade_min_rows
         ):
             wrapper = FlashInferCascadeDecodeWrapper(
