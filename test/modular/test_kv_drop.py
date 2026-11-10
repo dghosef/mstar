@@ -44,6 +44,7 @@ from mstar.engine.resources.sampler.config import SamplingReqConfig
 from mstar.engine.resources.sampler.resource import SamplerResource
 from mstar.engine.resources.step import FULL_ADMIT_NOT_READY, FULL_ADMIT_REBUILD, Segment, StepContext
 from mstar.model.base import LabelLayout, Span
+from mstar.model.submodule_base import ARNodeInputs
 from mstar.testing_utils.engine import make_engine, make_mgmt
 from mstar.testing_utils.model import StubModel, make_model
 from mstar.testing_utils.resource import StubResource, make_resource
@@ -260,6 +261,26 @@ def test_a_rebuilt_stream_keeps_its_footprint_and_is_keyed_as_a_fresh_prompt(roo
     assert (rebuilt.chain.keys, rebuilt.chain.unkeyed) == (want.chain.keys, want.chain.unkeyed), (
         "the rebuilt pages would be filed under keys another request with these ids can't match"
     )
+
+
+def test_a_rebuild_counts_nothing_in_the_hit_counters():
+    """The counters say how much of a prompt the cache saved a request: a cold request's lookup counts its tokens as
+    queried and none as hit, and the lookup of its own dropped pages when it is rebuilt counts on neither side."""
+    kv, prompt = _manager(), list(range(40))
+    kv.ingest_request("r", _config(prompt))
+
+    def lookup(length: int) -> None:
+        inputs = ARNodeInputs(input_seq_len=length)
+        kv.apply_cached_prefix("r", NODE, WALK, inputs, kv.resolve_cached_prefix("r", NODE, WALK, inputs))
+
+    lookup(40)
+    assert kv.prefix_tokens[NODE] == (40, 0)
+    _write(kv, "r", 40, 1, 1)
+    kv.drop("r", 42)
+    kv.prepare_rebuild("r", Rebuild(array("i", [100, 101, 102])))
+    lookup(42)
+
+    assert kv.prefix_tokens[NODE] == (40, 0), "the rebuild's restore of its own pages was counted as a hit"
 
 
 def _image_prompt(kv: KVManager, decoded: int) -> None:

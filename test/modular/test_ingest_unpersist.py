@@ -787,7 +787,9 @@ def _spawning_model():
     parent = [WalkStep("p"), WalkStep("d"), router, WalkStep("t", joins=True),
               WalkStep("pc", bind={"text_inputs": "tool_text"}, exits={"": 1})]
     agent = [WalkStep("p"), WalkStep("d"), WalkStep("r", exits={"answer": 3})]
-    return _ToyModel(walks, {"default": parent, "agent": agent}, {"default": list(walks)})
+    model = _ToyModel(walks, {"default": parent, "agent": agent}, {"default": list(walks)})
+    model.MAX_CHILDREN = 2
+    return model
 
 
 def _spawn_batches(parent="r"):
@@ -854,12 +856,35 @@ def test_a_parent_that_spawns_starts_a_child_per_prompt_and_holds_its_join_until
     assert [[i.uuid for i in e.tensor_info] for e in starts[a0].initial_inputs] == [[611]]
     assert c.requests[a0].parent == "r" and c._counted_requests() == 2 and c.requests["r"].children == [a0, a1]
     assert not c.waiting_queue, "a child queued behind the cap, which its parent waits on"
+    # a child is numbered just before its parent, in task order: the parked parent is newer than both, so a child
+    # that runs short may move it, and the next request is newer than all three
+    numbers = [starts[rid].request_info.arrival for rid in ("r", a0, a1)]
+    assert numbers == [3, 1, 2]
+    assert c._arrival(None, "next") == 6
     # one child has ended; the join waits for the other. The ended one has given up its resources, as any request
     # does when it ends, but keeps its tensors and its handle: its answer is the parent's to read
     assert not [b for b in _sent(c, "INPUT_SIGNALS") if b.request_info.graph_walk == "t"]
     assert a0 not in c.draining and c.requests[a0].ended
     assert [(b.request_id, b.keep_outputs) for b in _sent(c, "REMOVE_REQUEST")] == [(a0, True)]
     assert not _sent(c, "RELEASE_OUTPUTS")
+
+
+def test_a_child_is_keyed_from_its_ids_under_its_parents_root_and_cache_setting(tmp_path, monkeypatch):
+    """The child's prompt was written by the router, so it is keyed on the worker (`key_from_ids`); it hangs from
+    the parent's prefix root (a LoRA adapter's) and keeps the parent's setting for the cache, as any request of
+    the parent's would, but takes none of the parent's keys or layout."""
+    (tmp_path / "root").mkdir()
+    c = _spawn_conductor(tmp_path / "root", monkeypatch)
+    _, _, batches = _spawn_batches()
+    batches[0] = [_msg(ConductorMessageType.NEW_REQUEST, NewRequestConductor(
+        request_id="r", initial_signals={"text_inputs": [_info(101)]}, initial_input_modalities=["text"],
+        initial_output_modalities=["text"], input_metadata={},
+        model_kwargs={"prefix_root": b"adapter", "prefix_cache": False, "prefix_keys": {"kv": [b"k"]}},
+    ))]
+    _run(c, batches)
+    child = c.requests["r-agent-0"].model_kwargs
+    assert child["key_from_ids"] and child["prefix_root"] == b"adapter" and child["prefix_cache"] is False
+    assert "prefix_keys" not in child
 
 
 def test_the_join_reads_every_childs_answer_and_the_children_go_only_after_it_has(tmp_path, monkeypatch):

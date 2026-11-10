@@ -98,12 +98,12 @@ BATCH_SIZE = Family(
 )
 PREFIX_CACHE_QUERY_TOKENS = Family(
     "mstar_prefix_cache_query_tokens_total", COUNTER,
-    "Prompt tokens looked up in the prefix cache, once per request.",
+    "Prompt tokens looked up in the prefix cache, once per layout step.",
     ("component",),
 )
 PREFIX_CACHE_HIT_TOKENS = Family(
     "mstar_prefix_cache_hit_tokens_total", COUNTER,
-    "Prompt tokens the prefix cache already held at that lookup.",
+    "Prompt tokens every resource agreed to serve from the prefix cache.",
     ("component",),
 )
 KV_PREEMPTIONS = Family(

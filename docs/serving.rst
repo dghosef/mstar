@@ -1252,11 +1252,11 @@ or ``increase()``.
   forward ran.
 - ``mstar_prefix_cache_query_tokens_total{model_name, component}``,
   ``mstar_prefix_cache_hit_tokens_total{model_name, component}``: counters, prompt
-  tokens looked up in the prefix cache (once per request, its whole keyed prompt) and
-  tokens found there. Only models that key their prompts for prefix reuse (BAGEL,
+  tokens looked up in the prefix cache (once per layout step) and
+  tokens every resource agreed to serve from cache. Only models that key their prompts for prefix reuse (BAGEL,
   Orpheus, Qwen3.5 and Qwen3-Omni's Thinker) count, and above one rank only with
-  ``prefix_cache_tp`` set. Qwen3.5's hit counts the KV cache's tokens before its
-  recurrent pool cuts the hit to a snapshot.
+  ``prefix_cache_tp`` set. Qwen3.5's hit is the prefix after its recurrent pool
+  cut the hit to a snapshot. A rebuild's restore of its own pages is not counted.
 - ``mstar_component_pending_steps{model_name, component}``: gauge, requests whose next
   step on the node is ready (its inputs arrived) and not running: waiting for room in a
   step or for the worker to pick the node.

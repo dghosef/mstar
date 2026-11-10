@@ -847,6 +847,9 @@ class StepExecutor:
             outputs, batch_N.node_batch.completion_event,
             request_ids=batch_N.node_batch.request_ids,
         )
+        # before `record`, which takes the row that ends a request's prefill steps off its list, and before the samples:
+        # a row's ids precede its own sample
+        forgot = self._rebuilds.keep_appended(batch_N.node_batch)
         self._rebuilds.record(batch_N.node_batch, {
             rid: self.request_state.get_fwd_info(rid, batch_N.partition) for rid in batch_N.node_batch.cached_rids
         })
@@ -856,9 +859,8 @@ class StepExecutor:
         unreal = batch_N.batch.incomplete_node_rids
         if prefix_rows := engine.unreal_sample_rids(batch_N.node_batch):
             unreal = unreal | prefix_rows
-        self._rebuilds.note_appended(batch_N.node_batch)
         engine.step_finished(batch_N.node_batch, cpu_outputs, host_rows=host_rows, skip_rids=unreal)
-        forgot = self._rebuilds.keep_samples(batch_N.node_batch, cpu_outputs, host_rows, skip_rids=unreal)
+        forgot += self._rebuilds.keep_samples(batch_N.node_batch, cpu_outputs, host_rows, skip_rids=unreal)
         self.preemption.refuse_drops(forgot, batch_N.node_name)
         _pp_stage("prematerialize")
         runtime_stops, tokens = self._runtime_stop_column(batch_N, host_rows)
