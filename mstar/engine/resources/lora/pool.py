@@ -57,14 +57,15 @@ Adapters are loaded and unloaded at runtime (``load_adapter`` / ``unload_adapter
 which each rank applies whenever its control message arrives, not at a seq every rank
 agrees on. That is safe because neither touches what an admit decides from (slot
 refcounts, which slot holds which weights, the LRU clock): a load only makes a digest
-servable (the host tier holds it from its first request), and an unload only forgets the
-digest, its host copy and its digest -> slot entry, once no live request is on it. What
-ingest accepts does change at different moments per rank, but no request on a digest
-reaches a worker while that digest's load is still being read there: the API server
-selects a digest only once every worker loaded it, and the conductor refuses (409) a
-request whose digest a load or unload is in flight for. An unload is applied as its
-message arrives, so a request behind it is refused on every rank alike. The slot keeps
-the old weights, unheld, until LRU eviction reuses it.
+servable (the host tier holds it from its first request), and an unload only stops
+serving it, dropping its host copy once no live request is on it. A digest names the
+same weights for good, so the slot keeps them, unheld, and a request on them after they
+are loaded again takes that slot, until LRU eviction reuses it. What ingest accepts does
+change at different moments per rank, but no request on a digest reaches a worker while
+that digest's load is still being read there: the API server selects a digest only once
+every worker loaded it, and the conductor refuses (409) a request whose digest a load or
+unload is in flight for. An unload is applied as its message arrives, so a request
+behind it is refused on every rank alike.
 """
 
 from __future__ import annotations
@@ -672,10 +673,10 @@ class LoraAdapterPool(Resource):
 
     def unload_adapter(self, name: str, digest: bytes) -> bool:
         """Stop serving the weights ``digest`` names (``name`` labels them in messages) to
-        new requests. Their host copy and digest -> slot entry are forgotten now if no live
-        request is on them, else when the last one is removed; those requests run to the
-        end on them. Returns whether they were forgotten now. Weights this pool does not
-        serve are a no-op (a rolled-back load that failed here)."""
+        new requests. Their host copy is dropped now if no live request is on them, else
+        when the last one is removed; those requests run to the end on them. Returns
+        whether it was dropped now. Weights this pool does not serve are a no-op (a
+        rolled-back load that failed here)."""
         with self._lock:
             path = self._served.pop(digest, None)
             if path is None:
@@ -688,16 +689,13 @@ class LoraAdapterPool(Resource):
             return True
 
     def _forget(self, digest: bytes) -> None:
-        """Caller holds the lock. The slot keeps its weights, unheld, so the slot table an
-        admit decides from is unchanged; ``_install`` reuses the slot like any other."""
+        """Caller holds the lock. Drops the host copy alone: whether the weights have
+        anything for this pool, and the slot holding them (unheld), stay as admits left
+        them, since each rank forgets at its own moment; ``_install`` evicts them like any
+        other."""
         self._retiring.pop(digest, None)
         self._store.drop(digest)
-        self._empty.discard(digest)
-        slot = self._resident.pop(digest, None)
-        logger.info(
-            "LoRA pool: dropped %s%s", digest.hex()[:12],
-            "" if slot is None else f" (its slot {slot} is free to reuse)",
-        )
+        logger.info("LoRA pool: dropped %s", digest.hex()[:12])
 
     # Admission: a slot for a request's adapter, all or nothing with the other resources
 
@@ -1019,10 +1017,6 @@ class LoraAdapterPool(Resource):
                 "LoRA pool: evicting %s from slot %d for %s (%s)",
                 evicted.hex()[:12], slot, adapter.name, adapter.digest.hex()[:12],
             )
-        # a forgotten adapter's slot keeps its digest with no entry in `_resident`, which a
-        # reload of those weights may have pointed at another slot since: then this slot was
-        # not where they lived, and their reservations and reads stand
-        if evicted is not None and self._resident.get(evicted) == slot:
             # a row reserved on it while it was resident (which the pick cannot see: only
             # the deciding rank reserves) now misses, still counting one slot, and loads the
             # host copy it was reserved on, or fails if that copy's read failed

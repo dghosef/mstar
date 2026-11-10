@@ -328,6 +328,44 @@ def test_no_rank_waits_on_a_retry_once_a_load_has_failed(tmp_path):
         retry.set()
 
 
+def test_an_unload_and_reload_landing_at_different_moments_per_rank_keeps_the_slot_tables_equal(tmp_path):
+    """r1 runs on a1 on both ranks. The follower removes r1, then unloads a1; the leader
+    unloads a1 while r1 still runs on it, serves it again, then removes r1; the follower
+    then loads a1 too. Both ranks end serving a1 with r1 gone, so a new request on a1 must
+    be admitted alike on both, whichever order their unload, load and remove came in."""
+    paths = _write_adapters(tmp_path, ("a1", "a2"))
+    barrier = _Barrier(2, timeout=2.0)
+    leader, follower = ranks = [
+        LoraAdapterPool(make_spec(paths, cpu_capacity=1), "cpu", rank=r, world_size=2,
+                        agree=barrier.for_rank(r), decides=r == 0)
+        for r in (0, 1)
+    ]
+    a1 = digest_of(leader, "a1")
+
+    def admit(pool, rid):
+        s, c = step([rid]), ctx([rid])
+        outcome = pool.admit(s, c)
+        (pool.commit if outcome.ok else pool.rollback_admit)(s, c)
+        return _verdict(outcome)
+
+    for pool in ranks:
+        ingest(pool, "r1", "a1")
+        settle_reads(pool)
+    (v1, v2), errors = _on_both(lambda: admit(leader, "r1"), lambda: admit(follower, "r1"))
+    assert not errors and v1 == v2 == "ok"
+    follower.remove_request("r1")
+    follower.unload_adapter("a1", a1)
+    leader.unload_adapter("a1", a1)
+    leader.load_adapter("a1", paths["a1"], a1)
+    leader.remove_request("r1")
+    follower.load_adapter("a1", paths["a1"], a1)
+    for pool in ranks:
+        ingest(pool, "r2", "a1")
+        settle_reads(pool)
+    (v1, v2), errors = _on_both(lambda: admit(leader, "r2"), lambda: admit(follower, "r2"))
+    assert not errors and v1 == v2 == "ok" and _slots(leader) == _slots(follower)
+
+
 def _fail_reads(pool: LoraAdapterPool, name: str, first: threading.Event, then: threading.Event) -> None:
     """``name``'s reads on ``pool`` fail: the first once ``first`` is set, any later once
     ``then`` is (or after 10 s)."""

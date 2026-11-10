@@ -689,7 +689,7 @@ def test_requests_on_old_weights_finish_after_an_unload_or_a_reload_in_place(pat
         assert run_step(pool, ["r1", "r3"]).ok
         assert pool.slot_of("r1") == slots[w] != pool.slot_of("r3")  # r1 stays on a1's slot
         pool.remove_request("r1")
-        assert a1 not in pool.store and pool.resident_slot(a1) is None
+        assert a1 not in pool.store
 
 
 def test_a_reload_in_place_that_fails_on_one_worker_keeps_the_old_weights(paths):

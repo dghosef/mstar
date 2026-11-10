@@ -1552,9 +1552,10 @@ digest), so a reload in place is the new weights loaded beside the old and the o
 unloaded after. ``LoraAdapterPool.load_adapter_async`` only checks the weights on the reader
 thread and makes their digest servable (the worker acknowledges the load from its main loop
 once every pool has it), and ``unload_adapter`` only stops new requests on that digest; once
-no live request is on it (immediately, or at the last one's teardown) the pool forgets its
-host copy and its slot entry, and leaves the slot's weights and LRU standing as they were.
-Neither touches what an admit decides from. What ingest accepts changes at a different
+no live request is on it (immediately, or at the last one's teardown) the pool drops its
+host copy. Neither touches what an admit decides from: a digest names the same weights for
+good, so the slot holding them keeps them, its LRU and its digest as they were, and a
+request on them after they are loaded again takes that slot. What ingest accepts changes at a different
 moment on each rank, so the conductor refuses (409) requests on a digest a load or unload
 is in flight for, and requests on the old weights go on during a reload. Nothing per model
 is needed for either.
