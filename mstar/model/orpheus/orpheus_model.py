@@ -90,6 +90,8 @@ def _checkpoint_sampling_defaults(model_path_hf: str, cache_dir: str | None) -> 
 # The Orpheus repos also ship optimizer and FSDP state, ~72 GB nobody reads.
 LLM_FILES = ["*.json", "*.safetensors"]
 TOKENIZER_FILES = ["*.json"]
+# SNAC ships its weights only as a pytorch .bin, which ``SNAC.from_pretrained`` reads.
+SNAC_FILES = ["config.json", "pytorch_model.bin"]
 
 
 class OrpheusModel(Model):
@@ -473,7 +475,9 @@ class OrpheusModel(Model):
         from mstar.model.orpheus.components.snac import SNAC
         from mstar.model.orpheus.submodules import SNACDecoderSubmodule
 
-        snac_source = str(resolve_snapshot_dir(self.config.snac_model_id, cache_dir=self.cache_dir))
+        snac_source = str(resolve_snapshot_dir(
+            self.config.snac_model_id, cache_dir=self.cache_dir, allow_patterns=SNAC_FILES,
+        ))
         snac_model = SNAC.from_pretrained(snac_source).eval().to(device)
         return SNACDecoderSubmodule(
             snac_model=snac_model,

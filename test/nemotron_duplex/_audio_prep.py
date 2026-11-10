@@ -15,6 +15,8 @@ _DEMO_WAV = "turn_taking.wav"       # base VoiceChat-11B repo; L=user, R=agent
 
 
 def resolve_demo() -> str:
+    """The demo clip. Serving fetches only the checkpoint's files, so under
+    HF_HUB_OFFLINE this needs the clip fetched once beforehand."""
     from huggingface_hub import hf_hub_download
 
     from mstar.model.registry import HF_MODELS

@@ -33,7 +33,11 @@ def _snapshot():
     try:
         from huggingface_hub import snapshot_download
 
-        return snapshot_download(REPO, local_files_only=True)
+        from mstar.model.whisper.whisper_model import CHECKPOINT_FILES
+
+        # the model's own patterns: a cache that serving filled holds only those files,
+        # and an unfiltered offline lookup refuses it as incomplete
+        return snapshot_download(REPO, local_files_only=True, allow_patterns=CHECKPOINT_FILES)
     except Exception:  # noqa: BLE001
         pytest.skip(f"{REPO} is not in the local HF cache")
 

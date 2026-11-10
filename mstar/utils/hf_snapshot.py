@@ -26,9 +26,12 @@ def resolve_snapshot_dir(
     ``allow_patterns`` limits a download to the components the model serves, for
     repos that ship alternatives (a second transformer, a prompt enhancer) the
     deployment never loads."""
-    local = Path(model_path_hf)
+    local = Path(model_path_hf).expanduser()
     if local.is_dir():
         return local
+    if local.is_absolute() or model_path_hf.startswith((".", "~")):
+        # a path, not a hub id: say so rather than fail the hub's repo-id check
+        raise ValueError(f"{model_path_hf}: no such checkpoint directory")
     from huggingface_hub import snapshot_download
 
     return Path(snapshot_download(model_path_hf, cache_dir=cache_dir, allow_patterns=allow_patterns))

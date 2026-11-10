@@ -22,6 +22,15 @@ def test_a_failed_checkpoint_download_raises_instead_of_returning_the_repo_id(mo
         getattr(importlib.import_module(f"mstar.model.{module}"), cls)("org/repo")
 
 
+def test_a_missing_local_checkpoint_dir_is_named(tmp_path):
+    """A mistyped path went on to the hub as a repo id and failed its id check,
+    never saying the directory is missing."""
+    from mstar.utils.hf_snapshot import resolve_snapshot_dir
+
+    with pytest.raises(ValueError, match="no such checkpoint directory"):
+        resolve_snapshot_dir(str(tmp_path / "whispr"))
+
+
 def test_the_shared_patterns_keep_a_chat_template_saved_as_jinja():
     """transformers saves a chat template as ``chat_template.jinja`` by default;
     filtered out, a cold download serves a processor that can't format a chat."""

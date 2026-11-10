@@ -283,7 +283,10 @@ def _cached(repo):
     try:
         # a local directory, as the models load it: a repo id makes some
         # transformers versions query the Hub even when offline
-        path = snapshot_download(repo, local_files_only=True)
+        # (tokenizer files only: a cache a model's download filled holds no
+        # other formats, and an unfiltered offline lookup refuses it as incomplete)
+        path = snapshot_download(repo, local_files_only=True,
+                                 allow_patterns=["*.json", "*.txt", "*.model", "*.jinja", "tokenizer*"])
         if repo.startswith("ByteDance-Seed/BAGEL"):
             from mstar.model.bagel.components.tokenization import BagelTokenizer, add_special_tokens
 
