@@ -408,7 +408,8 @@ class QwenImage21Model(Model):
 
         ids = ids_for(prompt or "")
         uncond_ids = ids_for(kwargs["negative_prompt"]) if guided else None
-        drop = self._drop_idx_value()
+        self._ensure_processor()
+        drop = self._drop_idx
         latent_grids = [(image.size[1] // VAE_SCALE, image.size[0] // VAE_SCALE) for image in resized]
         layout = prompt_spans(
             ids[drop:], self.config.image_token_id, latent_grids, (height // VAE_SCALE, width // VAE_SCALE),
@@ -435,10 +436,6 @@ class QwenImage21Model(Model):
             GRIDS: [list(grid) for grid in grids],
         }
         return ProcessPromptOutput(out, metadata)
-
-    def _drop_idx_value(self) -> int:
-        self._ensure_processor()
-        return self._drop_idx
 
     def _check_layout(self, layout: RequestLayout) -> None:
         """A 400 for a request the rope or the cache cannot hold, before anything runs."""

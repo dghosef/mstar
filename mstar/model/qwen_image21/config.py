@@ -109,8 +109,6 @@ class QwenImage21Config:
     transformer: QwenImage21TransformerConfig = field(default_factory=QwenImage21TransformerConfig)
     text: Qwen3EncoderConfig = field(default_factory=_default_text)
     vision: QwenVisionConfig = field(default_factory=_default_vision)
-    # ``vae/config.json`` as diffusers' ``AutoencoderKLQwenImage21`` takes it
-    vae: dict = field(default_factory=dict)
     latent_channels: int = 64
     scheduler: FlowMatchConfig = field(default_factory=_default_scheduler)
     # A distilled checkpoint's fixed grid (``model_index.json``'s ``sample_sigmas``); its length is
@@ -118,8 +116,6 @@ class QwenImage21Config:
     sample_sigmas: tuple[float, ...] | None = None
     default_num_inference_steps: int = 40
     image_token_id: int = 151655
-    vision_start_token_id: int = 151652
-    vision_end_token_id: int = 151653
     mrope_section: tuple[int, int, int] = (24, 20, 20)
     # Qwen3-VL's image processor bounds (``size``), in pixels
     min_pixels: int = 65536
@@ -146,14 +142,11 @@ class QwenImage21Config:
                 fused_qkv=False,
             ),
             vision=QwenVisionConfig.from_hf(snapshot / "text_encoder"),
-            vae=vae,
             latent_channels=int(vae.get("z_dim", 64)),
             scheduler=FlowMatchConfig.from_scheduler_config(scheduler_cfg),
             sample_sigmas=None if sigmas is None else tuple(float(s) for s in sigmas),
             default_num_inference_steps=40 if sigmas is None else len(sigmas),
             image_token_id=int(text_cfg["image_token_id"]),
-            vision_start_token_id=int(text_cfg["vision_start_token_id"]),
-            vision_end_token_id=int(text_cfg["vision_end_token_id"]),
             mrope_section=tuple(rope.get("mrope_section", (24, 20, 20))),
             min_pixels=int(processor.get("size", {}).get("shortest_edge", 65536)),
             max_pixels=int(processor.get("size", {}).get("longest_edge", 16_777_216)),
