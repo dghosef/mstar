@@ -16,7 +16,12 @@ from mstar.model.base import Model, WorkerGraph, built_resources, enabled_resour
 from mstar.model.multimodal import SUPPORTED_MODALITIES
 from mstar.validation.client_streams import check_client_streams
 from mstar.validation.knobs import check_knobs
-from mstar.validation.placement import check_worker_graphs, node_groups_problems, routing_weights_problems
+from mstar.validation.placement import (
+    check_worker_graphs,
+    node_groups_problems,
+    routing_terms_problems,
+    routing_weights_problems,
+)
 from mstar.validation.resources import check_resources, resources_shape_problem
 
 
@@ -116,6 +121,7 @@ def validate_deployment(
             problems.append(_unreadable("refuse_unresolved_lora_adapters", e))
 
     problems += routing_weights_problems(config)
+    problems += routing_terms_problems(config)
     malformed = node_groups_problems(config)
     problems += malformed
     deployment = None

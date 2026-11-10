@@ -2099,6 +2099,64 @@
       ]
     },
     {
+      "id": 49,
+      "type": "timeseries",
+      "title": "Replica load",
+      "description": "The live requests the data-parallel replica pick counts on each replica of a set of node groups placed together. Queued work on the workers is not included.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 108,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prom"
+          },
+          "expr": "sum by (nodes, replica) (mstar_pool_load{model_name=~\"$model\"})",
+          "legendFormat": "{{nodes}} replica {{replica}}",
+          "range": true
+        }
+      ]
+    },
+    {
       "type": "row",
       "title": "Engine workers",
       "collapsed": false,

@@ -1060,6 +1060,7 @@ class PreprocessWorkerThread:
                 client_request_id=input.client_request_id,
                 input_open=bool(self._client_edges - input.ends),
                 streaming=input.streaming,
+                warmup=input.warmup,
                 prompt_tokens=num_prompt_tokens,
             ),
         )

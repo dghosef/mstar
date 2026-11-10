@@ -810,6 +810,7 @@ class APIServer:
         file_streams: dict[str, list[str | None]] | None = None,
         raw_inputs: dict[str, list[torch.Tensor]] | None = None,
         report_usage: bool = False,
+        warmup: bool = False,
     ) -> str:
         """Build a :class:`NewRequestConductor` and send it to the conductor.
 
@@ -847,6 +848,9 @@ class APIServer:
 
         ``report_usage`` ends a successful request's chunks with a ``usage``
         chunk (:func:`usage_chunk`).
+
+        ``warmup`` marks a startup warmup request, which the replica pick routes by load alone. Only
+        :meth:`WarmupRequest.submit` sets it; no endpoint passes a client's value.
         """
         if raw_inputs is not None:
             _check_raw_inputs(raw_inputs, file_paths)
@@ -926,6 +930,7 @@ class APIServer:
             ends=ending,
             streaming=streaming,
             raw_inputs=raw_inputs,
+            warmup=warmup,
         ))
 
         logger.info(
@@ -2069,6 +2074,7 @@ class WarmupRequest:
             prompt_parts=parts or None,
             streaming=False,
             request_id=request_id,
+            warmup=True,
         )
 
 
