@@ -69,6 +69,7 @@ from mstar.engine.resources.position.config import PositionStep
 from mstar.engine.resources.sampler.config import SamplerStep
 from mstar.engine.resources.sampler.resource import SamplerResource
 from mstar.engine.resources.step import ResourceStep, Segment, SubmoduleStep
+from mstar.model.components.text_glue import STREAM_BASE
 from mstar.model.components.token_step import TokenStepNode
 from mstar.model.keys import MIXED, PREFILL_TEXT, ROPE, SAMPLER
 from mstar.model.multimodal import MEDIA_LAYOUT, MediaEncoder, media_rows, media_walk_names, splice_media
@@ -91,6 +92,8 @@ from mstar.utils.profiler import PHASE_PERIOD, PhaseLaps, phase_record
 MEDIA_EMBEDS = "media_embeds"
 MEDIA_MASK = "media_mask"
 _NO_LIMIT = (1 << 31) - 1
+# the key under which a node keeps, per request, where a spoken turn's transcript ended
+_TRANSCRIPT_END = "transcript_end"
 
 
 def _decode_budget(info: CurrentForwardPassInfo) -> int:
@@ -382,14 +385,25 @@ class SampledTokenDecoder(TokenStepNode, ARNodeSubmodule):
             resource_step_info=advance,
         )
 
-    def _text_row(self, inputs: NameToTensorList) -> ARNodeInputs:
-        """A text prefill row. A row after a decode brings a second tensor: the position its first id belongs
-        at. That id is the one the decode sampled last (the stop token), which the step speculated past it may
-        already have written (its row is dropped after its forward). Whether it has is known only when the
-        step is declared, in step order (`declare_step`): the host counter `prepare_inputs` could read may not
-        have seen that step's commit yet, and a TP rank would act on its own."""
+    def _text_row(self, fwd_info: CurrentForwardPassInfo, inputs: NameToTensorList) -> ARNodeInputs:
+        """A text prefill row. A row written after the prompt's layout brings a second tensor: the KV slot its
+        first id belongs at (`ARNodeInputs.starts_at`). After a decode that id is the one the decode sampled
+        last (the stop token), which the step speculated past it may already have written (its row is dropped
+        after its forward). Whether it has is known only when the step is declared, in step order
+        (`declare_step`): the host counter `prepare_inputs` could read may not have seen that step's commit yet,
+        and a TP rank would act on its own.
+
+        A spoken turn's rows (their plan step has `STREAM_BASE`) are chunks of the transcript, each with its
+        start from the glue, and then the template's suffix, which follows the last chunk: its start is where
+        the chunks ended, which the node keeps for the request."""
         ids = inputs["text_inputs"][0]
         start = int(inputs["text_inputs"][1]) if len(inputs["text_inputs"]) > 1 else None
+        if STREAM_BASE in fwd_info.step_metadata:
+            state = self.request_state(fwd_info.rid_handle).kwargs
+            if start is None:
+                start = state.get(_TRANSCRIPT_END)
+            else:
+                state[_TRANSCRIPT_END] = start + ids.shape[0]
         return ARNodeInputs(input_seq_len=ids.shape[0], input_ids=ids, starts_at=start)
 
     def get_stop_policies(self, graph_walk: str) -> dict[str, StopPolicy] | None:
@@ -445,7 +459,7 @@ class SampledTokenDecoder(TokenStepNode, ARNodeSubmodule):
             # one token per row, read off the sampler's slot master in
             # `preprocess`; the routed signal is empty (or ignored) here
             return row
-        return self._text_row(inputs)
+        return self._text_row(fwd_info, inputs)
 
     def get_input_sequence_len(
         self, graph_walk: str, fwd_info: CurrentForwardPassInfo,
@@ -607,8 +621,12 @@ class SampledTokenDecoder(TokenStepNode, ARNodeSubmodule):
         per_request_info: Mapping[int, CurrentForwardPassInfo] | None = None,
         **kwargs,
     ) -> SubmoduleStep:
+        info = per_request_info or {}
         for rid, inp in zip(request_ids, inputs, strict=True):
-            if inp.starts_at is not None and not inp.chunk_start:
+            # a spoken turn's rows follow no decode, so no stop token of theirs is written ahead (and their start
+            # counts ids, which a media prompt's position counter does not)
+            transcript = rid in info and STREAM_BASE in info[rid].step_metadata
+            if inp.starts_at is not None and not inp.chunk_start and not transcript:
                 self._skip_written(rid, inp)
         # A prompt's ids, media pads and sentinels included, feed the
         # repetition penalty, as in transformers and vLLM. A mixed step's
@@ -650,9 +668,8 @@ class SampledTokenDecoder(TokenStepNode, ARNodeSubmodule):
         engine thread after every step before it committed, and each TP rank declares the same steps, so this is
         the one answer for all ranks. A repeated declaration finds nothing more written."""
         written = self.node_resources[self.POS_KEY].position(rid=rid, label="main") - inp.starts_at
-        # (a transcript chunk that is prepared while the one before it is still running finds the position behind)
-        assert written <= 1, f"a prefill after a decode found its first id {written} ids already written"
-        if written > 0:
+        assert written in (0, 1), f"a prefill after a decode found its first id {written} ids already written"
+        if written:
             inp.input_ids = inp.input_ids[written:]
             inp.input_seq_len -= written
             inp.starts_at += written
