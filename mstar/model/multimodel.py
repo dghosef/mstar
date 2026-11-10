@@ -110,7 +110,7 @@ class MultiModel(Model):
             raise ValueError("a multimodel needs at least one member")
         self.members = {name: _member(name, spec, cache_dir) for name, spec in members.items()}
         self.links = tuple(
-            link if isinstance(link, Link) else Link(**link) for link in links)
+            link if isinstance(link, Link) else Link(**{**link, "walks": tuple(link["walks"])}) for link in links)
         if sum(link.glue for link in self.links) > 1:
             raise ValueError("a multimodel takes one glued link: the glue node is one per deployment")
         for link in self.links:
@@ -318,7 +318,7 @@ class MultiModel(Model):
         source, target = self.members[link.source], self.members[link.target]
         taken = [m for m in input_modalities if source.max_input_files().get(m, 0) > 0]
         heard = source.process_prompt(
-            None, taken, ["text"], tensors=tensors, **kwargs)
+            None, taken, ["text"], tensors=tensors, **{k: v for k, v in kwargs.items() if k != "history"})
         history = [p for p in prompt_parts or () if p.modality not in taken]
         said = target.process_prompt(
             prompt, [m for m in input_modalities if m not in taken], output_modalities, tensors=tensors,
