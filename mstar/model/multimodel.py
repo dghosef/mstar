@@ -101,6 +101,10 @@ def refuse_clashes(kind: str, named: Mapping[str, Iterable[str]]) -> dict[str, s
 
 class MultiModel(Model):
 
+    @property
+    def MAX_CHILDREN(self) -> int:
+        return max(m.MAX_CHILDREN for m in self.members.values())
+
     def __init__(
         self, members: Mapping[str, Model | Mapping], links: Sequence[Link | Mapping] = (),
         cache_dir: str | None = None, model_path_hf: str = "",

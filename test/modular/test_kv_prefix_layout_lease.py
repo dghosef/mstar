@@ -484,3 +484,37 @@ def test_a_prompt_prefilled_beside_a_decode_is_matched_by_its_repeat():
     assert node.walk(TEXT_WALK, len(prompt)) == 2 * PAGE_SIZE, (
         "a prompt prefilled in a step of a combined walk filed no pages, so its repeat recomputed it"
     )
+
+
+def test_the_hit_counter_counts_the_prefix_the_resources_agreed_to_serve_not_the_index_match():
+    """A recurrent pool can serve less of a match than the index holds (it restores only at a snapshot), and the walk
+    runs the rest, so the counter that says how much of a prompt the cache saved counts what was served."""
+    node = _Node()
+    walk, length = _walks(PARTS)[0]
+    inputs = ARNodeInputs(input_seq_len=length)
+    agreed = node.runner.resolve_cached_prefix(RID, NODE, walk, inputs)
+    assert agreed.tokens > PAGE_SIZE
+    capped = agreed._replace(tokens=PAGE_SIZE, position=agreed.position - agreed.tokens + PAGE_SIZE)
+    for _ in range(2):   # a repeated probe counts nothing more
+        node.runner.apply_cached_prefix(RID, NODE, walk, inputs, capped)
+
+    queried, hit = node.kv.prefix_tokens[NODE]
+    assert (queried, hit) == (length, PAGE_SIZE)
+
+
+def test_a_step_counts_only_its_keyed_spans_as_queried():
+    # a step that groups keyed text with unkeyed tokens of its walk (Qwen3-Omni's video rows): the unkeyed ones can
+    # never hit, so they are not tokens looked up
+    node = _Node.__new__(_Node)
+    _TextNode.__init__(node)
+    node.kv.enable_prefix_cache(ROOT, {"main": KeyedWalks((TEXT_WALK,), ("decode",))})
+    config = _config([TEXT])
+    layout = config.kv_layout["main"]
+    config.kv_layout["main"] = replace(layout, spans=(*layout.spans, PrefixSpan(16, 16, TEXT_WALK, opens_step=False)))
+    node.runner.ingest_request(RID, {"kv": config})
+
+    inputs = ARNodeInputs(input_seq_len=len(TEXT) + 16)
+    agreed = node.runner.resolve_cached_prefix(RID, NODE, TEXT_WALK, inputs)
+    node.runner.apply_cached_prefix(RID, NODE, TEXT_WALK, inputs, agreed)
+
+    assert node.kv.prefix_tokens[NODE] == (len(TEXT), 0)

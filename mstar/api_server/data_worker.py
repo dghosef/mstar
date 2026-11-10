@@ -45,10 +45,13 @@ from mstar.communication.tensors import (
     NameToTensorList,
     create_tensor_communication_manager,
 )
+from mstar.conductor.request_info import KEY_FROM_IDS
 from mstar.distributed.base import node_group_axis_sizes
 from mstar.engine.resources.kv.config import KVSpec, prefix_caches_by_rank
 from mstar.engine.resources.kv.keys import PageItem, chain, end_key, fingerprint, page_items
 from mstar.engine.resources.lora.config import LORA_ADAPTER_KWARG
+from mstar.engine.resources.recurrent.checkpoints import checkpoint_policy
+from mstar.engine.resources.recurrent.config import RecurrentStateSpec
 from mstar.model.base import (
     ClientChunk,
     Model,
@@ -675,6 +678,8 @@ class PreparingInput(NamedTuple):
 
 
 class PreprocessWorkerThread:
+    # class-level so a thread built without __init__ asks the model for no message boundaries
+    _wants_marks = False
     # next time the thread publishes its transfer counts; class-level so a
     # thread built without __init__ has one
     _next_transfer_publish = 0.0
@@ -739,6 +744,11 @@ class PreprocessWorkerThread:
         self._keyed_labels = {
             key: by_label for key, by_label in declared.items() if key in self._prefix_page_sizes
         }
+        # whether a recurrent pool's checkpoint policy reads where the prompt breaks into messages
+        self._wants_marks = bool(self._keyed_labels) and any(
+            isinstance(spec, RecurrentStateSpec) and checkpoint_policy(spec.config.checkpoints).wants_marks
+            for spec in serving_resources(model, model_config)
+        )
         # client stream edge -> its declaration: the partition it flows into,
         # which its items and ends name, and its ClientAudio; the consuming
         # node comes in the conductor's route
@@ -975,8 +985,8 @@ class PreprocessWorkerThread:
         # only this worker knows which client streams the opening leaves open.
         internal = getattr(self.model, "INTERNAL_KWARGS", ())
         for name in (
-            "prefix_keys", "prefix_tail", "prefix_decode", "kv_layout", "prefix_root", "stream_lead_items",
-            "open_streams", *internal,
+            "prefix_keys", "prefix_tail", "prefix_decode", "prefix_marks", "message_marks", "message_ends", "kv_layout",
+            "prefix_root", "stream_lead_items", "open_streams", KEY_FROM_IDS, *internal,
         ):
             model_kwargs.pop(name, None)
         open_streams = self._client_edges - input.ends
@@ -991,6 +1001,7 @@ class PreprocessWorkerThread:
                 prompt_parts=input.prompt_parts,
                 open_streams=open_streams,
                 **model_kwargs,
+                **({"message_marks": True} if self._wants_marks and _prefix_cache(model_kwargs) else {}),
             )
             if isinstance(prompt_tensors, ProcessPromptOutput):
                 model_kwargs.update(prompt_tensors.metadata)
@@ -999,6 +1010,7 @@ class PreprocessWorkerThread:
                 tensors.update(prompt_tensors)
             layouts = model_kwargs.pop("kv_layout", {})
             num_prompt_tokens = self.model.prompt_tokens(tensors, layouts)
+            message_ends = model_kwargs.pop("message_ends", None)
             rows = {
                 key: {label: layout.row() for label, layout in by_label.items()}
                 for key, by_label in layouts.items()
@@ -1015,6 +1027,8 @@ class PreprocessWorkerThread:
                     tensors, layouts, rows, input.file_paths, file_states,
                     root=input.prefix_root,
                 ))
+                if message_ends and self._wants_marks:
+                    model_kwargs.update(self._prefix_marks(message_ends, layouts))
         elif input.text is not None:
             # Fallback: encode as UTF-8 bytes -> uint8 tensor
             byte_data = input.text.encode("utf-8")
@@ -1454,6 +1468,21 @@ class PreprocessWorkerThread:
         if root:
             kwargs["prefix_root"] = root
         return kwargs
+
+    def _prefix_marks(self, message_ends: dict[str, list[int]], layouts: dict) -> dict:
+        """The page floors of the prompt's message boundaries (``message_ends``: token offsets in the tensor that
+        starts a keyed label's layout), by resource and label, for a recurrent pool's checkpoint policy."""
+        marks: dict[str, dict[str, list[int]]] = {}
+        for resource_key, by_label in self._keyed_labels.items():
+            page_size = self._prefix_page_sizes[resource_key]
+            for label in by_label:
+                layout = layouts.get(resource_key, {}).get(label)
+                if layout is None or not layout.spans or layout.spans[0].source not in message_ends:
+                    continue
+                floors = sorted({end // page_size * page_size for end in message_ends[layout.spans[0].source]} - {0})
+                if floors:
+                    marks.setdefault(resource_key, {})[label] = floors
+        return {"prefix_marks": marks} if marks else {}
 
     def _page_layout(
         self, prefix_keys: PrefixKeys, layout: tuple[Span, ...],

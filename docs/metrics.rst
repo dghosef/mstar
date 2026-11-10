@@ -287,16 +287,16 @@ TP, SP or CFG instance count once: the instance's first rank reports.
    Histogram, rows the step's forward ran. Buckets: :ref:`batch <metrics-buckets>`.
 
 ``mstar_prefix_cache_query_tokens_total{model_name, component}``
-   Counter. Prompt tokens looked up in the prefix cache, once per request (its whole
-   keyed prompt). Only models that key their prompts for prefix reuse count (BAGEL,
-   Orpheus and Qwen3.5). Under tensor parallelism only rank 0 counts a lookup.
+   Counter. Prompt tokens looked up in the prefix cache, once per layout step (the
+   step's keyed tokens; a rebuild after a drop is not counted again). Only models that declare ``PrefixKeys`` count. Under tensor parallelism only rank 0 counts a lookup.
 
 ``mstar_prefix_cache_hit_tokens_total{model_name, component}``
-   Counter. Tokens the prefix cache already held at that lookup. The hit rate is
+   Counter. Tokens of that lookup that every resource agreed to serve from cache, counted
+   once per layout step. For Qwen3.5 this is the prefix after the recurrent pool has cut
+   the hit to a snapshot, so a hit the pool cuts to 0 counts 0. A rebuild's restore of
+   its own pages is not counted. The hit rate is
    ``rate(mstar_prefix_cache_hit_tokens_total[5m])`` divided by
-   ``rate(mstar_prefix_cache_query_tokens_total[5m])``. For Qwen3.5 these are the KV
-   cache's tokens before the recurrent pool cuts the hit to a snapshot, so a hit the pool
-   cuts to 0 still counts.
+   ``rate(mstar_prefix_cache_query_tokens_total[5m])``.
 
 ``mstar_kv_preemptions_total{model_name, component}``
    Counter. Requests chosen to move to the host or drop because a grant past a request's reservation ran short

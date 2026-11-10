@@ -26,6 +26,7 @@ from mstar.engine.resources.base import (
 )
 from mstar.engine.resources.kv.keys import fingerprint
 from mstar.engine.resources.kv.manager import _DEBUG_ASSERTS
+from mstar.engine.resources.recurrent.checkpoints import CheckpointRow, checkpoint_policy
 from mstar.engine.resources.recurrent.config import (
     RecurrentStateConfig,
     RecurrentStateSpec,
@@ -175,6 +176,7 @@ class RecurrentStatePool(Resource):
             )
         self._device = device
         self.config = config
+        self._checkpoints = checkpoint_policy(config.checkpoints)
         self._comm_group = comm_group
         # the resource key, for errors
         self._name = name
@@ -789,7 +791,18 @@ class RecurrentStatePool(Resource):
         A pool with no snapshot slots keys none."""
         self._kv = kv if self.config.prefix_slots else None
         if self._kv is not None:
-            kv.bind_snapshots(self)
+            kv.bind_restorer(self)
+
+    def keeps_prefix(self, key: bytes) -> bool:
+        """Whether a snapshot is filed under the cache's index ``key``, or snapshots are off. Read without the
+        lock, as `restorable` is. See `Resource.keeps_prefix` for what ranks may disagree on."""
+        return self._kv is None or key in self._snap_by_key
+
+    @property
+    def snapshots_per_row(self) -> int:
+        """The most snapshots a prefill row keeps (the checkpoint policy's `per_row`), which the GDN wrapper sizes a
+        captured step for."""
+        return self._checkpoints.per_row
 
     def close_prefix_cache(self) -> None:
         self._kv = None
@@ -932,26 +945,39 @@ class RecurrentStatePool(Resource):
         with self._lock:
             start = hit = 0
             lease = self._leases.get(rid)
-            if lease is not None and lease.label == label:
+            mine = lease is not None and lease.label == label
+            if mine:
                 assert not preplan, "a pre-plan took a prefix lease"
-                del self._leases[rid]
                 hit = lease.hit
                 if lease.slot is not None:
-                    self._restores[(rid, label)] = lease
-                    self._admit_restores.append((rid, label))
                     start = lease.tokens
             elif self._slots[rid][label].has_state:
                 # a later chunk: its checkpoints sit on pages only from a page
                 start = self._slots[rid][label].tokens
                 if preplan or start % page:
                     return
-            if span < page or (rid, label) not in self._keyed:
+            # the policy's answer is checked before anything is taken, so a refusal leaves the pool as it was
+            kept = None
+            if span >= page and (rid, label) in self._keyed:
+                row = CheckpointRow(start, span, hit, every, mid_prefill, self._kv.prefix_marks(rid, label))
+                kept = set(self._checkpoints.boundaries(row))
+                if len(kept) > self._checkpoints.per_row:
+                    raise ValueError(
+                        f"checkpoint policy {type(self._checkpoints).__name__} kept {len(kept)} boundaries of a "
+                        f"row; it declares {self._checkpoints.per_row} at most (`per_row`), which a captured graph "
+                        "is sized for"
+                    )
+            if mine:
+                del self._leases[rid]
+                if lease.slot is not None:
+                    self._restores[(rid, label)] = lease
+                    self._admit_restores.append((rid, label))
+            if kept is None:
                 return
-            end = start + (span if mid_prefill else span - 1) // every * every
-            for boundary in sorted({end, start + (hit - start) // every * every}):
+            for boundary in sorted(kept):
                 if start < boundary <= start + span:
                     assert not preplan, "a pre-plan reserved a snapshot write"
-                    self._reserve_write(rid, label, boundary, boundary - start, boundary == end)
+                    self._reserve_write(rid, label, boundary, boundary - start, boundary == row.end)
 
     def _reserve_write(self, rid: str, label: str, boundary: int, offset: int, row_end: bool = False) -> None:
         """Caller holds the lock."""
@@ -1021,8 +1047,13 @@ class RecurrentStatePool(Resource):
         as many prompts as slots. Caller holds the lock."""
         if self._snap_free:
             return self._snap_free.pop()
-        refs = self._snap_refs
-        snap = next((snap for snap, (_, reply) in self._snap_meta.items() if reply and snap not in refs), None)
+        refs, kv = self._snap_refs, self._kv
+        # a snapshot whose page the cache has lost is dead, since a hit stops at the cache's: it goes first
+        snap = None if kv is None else next(
+            (snap for snap, (key, _) in self._snap_meta.items() if snap not in refs and not kv.keeps_prefix(key)), None,
+        )
+        if snap is None:
+            snap = next((snap for snap, (_, reply) in self._snap_meta.items() if reply and snap not in refs), None)
         if snap is None:
             snap = next((snap for snap in self._snap_meta if snap not in refs), None)
         if snap is not None:

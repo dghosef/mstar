@@ -60,6 +60,7 @@ def test_guard_refuses_head_dims_the_kernel_does_not_take(hopper):
 
 def _prefill(stage_inputs, **kwargs):
     return GDNPrefillWrapper(
+        snapshots_per_row=2,
         device=torch.device("cpu"), pad_slot_id=PAD_SLOT_ID, stage_inputs=stage_inputs, **kwargs,
     )
 
@@ -73,6 +74,7 @@ def test_a_staged_wrapper_tells_the_caller_not_to_prepare():
 @pytest.mark.parametrize("stage_inputs", [False, True])
 def test_mixed_wrapper_normalizes_decode_rows_once(stage_inputs):
     mixed = GDNMixedWrapper(
+        snapshots_per_row=2,
         device=torch.device("cpu"), pad_slot_id=PAD_SLOT_ID, stage_inputs=stage_inputs,
     )
     assert mixed.qk_l2norm_in_kernel is stage_inputs
@@ -254,7 +256,7 @@ def test_chunked_kernel_agrees_through_either_path():
     has_state = torch.zeros(rows, dtype=torch.bool, device=_CUDA)
 
     def run(stage_inputs):
-        wrapper = GDNPrefillWrapper(stage_inputs=stage_inputs, **kwargs)
+        wrapper = GDNPrefillWrapper(stage_inputs=stage_inputs, snapshots_per_row=2, **kwargs)
         wrapper.plan(list(spans), slots, has_state)
         state = torch.zeros(4, 32, 128, 128, device=_CUDA)
         if stage_inputs:
