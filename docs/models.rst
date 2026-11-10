@@ -771,10 +771,10 @@ none, share a batch::
 
 A name that is no local path is read as a Hugging Face repo id, as vLLM reads one. The API
 server fetches its ``adapter_model.safetensors`` (and its ``adapter_config.json``, and
-``config.json`` only when that gives no alpha, as a local read takes them) into the HF cache once, and nothing else
-of the repo, and the workers read that file. A repo without ``adapter_model.safetensors``
-(a ``.bin`` adapter) is refused, and so is one whose configs could not be fetched. With
-``HF_HUB_OFFLINE=1`` it is taken from the cache alone.
+``config.json`` only when that gives no alpha, as a local read takes them) into the HF
+cache once, and nothing else of the repo, and the workers read that file. A repo without
+``adapter_model.safetensors`` (a ``.bin`` adapter) is refused, and so is one whose configs
+could not be fetched. With ``HF_HUB_OFFLINE=1`` it is taken from the cache alone.
 
 Every adapter the config names is checked at startup, before any worker starts (LoRA
 layers present, rank within ``max_rank``, only the targets below, shapes that fit them),

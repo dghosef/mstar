@@ -97,12 +97,12 @@ def fetch_adapter_path(source: str) -> str:
     reads it, else a Hugging Face repo id (as vLLM's ``lora_path`` may be), whose
     ``adapter_model.safetensors``, its ``adapter_config.json``, and its ``config.json`` only
     when that gives no alpha (``sidecar_default_alpha``), as a local read takes them, alone
-    are fetched into the HF cache, at one commit, from the cache alone under ``HF_HUB_OFFLINE``.
-    A config is taken as absent only when the hub says so, now or in the cache's record of an
-    earlier answer; one that could not be fetched fails the read, as the weights would, so an
-    adapter is never served with another alpha than its files give it. Every worker reads the file checked here. Called
-    where the API server checks adapters (startup and runtime loads), never while a config
-    is parsed.
+    are fetched into the HF cache, at one commit, from the cache alone under
+    ``HF_HUB_OFFLINE``. A config is taken as absent only when the hub says so, now or in the
+    cache's record of an earlier answer; one that could not be fetched fails the read, as
+    the weights would, so an adapter is never served with another alpha than its files give
+    it. Every worker reads the file checked here. Called where the API server checks
+    adapters (startup and runtime loads), never while a config is parsed.
 
     A repo with no safetensors adapter is a ``ValueError``. Any other failure is not, so a
     client is told only that the adapter could not be read (``describe_load_error``), as
