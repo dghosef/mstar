@@ -601,15 +601,16 @@ def test_the_api_server_pins_digests_and_narrows_targets_in_the_config_it_hands_
     assert lora_spec(serving_resources(model, {"resources": {}})) is None
 
 
-def _fake_hub(monkeypatch, repos: dict[str, dict[str, bytes]]) -> list[str]:
+def _fake_hub(monkeypatch, request, repos: dict[str, dict[str, bytes]]) -> list[str]:
     """Point huggingface_hub at a local server holding ``repos`` (repo id -> file -> bytes)
     at one commit; returns the files it is asked for. A file given as a number is answered
     with that status. A repo named ``*/torn`` announces one byte more than it sends, as a
-    download cut short does."""
+    download cut short does. The server stops when the test ends."""
     import hashlib
     import types
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+    import huggingface_hub
     import huggingface_hub.constants as hf
 
     asked: list[str] = []
@@ -644,6 +645,13 @@ def _fake_hub(monkeypatch, repos: dict[str, dict[str, bytes]]) -> list[str]:
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Hub)
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    request.addfinalizer(server.server_close)
+    request.addfinalizer(server.shutdown)
+    # past any proxy the environment names: the hub's shared client reads it when built
+    for var in ("NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(var, "127.0.0.1,localhost")
+    huggingface_hub.close_session()
+    request.addfinalizer(huggingface_hub.close_session)
     monkeypatch.setattr(hf, "ENDPOINT", f"http://127.0.0.1:{server.server_port}")
     monkeypatch.setattr(hf, "HUGGINGFACE_CO_URL_TEMPLATE", hf.ENDPOINT + "/{repo_id}/resolve/{revision}/{filename}")
     monkeypatch.setattr(hf, "HF_HUB_OFFLINE", False)
@@ -652,7 +660,7 @@ def _fake_hub(monkeypatch, repos: dict[str, dict[str, bytes]]) -> list[str]:
     return asked
 
 
-def test_a_configured_adapter_may_be_a_hugging_face_repo_id(adapters, tmp_path, monkeypatch):
+def test_a_configured_adapter_may_be_a_hugging_face_repo_id(adapters, tmp_path, monkeypatch, request):
     """A repo id is fetched once, by the API server, through the HF cache (offline here, so
     from the cache alone), and the config every worker builds from names its snapshot's
     file. Online, only the adapter's weights and its configs are fetched, never the repo's
@@ -699,7 +707,7 @@ def test_a_configured_adapter_may_be_a_hugging_face_repo_id(adapters, tmp_path, 
 
     with open(paths["a1"], "rb") as f:
         weights = f.read()
-    asked = _fake_hub(monkeypatch, {
+    asked = _fake_hub(monkeypatch, request, {
         "org/chat": {ADAPTER_WEIGHTS_FILE: weights, "adapter_config.json": b'{"lora_alpha": 8}',
                      "model.safetensors": bytes(1 << 16)},
         "org/bin": {"adapter_model.bin": weights},
