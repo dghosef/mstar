@@ -51,13 +51,12 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class _Op:
     name: str
-    # the weights its requests are selected under: a load's once it is served, an
-    # unload's restored with the name if the conductor refuses
-    digest: bytes
-    # whether (name, digest) becomes selectable on a successful answer (a load), on a
-    # refused one (an unload, whose name was taken out first), or never (None: the old
-    # weights' unload after a reload in place, whose name is already on the new ones)
-    selects_on_success: bool | None
+    # the weights the name becomes selectable on when the conductor answers that the op
+    # succeeded (a load's), and when it answers that it refused (an unload's, whose name
+    # was taken out first); neither for the old weights' unload after a reload in place,
+    # whose name is on the new ones already
+    on_ok: bytes | None
+    on_refused: bytes | None
     future: concurrent.futures.Future
 
 
@@ -117,7 +116,7 @@ class LoraAdmin:
                     LoadLoraAdapter(
                         op_id=_op_id(), lora_name=name, lora_path=path, lora_digest=digest.hex(),
                     ),
-                    ConductorMessageType.LOAD_LORA_ADAPTER, digest, selects_on_success=True,
+                    ConductorMessageType.LOAD_LORA_ADAPTER, on_ok=digest,
                 )
             if old is not None and old not in self._served.digests:
                 await self._retire(name, old)
@@ -140,7 +139,7 @@ class LoraAdmin:
             if digest not in self._served.digests:  # else another name is on these weights
                 await self._request(
                     UnloadLoraAdapter(op_id=_op_id(), lora_name=name, lora_digest=digest.hex()),
-                    ConductorMessageType.UNLOAD_LORA_ADAPTER, digest, selects_on_success=False,
+                    ConductorMessageType.UNLOAD_LORA_ADAPTER, on_refused=digest,
                 )
         return f"Success: LoRA adapter '{name}' removed successfully."
 
@@ -151,7 +150,7 @@ class LoraAdmin:
         try:
             await self._request(
                 UnloadLoraAdapter(op_id=_op_id(), lora_name=name, lora_digest=digest.hex()),
-                ConductorMessageType.UNLOAD_LORA_ADAPTER, digest, selects_on_success=None,
+                ConductorMessageType.UNLOAD_LORA_ADAPTER,
             )
         except HTTPException as exc:
             logger.warning(
@@ -167,9 +166,11 @@ class LoraAdmin:
         if op is None:
             logger.warning("LoRA: an answer for unknown operation %s", body.op_id)
             return
-        if op.selects_on_success is (body.error_message is None):
-            self._served.add(op.name, op.digest)
-            if op.selects_on_success:
+        ok = body.error_message is None
+        digest = op.on_ok if ok else op.on_refused
+        if digest is not None:
+            self._served.add(op.name, digest)
+            if ok:
                 logger.info("LoRA adapter %s is now served", op.name)
             else:
                 logger.info("LoRA adapter %s: unload refused (%s); still served", op.name, body.error_message)
@@ -204,14 +205,11 @@ class LoraAdmin:
 
     async def _request(
         self, body: LoadLoraAdapter | UnloadLoraAdapter, message_type: ConductorMessageType,
-        digest: bytes, selects_on_success: bool | None,
+        on_ok: bytes | None = None, on_refused: bytes | None = None,
     ) -> None:
         future: concurrent.futures.Future = concurrent.futures.Future()
         with self._ops_lock:
-            self._ops[body.op_id] = _Op(
-                name=body.lora_name, digest=digest, selects_on_success=selects_on_success,
-                future=future,
-            )
+            self._ops[body.op_id] = _Op(name=body.lora_name, on_ok=on_ok, on_refused=on_refused, future=future)
         self._send(ConductorMessage(message_type=message_type, body=body))
         try:
             result: LoraAdapterResult = await asyncio.wait_for(
