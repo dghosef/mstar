@@ -102,7 +102,7 @@ def test_cascade_decode_attends_as_the_plain_decode_does():
         return Workspace(torch.empty(WS, dtype=torch.uint8, device=device), "test")
 
     cascade = FlashInferCascadeDecodeWrapper(
-        workspace_buffer=ws(), batch_size=BS, max_num_pages=max_pages, **kw,
+        decode_workspace=ws(), shared_workspace=ws(), batch_size=BS, max_num_pages=max_pages, **kw,
     )
     plain = FlashInferDecodeWrapper(
         workspace_buffer=ws(), batch_size=BS, max_num_pages=max_pages,
