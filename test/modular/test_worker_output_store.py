@@ -58,3 +58,21 @@ def test_new_token_counts_dedup_per_rid_not_across_rids(tmp_path):
     )
 
     assert counts == {7: {"token": 3}, 9: {"token": 5}}
+
+
+def test_a_token_whose_client_copy_rode_inline_counts_as_one_without_its_tensor(tmp_path):
+    """The route holds the tensor of an emit edge for the client only when the copy is not inline, so once the
+    route is done nobody does and the store has let it go: the count must not read it. Another row of the step
+    whose copy took the tensor path counts its tensor."""
+    w = _worker(tmp_path)
+    stored = w.tensor_manager.store_and_return_tensor_info_batch(
+        [7, 9], {7: {"token": [torch.ones(1)]}, 9: {"token": [torch.ones(4)]}}, ["token"],
+    )
+    gone = stored.flat_uuids[0]
+    w.tensor_manager.tensor_store.remove_tensor(gone)
+
+    counts = w.executor._count_new_tokens(
+        [0, 1], [7, 9], [gone, stored.flat_uuids[1]], ["token"], [0, 0], ("token", frozenset({7})),
+    )
+
+    assert counts == {7: {"token": 1}, 9: {"token": 4}}

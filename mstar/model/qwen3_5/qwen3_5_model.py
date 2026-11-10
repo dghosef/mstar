@@ -1,10 +1,12 @@
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 import torch
 from jinja2 import TemplateError
 from transformers import AutoTokenizer
 
+from mstar.conductor.request_info import WalkStep
 from mstar.engine.resources.attn.config import AttentionConfig, AttentionSpec
 from mstar.engine.resources.attn.ragged.config import (
     RaggedAttentionConfig,
@@ -19,14 +21,27 @@ from mstar.engine.resources.linear_attn.config import (
 from mstar.engine.resources.position.config import PositionConfig, PositionSpec
 from mstar.engine.resources.recurrent.config import DeltaNetGeometry, RecurrentStateConfig, RecurrentStateSpec
 from mstar.engine.resources.spec import NodeResourceSpec
+from mstar.graph.base import GraphSection, TensorPointerInfo
 from mstar.model.base import TensorAndMetadata
 from mstar.model.components.mrope import image_position_advance
-from mstar.model.keys import MIXED
+from mstar.model.components.python_tool import (
+    ROUTER_NODE,
+    TOOL_HANDLERS,
+    TOOL_NODE,
+    TOOL_SCHEMAS,
+    ToolRouterSubmodule,
+    ToolSubmodule,
+    check_tools,
+    tool_plan,
+    tool_walks,
+)
+from mstar.model.keys import MIXED, PREFILL_TEXT
 from mstar.model.media_limits import read_image
 from mstar.model.multimodal import (
     VIDEO,
     PromptPart,
     as_uint8_chw,
+    media_walks,
     messages_from_parts,
     vision_encoder,
 )
@@ -61,6 +76,7 @@ logger = logging.getLogger(__name__)
 # TODO: implement MoE variants
 class Qwen3_5DenseModel(MultimodalDecoderModel):
     NAME = "Qwen3.5"
+    tools: tuple[str, ...] = ()
     METADATA_FILES = (
         "config.json",
         "preprocessor_config.json",
@@ -78,9 +94,14 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
         self,
         model_path_hf: str,
         cache_dir: str | None = None,
+        tools: Sequence[str] = (),
         **kwargs: Any,
     ):
         super().__init__(model_path_hf, cache_dir)
+        # The serving config's ``model_kwargs: {tools: [python]}``: the reply may call these tools
+        # (`mstar.model.components.python_tool`), on a ``Router`` and a ``Tool`` node the deployment places.
+        # Code the model wrote runs on the host, so serve ``python`` only where callers are trusted.
+        self.tools = check_tools(tools)
         self.config = Qwen3_5Config.from_hf(self.local_dir)
         # None on a text-only checkpoint (`_create_submodule` then refuses a
         # vision_encoder node)
@@ -370,6 +391,7 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
                 tokenize=False,
                 add_generation_prompt=True,
                 enable_thinking=enable_thinking,
+                tools=[TOOL_SCHEMAS[name] for name in self.tools] or None,
             )
         except TemplateError as exc:
             # a chat the template refuses (a system message after the first turn,
@@ -423,6 +445,49 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
     # Model ABC: submodule loading
     # ------------------------------------------------------------------
 
+    def get_graph_walk_graphs(self) -> dict[str, GraphSection]:
+        walks = super().get_graph_walk_graphs()
+        if self.tools:
+            walks = {
+                **media_walks(self.config.max_position_embeddings, self.encoders, text=self.TEXT_PROMPTS, tools=True),
+                **tool_walks(),
+            }
+        return walks
+
+    def get_loop_caps(self, **model_kwargs) -> dict[str, int]:
+        if not self.tools:
+            caps = super().get_loop_caps(**model_kwargs)
+        else:
+            # Every id a tool request writes after its prompt counts toward the output budget (its decode
+            # steps, its tool text), and each step runs under what is left of it, so the reserve is the
+            # budget and the step speculated past a stop.
+            caps = {self.DECODE_LOOP: self.get_max_output_tokens(**model_kwargs) + 1}
+        return caps
+
+    def walk_plan(
+        self,
+        partition_name: str,
+        input_modalities: list[str],
+        output_modalities: list[str],
+        input_signals: dict[str, list[TensorPointerInfo]],
+        model_kwargs: dict,
+    ) -> list[WalkStep]:
+        plan = super().walk_plan(
+            partition_name, input_modalities, output_modalities, input_signals, model_kwargs)
+        if not plan:
+            return plan
+        prefill, decode = plan
+        leading = [prefill]
+        if not self.tools:
+            return [*leading, decode]
+        return tool_plan(leading, "decode", PREFILL_TEXT, bool(model_kwargs.get("enable_thinking", True)))
+
+    def validate_config_yaml(self, config: dict, config_path: str) -> None:
+        super().validate_config_yaml(config, config_path)
+        placed = {n for group in config.get("node_groups") or () for n in group.get("node_names", ())}
+        if self.tools and (missing := {ROUTER_NODE, TOOL_NODE} - placed):
+            raise ValueError(f"{config_path}: model_kwargs.tools needs the nodes {sorted(missing)} in node_groups")
+
     def _create_submodule(
         self, node_name: str, device: str, dtype: torch.dtype, tp_group,
     ) -> NodeSubmodule | None:
@@ -431,6 +496,11 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
             VisionEncoderSubmodule,
         )
 
+        if node_name == ROUTER_NODE and self.tools:
+            return ToolRouterSubmodule(self.tokenizer, device)
+        if node_name == TOOL_NODE and self.tools:
+            handlers = {name: TOOL_HANDLERS[name] for name in self.tools if name in TOOL_HANDLERS}
+            return ToolSubmodule(self.tokenizer, handlers, device)
         if node_name not in ("LLM", "vision_encoder"):
             return None
 
@@ -466,4 +536,6 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
         load_qwen3_5_weights(model, weights_dir, device=device)
         model.requires_grad_(False).eval()
         logger.info("Loaded Qwen3.5 LLM submodule onto %s", device)
-        return LLMSubmodule(model, self.config, self.vision_config, self.encoders)
+        llm = LLMSubmodule(model, self.config, self.vision_config, self.encoders)
+        llm.tool_budget = bool(self.tools)
+        return llm

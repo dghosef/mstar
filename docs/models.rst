@@ -757,6 +757,18 @@ is its first member's, and every output is turned into bytes by the member that 
 (``Model.postprocessor``). A ``/generate`` chunk's ``metadata["signal"]`` names the output it came from, so a client
 tells a transcript from a reply. It is a library, not a registered model yet.
 
+**A Python tool the reply can call.** ``model_kwargs: {tools: [python]}`` in the serving config
+(``configs/qwen3_5_0.8b_tool.yaml``) lets a reply run Python: the chat template is given a ``python(code)`` tool, a
+reply that writes ``<tool_call>`` blocks ends its turn, a ``Router`` node parses the turn's calls and a ``Tool`` node
+(both listed in ``node_groups`` on a rank of their own; it shares a GPU through ``rank_devices`` and runs no CUDA
+work) runs every call of the turn at once, each by its tool's handler (``python`` runs ``python -I`` processes with an
+empty environment, a timeout and CPU, memory and file-size limits), and the reply continues from the results, under
+the same ``max_output_tokens``, until it answers without a call. The tool text counts toward that budget. The ``<tool_call>`` markup still reaches the
+client as text (no ``tool_calls`` deltas yet). The tool text is keyed for prefix caching like the reply's own tokens,
+so the pages that hold it are shared; a hybrid model's recurrent-state snapshots end with the reply, so a later
+request that repeats the tool text recomputes its state from there. **The code is whatever the model wrote and runs on
+the host with no network or filesystem isolation: serve this only where every caller is trusted.**
+
 **LoRA adapters.** A ``resources: lora:`` block in the serving config serves
 per-request LoRA adapters (PEFT ``adapter_model.safetensors``; the scaling comes
 from the ``adapter_config.json`` beside it). The OpenAI ``model`` field picks one,

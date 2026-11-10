@@ -277,6 +277,14 @@ class GpuStepBody:
         )
 
 
+def _inline_rows(routed: RouteTensors | None, rids: list[int]) -> tuple[str, frozenset[int]] | None:
+    """The signal whose client copy rode inline this step, and the rows it did for."""
+    if routed is None or routed.inline_signal is None:
+        return None
+    held = zip(rids, routed.inline_values, strict=False)
+    return routed.inline_signal, frozenset(rid for rid, value in held if value is not None)
+
+
 class StepExecutor:
     def __init__(
         self, services: WorkerServices, layout: WorkerLayout, timer: PhaseTimer,
@@ -450,6 +458,7 @@ class StepExecutor:
         flat_uuids: list[int],
         signals: list[str],
         signal_idxs: list[int],
+        inline: tuple[str, frozenset[int]] | None = None,
     ) -> dict[int, dict[str, int]]:
         """Token counts for the conductor, per rid. Needs numel(), hence the
         tensors -- which is why this stays here and not behind the contract.
@@ -461,12 +470,18 @@ class StepExecutor:
         edges (``new_token_outputs`` is a bare filter), and one output routed
         to two destinations is two edges carrying the same tensors, so summing
         them would double every token.
+
+        A row whose client copy rode inline (``inline``: the signal and the rows) has a tensor nobody holds once the
+        route is done, and its inline value is the one token it counts.
         """
         counts: dict[int, dict[str, int]] = {}
         for idx in new_token_idxs:
             per_rid = counts.setdefault(flat_rids[idx], {})
             signal = signals[signal_idxs[idx]]
             if signal in per_rid:
+                continue
+            if inline is not None and signal == inline[0] and flat_rids[idx] in inline[1]:
+                per_rid[signal] = 1
                 continue
             per_rid[signal] = self.tensor_manager.get_tensor(
                 flat_uuids[idx]
@@ -869,7 +884,7 @@ class StepExecutor:
         _t_rt = _time.perf_counter() if self.timer.period else 0.0
         step = rt.begin_postprocess(request)
         rt_time = _time.perf_counter() - _t_rt if self.timer.period else 0.0
-        stored = None
+        stored = routed = None
         sent_here = False
         while step.need is not PostprocessNeed.DONE:
             _t = _time.perf_counter() if self.timer.period else 0.0
@@ -893,14 +908,14 @@ class StepExecutor:
                         if rid_outputs:
                             for name in names:
                                 rid_outputs.pop(name, None)
-                stored, route_tensors = self._store_outputs(
+                stored, routed = self._store_outputs(
                     batch_N, outputs, request, step, cpu_outputs, host_rows, engine,
                 )
                 stage = "store_tensors"
                 _t_rt = _time.perf_counter() if self.timer.period else 0.0
-                step = rt.resume_postprocess(stored=route_tensors)
+                step = rt.resume_postprocess(stored=routed)
             else:
-                send = self._send_input(batch_N, request, step, stored, engine)
+                send = self._send_input(batch_N, request, step, stored, engine, routed)
                 sent_here = True
                 stage = "send_prep"
                 _t_rt = _time.perf_counter() if self.timer.period else 0.0
@@ -1206,7 +1221,7 @@ class StepExecutor:
 
     def _send_input(
         self, batch_N: PendingBatch, request: PostprocessRequest, step: PostprocessStep,
-        stored: StoredOutputs | None, engine,
+        stored: StoredOutputs | None, engine, routed: RouteTensors | None = None,
     ) -> SendInput:
         """SEND: what the send needs of the worker, after the stopped rows'
         finalize, the step's publication and the route's tensor work."""
@@ -1244,7 +1259,7 @@ class StepExecutor:
         laps = PhaseLaps("worker.postprocess.stream_send.")
         new_token_counts = self._count_new_tokens(
             route_output.new_token_output_idxs,
-            stored.flat_rids, stored.flat_uuids, signals, stored.signal_idxs,
+            stored.flat_rids, stored.flat_uuids, signals, stored.signal_idxs, _inline_rows(routed, rids),
         )
         laps.lap("count_tokens")
 

@@ -123,21 +123,26 @@ def test_a_prefill_after_a_decode_lands_after_the_stop_token_whether_or_not_the_
     only after it ran: the stop token is in the request's state if it did and is not if it did not. The row is
     prepared on a host thread that may run before that step commits, so the prefill decides when it is declared,
     in step order: the same ids land either way. A plain request's row is not touched."""
+    from mstar.conductor.request_info import FINAL_PREFILL, PREFILL_END, TOOLS
+
     prompt, turn, tail = [11, 12, 13], [21, 22, 23, 99], [31, 32]      # 99 = <|im_end|>, the stop token
     state = _State()
     llm = _decoder(state)
 
     state.tokens += prompt                                              # the prefill commits the prompt
-    end = len(prompt)                                                   # where its state ends
+    outputs = {"new_token": [torch.tensor([turn[0]])]}
+    llm.postprocess("wire", _info("prefill_text", **{TOOLS: True, FINAL_PREFILL: True}), outputs)
+    (end,) = outputs[PREFILL_END]
+    assert end.tolist() == [len(prompt)]
     state.tokens += turn[:-1]                                           # a decode step feeds each token but the stop
 
     def speculated_step():
         if speculated_step_ran:
             state.tokens.append(turn[-1])                               # the one speculated past the stop
 
-    # what the plan hands over: the ids to write from the stop token on, and where it belongs
-    row = [torch.tensor([turn[-1], *tail]), torch.tensor([end + len(turn) - 1])]
-    info = _info("prefill_text")
+    # what the router and tool node hand over: the ids to write from the stop token on, and where it belongs
+    row = [torch.tensor([turn[-1], *tail]), torch.tensor([int(end) + len(turn) - 1])]
+    info = _info("prefill_text", **{TOOLS: True})
     if ran_before_prepare:
         speculated_step()
     inp = llm.prepare_inputs("prefill_text", info, {"text_inputs": row})
@@ -175,16 +180,46 @@ def test_a_transcript_chunk_prepared_while_the_one_before_it_runs_is_not_taken_f
     assert inp.input_ids.tolist() == [7, 8] and inp.starts_at == 12
 
 
-def test_a_prefill_that_is_not_the_last_before_decode_routes_no_token():
-    from mstar.conductor.request_info import FINAL_PREFILL
+def test_a_prefill_that_is_not_the_last_before_decode_routes_no_token_with_or_without_tools():
+    from mstar.conductor.request_info import FINAL_PREFILL, PREFILL_END, TOOLS
 
     llm = _decoder(_State())
-    outputs = {"new_token": [torch.tensor([7])], "text_inputs": [torch.tensor([7])]}
-    llm.postprocess("wire", _info("prefill_text", **{FINAL_PREFILL: False}), outputs)
-    assert not outputs
+    for metadata in ({FINAL_PREFILL: False}, {FINAL_PREFILL: False, TOOLS: True}):
+        outputs = {"new_token": [torch.tensor([7])], "text_inputs": [torch.tensor([7])]}
+        llm.postprocess("wire", _info("prefill_text", **metadata), outputs)
+        assert not outputs
     outputs = {"new_token": [torch.tensor([7])]}
     llm.postprocess("wire", _info("prefill_text", **{FINAL_PREFILL: True}), outputs)
-    assert outputs["new_token"]
+    assert PREFILL_END not in outputs and outputs["new_token"]
+
+
+def test_a_tool_requests_decode_accumulates_its_tokens_and_a_plain_one_does_not():
+    from mstar.conductor.request_info import TOOLS, TURN_IDS
+
+    llm = _decoder(_State())
+    for metadata, expected in (({TOOLS: True}, True), ({}, False)):
+        outputs = {"new_token": [torch.tensor([7])]}
+        llm.postprocess("wire", _info("decode", **metadata), outputs)
+        assert (TURN_IDS in outputs) == expected
+
+
+def test_only_a_deployment_with_tools_changes_its_decode_stop_policy():
+    from mstar.conductor.request_info import TOOLS
+    from mstar.model.submodule_base import StopKind, TokenStop
+
+    llm = _decoder(_State())
+    llm.token_stop = TokenStop(
+        loop="decode_loop", buffer="new_token", stop_ids=frozenset({99}), sampler="sampler", walk="decode",
+        runtime_check=True)
+    # a node that runs no tool rounds: the EOS-only policy, with no iteration limit, as ever
+    llm.tool_budget = False
+    (policy,) = llm.get_stop_policies("decode").values()
+    assert policy.kind is StopKind.EOS and policy.limits(_info("decode", **{TOOLS: True})).max_iters is None
+    # with tools, a tool request's decode runs under what is left of its budget, a plain one under its cap
+    llm.tool_budget = True
+    (policy,) = llm.get_stop_policies("decode").values()
+    assert policy.limits(_info("decode", **{TOOLS: True})).max_iters == 64
+    assert policy.limits(_info("decode")).max_iters > 10 ** 9
 
 
 def test_the_rows_of_a_prefill_that_is_not_the_last_before_decode_have_no_real_sample():
