@@ -78,7 +78,7 @@ def test_the_worker_fails_only_the_request_whose_ingest_raised(raises_in):
     assert w.lifecycle.park(parked)
     w.ingest._dispatch = processed.extend
     body = SimpleNamespace(
-        request_id="wire", partition_worker_graph_ids=None, worker_graph_to_workers={}, loop_caps={},
+        request_id="wire", partition_worker_graph_ids=None, worker_graph_to_workers={}, loop_caps={}, silent=False,
         initial_inputs=[],
         request_info=SimpleNamespace(
             partition_name="p", graph_walk="g", resource_configs={}, rid_handle=None,

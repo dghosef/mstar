@@ -150,8 +150,9 @@ def test_a_request_no_rebuild_can_write_again_isnt_rebuildable_in_its_pools(monk
                10: {"kv": KVReqConfig(kv_layout={})}}
     for rid, config in configs.items():
         info = SimpleNamespace(partition_name="p", graph_walk=PREFILL, resource_configs=config, stream_lead_items={})
-        w.ingest._add_new_request(SimpleNamespace(request_id=str(rid), partition_worker_graph_ids=None, loop_caps={},
-                                                  worker_graph_to_workers={}, initial_inputs=[], request_info=info))
+        w.ingest._add_new_request(SimpleNamespace(
+            request_id=str(rid), partition_worker_graph_ids=None, loop_caps={}, silent=False,
+            worker_graph_to_workers={}, initial_inputs=[], request_info=info))
     refused = {rid for rid in configs if not kv._overrides[rid].rebuildable}
     assert refused == ({R, 12, 13} if talker_walk == PREFILL else {12, 13}), (
         "a request nothing can drop would count as one a drop frees"
@@ -177,13 +178,16 @@ def test_postprocess_appends_kept_samples_and_lands_a_rebuild_row_beside_them():
     assert landed == [R], "the rebuilt request would never be ready to decode again"
 
 
-@pytest.mark.parametrize("why", ["no ids", "backlog", "prefill walk", "samples short"])
+@pytest.mark.parametrize("why", ["no ids", "backlog", "prefill walk", "samples short", "past a tool round"])
 def test_a_drop_is_refused_when_its_rebuild_could_not_follow(why):
     w, eng = _worker()
-    w._rebuilds._kept[NODE].update({} if why == "no ids" else {R: _kept(5)})
+    # (a request past a tool round kept the samples of its earlier decodes too, and its tool text, which
+    # no kept id holds, is in its KV: rebuilding it would lose the text)
+    kept = _kept(5, 6, 7, 8) if why == "past a tool round" else _kept(5)
+    w._rebuilds._kept[NODE].update({} if why == "no ids" else {R: kept})
     w.scheduler.backlog.update({(NODE, DECODE): ScheduledBatch(NODE, DECODE, {R: 0})} if why == "backlog" else {})
     w.infos[R].graph_walk = PREFILL if why == "prefill walk" else DECODE
-    w.infos[R].dynamic_loop_iter_counts["loop"] = 1 if why == "samples short" else 0
+    w.infos[R].dynamic_loop_iter_counts["loop"] = 1 if why in ("samples short", "past a tool round") else 0
 
     with pytest.raises(RuntimeError):
         w.preemption._drop(R, NODE)

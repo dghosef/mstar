@@ -1714,6 +1714,29 @@ methods are:
    model that runs another walk after its loop (an ``align`` walk, or image generation after
    thinking) or publishes final-only state at the loop's stop must not return it there. Keep
    ``check_stop_batched``, if you write one, in agreement.
+   A step's walk can end through a named exit: its node's ``check_stop`` returns
+   ``StopCheck(exit="tool_call")``, as the tool router does. The
+   plan's ``WalkStep(..., exits={"tool_call": j})`` then runs step ``j`` (a later step) instead
+   of the next one; an exit the step does not list runs the next one.
+   A target may be any step, even an earlier one (``""``, the unnamed end,
+   is an exit too, so ``exits={"": 1}`` loops back), or ``len(plan)``, which ends the plan; the
+   tool round of ``mstar.model.components.python_tool`` is such a cycle (prefill, decode, route, tool,
+   prefill that continues the reply). A prefill after a decode brings the ids to write and, as a
+   second ``text_inputs`` tensor, the position its first id belongs at: the decode's last id, which the
+   step speculated past the stop may have written already, so ``SampledTokenDecoder`` leaves it out when
+   the position counter is past it. A prefill whose row is empty runs no forward and completes its node.
+   Text written after the prompt is keyed for prefix caching when its walk is in ``PrefixKeys.walks``.
+   A plan that comes back runs each step under the output
+   budget it has left (``max_tokens``), and a partition a stream moves cannot have one.
+   A step may start child requests of the same model, ``WalkStep(..., spawns=("agent_0", ...))``: when it ends, the
+   conductor starts one from each of those persisted signals that it produced (the tensor is the child's
+   ``text_inputs``; the model implements ``kv_layout(layout, length)`` as ``MultimodalDecoderModel`` does, for the
+   child's KV), inside the parent's slot and with no client output. A later step with ``joins=True`` waits until every
+   child has ended, then runs with the children's persisted ``agent_answer`` tensors as its ``agent_answers`` input and
+   ``step_metadata["agents"]`` and ``["agent_errors"]`` (a failed child's text, by index). The router and tool node of
+   ``mstar.model.components.python_tool`` use this for ``spawn_agent``.
+   A step a stream feeds that runs once per chunk may be followed by more steps: the stream's final chunk then moves
+   the plan on, where a stop check's ``END_PARTITION`` (reported with that exit) still ends the partition.
    To also keep some of this step's outputs from being routed, return
    ``StopCheck(stops, withheld=(names...))``, for example a frame streamed alongside the
    EOS token: its consumer then never receives it, instead of finding and dropping it with

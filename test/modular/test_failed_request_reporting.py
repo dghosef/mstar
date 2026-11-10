@@ -30,7 +30,7 @@ def _pending(rids, failed):
             failed_requests=dict(failed),
             final_stream_rids=set(rids),
             cached_rids=set(rids),
-            partition_done_rids=set(rids),
+            partition_done_rids=set(rids), exits={},
         ),
     )
 
