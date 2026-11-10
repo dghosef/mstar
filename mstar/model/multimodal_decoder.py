@@ -27,7 +27,7 @@ from typing import NamedTuple
 import torch
 
 from mstar.communication.tensors import NameToTensorList
-from mstar.conductor.request_info import AGENT_CHILD, APPENDS, FINAL_PREFILL
+from mstar.conductor.request_info import AGENT_CHILD, FINAL_PREFILL
 from mstar.distributed.base import ShardingConfig
 from mstar.engine.resources.sampler.config import SamplerSpec, SamplingReqConfig
 from mstar.engine.resources.spec import CombinedSplit, ResourceReqConfig
@@ -75,6 +75,7 @@ from mstar.model.multimodal import (
     media_walk_name,
     media_walk_names,
     media_walks,
+    message_boundaries,
     parts_from_modalities,
     text_combined_walks,
 )
@@ -189,6 +190,10 @@ class MultimodalDecoderModel(Model):
     def spawn(self) -> bool:
         """Whether a reply may start agents (``spawn_agent``): child requests of this model, one per task."""
         return SPAWN in self.tools
+
+    @property
+    def MAX_CHILDREN(self) -> int:
+        return MAX_AGENTS if self.spawn else 0
 
     def __init__(
         self, model_path_hf: str, cache_dir: str | None = None, tools: Sequence[str] = (), stream_in: str = "",
@@ -362,6 +367,7 @@ class MultimodalDecoderModel(Model):
                 **out.metadata, TRANSCRIPT_STREAM: int(out.new_input_tensors["text_inputs"][0].numel()),
                 TRANSCRIPT_RESERVE: MAX_TRANSCRIPT_TOKENS + int(out.new_input_tensors[SUFFIX][0].numel()),
             })
+        message_marks = kwargs.pop("message_marks", False)
         if history := kwargs.pop("history", None):
             earlier = self._history_parts(history)
             if prompt is None and prompt_parts is None and not input_modalities:
@@ -372,6 +378,10 @@ class MultimodalDecoderModel(Model):
             input_modalities = [TEXT] * len(earlier) + list(input_modalities)
         prompt_in = self.intake(prompt, input_modalities, tensors, prompt_parts, **kwargs)
         layout = self.prompt_layout(prompt_in)
+        ends = self.message_ends(
+            prompt_parts if prompt_parts is not None else parts_from_modalities(input_modalities, prompt),
+            prompt_in.pads.ids, **kwargs,
+        ) if message_marks else []
         # the raw attachments are spent once prepared (the encoders read their
         # inputs): don't hold them for the request's life
         spent = {
@@ -379,8 +389,15 @@ class MultimodalDecoderModel(Model):
         }
         return ProcessPromptOutput(
             {"text_inputs": [prompt_in.pads.ids], **spent, **prompt_in.inputs},
-            {MEDIA_LAYOUT: layout, "kv_layout": self.kv_layout(layout, int(prompt_in.pads.ids.numel()))},
+            {MEDIA_LAYOUT: layout, "kv_layout": self.kv_layout(layout, int(prompt_in.pads.ids.numel())),
+             **({"message_ends": {"text_inputs": ends}} if ends else {})},
         )
+
+    def message_ends(self, parts: list[PromptPart], ids: torch.Tensor, **kwargs) -> list[int]:
+        """The token counts at which the rendered prompt ``ids`` break between messages, for a recurrent pool's
+        checkpoint policy to keep a snapshot at (`message_boundaries`)."""
+        template = self.chat_template_kwargs(**kwargs)
+        return [] if template is None else message_boundaries(parts, ids, self.tokenizer, **template)
 
     def process_open_prompt(
         self,
@@ -584,10 +601,10 @@ class MultimodalDecoderModel(Model):
             leading = [
                 replace(prefill, step_metadata=metadata),
                 # a chunk's sampled token is nobody's, like the history prefill's
-                WalkStep(STREAM_WALK, step_metadata={APPENDS: True, FINAL_PREFILL: False, STREAM_BASE: base}),
+                WalkStep(STREAM_WALK, step_metadata={FINAL_PREFILL: False, STREAM_BASE: base}),
                 WalkStep(
                     PREFILL_TEXT, bind={"text_inputs": SUFFIX},
-                    step_metadata={FINAL_PREFILL: True, APPENDS: True, STREAM_BASE: base}),
+                    step_metadata={FINAL_PREFILL: True, STREAM_BASE: base}),
             ]
         if not self.tools:
             return [*leading, WalkStep("decode", bind={"text_inputs": "new_token"})]
@@ -614,9 +631,11 @@ class MultimodalDecoderModel(Model):
 
     def render_agent(self, task: str, enable_thinking: bool = True) -> list[int]:
         """The prompt ids of an agent that does ``task``: the chat template, with the same tools as its parent's."""
+        template = self.chat_template_kwargs(enable_thinking=enable_thinking)
+        if template is None:
+            template = {"enable_thinking": enable_thinking, "tools": self.tool_schemas()}
         text = self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": task}], tokenize=False, add_generation_prompt=True,
-            enable_thinking=enable_thinking, tools=self.tool_schemas(),
+            [{"role": "user", "content": task}], tokenize=False, add_generation_prompt=True, **template,
         )
         return list(encode_ids(self.tokenizer, text))
 

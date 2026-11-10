@@ -16,6 +16,7 @@ nothing else of the prompt.
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, ".")
 
@@ -26,7 +27,7 @@ from mstar.engine.engine import _MeasuredRow
 from mstar.engine.resources.base import KeyedWalks
 from mstar.engine.resources.kv import manager as manager_mod
 from mstar.engine.resources.kv.config import KVReqConfig, KVStep, PagedKVConfig, PrefixSpan, StreamLayout
-from mstar.engine.resources.kv.keys import chain
+from mstar.engine.resources.kv.keys import chain, fingerprint
 from mstar.engine.resources.kv.manager import KVManager
 from mstar.engine.resources.step import Segment, StepContext
 from mstar.model.submodule_base import ARNodeInputs
@@ -380,3 +381,80 @@ def test_an_appended_row_is_keyed_at_the_chains_end_and_closes_the_chain_when_it
         assert chain_.unkeyed is None and chain_.covered_len == len(prompt)
     else:
         assert chain_.unkeyed is not None and chain_.covered_len == len(prompt) + 3
+
+
+@pytest.mark.parametrize("root, shared", [(b"", 2 * PAGE_SIZE), (b"an adapter", 0)])
+@pytest.mark.parametrize("probe", ["prepared", "measured"])
+def test_a_prompt_keyed_from_its_ids_leases_the_pages_another_with_the_same_ids_cached(root, shared, probe):
+    """A child request's prompt was written by the router, so the API server never keyed it. Its first row brings
+    the ids, the worker keys them as a prompt of those ids is keyed (under the request's own root, so an adapter's
+    child shares nothing with the base model's pages), and the leading pages the parent's prompt cached are leased.
+    The scheduler's measuring probe, which cuts a long prompt into chunks, brings the row's tensors and does the same,
+    or the chunks would be cut from 0 and the hit declined."""
+    kv = _manager()
+    kv.enable_prefix_cache(ROOT, {"main": KeyedWalks(writes=("prefill",), growth=(WALK,), tensor="text_inputs")})
+    prompt = list(range(300))
+    kv.ingest_request("r0", KVReqConfig(
+        prefix_keys={"main": chain(_pages(prompt))}, prefix_tail={"main": prompt[256:]},
+        kv_layout={"main": StreamLayout(
+            spans=(PrefixSpan(300, 300, "prefill"),), growth=(("decode_loop", 1),), keyed_spans=1)},
+        loop_caps={"decode_loop": 10},
+    ))
+    step = KVStep(segments=(Segment("r0", "main", 300),))
+    ctx = StepContext(request_ids=("r0",), graph_walk="prefill", slot=0, capture=False)
+    assert kv.admit(step, ctx).ok
+    kv.plan(step, ctx)
+    kv.commit(step, ctx)
+
+    kv.ingest_request("r1", KVReqConfig(
+        key_from_ids=True, prefix_root=root,
+        kv_layout={"main": StreamLayout(spans=(PrefixSpan(300, 300, "prefill"),), growth=(("decode_loop", 1),))},
+        loop_caps={"decode_loop": 10},
+    ))
+    inputs = (
+        ARNodeInputs(input_seq_len=300, input_ids=torch.tensor(prompt)) if probe == "prepared"
+        else _MeasuredRow(300, tensor_inputs={"text_inputs": torch.tensor(prompt)})
+    )
+    got = kv.resolve_cached_prefix("r1", NODE, "prefill", inputs)
+    assert (got.tokens if got is not None else 0) == shared
+
+
+def test_pages_a_resource_keeps_no_state_for_are_evicted_before_older_ones_it_does():
+    """A hit restores from every pool over the cache, so a page some pool holds no state for is the one to lose,
+    though another pool holds it (`Resource.keeps_prefix`, over every pool)."""
+    kv = _manager()
+    kv.enable_prefix_cache(ROOT, {"main": KeyedWalks(writes=("prefill",), growth=(WALK,))})
+    keys = {}
+    for rid, base in (("old", 0), ("new", 1000)):
+        prompt = list(range(base, base + PAGE_SIZE + 5))
+        keys[rid] = chain(_pages(prompt))
+        kv.ingest_request(rid, KVReqConfig(
+            prefix_keys={"main": keys[rid]}, prefix_tail={"main": prompt[PAGE_SIZE:]},
+            kv_layout={"main": StreamLayout(
+                spans=(PrefixSpan(len(prompt), len(prompt), "prefill"),), growth=(("decode_loop", 1),), keyed_spans=1)},
+            loop_caps={"decode_loop": 4},
+        ))
+        step = KVStep(segments=(Segment(rid, "main", len(prompt)),))
+        ctx = StepContext(request_ids=(rid,), graph_walk="prefill", slot=0, capture=False)
+        assert kv.admit(step, ctx).ok
+        kv.plan(step, ctx)
+        kv.commit(step, ctx)
+        kv.remove_request(rid)
+    first = kv._index.page_for(fingerprint(ROOT, keys["old"][0]))
+    assert first is not None and kv._index.page_for(fingerprint(ROOT, keys["new"][0])) is not None
+    # the older page keeps state in both pools: the newer one, which one of them lacks, goes first
+    old = fingerprint(ROOT, keys["old"][0])
+    for held in ({old, fingerprint(ROOT, keys["new"][0])}, {old}):
+        kv.bind_restorer(SimpleNamespace(keeps_prefix=held.__contains__))
+    assert kv._evict(1) == 1
+    assert kv._index.page_for(fingerprint(ROOT, keys["old"][0])) == first
+    assert kv._index.page_for(fingerprint(ROOT, keys["new"][0])) is None
+
+
+def test_a_resource_that_restores_prefixes_cannot_bind_above_one_rank():
+    """Its answers (`keeps_prefix`, `restorable`) are rank-local, so two ranks could evict different pages."""
+    kv = _manager()
+    kv.bind_restorer(SimpleNamespace(keeps_prefix=lambda key: True))
+    kv._world_size = 2
+    with pytest.raises(ValueError, match="one rank only"):
+        kv.bind_restorer(SimpleNamespace())
