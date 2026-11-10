@@ -18,10 +18,16 @@ they run:
    then, once they are running, ``POST /v1/unload_lora_adapter``. The unload must answer
    200, a new request on the adapter must answer 400, and every held request must finish
    with its full length (they run on the old weights to the end).
-4. ``reload``: the same adapter loaded again from the same directory (retried while the
-   workers still hold it for the requests that just finished: a 400 saying so), then the
-   parity prompts again, which must pass the same rule (how many equal the first load's
-   outputs is reported: the base traffic's batch composition can move a greedy token).
+4. ``reload``: the same adapter loaded again from the same directory, which must answer
+   200 at once, then the parity prompts again, which must pass the same rule (how many
+   equal the first load's outputs is reported: the base traffic's batch composition can
+   move a greedy token).
+5. ``load_inplace``: ``--held`` long requests started on the first adapter again, then the
+   first adapter's name loaded with the second adapter's directory and ``"load_inplace":
+   true``. The load must answer 200 while they run; every held request must finish with
+   its full length, its first tokens agreeing with the first adapter's reference (they
+   were selected on the old weights and keep them); then the parity prompts again, the
+   first name's now against the second adapter's reference.
 
 Pass (exit 0): every check above, and ``failed == 0`` for the base traffic. Results:
 ``runtime_load.json`` and ``server_runtime_load.log`` under ``--out`` (suffixed
@@ -180,16 +186,19 @@ def run(args) -> int:
         windows[label] = (t0, time.monotonic())
         return status, text
 
-    def parity(tag: str) -> dict:
+    def parity(tag: str, weights: dict[str, str] | None = None) -> dict:
+        """The outputs of each name ``weights`` maps (by default each adapter to itself)
+        against the reference of the adapter whose weights it serves."""
+        weights = weights or {name: name for name in names}
         outputs, rows = {}, {}
-        for name in names:
+        for name, on in weights.items():
             for i, prompt in enumerate(PROMPTS):
                 text = _chat(url, name, prompt, args.max_tokens)
                 outputs.setdefault(name, {})[str(i)] = text
                 ids = tok(text, add_special_tokens=False).input_ids
-                rows[f"{name}/{i}"] = r = _agree(ids, ref[name][str(i)])
-                check(r["pass"], f"{tag}: {name}/{i} against the reference (match {r['match']})")
-        for name in names:
+                rows[f"{name}/{i}"] = r = _agree(ids, ref[on][str(i)])
+                check(r["pass"], f"{tag}: {name}/{i} against {on}'s reference (match {r['match']})")
+        for name in weights:
             check(any(outputs[name][str(i)] != base_out[str(i)] for i in range(len(PROMPTS))),
                   f"{tag}: control, {name} changes some output against the base model")
         return {"outputs": outputs, "rows": rows}
@@ -227,8 +236,7 @@ def run(args) -> int:
                 # 2. parity against HF + PEFT
                 result["first"] = parity("first load")
 
-                # 3. unload while requests on it run
-                def held(i: int) -> tuple[int, int | None, str]:
+                def held(i: int) -> tuple[int, list[int] | None, str | None]:
                     status, body = _post(f"{url}/v1/chat/completions", {
                         "model": first, "messages": [{"role": "user", "content": PROMPTS[i % len(PROMPTS)]}],
                         "temperature": 0, "max_tokens": args.held_tokens, "ignore_eos": True,
@@ -239,27 +247,34 @@ def run(args) -> int:
                     # the non-streaming usage is not filled in on every engine: count the text
                     choice = body["choices"][0]
                     text = choice["message"]["content"] or ""
-                    return status, len(tok(text, add_special_tokens=False).input_ids), None
+                    return status, tok(text, add_special_tokens=False).input_ids, None
 
-                with concurrent.futures.ThreadPoolExecutor(args.held) as pool:
-                    futures = [pool.submit(held, i) for i in range(args.held)]
-                    time.sleep(args.held_lead_s)
-                    status, text = admin("/v1/unload_lora_adapter", {"lora_name": first}, "unload")
-                    check(status == 200, f"unload {first} with {args.held} requests on it: HTTP {status} {text[:200]}")
-                    status, _ = _post(f"{url}/v1/chat/completions", {
-                        "model": first, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 4,
-                    })
-                    check(status == 400, f"a new request on {first} after its unload: HTTP {status}")
-                    check(not any(f.done() for f in futures),
-                          "the held requests were still running when the unload answered")
-                    held_results = [f.result() for f in futures]
-                result["held"] = held_results
-                # re-tokenized text can merge or split a few tokens at the boundaries
-                # by token count: main's non-streaming chat says finish_reason "stop" either way
-                check(all(s == 200 and n is not None and n >= 0.9 * args.held_tokens
-                          for s, n, _ in held_results),
-                      f"every held request ran to its {args.held_tokens} tokens (re-tokenized >= 90%): "
-                      f"{held_results}")
+                def held_through(path: str, body: dict, label: str, what: str) -> list:
+                    """``--held`` requests on the first adapter, and ``path`` posted while
+                    they run; each must run to its end."""
+                    with concurrent.futures.ThreadPoolExecutor(args.held) as pool:
+                        futures = [pool.submit(held, i) for i in range(args.held)]
+                        time.sleep(args.held_lead_s)
+                        status, text = admin(path, body, label)
+                        running = not any(f.done() for f in futures)
+                        check(status == 200, f"{what} with {args.held} requests on it: HTTP {status} {text[:200]}")
+                        results = [f.result() for f in futures]
+                    check(running, f"the held requests were still running when the {label} answered")
+                    counts = [(s, None if ids is None else len(ids), err) for s, ids, err in results]
+                    result[f"held_{label}"] = counts
+                    # re-tokenized text can merge or split a few tokens at the boundaries
+                    # by token count: main's non-streaming chat says finish_reason "stop" either way
+                    check(all(s == 200 and n is not None and n >= 0.9 * args.held_tokens for s, n, _ in counts),
+                          f"every held request ran to its {args.held_tokens} tokens through the {label} "
+                          f"(re-tokenized >= 90%): {counts}")
+                    return results
+
+                # 3. unload while requests on it run
+                held_through("/v1/unload_lora_adapter", {"lora_name": first}, "unload", f"unload {first}")
+                status, _ = _post(f"{url}/v1/chat/completions", {
+                    "model": first, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 4,
+                })
+                check(status == 400, f"a new request on {first} after its unload: HTTP {status}")
                 status, _ = admin("/v1/unload_lora_adapter", {"lora_name": first}, "unload_again")
                 check(status == 404, f"unloading {first} again: HTTP {status}")
                 with urllib.request.urlopen(f"{url}/v1/models") as r:
@@ -267,13 +282,8 @@ def run(args) -> int:
                 check(first not in listed, f"/v1/models after the unload: {listed}")
 
                 # 4. reload the same weights
-                deadline = time.monotonic() + 60
-                while True:
-                    status, text = admin("/v1/load_lora_adapter",
-                                         {"lora_name": first, "lora_path": dirs[first]}, "reload")
-                    if status == 200 or time.monotonic() > deadline or "still running" not in text:
-                        break
-                    time.sleep(1)
+                status, text = admin("/v1/load_lora_adapter",
+                                     {"lora_name": first, "lora_path": dirs[first]}, "reload")
                 check(status == 200, f"reload {first}: HTTP {status} {text[:200]}")
                 result["reload"] = parity("reload")
                 same = [k for k in result["first"]["outputs"][first]
@@ -282,6 +292,23 @@ def run(args) -> int:
                 # can move a greedy token, as it can between any two runs
                 result["reload_identical"] = f"{len(same)}/{len(PROMPTS)}"
                 print(f"{first} reloaded from the same weights: {len(same)}/{len(PROMPTS)} outputs identical")
+
+                # 5. reload in place, while requests on the old weights run, onto weights
+                # no name is on (the second adapter's, unloaded first), which the workers
+                # read beside the old ones
+                second = names[1]
+                status, text = admin("/v1/unload_lora_adapter", {"lora_name": second}, f"unload_{second}")
+                check(status == 200, f"unload {second}: HTTP {status} {text[:200]}")
+                results = held_through(
+                    "/v1/load_lora_adapter", {"lora_name": first, "lora_path": dirs[second], "load_inplace": True},
+                    "load_inplace", f"load_inplace {first} onto {second}'s weights",
+                )
+                old = [_agree(ids, ref[first][str(i % len(PROMPTS))]) for i, (_, ids, _) in enumerate(results)
+                       if ids is not None]
+                check(all(r["pass"] for r in old),
+                      f"the held requests kept {first}'s old weights (their first tokens against its "
+                      f"reference): {[r['match'] for r in old]}")
+                result["load_inplace"] = parity("reload in place", {first: second})
             result["base_traffic"] = base.summary(windows)
     b = result["base_traffic"]
     check(b["failed"] == 0 and b["requests"] > 0,
