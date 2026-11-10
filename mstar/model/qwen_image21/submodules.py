@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import NamedTuple
 
 import torch
@@ -226,8 +227,10 @@ class QwenImage21VaeDecoderSubmodule(NodeSubmodule):
 # dit
 # ---------------------------------------------------------------------------
 
-class DitKey(NamedTuple):
-    """What has to match for two denoise rows to share a forward and a captured graph."""
+@dataclass(frozen=True)
+class DitKey:
+    """What has to match for two denoise rows to share a forward and a captured graph. A dataclass, as
+    the scaffold's keys are: a capture template's clone rebuilds a tuple from its items."""
 
     height: int
     width: int

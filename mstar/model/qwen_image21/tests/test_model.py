@@ -174,3 +174,12 @@ def test_config_reads_the_pixel_bounds_from_either_processor_layout(tmp_path, la
         write("processor/processor_config.json", {"image_processor": bounds})
     config = QwenImage21Config.from_snapshot(tmp_path)
     assert (config.min_pixels, config.max_pixels) == (1234, 99999) and config.sample_sigmas == (1.0, 0.5)
+
+
+def test_a_denoise_capture_template_clones():
+    """The engine clones a capture bucket's template inputs, key included."""
+    from mstar.model.qwen_image21.submodules import DitKey
+    from mstar.model.submodule_base import NodeInputs
+
+    key = DitKey(64, 48, True)
+    assert NodeInputs(resource_step_info=key).clone().resource_step_info == key
