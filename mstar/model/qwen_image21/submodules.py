@@ -394,7 +394,7 @@ class QwenImage21DenoiseSubmodule(DenoiseLoopSubmodule):
         keys = [inp.resource_step_info for inp in inputs]
         labels = (MAIN, UNCOND) if keys[0].cfg else (MAIN,)
         segments = tuple(
-            Segment(rid, label, self.num_tokens(key))
+            Segment(rid, label, key.height * key.width)
             for label in labels for rid, key in zip(request_ids, keys, strict=True)
         )
         return SubmoduleStep(cg_key_info=self._uniform_key(keys), steps={
@@ -428,7 +428,9 @@ class QwenImage21DenoiseSubmodule(DenoiseLoopSubmodule):
         return noise.view(channels, h * w).transpose(0, 1)
 
     def num_tokens(self, bucket_key: DitKey) -> int:
-        return bucket_key.height * bucket_key.width
+        """The K/V slots a row writes: the target once per label. The engine sizes capture buckets and
+        stages the KV plan by it, so under CFG it counts both labels."""
+        return bucket_key.height * bucket_key.width * (2 if bucket_key.cfg else 1)
 
     def request_inputs(self, fwd_info, inputs, bucket_key: DitKey) -> dict[str, torch.Tensor]:
         """The target's frame position per label, and the guidance scale under CFG: staged once."""
@@ -447,7 +449,7 @@ class QwenImage21DenoiseSubmodule(DenoiseLoopSubmodule):
     def capture_request_inputs(self, bucket_key: DitKey, device) -> dict[str, torch.Tensor]:
         labels = 2 if bucket_key.cfg else 1
         out = {
-            LATENTS: torch.zeros(self.num_tokens(bucket_key), self.qi_config.transformer.in_channels,
+            LATENTS: torch.zeros(bucket_key.height * bucket_key.width, self.qi_config.transformer.in_channels,
                                  dtype=self.transformer.dtype, device=device),
             "frames": torch.zeros(labels, dtype=torch.long, device=device),
         }

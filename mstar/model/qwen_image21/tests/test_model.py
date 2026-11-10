@@ -183,3 +183,17 @@ def test_a_denoise_capture_template_clones():
 
     key = DitKey(64, 48, True)
     assert NodeInputs(resource_step_info=key).clone().resource_step_info == key
+
+
+@pytest.mark.parametrize("cfg", [False, True])
+def test_a_denoise_rows_tokens_are_the_kv_slots_its_step_declares(cfg):
+    """The engine stages a step's KV plan into a bucket sized by the rows' input_seq_len, so a CFG row
+    (the target on two labels) has to count both."""
+    from mstar.model.qwen_image21.submodules import DitKey, QwenImage21DenoiseSubmodule
+    from mstar.model.submodule_base import NodeInputs
+
+    sub = QwenImage21DenoiseSubmodule(None, QwenImage21Config(), loop_name="denoise_loop")
+    key = DitKey(8, 6, cfg)
+    inputs = [NodeInputs(resource_step_info=key, input_seq_len=sub.num_tokens(key)) for _ in range(3)]
+    step = sub.declare_step("image_gen", ["a", "b", "c"], inputs)
+    assert sum(s.span for s in step.steps[KV].segments) == sum(inp.input_seq_len for inp in inputs)
