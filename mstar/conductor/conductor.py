@@ -1370,6 +1370,18 @@ class Conductor:
             # partition's (which startup checked are the model's), or a ``bind`` key
             # that isn't an input of the step's walk. A model bug, so a 500.
             for k, step in enumerate(pstate.plan):
+                if bad := sorted(f"{name}->{to}" for name, to in step.exits.items() if not 0 <= to <= len(pstate.plan)):
+                    raise RuntimeError(
+                        f"{type(self.model).__name__}'s plan for partition {p.name!r} has exits {bad} on step {k}, "
+                        f"which are not steps of its {len(pstate.plan)}-step plan or its end"
+                    )
+                if stream_moved and (back := sorted(name for name, to in step.exits.items() if to <= k)):
+                    # the stream-moved lookup finds a step by walk name, going forward
+                    raise RuntimeError(
+                        f"{type(self.model).__name__}'s plan for partition {p.name!r} has exits {back} on step {k} "
+                        "that lead back, which a partition a stream moves cannot follow"
+                    )
+                pstate.cyclic |= any(to <= k for to in step.exits.values())
                 if step.walk not in p.graph_walks:
                     raise RuntimeError(
                         f"{type(self.model).__name__}'s plan for partition {p.name!r} runs {step.walk!r}, "
@@ -1938,6 +1950,14 @@ class Conductor:
         # the pass: that can be another worker's (an encoder's, say).
         if body.partition_done:
             pstate.worker_reported_done = True
+        if body.exit:
+            # only the rank that took the exit reports it; two ranks naming different ones is a bug
+            if pstate.exit and pstate.exit != body.exit:
+                raise RuntimeError(
+                    f"partition {partition_name!r} of request {body.request_id} ended through exits "
+                    f"{pstate.exit!r} and {body.exit!r} in one pass"
+                )
+            pstate.exit = body.exit
 
         # Persist signals: every rank contributes its shard (different uuid +
         # source_tp_rank); accumulate across ranks, do not dedup. What an
@@ -2071,6 +2091,7 @@ class Conductor:
         pstate.current_worker_graph_ids = set()
         pstate.wg_rank_completions = {}
         pstate.worker_reported_done = False
+        pstate.exit = ""
         pstate.fwd_pass_number += 1
 
         self._set_partition_worker_graph_ids(request_id, partition_name, pstate.graph_walk)
@@ -2126,22 +2147,45 @@ class Conductor:
                 logger.debug("partition %s reported walk %s, which its plan is past", partition_name, walk)
                 return stay
             pstate.cursor = k
-            if k + 1 < len(plan) and not self._walk_inputs[plan[k + 1].walk]:
-                return stay
         elif walk in self._repeating_walks:
             # each chunk's pass gets the step's edges, so its node is ready; the
             # tensors went with the first, and a later step may still hold them
             return self._plan_step(request_data, pstate, k, with_tensors=False)
-        if k + 1 >= len(plan):
+        # the step the report's exit leads to, else the next one in the list
+        nxt = plan[k].exits.get(pstate.exit, k + 1)
+        if nxt < len(plan) and partition_name in self.producer_triggered_partitions \
+                and not self._walk_inputs[plan[nxt].walk]:
+            return stay
+        if nxt >= len(plan):
             stay.request_done = True
             return stay
-        args = self._plan_step(request_data, pstate, k + 1)
+        args = self._plan_step(request_data, pstate, nxt)
         args.unpersist_tensors = self._consumed(request_data, [partition_name])
         return args
 
     def _reads(self, step: WalkStep) -> set[str]:
         """The persisted names ``step`` reads."""
         return {step.bind.get(name, name) for name, _ in self._walk_inputs[step.walk]}
+
+    def _later_reads(self, plan: list[WalkStep], k: int) -> set[str]:
+        """The names a step after step ``k`` reads as they are held now: along some
+        path of the plan's edges from ``k``, no walk persists the name before
+        the step. What a walk persists replaces what it read."""
+        def after(j: int) -> set[int]:
+            return {t for t in (j + 1, *plan[j].exits.values()) if t < len(plan)}
+
+        reads: set[str] = set()
+        seen: set[tuple[int, frozenset[str]]] = set()
+        todo = [(j, frozenset(self._walk_persists[plan[k].walk])) for j in after(k)]
+        while todo:
+            j, fresh = todo.pop()
+            if (j, fresh) in seen:
+                continue
+            seen.add((j, fresh))
+            reads |= self._reads(plan[j]) - fresh
+            fresh = fresh | self._walk_persists[plan[j].walk]
+            todo.extend((t, fresh) for t in after(j))
+        return reads
 
     def _consumed(self, request_data: RequestData, sent: list[str]) -> list[TensorPointerInfo]:
         """The held tensors to release once the current steps of the ``sent``
@@ -2159,13 +2203,8 @@ class Conductor:
         # the names a later step reads as they are held now
         still_read: set[str] = set()
         for pstate in states.values():
-            if pstate.is_done or not pstate.plan:
-                continue
-            plan = pstate.plan
-            fresh = self._walk_persists[plan[pstate.cursor].walk]
-            for step in plan[pstate.cursor + 1:]:
-                still_read |= self._reads(step) - fresh
-                fresh = fresh | self._walk_persists[step.walk]
+            if not (pstate.is_done or not pstate.plan):
+                still_read |= self._later_reads(pstate.plan, pstate.cursor)
         return [
             info for name, infos in request_data.persist_signals.items()
             if name in read_now and name not in still_read for info in infos
@@ -2202,7 +2241,9 @@ class Conductor:
                         random_seed=pstate.random_seed,
                         resource_publish_info=pstate.resource_publish_info,
                         partition_name=partition_name,
-                        max_tokens=request_data.max_output_tokens,
+                        # a plan that comes back to a decode walk runs it under what is left
+                        max_tokens=max(1, request_data.max_output_tokens - pstate.num_output_tokens)
+                        if pstate.cyclic else request_data.max_output_tokens,
                         resource_configs=request_data.resource_configs,
                     ),
                     partition_name=partition_name

@@ -1776,6 +1776,13 @@ methods are:
    model that runs another walk after its loop (an ``align`` walk, or image generation after
    thinking) or publishes final-only state at the loop's stop must not return it there. Keep
    ``check_stop_batched``, if you write one, in agreement.
+   A step's walk can end through a named exit: its node's ``check_stop`` returns
+   ``StopCheck(exit="tool_call")``. The plan's ``WalkStep(..., exits={"tool_call": j})`` then
+   runs step ``j`` instead of the next one; an exit the step does not list runs the next one. A
+   target may be any step, even an earlier one (``""``, the unnamed end, is an exit too, so
+   ``exits={"": 1}`` loops back), or ``len(plan)``, which ends the plan. A plan that comes back
+   runs each step under the output budget it has left (``max_tokens``), and a partition a stream
+   moves cannot have one.
    To also keep some of this step's outputs from being routed, return
    ``StopCheck(stops, withheld=(names...))``, for example a frame streamed alongside the
    EOS token: its consumer then never receives it, instead of finding and dropping it with

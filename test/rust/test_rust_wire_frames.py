@@ -643,6 +643,22 @@ def test_a_speculative_completion_does_not_report_the_partition_done(tmp_path):
     assert not body.partition_done, "a speculative pass reported done"
 
 
+def test_a_named_exit_rides_one_report_and_waits_out_a_speculative_pass(tmp_path):
+    """A loop's stop names the exit while its next iteration was already run
+    speculatively. That pass is discarded with the stop and reports nothing, so
+    the exit stays for the frame that really ends the walk, and is taken once."""
+    mesh = _Mesh(tmp_path, outs=[("out", "", False)])
+    rid = mesh.admit()
+    mesh.rt.mark_exit(rid, "default", "tool_call")
+
+    mesh.rt.set_in_flight("only", [rid], [WG_ID], True)
+    assert mesh.run(rid, uuids=[])["conductor"][0].body.exit == ""
+
+    mesh.rt.set_in_flight("only", [rid], [WG_ID], False)
+    assert mesh.run(rid, uuids=[])["conductor"][0].body.exit == "tool_call"
+    assert mesh.run(rid, uuids=[])["conductor"][0].body.exit == ""
+
+
 # --- the fanout reaches each destination worker once, with its own slice -----
 
 P2 = "worker_2"

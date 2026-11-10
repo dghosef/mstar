@@ -455,6 +455,9 @@ class ExecutingBatch:
     # rids for which this step ends every finite stream into the partition, or
     # whose stop check returned END_PARTITION; this step reports the partition done
     partition_done_rids: set[int] = field(default_factory=set)
+    # rid -> the named exit its stop check took (``StopCheck.exit``); this step
+    # ends the walk through it
+    exits: dict[int, str] = field(default_factory=dict)
 
     # rid -> the part of a chunked row's input this step runs
     chunk_ranges: Mapping[int, ChunkRange] = field(default_factory=dict)
@@ -618,6 +621,8 @@ class ExecutingBatch:
         ended = rids - (self.skipped_rids - self.cached_rids)
         self.final_stream_rids.difference_update(ended)
         self.partition_done_rids.difference_update(ended)
+        for rid in ended:
+            self.exits.pop(rid, None)
         self.per_request_info = {
             rid: info for rid, info in self.per_request_info.items()
             if rid not in rids
@@ -2490,7 +2495,7 @@ class Engine:
         host_rows: HostRows | None = None,
     ) -> dict[str, set[str]]:
         """Each rid's ``submodule.check_stop``, as rid -> its stops (loop names,
-        or ``END_PARTITION``).
+        or ``END_PARTITION``). The exits they name go on ``batch.exits``.
 
         Reads tensor values, so it belongs on the caller's slow-postprocess
         path rather than in ``exec``, where the ``.item()`` / ``.cpu()`` would
@@ -2540,6 +2545,8 @@ class Engine:
             if isinstance(rid_stops, StopCheck):
                 if rid_stops.withheld:
                     withheld[rid] = rid_stops.withheld
+                if rid_stops.exit:
+                    batch.exits[rid] = rid_stops.exit
                 rid_stops = rid_stops.stops
             if rid_stops:
                 stops[rid] = rid_stops

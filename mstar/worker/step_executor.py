@@ -750,6 +750,7 @@ class StepExecutor:
                 # its loop already stopped; see ExecutingBatch.drop_rids
                 batch_N.node_batch.final_stream_rids.discard(stopped_rid)
                 batch_N.node_batch.partition_done_rids.discard(stopped_rid)
+                batch_N.node_batch.exits.pop(stopped_rid, None)
         # keep the forward's order: other code walks this list positionally
         batch_N.node_batch.request_ids = [
             rid for rid in batch_N.node_batch.request_ids if rid in valid_rids
@@ -1036,6 +1037,11 @@ class StepExecutor:
         # stop would cut the prompt short. Its chunk Loop ends by its own count.
         for rid in batch_N.batch.incomplete_node_rids:
             stops.pop(rid, None)
+            batch_N.node_batch.exits.pop(rid, None)
+        # The runtime reports the named exits on the send that follows, a
+        # speculative node's excepted.
+        for rid, exit_name in batch_N.node_batch.exits.items():
+            self._graph_runtime.mark_exit(rid, batch_N.partition, exit_name)
         ended = []
         # Only a row outside any loop can end its pass here: inside one it
         # would stop only the innermost loop, and a speculated next iteration
@@ -1422,6 +1428,7 @@ class StepExecutor:
             # its streams do not end here; see ExecutingBatch.drop_rids
             pending.node_batch.final_stream_rids.discard(rid)
             pending.node_batch.partition_done_rids.discard(rid)
+            pending.node_batch.exits.pop(rid, None)
         pending.node_batch.request_ids = [
             rid for rid in pending.node_batch.request_ids
             if rid not in failed_requests
