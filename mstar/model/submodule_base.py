@@ -625,9 +625,16 @@ class ARNodeInputs(NodeInputs):
     # Tensor for single cache label, dict for multi-label
     custom_pos_ids: torch.Tensor | dict[str, torch.Tensor] | None = None
 
-    # The position the row's first id belongs at, for a row whose request may have written that id already (the
-    # stop token a decode loop speculated past). The step's `declare_step` drops what the position resource
-    # says is written (`SampledTokenDecoder.declare_step`); None for every other row.
+    # Where the row's first id belongs, for a row written after the prompt's layout; the KV probe keys it by this,
+    # not by the stream's length, which lags a step still running. Each producer gives its own unit: a tool's text
+    # the position counter (`PREFILL_END` plus the ids since), a spoken turn's transcript chunks and suffix a KV
+    # slot (one per id, which an image's MRoPE span makes larger than the counter). For a row after a decode the
+    # first id is the stop token, which the step speculated past it may have written already:
+    # `SampledTokenDecoder.declare_step` drops it by the position resource, which changes the row's length after
+    # the engine has read it (batch budget, capture lease), safe while a node's captures pad to a bucket and it has
+    # no piecewise region sized by the row. No media prompt is keyed (its span is not), so a spoken turn with an
+    # image keys nothing, and `declare_step` skips the counter check for a spoken turn's rows. None for every other
+    # row.
     starts_at: int | None = None
 
     @classmethod
