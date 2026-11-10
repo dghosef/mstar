@@ -76,7 +76,7 @@ class LoraAdapterOps:
         self._pending: dict[str, _PendingOp] = {}
 
     def load(self, body: LoadLoraAdapter) -> None:
-        refusal = self._refusal(body.lora_name)
+        refusal = self._refusal(body)
         if refusal is not None:
             self._answer(body.op_id, *refusal)
             return
@@ -85,7 +85,7 @@ class LoraAdapterOps:
     def unload(self, body: UnloadLoraAdapter) -> None:
         """Running requests on the name finish on its weights; the API server took it out
         of selection before asking."""
-        refusal = self._refusal(body.lora_name)
+        refusal = self._refusal(body)
         if refusal is not None:
             self._answer(body.op_id, *refusal)
             return
@@ -117,11 +117,12 @@ class LoraAdapterOps:
                     detail=f"LoRA adapter '{config.adapter}' is being loaded or unloaded; retry once that is done",
                 )
 
-    def _refusal(self, name: str) -> tuple[int, str] | None:
+    def _refusal(self, body: LoadLoraAdapter | UnloadLoraAdapter) -> tuple[int, str] | None:
         if self._spec is None or not self._spec.runtime_updates:
             return 404, "Not Found"  # as the API server answers
-        if any(op.body.lora_name == name for op in self._pending.values()):
-            return 409, f"a load or unload of LoRA adapter '{name}' is already in progress"
+        # by weights, as requests are: a rollback of the op in flight would undo this one
+        if any(op.body.lora_digest == body.lora_digest for op in self._pending.values()):
+            return 409, f"a load or unload of the weights of LoRA adapter '{body.lora_name}' is already in progress"
         return None
 
     def next_deadline(self) -> float | None:

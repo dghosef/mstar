@@ -399,17 +399,22 @@ class _Outbox:
 
 
 def test_a_load_is_answered_only_once_every_worker_acknowledged(paths):
-    """The API server makes the name selectable on the answer (``LoraAdmin.on_result``)."""
+    """The API server makes the name selectable on the answer (``LoraAdmin.on_result``).
+    Meanwhile another load or unload of the same weights, under any name, is refused: a
+    rollback of the first would undo the second on the workers."""
     spec = make_spec({"a1": paths["a1"]}, runtime_updates=True)
     out = _Outbox()
     ops = LoraAdapterOps(spec, ["worker_0", "worker_1"], out)
     ops.load(LoadLoraAdapter(op_id="op1", lora_name="a2", lora_path=paths["a2"], lora_digest="ab" * 32))
+    ops.load(LoadLoraAdapter(op_id="op2", lora_name="b2", lora_path=paths["a2"], lora_digest="ab" * 32))
+    ops.unload(UnloadLoraAdapter(op_id="op3", lora_name="b2", lora_digest="ab" * 32))
+    assert [(a.op_id, a.status) for a in out.answers()] == [("op2", 409), ("op3", 409)]
     for worker in ("worker_0", "worker_1"):
         assert [m.message_type for m in out.to(worker)] == [WorkerMessageType.LOAD_LORA_ADAPTER]
     ops.ack(LoraAdapterAck(op_id="op1", worker_id="worker_0"))
-    assert out.answers() == []
+    assert len(out.answers()) == 2
     ops.ack(LoraAdapterAck(op_id="op1", worker_id="worker_1"))
-    assert out.answers() == [LoraAdapterResult(op_id="op1", status=200)]
+    assert out.answers()[2:] == [LoraAdapterResult(op_id="op1", status=200)]
 
 
 def test_a_request_on_weights_being_loaded_or_unloaded_is_refused(paths):
