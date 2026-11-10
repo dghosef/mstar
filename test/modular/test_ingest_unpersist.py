@@ -915,6 +915,21 @@ def test_a_parent_that_is_aborted_takes_its_children_with_it_and_tells_the_api_s
     assert not [b for b in _sent(c, "INPUT_SIGNALS") if b.request_info.graph_walk == "t"], "the join ran"
 
 
+def test_a_tool_step_after_a_join_is_not_sent_the_answers_the_join_read():
+    """The answers stay held to the request's end (the plan comes back to the join's name), and the children's
+    tensors are released after the join: a later tool step must not read them."""
+    from mstar.model.components.python_tool import AGENT_ANSWERS, tool_plan, tool_walks
+
+    walks = {**tool_walks(spawn=True), "p": GraphNode(name="n", input_names=["text_inputs"], outputs=[
+        GraphEdge(next_node=EMPTY_DESTINATION, name="first", persist=True)]), **_decoder_walks(())}
+    plan = tool_plan([WalkStep("p")], "decode", "p", False, spawn=True)
+    model = _ToyModel(walks, {"default": plan}, {"default": list(walks)})
+    held = {name: [_info(u)] for name, u in (("tool_calls", 1), (AGENT_ANSWERS, 2), ("text_inputs", 3))}
+    sent = {step.walk: [e.name for e in plan_step(model, plan, k, held).inputs]
+            for k, step in enumerate(plan) if step.walk in ("tool", "join")}
+    assert AGENT_ANSWERS not in sent["tool"] and AGENT_ANSWERS in sent["join"]
+
+
 def _after(tmp_path, monkeypatch, name, *more):
     """A conductor after the parent spawned two agents (none has answered), then the batches ``more`` makes."""
     (tmp_path / name).mkdir()

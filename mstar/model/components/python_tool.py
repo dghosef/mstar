@@ -83,6 +83,7 @@ ROUTER_NODE = "Router"
 ROUTE_WALK = "route"
 TOOL_NODE = "Tool"
 TOOL_WALK = "tool"
+JOIN_WALK = "join"
 TOOL_CALLS = "tool_calls"
 TOOL_TEXT = "tool_text"
 # the exits of the router: a turn with no tool call answers (the plan ends); one with calls runs them
@@ -238,25 +239,33 @@ def check_tools(names: Sequence[str]) -> tuple[str, ...]:
 def tool_walks(spawn: bool = False) -> dict[str, GraphSection]:
     """The ``route`` walk (the turn's ids in, the parsed calls out) and the ``tool`` walk (the calls
     in, ``tool_text`` out, persisted and counted toward the request's output budget). With ``spawn`` the
-    router also persists a spawn's prompts and flag and a child's answer, and the tool node reads the
-    answers of the agents."""
+    router also persists a spawn's prompts and flag and a child's answer, and a ``join`` walk of the tool
+    node reads the answers of the agents."""
     outputs = [GraphEdge(next_node=EMPTY_DESTINATION, name=TOOL_CALLS, persist=True)]
     if spawn:
         outputs += [
             GraphEdge(next_node=EMPTY_DESTINATION, name=name, persist=True)
             for name in (*AGENT_PROMPTS, SPAWNED, AGENT_ANSWER)
         ]
-    return {
+    def tool(inputs: list[str]) -> GraphNode:
+        return GraphNode(
+            name=TOOL_NODE, input_names=inputs,
+            outputs=[GraphEdge(
+                next_node=EMPTY_DESTINATION, name=TOOL_TEXT, persist=True, conductor_new_token=True)],
+        )
+
+    walks = {
         ROUTE_WALK: GraphNode(
             name=ROUTER_NODE, input_names=["new_token", TURN_IDS, PREFILL_END, *([SPAWNED] if spawn else [])],
             outputs=outputs,
         ),
-        TOOL_WALK: GraphNode(
-            name=TOOL_NODE, input_names=[TOOL_CALLS, *([AGENT_ANSWERS] if spawn else [])],
-            outputs=[GraphEdge(
-                next_node=EMPTY_DESTINATION, name=TOOL_TEXT, persist=True, conductor_new_token=True)],
-        ),
+        TOOL_WALK: tool([TOOL_CALLS]),
     }
+    if spawn:
+        # The join is a walk of its own: the answers are held to the request's end, so a tool step that read
+        # them would find, after the join, tensors the children's release has freed.
+        walks[JOIN_WALK] = tool([TOOL_CALLS, AGENT_ANSWERS])
+    return walks
 
 
 def tool_plan(
@@ -287,7 +296,7 @@ def tool_plan(
     ]
     if spawn:
         plan += [
-            WalkStep(TOOL_WALK, step_metadata={"enable_thinking": enable_thinking}, joins=True),
+            WalkStep(JOIN_WALK, step_metadata={"enable_thinking": enable_thinking}, joins=True),
             WalkStep(
                 prefill_walk, bind={"text_inputs": TOOL_TEXT}, exits={"": n},
                 step_metadata={FINAL_PREFILL: True, TOOLS: True, APPENDS: True},
