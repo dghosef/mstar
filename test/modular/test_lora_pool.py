@@ -14,7 +14,7 @@ import pytest
 import torch
 
 pytest.importorskip("safetensors")
-from lora_module_helpers import pin_digests  # noqa: E402
+from lora_module_helpers import digest_of, lora_request, pin_digests  # noqa: E402
 from safetensors.torch import save_file  # noqa: E402
 
 from mstar.distributed.base import PARALLEL_AXES  # noqa: E402
@@ -137,9 +137,10 @@ def run_step(pool, rids, spans=None, commit=True, **ctx_kw):
     return outcome
 
 
-def ingest(pool, rid, adapter):
-    """As the conductor opens a request: a base-model one carries no config."""
-    pool.ingest_request(rid, None if adapter is None else LoraReqConfig(adapter=adapter))
+def ingest(pool, rid, adapter, digest: bytes | None = None):
+    """As the conductor opens a request: on ``digest``, or a configured adapter's pinned
+    one; a base-model one carries no config."""
+    pool.ingest_request(rid, lora_request(pool, adapter) if digest is None else LoraReqConfig(adapter, digest))
 
 
 def token_slots_of(addr) -> list[int]:
@@ -186,8 +187,8 @@ def test_admit_refcount_lru_evict_and_the_zero_slot(adapters):
     assert pool.scalings[ZERO_SLOT] == 0
     for rid, name in [("base", None), ("r1", "a1"), ("r2", "a2"), ("r3", "a3"), ("r4", "a2"), ("r5", "a1")]:
         ingest(pool, rid, name)
-    with pytest.raises(ValueError):
-        ingest(pool, "bad", "nope")
+    with pytest.raises(ValueError, match="no longer served"):
+        ingest(pool, "bad", "nope", digest=bytes(32))
     assert run_step(pool, ["base", "r1", "r2"]).ok
     s1, s2 = pool.slot_of("r1"), pool.slot_of("r2")
     assert pool.slot_of("base") == ZERO_SLOT and {s1, s2} == {1, 2} and pool.slot_state(s1).refcount == 1
@@ -207,12 +208,12 @@ def test_admit_refcount_lru_evict_and_the_zero_slot(adapters):
     assert run_step(pool, ["r4"]).ok
     pool.remove_request("r4")
     assert run_step(pool, ["r3"]).ok
-    assert pool.slot_of("r3") == s1 and pool.resident_slot("a1") is None
-    assert pool.resident_slot("a2") == s2  # unheld, but still resident
+    assert pool.slot_of("r3") == s1 and pool.resident_slot(digest_of(pool, "a1")) is None
+    assert pool.resident_slot(digest_of(pool, "a2")) == s2  # unheld, but still resident
     # the evicted slot takes the new adapter's per-layer ranks: a3 adapts o alone
     assert pool.layer_ranks("qkv", 0)[s1] == 0 and pool.layer_ranks("o", 1)[s1] == 3
     # a1 comes back into the slot a2 kept warm, the only unheld one
-    assert run_step(pool, ["r5"]).ok and pool.slot_of("r5") == s2 and pool.resident_slot("a2") is None
+    assert run_step(pool, ["r5"]).ok and pool.slot_of("r5") == s2 and pool.resident_slot(digest_of(pool, "a2")) is None
 
 
 def test_an_adapter_with_nothing_for_the_pools_targets_takes_no_slot(adapters, tmp_path):
@@ -228,7 +229,7 @@ def test_an_adapter_with_nothing_for_the_pools_targets_takes_no_slot(adapters, t
     assert admitted(runner, "r1") and run_step(pool, ["r1"]).ok
     assert admitted(runner, "e1") and pool.lean_for(["e1"]) and not pool.lean_for(["e1", "r1"])
     assert run_step(pool, ["r1", "e1"]).ok and pool.slot_of("e1") == ZERO_SLOT
-    assert pool.slot_state(1).refcount == 1 and pool.resident_slot("mlp") is None and "mlp" not in pool.store
+    assert pool.slot_state(1).refcount == 1 and pool.resident_slot(digest_of(pool, "mlp")) is None and digest_of(pool, "mlp") not in pool.store
 
 
 def test_a_spec_over_two_nodes_builds_a_pool_per_node(adapters):
@@ -278,7 +279,7 @@ def test_rollback_undoes_only_what_this_admit_took(adapters):
     pool.rollback_admit(s, c)
     assert pool.slot_of("old") == held and pool.slot_state(held).refcount == 1
     assert pool.slot_of("new") is None and pool.slot_of("same") is None
-    new_slot = pool.resident_slot("a2")
+    new_slot = pool.resident_slot(digest_of(pool, "a2"))
     assert new_slot is not None and pool.slot_state(new_slot).refcount == 0
     # retried: a2 is still resident, so it is not reloaded elsewhere
     assert run_step(pool, ["old", "new", "same"]).ok
@@ -291,12 +292,12 @@ def test_a_miss_does_not_evict_a_resident_adapter_a_later_row_names(adapters):
     for rid, name in [("w1", "a1"), ("w2", "a2"), ("r3", "a3"), ("r1", "a1")]:
         ingest(pool, rid, name)
     assert run_step(pool, ["w1", "w2"]).ok
-    a1_slot = pool.resident_slot("a1")
+    a1_slot = pool.resident_slot(digest_of(pool, "a1"))
     pool.remove_request("w1")  # a1's slot is now the LRU victim
     assert run_step(pool, ["w2"]).ok
     pool.remove_request("w2")
     assert run_step(pool, ["r3", "r1"]).ok
-    assert pool.slot_of("r1") == a1_slot and pool.slot_of("r3") == pool.resident_slot("a3") != a1_slot
+    assert pool.slot_of("r1") == a1_slot and pool.slot_of("r3") == pool.resident_slot(digest_of(pool, "a3")) != a1_slot
 
 
 def test_addressing_contents(adapters):
@@ -362,10 +363,10 @@ def test_store_shards_for_its_rank_and_keeps_an_lru(adapters):
     store = LoraAdapterStore(make_spec(paths, cpu_capacity=2))
     for name in ("a1", "a2"):
         store.load(name, paths[name], digests[name])
-    assert not store.hold("a1")  # a1 now most recent
+    assert not store.hold(digests["a1"])  # a1 now most recent
     store.load("a3", paths["a3"], digests["a3"])
-    assert "a1" in store and "a3" in store and "a2" not in store
-    assert store.get("a3").digest != whole.digest == store.get("a1").digest
+    assert digests["a1"] in store and digests["a3"] in store and digests["a2"] not in store
+    assert store.get(digests["a3"]).digest != whole.digest == store.get(digests["a1"]).digest
 
 
 def test_a_runtime_load_stages_no_copy_until_a_request_names_it(adapters):
@@ -383,10 +384,10 @@ def test_a_runtime_load_stages_no_copy_until_a_request_names_it(adapters):
     pool.store.read = tracked
     for name in ("a1", "a2", "a3"):
         pool.load_adapter(name, paths[name], digests[name])
-    assert reads == [] and all(pool.serves(n) for n in ("a1", "a2", "a3"))
-    ingest(pool, "r", "a2")
+    assert reads == [] and all(pool.serves(d) for d in digests.values())
+    ingest(pool, "r", "a2", digests["a2"])
     settle_reads(pool)
-    assert "a2" in pool.store and reads == ["a2"]
+    assert digests["a2"] in pool.store and reads == ["a2"]
 
 
 # --- numerics and compile ------------------------------------------------------------------------
@@ -500,7 +501,7 @@ def test_slots_take_the_nodes_compute_dtype(adapters):
     a, b = pool.weights("qkv", 0)
     assert pool.dtype is torch.float16 and a.dtype is b.dtype is torch.float16
     ingest(pool, "r", "a1")
-    assert run_step(pool, ["r"]).ok and pool.store.get("a1").a["qkv"].dtype is torch.float16
+    assert run_step(pool, ["r"]).ok and pool.store.get(digest_of(pool, "a1")).a["qkv"].dtype is torch.float16
     # a spec's own dtype wins; with neither, the build says what is missing
     assert LoraAdapterPool(make_spec(paths), "cpu", dtype=torch.float16).dtype is torch.float64
     with pytest.raises(ValueError, match="no dtype"):
@@ -784,7 +785,7 @@ def test_a_request_on_a_resident_adapter_waits_for_its_host_copy(adapters):
     gate, read = threading.Event(), pool.store.read
     pool.store.read = lambda name, path, digest: gate.wait(10) and read(name, path, digest)
     ingest(pool, "r", "a1")
-    assert pool.resident_slot("a1") is not None and "a1" not in pool.store
+    assert pool.resident_slot(digest_of(pool, "a1")) is not None and digest_of(pool, "a1") not in pool.store
     assert runner.admit_retrieve("r", "LLM", "decode").queued
     gate.set()
     settle_reads(pool)
@@ -866,10 +867,10 @@ def test_a_request_on_a_resident_adapter_whose_read_failed_still_counts_a_slot(a
     for rid, name in [("r", "a1"), ("y", "a3")]:
         ingest(pool, rid, name)
     settle_reads(pool)
-    assert pool.resident_slot("a1") is not None and "a1" not in pool.store
+    assert pool.resident_slot(digest_of(pool, "a1")) is not None and digest_of(pool, "a1") not in pool.store
     assert admitted(runner, "y") and runner.admit_retrieve("r", "LLM", "decode").queued
     # y's miss evicts a1, so r is in no slot now: let through at once, to fail
-    assert run_step(pool, ["y"]).ok and pool.resident_slot("a1") is None
+    assert run_step(pool, ["y"]).ok and pool.resident_slot(digest_of(pool, "a1")) is None
     assert runner.admit_waiting(_nothing_published) == [("LLM", "r")]
     reason = run_step(pool, ["y", "r"]).reason
     assert isinstance(reason, AdmitRuntimeError) and reason.request_ids == {"r"}

@@ -142,7 +142,7 @@ async def _lora_admin_call(call, route: str):
 @router.post("/v1/load_lora_adapter")
 async def load_lora_adapter(request: LoadLoraAdapterRequest):
     return await _lora_admin_call(
-        lambda admin: admin.load(request.lora_name, request.lora_path), "/v1/load_lora_adapter",
+        lambda admin: admin.load(request.lora_name, request.lora_path, request.load_inplace), "/v1/load_lora_adapter",
     )
 
 

@@ -101,6 +101,11 @@ def _wire(message):
     return decode(encode(message))
 
 
+def _weights(path) -> bytes:
+    """The digest a pool knows an adapter file's weights by."""
+    return adapter_digest(read_lora_file(path))
+
+
 @pytest.fixture
 def paths(tmp_path):
     out = {}
@@ -280,14 +285,14 @@ class _Admin:
             raise self.error
         return f"Success: LoRA adapter '{call[1]}' {verb} successfully."
 
-    async def load(self, name, path):
-        return await self._answer(("load", name, path), "added")
+    async def load(self, name, path, load_inplace=False):
+        return await self._answer(("load", name, path, load_inplace), "added")
 
     async def unload(self, name):
         return await self._answer(("unload", name), "removed")
 
 
-_ENDPOINTS = (("/v1/load_lora_adapter", {"lora_name": "a", "lora_path": "/p"}),
+_ENDPOINTS = (("/v1/load_lora_adapter", {"lora_name": "a", "lora_path": "/p", "load_inplace": True}),
               ("/v1/unload_lora_adapter", {"lora_name": "a"}))
 
 
@@ -316,7 +321,7 @@ def test_the_lora_endpoints(monkeypatch, error, status, message):
     for path, body in (("/v1/load_lora_adapter", {"lora_name": "b"}), ("/v1/unload_lora_adapter", {})):
         r = client.post(path, json=body)
         assert r.status_code == 400 and r.json()["error"]["code"] == 400
-    assert stub.lora_admin.calls == [("load", "a", "/p"), ("unload", "a")]
+    assert stub.lora_admin.calls == [("load", "a", "/p", True), ("unload", "a")]
 
 
 def test_the_lora_endpoints_are_404_without_runtime_updates(monkeypatch):
@@ -343,7 +348,7 @@ def test_the_lora_endpoints_are_404_without_runtime_updates(monkeypatch):
 
 def test_the_new_messages_round_trip_the_wire():
     load = LoadLoraAdapter(op_id="op", lora_name="sql", lora_path="/a.safetensors", lora_digest="ab" * 32)
-    unload = UnloadLoraAdapter(op_id="op", lora_name="sql")
+    unload = UnloadLoraAdapter(op_id="op", lora_name="sql", lora_digest="ab" * 32)
     for message in (
         ConductorMessage(ConductorMessageType.LOAD_LORA_ADAPTER, load),
         ConductorMessage(ConductorMessageType.UNLOAD_LORA_ADAPTER, unload),
@@ -404,10 +409,12 @@ def test_a_load_is_answered_only_once_every_worker_acknowledged(paths):
     assert out.answers() == [LoraAdapterResult(op_id="op1", status=200)]
 
 
-def test_a_request_on_an_adapter_being_loaded_or_unloaded_is_refused(paths):
+def test_a_request_on_weights_being_loaded_or_unloaded_is_refused(paths):
     """Each worker finishes a load or unload in its own time, so the conductor refuses
-    (409) a request on its adapter until every worker answered, rather than have one rank
-    open the request and another refuse it."""
+    (409) a request on its weights until every worker answered, rather than have one rank
+    open the request and another refuse it. Requests on a name's other weights go on, so
+    a reload in place (load new, then unload old) refuses none on the old weights while
+    the new ones are read."""
     spec = make_spec({}, runtime_updates=True)
     conductor = object.__new__(Conductor)
     conductor.model = make_model(get_node_resources=lambda: [spec], get_request_resource_configs=lambda *a, **kw: {})
@@ -417,22 +424,25 @@ def test_a_request_on_an_adapter_being_loaded_or_unloaded_is_refused(paths):
     conductor._do_ingest_request = lambda body: conductor._get_resource_configs([], [], body.model_kwargs)
     rejected = []
     conductor._reject_request = lambda rid, error, status: rejected.append((rid, status))
+    old, new = "aa" * 32, "ab" * 32
 
-    def admit(rid, adapter):
+    def admit(rid, digest):
         conductor._admit_request(SimpleNamespace(
-            request_id=rid, model_kwargs={LORA_ADAPTER_KWARG: adapter}, client_input=None,
+            request_id=rid, model_kwargs={LORA_ADAPTER_KWARG: "a1", LORA_DIGEST_KWARG: bytes.fromhex(digest)},
+            client_input=None,
         ))
 
-    ops.load(LoadLoraAdapter(op_id="l", lora_name="a1", lora_path=paths["a1"], lora_digest="ab" * 32))
-    admit("on_a1", "a1")
-    admit("on_a2", "a2")
+    ops.load(LoadLoraAdapter(op_id="l", lora_name="a1", lora_path=paths["a1"], lora_digest=new))
+    admit("on_new", new)
+    admit("on_old", old)
     ops.ack(LoraAdapterAck(op_id="l", worker_id="worker_0"))
-    admit("still_on_a1", "a1")
+    admit("still_on_new", new)
     ops.ack(LoraAdapterAck(op_id="l", worker_id="worker_1"))
-    admit("done", "a1")
-    ops.unload(UnloadLoraAdapter(op_id="u", lora_name="a1"))
-    admit("unloading", "a1")
-    assert rejected == [("on_a1", 409), ("still_on_a1", 409), ("unloading", 409)]
+    admit("done", new)
+    ops.unload(UnloadLoraAdapter(op_id="u", lora_name="a1", lora_digest=old))
+    admit("unloading_old", old)
+    admit("on_new_meanwhile", new)
+    assert rejected == [("on_new", 409), ("still_on_new", 409), ("unloading_old", 409)]
 
 
 def test_a_load_a_worker_never_answers_times_out_and_is_undone(paths):
@@ -508,8 +518,8 @@ class _Deployment:
         assert peer == "conductor"
         self.ops.ack(_wire(message).body)
 
-    def load(self, name, path):
-        return asyncio.run(self.admin.load(name, path))
+    def load(self, name, path, load_inplace=False):
+        return asyncio.run(self.admin.load(name, path, load_inplace))
 
     def unload(self, name):
         return asyncio.run(self.admin.unload(name))
@@ -518,7 +528,7 @@ class _Deployment:
 def test_a_runtime_load_and_unload_end_to_end(paths):
     d = _Deployment(paths)
     assert d.load("a1", paths["a1"]) == "Success: LoRA adapter 'a1' added successfully."
-    assert all(pool.serves("a1") for pool in d.pools.values())
+    assert all(pool.serves(_weights(paths["a1"])) for pool in d.pools.values())
     assert d.served.adapter_for("a1") == "a1"
     # its requests are keyed under the weights the workers serve
     root = adapter_prefix_root(d.served.check("a1"))
@@ -531,7 +541,7 @@ def test_a_runtime_load_and_unload_end_to_end(paths):
     # out of selection before any worker hears of it
     assert d.unload_seen == [("worker_0", False), ("worker_1", False)]
     assert d.served.adapters == ()
-    assert not any(pool.serves("a1") for pool in d.pools.values())
+    assert not any(pool.serves(_weights(paths["a1"])) for pool in d.pools.values())
     with pytest.raises(REFUSED) as err:
         d.unload("a1")
     assert _status(err.value) == 404
@@ -577,7 +587,7 @@ def test_a_retry_after_a_timeout_runs_behind_the_slow_workers_rollback(paths):
         _finish_when_read(d.workers["worker_1"])
     assert not d.workers["worker_1"].ingest.lora_loads
     assert answers[-1] == LoraAdapterResult(op_id="op2", status=200)
-    assert all(pool.serves("a1") for pool in d.pools.values())
+    assert all(pool.serves(_weights(paths["a1"])) for pool in d.pools.values())
 
 
 def test_a_failed_read_on_one_worker_is_undone_everywhere_without_leaking_the_io_error(paths):
@@ -587,8 +597,8 @@ def test_a_failed_read_on_one_worker_is_undone_everywhere_without_leaking_the_io
     assert _status(err.value) == 400 and "could not be read" in _message(err.value)
     # the I/O error and the worker ids stay in the server log
     assert "/srv/secret" not in _message(err.value) and "worker_1" not in _message(err.value)
-    assert not any(pool.serves("a1") for pool in d.pools.values())
-    assert "a1" not in d.pools["worker_0"].store and d.served.adapters == ()
+    assert not any(pool.serves(_weights(paths["a1"])) for pool in d.pools.values())
+    assert _weights(paths["a1"]) not in d.pools["worker_0"].store and d.served.adapters == ()
 
 
 def test_a_refused_path_tells_the_client_nothing_about_the_servers_files(paths, tmp_path, caplog):
@@ -640,31 +650,71 @@ def test_a_refused_path_tells_the_client_nothing_about_the_servers_files(paths, 
     with pytest.raises(REFUSED) as err:
         d.load("wide", str(wide))
     assert _status(err.value) == 400 and "max_rank" in _message(err.value)
-    assert not any(pool.serves(n) for pool in d.pools.values() for n in ("x", "wide"))
+    assert not any(pool.serves(_weights(str(wide))) for pool in d.pools.values())
 
 
-def test_requests_on_an_unloaded_adapter_finish_and_new_ones_are_refused(paths):
+def test_requests_on_old_weights_finish_after_an_unload_or_a_reload_in_place(paths):
+    """An unload stops new requests on the name; those already running finish on its
+    weights, and the name may be loaded again meanwhile. A reload in place moves the name
+    to new weights the same way: requests selected before the move finish on the old
+    weights, new ones run the new, and the old ones are freed once their last request ends."""
     d = _Deployment(paths)
-    d.load("a1", paths["a1"])
+    a1, a2 = _weights(paths["a1"]), _weights(paths["a2"])
+    d.load("sql", paths["a1"])
     for pool in d.pools.values():
-        ingest(pool, "r1", "a1")
+        ingest(pool, "r1", "sql", d.served.check("sql"))
         assert run_step(pool, ["r1"]).ok
     slots = {w: pool.slot_of("r1") for w, pool in d.pools.items()}
     for pool in d.pools.values():
         pool.drop("r1", 3)  # preempted (#870): it keeps its adapter and slot through the unload
-    d.unload("a1")
+    d.unload("sql")
     for w, pool in d.pools.items():
         assert run_step(pool, ["r1"]).ok  # still running on its slot
-        assert pool.slot_state(slots[w]).refcount == 1 and "a1" in pool.store
-        with pytest.raises(ValueError, match="unknown LoRA adapter"):
-            ingest(pool, "r2", "a1")
-    # a reload before they finish is refused on every worker, and rolled back
-    with pytest.raises(REFUSED, match="still running"):
-        d.load("a1", paths["a1"])
+        assert pool.slot_state(slots[w]).refcount == 1 and a1 in pool.store
+        with pytest.raises(ValueError, match="no longer served"):
+            ingest(pool, "r2", "sql", a1)
+    d.load("sql", paths["a1"])  # again while r1 runs: the same weights, served at once
+    with pytest.raises(REFUSED, match="load_inplace"):
+        d.load("sql", paths["a2"])
+    d.load("sql", paths["a2"], load_inplace=True)
+    assert d.served.check("sql") == a2
     for w, pool in d.pools.items():
+        assert pool.serves(a2) and not pool.serves(a1)
+        with pytest.raises(ValueError, match="no longer served"):
+            ingest(pool, "late", "sql", a1)  # selected on the old weights before the move
+        ingest(pool, "r3", "sql", a2)
+        assert run_step(pool, ["r1", "r3"]).ok
+        assert pool.slot_of("r1") == slots[w] != pool.slot_of("r3")  # r1 stays on a1's slot
         pool.remove_request("r1")
-        assert pool.slot_state(slots[w]).refcount == 0
-        assert "a1" not in pool.store and pool.resident_slot("a1") is None
+        assert a1 not in pool.store and pool.resident_slot(a1) is None
+
+
+def test_a_reload_in_place_that_fails_on_one_worker_keeps_the_old_weights(paths):
+    """The load is undone on the other workers by its digest, so the name and its old
+    weights stay served everywhere."""
+    d = _Deployment(paths)
+    a1, a2 = _weights(paths["a1"]), _weights(paths["a2"])
+    d.load("sql", paths["a1"])
+
+    def broken(name, path, digest):
+        raise OSError("cannot read /srv/secret on this rank")
+    d.pools["worker_1"].store.checked_rank = broken
+    with pytest.raises(REFUSED) as err:
+        d.load("sql", paths["a2"], load_inplace=True)
+    assert _status(err.value) == 400 and "could not be read" in _message(err.value)
+    assert d.served.check("sql") == a1
+    assert all(pool.serves(a1) and not pool.serves(a2) for pool in d.pools.values())
+
+
+def test_two_names_on_the_same_weights_share_them_on_the_workers(paths):
+    d = _Deployment(paths)
+    a1 = _weights(paths["a1"])
+    d.load("sql", paths["a1"])
+    d.load("chat", paths["a1"])  # no worker hears of it: they serve these weights already
+    d.unload("sql")
+    assert d.served.adapters == ("chat",) and all(pool.serves(a1) for pool in d.pools.values())
+    d.unload("chat")
+    assert not any(pool.serves(a1) for pool in d.pools.values())
 
 
 # --- startup checks and digests --------------------------------------------------------------
@@ -724,13 +774,14 @@ def test_a_file_changed_on_disk_is_refused_on_every_rank(paths):
     barrier, pools = _Barrier(2), []
     for rank in range(2):
         # a2 first: the preload reads only it, so a1's first read comes after the change
-        spec = make_spec({"a2": path, "a1": path}, max_slots=1, cpu_capacity=1)
+        spec = make_spec({"a2": paths["a2"], "a1": path}, max_slots=1, cpu_capacity=1)
         pools.append(LoraAdapterPool(spec, "cpu", rank=rank, world_size=2, agree=barrier.for_rank(rank)))
+    checked = _weights(path)
     write_adapter(path, rank=2, seed=7)  # same name and shapes, other weights
     outcomes = [None, None]
 
     def run(i):
-        ingest(pools[i], "r1", "a1")
+        ingest(pools[i], "r1", "a1", checked)
         outcomes[i] = run_step(pools[i], ["r1"])
 
     threads = [threading.Thread(target=run, args=(i,)) for i in range(2)]
@@ -742,11 +793,12 @@ def test_a_file_changed_on_disk_is_refused_on_every_rank(paths):
         assert not outcome.ok and isinstance(outcome.reason, AdmitRuntimeError)
         assert outcome.reason.request_ids == frozenset({"r1"})
     assert "changed on disk" in outcomes[0].reason.message + outcomes[1].reason.message
-    assert all(pool.resident_slot("a1") is None for pool in pools)
+    assert all(pool.resident_slot(checked) is None for pool in pools)
 
 
 def test_a_runtime_load_whose_file_changes_before_the_workers_read_it_is_refused(paths):
     d = _Deployment(paths)
+    checked = _weights(paths["a1"])
     forward = d.ops.load
 
     def changed_in_between(body):
@@ -758,5 +810,5 @@ def test_a_runtime_load_whose_file_changes_before_the_workers_read_it_is_refused
     with pytest.raises(REFUSED) as err:
         d.load("a1", paths["a1"])
     assert _status(err.value) == 400 and "changed on disk" in _message(err.value)
-    assert not any(pool.serves("a1") for pool in d.pools.values())
+    assert not any(pool.serves(checked) for pool in d.pools.values())
     assert d.served.adapters == ()

@@ -153,9 +153,17 @@ def pool(spec: LoraSpec, rank: int = 0, world: int = 1) -> LoraAdapterPool:
     return LoraAdapterPool(spec, "cpu", rank=rank, world_size=world)
 
 
-def _config(adapter: str | None) -> LoraReqConfig | None:
-    """As the conductor opens a request: a base-model one carries no config."""
-    return None if adapter is None else LoraReqConfig(adapter=adapter)
+def digest_of(pool_or_spec, adapter: str) -> bytes:
+    """The digest a configured adapter's weights were pinned to: what a pool knows it by."""
+    return getattr(pool_or_spec, "spec", pool_or_spec).adapter_digests[adapter]
+
+
+def lora_request(pool_or_spec, adapter: str | None) -> LoraReqConfig | None:
+    """As the conductor opens a request on a configured adapter: on the digest the API
+    server pinned for it (``ServedModels.select``). A base-model one carries no config."""
+    if adapter is None:
+        return None
+    return LoraReqConfig(adapter, digest_of(pool_or_spec, adapter))
 
 
 def plan(pools, rows: list[tuple[str, str | None, int]]) -> None:
@@ -163,7 +171,7 @@ def plan(pools, rows: list[tuple[str, str | None, int]]) -> None:
     over them, as the engine drives a step whose segments are one per request."""
     for p in pools:
         for rid, adapter, _ in rows:
-            p.ingest_request(rid, _config(adapter))
+            p.ingest_request(rid, lora_request(p, adapter))
         step = ResourceStep(segments=tuple(Segment(rid, "main", n) for rid, _, n in rows))
         ctx = StepContext(request_ids=[r for r, _, _ in rows], graph_walk="prefill", slot=0, capture=False)
         assert p.admit(step, ctx).ok
@@ -174,7 +182,7 @@ def admit_declared(lora_pool, step, rows, walk: str = "prefill") -> None:
     """Admit and plan a node's declared ``step`` for ``rows`` ((rid, adapter, span)), with
     the pool's step the engine adds to it (``with_segment_steps``)."""
     for rid, adapter, _ in rows:
-        lora_pool.ingest_request(rid, _config(adapter))
+        lora_pool.ingest_request(rid, lora_request(lora_pool, adapter))
     ctx = StepContext(request_ids=[r for r, _, _ in rows], graph_walk=walk, slot=0, capture=False)
     key = lora_pool.spec.resource_key
     lora_step = with_segment_steps(step, (key,)).get(key)

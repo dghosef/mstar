@@ -9,6 +9,13 @@ An unload takes the name out of selection first, then tells the workers, whose r
 requests on it finish on its weights; the name is selectable again if the conductor
 refused. This process and ``ServedModels`` are the registry of what is served: the
 conductor keeps none.
+
+Workers know an adapter by its weights' digest alone, so the workers hear of a load only
+for weights no served name is on yet, and of an unload only once no served name is on
+them. A load with ``load_inplace`` moves a served name to new weights the same way: the
+new weights are loaded beside the old, the name is selected on them, and the old weights
+are unloaded unless another name is on them. Requests selected on the old weights before
+the move finish on them.
 """
 
 from __future__ import annotations
@@ -28,8 +35,8 @@ from mstar.api_server.served_models import ServedModels
 from mstar.engine.resources.lora.config import (
     LoraSpec,
     describe_load_error,
-    fetch_adapter_path,
 )
+from mstar.engine.resources.lora.serving import fetch_adapter_path
 from mstar.engine.resources.lora.store import check_adapter_file
 from mstar.utils.ipc_format import (
     ConductorMessage,
@@ -44,10 +51,13 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class _Op:
     name: str
-    is_load: bool
     # the weights its requests are selected under: a load's once it is served, an
     # unload's restored with the name if the conductor refuses
     digest: bytes
+    # whether (name, digest) becomes selectable on a successful answer (a load), on a
+    # refused one (an unload, whose name was taken out first), or never (None: the old
+    # weights' unload after a reload in place, whose name is already on the new ones)
+    selects_on_success: bool | None
     future: concurrent.futures.Future
 
 
@@ -74,7 +84,9 @@ class LoraAdmin:
         self._ops: dict[str, _Op] = {}
         self._ops_lock = threading.Lock()
 
-    async def load(self, name: str, path: str) -> str:
+    async def load(self, name: str, path: str, load_inplace: bool = False) -> str:
+        """Serve ``path``'s weights under ``name``; with ``load_inplace``, a served name
+        moves to them (vLLM's field), else a served name is refused."""
         self._require_runtime_updates()
         if not name or not path:
             raise ValueError("Both 'lora_name' and 'lora_path' must be non-empty.")
@@ -82,8 +94,12 @@ class LoraAdmin:
             raise ValueError(f"'{name}' is the base model's name")
         async with self._serial:
             self._refuse_unanswered(name)
-            if name in self._served.adapters:
-                raise ValueError(f"The lora adapter '{name}' has already been loaded.")
+            old = self._served.check(name) if name in self._served.adapters else None
+            if old is not None and not load_inplace:
+                raise ValueError(
+                    f"The lora adapter '{name}' has already been loaded. To load other "
+                    "weights under it, set 'load_inplace' to true."
+                )
             try:
                 path, digest = await asyncio.to_thread(self._fetch_and_check, name, path)
             except Exception as exc:  # noqa: BLE001 - any unreadable or unfit file is the client's
@@ -92,12 +108,19 @@ class LoraAdmin:
                 # (the route logs a refusal as one line, without its cause)
                 logger.warning("LoRA adapter %r refused (adapter: %s)", name, path, exc_info=exc)
                 raise ValueError(f"LoRA adapter '{name}': {describe_load_error(exc)}") from exc
-            await self._request(
-                LoadLoraAdapter(
-                    op_id=_op_id(), lora_name=name, lora_path=path, lora_digest=digest.hex(),
-                ),
-                ConductorMessageType.LOAD_LORA_ADAPTER, digest,
-            )
+            if digest == old:
+                return f"Success: LoRA adapter '{name}' added successfully."
+            if digest in self._served.digests:
+                self._served.add(name, digest)  # the workers serve these weights already
+            else:
+                await self._request(
+                    LoadLoraAdapter(
+                        op_id=_op_id(), lora_name=name, lora_path=path, lora_digest=digest.hex(),
+                    ),
+                    ConductorMessageType.LOAD_LORA_ADAPTER, digest, selects_on_success=True,
+                )
+            if old is not None and old not in self._served.digests:
+                await self._retire(name, old)
         return f"Success: LoRA adapter '{name}' added successfully."
 
     async def unload(self, name: str) -> str:
@@ -114,11 +137,26 @@ class LoraAdmin:
                 raise HTTPException(
                     status_code=404, detail=f"The lora adapter '{name}' cannot be found.",
                 )
-            await self._request(
-                UnloadLoraAdapter(op_id=_op_id(), lora_name=name),
-                ConductorMessageType.UNLOAD_LORA_ADAPTER, digest,
-            )
+            if digest not in self._served.digests:  # else another name is on these weights
+                await self._request(
+                    UnloadLoraAdapter(op_id=_op_id(), lora_name=name, lora_digest=digest.hex()),
+                    ConductorMessageType.UNLOAD_LORA_ADAPTER, digest, selects_on_success=False,
+                )
         return f"Success: LoRA adapter '{name}' removed successfully."
+
+    async def _retire(self, name: str, digest: bytes) -> None:
+        """Unload the weights a reload in place moved ``name`` off. The reload has
+        succeeded by now, so a failure here is logged, not answered: those weights may
+        then stay loaded on some workers, unselectable, until they restart."""
+        try:
+            await self._request(
+                UnloadLoraAdapter(op_id=_op_id(), lora_name=name, lora_digest=digest.hex()),
+                ConductorMessageType.UNLOAD_LORA_ADAPTER, digest, selects_on_success=None,
+            )
+        except HTTPException as exc:
+            logger.warning(
+                "LoRA adapter %s: unloading its old weights %s failed: %s", name, digest.hex()[:12], exc.detail,
+            )
 
     def on_result(self, body: LoraAdapterResult) -> None:
         """The conductor's answer, applied here even when its HTTP request has timed out,
@@ -129,12 +167,12 @@ class LoraAdmin:
         if op is None:
             logger.warning("LoRA: an answer for unknown operation %s", body.op_id)
             return
-        if op.is_load and body.error_message is None:
+        if op.selects_on_success is (body.error_message is None):
             self._served.add(op.name, op.digest)
-            logger.info("LoRA adapter %s is now served", op.name)
-        elif not op.is_load and body.error_message is not None:
-            self._served.add(op.name, op.digest)
-            logger.info("LoRA adapter %s: unload refused (%s); still served", op.name, body.error_message)
+            if op.selects_on_success:
+                logger.info("LoRA adapter %s is now served", op.name)
+            else:
+                logger.info("LoRA adapter %s: unload refused (%s); still served", op.name, body.error_message)
         try:
             op.future.set_result(body)
         except concurrent.futures.InvalidStateError:
@@ -166,13 +204,13 @@ class LoraAdmin:
 
     async def _request(
         self, body: LoadLoraAdapter | UnloadLoraAdapter, message_type: ConductorMessageType,
-        digest: bytes,
+        digest: bytes, selects_on_success: bool | None,
     ) -> None:
         future: concurrent.futures.Future = concurrent.futures.Future()
         with self._ops_lock:
             self._ops[body.op_id] = _Op(
-                name=body.lora_name, is_load=isinstance(body, LoadLoraAdapter),
-                digest=digest, future=future,
+                name=body.lora_name, digest=digest, selects_on_success=selects_on_success,
+                future=future,
             )
         self._send(ConductorMessage(message_type=message_type, body=body))
         try:

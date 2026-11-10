@@ -398,7 +398,9 @@ class LoadLoraAdapter(MessageBody):
     and answers once all of them have acknowledged. ``op_id`` pairs the acks and the
     answer with the request; ``lora_path`` is a safetensors file every process can read.
     ``lora_digest`` (hex) is the digest of the weights the API server checked and keys
-    the prefix cache under: a worker reading other weights refuses the load.
+    the prefix cache under: a worker reading other weights refuses the load. Workers know
+    an adapter by its digest alone (``lora_name`` labels it in their messages), so the API
+    server sends a load only for weights no served name is on yet.
     """
     op_id: str
     lora_name: str
@@ -408,10 +410,12 @@ class LoadLoraAdapter(MessageBody):
 
 @dataclass
 class UnloadLoraAdapter(MessageBody):
-    """Stop serving a LoRA adapter to new requests (``POST /v1/unload_lora_adapter``);
-    routed like ``LoadLoraAdapter``."""
+    """Stop serving the weights ``lora_digest`` (hex) names to new requests, routed like
+    ``LoadLoraAdapter``: on ``POST /v1/unload_lora_adapter`` of the last name on them, or
+    after a reload in place (``load_inplace``) moved the name to other weights."""
     op_id: str
     lora_name: str
+    lora_digest: str
 
 
 @dataclass
