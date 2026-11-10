@@ -200,7 +200,11 @@ class FlashInferManager(AttentionManager):
             self._cascade_min_rows is not None and num_rows >= self._cascade_min_rows
         ):
             wrapper = FlashInferCascadeDecodeWrapper(
-                workspace_buffer=workspace, batch_size=num_rows, **kv_kwargs,
+                decode_workspace=workspace,
+                # a slot runs a split step or a decode step, never both at once
+                shared_workspace=self._workspaces.get(f"{label}.split_prefill", lease.slot),
+                batch_size=num_rows,
+                **kv_kwargs,
             )
         elif bucket.bs == bucket.num_tokens and not force_prefill:
             wrapper = self._fmha_wrapper(workspace, num_rows) or FlashInferDecodeWrapper(
