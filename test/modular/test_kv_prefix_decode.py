@@ -22,6 +22,7 @@ sys.path.insert(0, ".")
 import pytest
 import torch
 
+from mstar.engine.resources.base import KeyedWalks
 from mstar.engine.resources.kv import manager as manager_mod
 from mstar.engine.resources.kv.config import KVReqConfig, KVStep, PagedKVConfig, PrefixSpan, StreamLayout
 from mstar.engine.resources.kv.keys import chain
@@ -270,4 +271,72 @@ def test_a_request_that_opted_out_chains_nothing():
     assert _indexed(kv) == 0, (
         "a request that turned the cache off left its generated pages behind"
     )
+    kv.assert_pages_conserved()
+
+
+@pytest.mark.parametrize("speculated_step_ran", [False, True])
+def test_text_appended_after_a_reply_is_keyed_like_the_ids_around_it(speculated_step_ran):
+    """A tool's text is prefilled after the reply it answers. Its ids are no sampled id, but the row
+    brings them, and they join the chain after the reply's, so a later request whose prompt is the whole
+    history finds the pages that hold them. The row begins with the reply's stop token, which the step
+    speculated past the stop may have written already, as the decoder leaves it out then."""
+    kv = KVManager(
+        cfg=PagedKVConfig(num_layers=1, num_kv_heads=1, head_dim=8, max_seq_len=8192, max_num_pages=64,
+                          page_size=PAGE_SIZE),
+        name="kv", joint_comm_group=None, transfer_engine_info=None, device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    kv.enable_prefix_cache(ROOT, {"main": KeyedWalks(writes=("prefill",), growth=(WALK,))})
+    prompt = list(range(100))
+    kv.ingest_request("r0", KVReqConfig(
+        prefix_keys={"main": chain(_pages(prompt))}, prefix_tail={"main": prompt},
+        prefix_decode={"main": TENSOR},
+        kv_layout={"main": StreamLayout(
+            spans=(PrefixSpan(len(prompt), len(prompt), "prefill"),), growth=(("decode_loop", 1),), keyed_spans=1)},
+        loop_caps={"decode_loop": 400},
+    ))
+    history = list(prompt)
+
+    def step(walk, span):
+        s = KVStep(segments=(Segment("r0", "main", span),))
+        ctx = StepContext(request_ids=("r0",), graph_walk=walk, slot=0, capture=False)
+        assert kv.admit(s, ctx).ok
+        kv.plan(s, ctx)
+        kv.commit(s, ctx)
+
+    def sample(token):
+        history.append(token)
+        _sampled(kv, "r0", token)
+
+    step("prefill", len(prompt))
+    sample(9000)
+    for i in range(1, 141):
+        step(WALK, 1)
+        sample(9000 + i)
+    stop = history[-1]
+    if speculated_step_ran:
+        step(WALK, 1)                      # writes the stop token; its own sample is dropped
+    text = list(range(500, 530))
+    row = text if speculated_step_ran else [stop, *text]
+    inputs = ARNodeInputs(input_seq_len=len(row), input_ids=torch.tensor(row))
+    for _ in range(2):                     # a probe is repeated whenever the step is prepared again
+        assert kv.resolve_cached_prefix("r0", NODE, "prefill", inputs) is None
+    history += text
+    step("prefill", len(row))
+    sample(9500)
+    for i in range(1, 31):
+        step(WALK, 1)
+        sample(9500 + i)
+    assert kv._streams["r0"]["main"].chain is not None
+    assert _indexed(kv) == 2
+
+    later = history + list(range(700, 760))
+    kv.ingest_request("r1", KVReqConfig(
+        prefix_keys={"main": chain(_pages(later))}, prefix_tail={"main": later[2 * PAGE_SIZE:]},
+        kv_layout={"main": StreamLayout(
+            spans=(PrefixSpan(len(later), len(later), "prefill"),), growth=(("decode_loop", 1),), keyed_spans=1)},
+        loop_caps={"decode_loop": 0},
+    ))
+    got = kv.resolve_cached_prefix("r1", NODE, "prefill", ARNodeInputs(input_seq_len=len(later)))
+    assert got.tokens == 2 * PAGE_SIZE, "the page holding the appended text was keyed under other ids"
     kv.assert_pages_conserved()

@@ -402,3 +402,4 @@ class KokoroSynthSubmodule(NodeSubmodule):
                 capture_batch_sizes=self.frame_capture_sizes(bucket),
             )
         return regions
+

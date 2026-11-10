@@ -276,10 +276,13 @@ class WhisperDecoderSubmodule(TokenStepNode, ARNodeSubmodule):
     # prefill steps are graph replays; the walks they don't cover run eagerly.
     disable_torch_compile = True
 
-    def __init__(self, decoder: WhisperDecoderModel, config: WhisperModelConfig):
+    def __init__(self, decoder: WhisperDecoderModel, config: WhisperModelConfig, stream_out: bool = False):
         super().__init__()
         self.decoder = decoder
         self.config = config
+        # whether the decode loop also emits each token as `new_token`, for a stream into another model
+        # (a `Link` of a `MultiModel`); the prompt walks emit it already
+        self.stream_out = stream_out
         # a stop on the first transcript token ends the partition (`_token_stops`)
         self.token_stop = TokenStop(
             loop=self.DECODE_LOOP, buffer="new_token",
@@ -731,6 +734,8 @@ class WhisperDecoderSubmodule(TokenStepNode, ARNodeSubmodule):
         # persisted first token.
         if graph_walk == DECODE_WALK:
             rows = {"text_inputs": new_tokens}
+            if self.stream_out:
+                rows["new_token"] = new_tokens
             if next_rules is not None and self._reads_loopback(graph_walk):
                 engine_inputs.resources[SAMPLER].store_loopback_state(
                     TS_RULES, engine_inputs.request_ids, next_rules,
