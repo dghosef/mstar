@@ -472,6 +472,17 @@ python -m benchmark.tts_speech_bench --engine mstar --url http://127.0.0.1:8000 
 - The Wan-VAE decode dtype is gated on the cuDNN build: bf16 needs cuDNN &gt;= 9.16 (fast Hopper bf16 conv3d); older cuDNN serves the decode in fp32/TF32 automatically.
 - Two GPUs (H200 numbers, measured before the Cosmos3-Edge Blackwell changes, so the one-GPU baselines are older): `configs/cosmos3_nano_sp2.yaml` halves one request's denoise (Nano 832x480x189x35: 1.47 -&gt; 0.78 s per step), while `configs/cosmos3_nano_dp2.yaml` (a whole replica per GPU) serves more under concurrency: 2.13 videos/min at 2 concurrent vs 1.63 for sp2 and 1.07 on one GPU. For Edge (832x480x121, 20 steps): `configs/cosmos3_edge_sp2.yaml` takes one request from 6.3 to 4.4 s (generation only: the reasoner has no SP path), and `configs/cosmos3_edge_dp2.yaml` serves 15.8 videos/min at 4 concurrent vs 7.9 on one GPU.
 
+## Cosmos3 denoise CUDA graphs {#cosmos3-denoise-cuda-graphs}
+
+The image denoise step replays a captured CUDA graph at the sizes a deployment lists, in the `model_kwargs` of its config YAML. Any other size runs eager.
+
+- `gen_capture_sizes`: the `(height, width)` pixel pairs to capture, for example `[[640, 640]]`. The default is `[[192, 320], [480, 832], [720, 1280]]`; `graph_max_latent_area` (default 2000, latent H*W) skips the larger ones.
+- `gen_capture_batch_sizes`: the batch sizes captured per size (default `[1]`). Concurrent requests replay the smallest captured batch that holds them, padded; larger batches run the eager cross-request step. Each captured size costs startup time and graph memory.
+- `prefill_capture_batch_sizes`: the batch sizes the text prefill is captured at (default `[1]`); its token sizes are the serving config's `prefill_token_buckets`.
+- A graph holds the guidance branches the deployment's default guidance runs: one for a distilled checkpoint (guidance 1.0), two otherwise. A request at other guidance runs eager. Concurrent image, text-prefill and action requests with the same branches batch together; video, sound and conditional-prefill requests batch only when both branches are held.
+
+The earlier environment variables are no longer read (the server logs a warning when one is set); set the `model_kwargs` key instead: `COSMOS3_GEN_CAPTURE_RES` is `gen_capture_sizes`, `COSMOS3_GEN_CAPTURE_BS` is `gen_capture_batch_sizes`, `COSMOS3_GEN_CAPTURE_VIDEO` is `gen_capture_video`, `COSMOS3_GRAPH_MAX_LATENT_AREA` is `graph_max_latent_area` and `COSMOS3_PREFILL_CAPTURE_BS` is `prefill_capture_batch_sizes`.
+
 ## Cosmos3 image-to-video conditioning {#cosmos3-image-to-video-conditioning}
 
 An image-to-video request's conditioning image is scaled to cover the output size with its aspect ratio kept, center-cropped and rounded to 8 bits, as in NVIDIA's cosmos-framework and diffusers 0.40 and later. Setting `conditioning_resize: stretch` under the config YAML's `model_kwargs` resizes it to the output size instead (antialiased bilinear, aspect ratio not kept), as diffusers 0.39 did. Action requests ignore the setting. The image pins the first latent frame, so the request must ask for a video of more than one latent frame (`num_frames` above 4); an image output, or a shorter video, is refused with a 400.

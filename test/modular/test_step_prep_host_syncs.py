@@ -333,13 +333,11 @@ def test_omnivoice_unmask_step_reads_no_tensor():
 
 def _cosmos3(monkeypatch=None, capture=False):
     if capture:
-        monkeypatch.setenv("COSMOS3_GEN_CAPTURE_RES", "64x64")
-        monkeypatch.setenv("COSMOS3_GEN_CAPTURE_VIDEO", "64x64x9")
         monkeypatch.setenv("COSMOS3_DISABLE_PREFILL_ACCELERATOR_GRAPH", "1")
         monkeypatch.delenv("COSMOS3_DISABLE_ACCELERATOR_GRAPH", raising=False)
     from mstar.model.cosmos3.tests.test_rotary_table import stand_in_rotary
 
-    config = Cosmos3Config(compile_denoise=False)
+    config = Cosmos3Config(compile_denoise=False, gen_capture_sizes=((64, 64),), gen_capture_video=((64, 64, 9),))
     transformer = SimpleNamespace(
         proj_in=SimpleNamespace(weight=torch.zeros(1, dtype=torch.float32)),
         sp_group=SimpleNamespace(world_size=1), comm_group=SimpleNamespace(world_size=1),

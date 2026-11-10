@@ -688,11 +688,11 @@ def capture_ladder(key: str, value) -> list[int]:
 
 
 def warn_retired_ladder_env(name: str, setting: str) -> None:
-    """Warn that the environment variable ``name``, a capture ladder the serving config's
-    ``prefill_token_buckets`` replaced, is set but no longer read; ``setting`` is the
-    serving config entry that sets it."""
+    """Warn that the environment variable ``name``, a capture setting the serving config
+    replaced (``prefill_token_buckets``, a model's ``model_kwargs``), is set but no longer
+    read; ``setting`` is the serving config entry that sets it."""
     if name in os.environ:
-        logger.warning("%s is no longer read; set the ladder in the serving config: %s", name, setting)
+        logger.warning("%s is no longer read; set it in the serving config: %s", name, setting)
 
 
 def check_loaded(module: torch.nn.Module, loaded: set[str], what: str) -> None:

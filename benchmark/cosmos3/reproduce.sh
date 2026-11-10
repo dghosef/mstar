@@ -15,22 +15,32 @@ set -eu
 
 # --------------------------------------------------------------------------
 # Serve M* (this repo). torch.compile + CUDA graphs are on by default.
-# COSMOS3_GEN_CAPTURE_RES bakes a denoise graph per benchmarked resolution;
-# COSMOS3_GEN_CAPTURE_BS additionally captures batched (concurrent) denoise
-# steps, which the throughput sweep needs to scale past one request.
+# gen_capture_sizes bakes a denoise graph per benchmarked resolution;
+# gen_capture_batch_sizes additionally captures batched (concurrent) denoise
+# steps, which the throughput sweep needs to scale past one request. Both are
+# model_kwargs, so the script serves a copy of the config with them set.
 #   usage: serve_mstar <gpu> <port>
 # --------------------------------------------------------------------------
 serve_mstar() {
   : "${SNAP:?set SNAP to the Cosmos3-Nano snapshot dir}"
   : "${MSTAR:?set MSTAR to the repo checkout}"
-  local sock upload
-  sock=$(mktemp -d); upload=$(mktemp -d)
+  local sock upload config
+  sock=$(mktemp -d); upload=$(mktemp -d); config="$sock/cosmos3_nano.yaml"
+  python - "$MSTAR/configs/cosmos3_nano.yaml" "$config" <<'PY'
+import sys
+
+import yaml
+
+deployment = yaml.safe_load(open(sys.argv[1]))
+deployment["model_kwargs"].update(
+    gen_capture_sizes=[[192, 320], [480, 832], [720, 1280]], gen_capture_batch_sizes=[1, 4, 8],
+)
+yaml.safe_dump(deployment, open(sys.argv[2], "w"))
+PY
   CUDA_VISIBLE_DEVICES="$1" PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    COSMOS3_GEN_CAPTURE_RES=192x320,480x832,720x1280 \
-    COSMOS3_GEN_CAPTURE_BS=1,4,8 \
     COSMOS3_NANO_DIR="$SNAP" PYTHONPATH="$MSTAR" \
     python "$MSTAR/mstar/api_server/entrypoint.py" \
-    --config "$MSTAR/configs/cosmos3_nano.yaml" \
+    --config "$config" \
     --socket-path-prefix "$sock/" --upload-dir "$upload/" \
     --port "$2" --mooncake-port "$(($2 + 1000))" --tensor-comm-protocol SHM
 }

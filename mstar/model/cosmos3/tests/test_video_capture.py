@@ -35,14 +35,14 @@ BOTH, ONE = (COND_LABEL, UNCOND_LABEL), (COND_LABEL,)
 
 
 def _dit_with_buckets(monkeypatch, prefill=False, **config):
-    monkeypatch.setenv("COSMOS3_GEN_CAPTURE_RES", "64x64")
-    monkeypatch.setenv("COSMOS3_GEN_CAPTURE_VIDEO", "64x64x9")
     if prefill:
         monkeypatch.delenv("COSMOS3_DISABLE_PREFILL_ACCELERATOR_GRAPH", raising=False)
     else:
         monkeypatch.setenv("COSMOS3_DISABLE_PREFILL_ACCELERATOR_GRAPH", "1")
     monkeypatch.delenv("COSMOS3_DISABLE_ACCELERATOR_GRAPH", raising=False)
-    cfg = Cosmos3Config(compile_denoise=False, **config)
+    cfg = Cosmos3Config(
+        compile_denoise=False, gen_capture_sizes=((64, 64),), gen_capture_video=((64, 64, 9),), **config,
+    )
     sub = Cosmos3DiTSubmodule(transformer=_fake_transformer(cfg), config=cfg, scheduler=None)
     configs = sub.get_accelerator_graph_configs("cpu")
     return sub, configs

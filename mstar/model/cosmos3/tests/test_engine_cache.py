@@ -1079,8 +1079,8 @@ def _run_accelerator_graph_denoise(ctx, gs=GS, rows=None):
     starts = {rid: row["start"] for rid, row in zip(rids, rows, strict=True)}
     # Capture at this test's (H, W) regardless of the production default, at
     # the batch sizes under test: one request alone, and all of them.
-    dit.gen_capture_resolutions = ((H, W),)
-    dit.gen_capture_batch_sizes = tuple(sorted({1, len(rids)}))
+    dit.config.gen_capture_sizes = ((H, W),)
+    dit.config.gen_capture_batch_sizes = tuple(sorted({1, len(rids)}))
     resources = _engine_resources(model, rids, device, dtype, max_num_pages=256)
     dit.config.guidance_scale = gs
     md = {"height": H, "width": W, "num_frames": 1, "fps": 24.0,

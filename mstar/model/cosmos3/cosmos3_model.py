@@ -363,6 +363,7 @@ class Cosmos3Model(Model):
                     )
         cfg.check_streaming_decode()
         cfg.check_compile()
+        cfg.check_capture()
         return cfg
 
     def _load_tokenizer(self):

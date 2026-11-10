@@ -311,11 +311,10 @@ def test_captured_inputs_stack_the_tables(monkeypatch) -> None:
     stacked; a request at the captured shape stages its statics' tables
     stacked once, the replay-side preprocess stacks them on the batch dim, and
     ``forward_captured`` hands every row its own pair per branch."""
-    monkeypatch.setenv("COSMOS3_GEN_CAPTURE_RES", "64x64")
-    monkeypatch.setenv("COSMOS3_GEN_CAPTURE_VIDEO", "64x64x9")
     monkeypatch.setenv("COSMOS3_DISABLE_PREFILL_ACCELERATOR_GRAPH", "1")
     monkeypatch.delenv("COSMOS3_DISABLE_ACCELERATOR_GRAPH", raising=False)
     sub, model, cfg, _ = _tiny(torch.bfloat16)
+    cfg.gen_capture_sizes, cfg.gen_capture_video = ((64, 64),), ((64, 64, 9),)
     video_cfg = sub.get_accelerator_graph_configs("cpu")[1]
     assert video_cfg.capture_graph_walk == C.VIDEO_GEN_WALK
     single = video_cfg.single_request_inputs.tensor_inputs

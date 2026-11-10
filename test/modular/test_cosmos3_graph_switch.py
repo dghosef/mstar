@@ -19,6 +19,10 @@ GRAPH_CONFIGS = [
 ]
 
 
+# one tiny image size and one tiny video tier, so declaring the captures is cheap
+TINY_CAPTURES = {"gen_capture_sizes": [[64, 64]], "gen_capture_video": [[64, 64, 9]]}
+
+
 class _FakeTransformer(nn.Module):
     # declaring a video capture builds its statics, rotary table included
     _rotary = Cosmos3OmniTransformer._rotary
@@ -34,10 +38,10 @@ class _FakeTransformer(nn.Module):
         raise AssertionError("declaring captures should not execute the model")
 
 
-def _submodules(enabled):
+def _submodules(enabled, **kwargs):
     model = Cosmos3Model(
         model_path_hf="unused", skip_weight_loading=True,
-        accelerator_graph=enabled, compile_denoise=False,
+        accelerator_graph=enabled, compile_denoise=False, **kwargs,
     )
     assert model.config.accelerator_graph is enabled
     transformer = _FakeTransformer(model.config)
@@ -67,12 +71,7 @@ def test_switch_gates_all_cosmos3_captures(monkeypatch, enabled, disable_env):
     else:
         monkeypatch.setenv("COSMOS3_DISABLE_ACCELERATOR_GRAPH", disable_env)
     monkeypatch.delenv("COSMOS3_DISABLE_PREFILL_ACCELERATOR_GRAPH", raising=False)
-    monkeypatch.setenv("COSMOS3_GEN_CAPTURE_RES", "64x64")
-    monkeypatch.setenv("COSMOS3_GEN_CAPTURE_VIDEO", "64x64x9")
-    monkeypatch.setenv("COSMOS3_GEN_CAPTURE_BS", "1")
-    monkeypatch.setenv("COSMOS3_GRAPH_MAX_LATENT_AREA", "2000")
-    monkeypatch.setenv("COSMOS3_PREFILL_CAPTURE_BS", "1")
-    dit, reasoner = _submodules(enabled)
+    dit, reasoner = _submodules(enabled, **TINY_CAPTURES)
     dit_configs = dit.get_accelerator_graph_configs(torch.device("cpu"))
     reasoner_configs = reasoner.get_accelerator_graph_configs(torch.device("cpu"))
     if enabled and not disable_env:
@@ -105,10 +104,7 @@ def test_disabled_switch_skips_gpu_templates(monkeypatch, device_type):
 def test_prefill_environment_switch_leaves_other_captures_enabled(monkeypatch):
     monkeypatch.delenv("COSMOS3_DISABLE_ACCELERATOR_GRAPH", raising=False)
     monkeypatch.setenv("COSMOS3_DISABLE_PREFILL_ACCELERATOR_GRAPH", "1")
-    monkeypatch.setenv("COSMOS3_GEN_CAPTURE_RES", "64x64")
-    monkeypatch.setenv("COSMOS3_GEN_CAPTURE_VIDEO", "64x64x9")
-    monkeypatch.setenv("COSMOS3_GRAPH_MAX_LATENT_AREA", "2000")
-    dit, reasoner = _submodules(True)
+    dit, reasoner = _submodules(True, **TINY_CAPTURES)
     assert {config.capture_graph_walk for config in dit.get_accelerator_graph_configs("cpu")} == {
         C.IMAGE_GEN_WALK, C.VIDEO_GEN_WALK,
     }
@@ -116,3 +112,15 @@ def test_prefill_environment_switch_leaves_other_captures_enabled(monkeypatch):
     assert [config.capture_graph_walk for config in reasoner.get_accelerator_graph_configs("cpu")] == [
         C.REASONER_DECODE_WALK,
     ]
+
+
+def test_retired_capture_environment_variables_are_not_read(monkeypatch):
+    for name in ("COSMOS3_GEN_CAPTURE_RES", "COSMOS3_GEN_CAPTURE_BS", "COSMOS3_GEN_CAPTURE_VIDEO",
+                 "COSMOS3_GRAPH_MAX_LATENT_AREA", "COSMOS3_PREFILL_CAPTURE_BS"):
+        monkeypatch.setenv(name, "64x64" if name.endswith("RES") else "1")
+    monkeypatch.delenv("COSMOS3_DISABLE_ACCELERATOR_GRAPH", raising=False)
+    monkeypatch.delenv("COSMOS3_DISABLE_PREFILL_ACCELERATOR_GRAPH", raising=False)
+    dit, _ = _submodules(True, gen_capture_sizes=[[64, 128]])
+    # the 64x64 the variable names is not captured: the config's size is
+    ch = dit.config.latent_channel
+    assert [c.additional_key_info[0] for c in dit.get_accelerator_graph_configs("cpu")[:-1]] == [(1, ch, 1, 4, 8)]

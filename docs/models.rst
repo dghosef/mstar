@@ -1824,6 +1824,36 @@ Cosmos3 environment requirements
   ``configs/cosmos3_edge_dp2.yaml`` serves 15.8 videos/min at 4 concurrent vs 7.9 on
   one GPU.
 
+Cosmos3 denoise CUDA graphs
+---------------------------
+
+The image denoise step replays a captured CUDA graph at the sizes a deployment
+lists, in the ``model_kwargs`` of its config YAML. Any other size runs eager.
+
+- ``gen_capture_sizes``: the ``(height, width)`` pixel pairs to capture, for
+  example ``[[640, 640]]``. The default is ``[[192, 320], [480, 832],
+  [720, 1280]]``; ``graph_max_latent_area`` (default 2000, latent H*W) skips the
+  larger ones.
+- ``gen_capture_batch_sizes``: the batch sizes captured per size (default
+  ``[1]``). Concurrent requests replay the smallest captured batch that holds
+  them, padded; larger batches run the eager cross-request step. Each
+  captured size costs startup time and graph memory.
+- ``prefill_capture_batch_sizes``: the batch sizes the text prefill is
+  captured at (default ``[1]``); its token sizes are the serving config's
+  ``prefill_token_buckets``.
+- A graph holds the guidance branches the deployment's default guidance runs:
+  one for a distilled checkpoint (guidance 1.0), two otherwise. A request at
+  other guidance runs eager. Concurrent image, text-prefill and action requests
+  with the same branches batch together; video, sound and conditional-prefill
+  requests batch only when both branches are held.
+
+The earlier environment variables are no longer read (the server logs a warning
+when one is set); set the ``model_kwargs`` key instead: ``COSMOS3_GEN_CAPTURE_RES``
+is ``gen_capture_sizes``, ``COSMOS3_GEN_CAPTURE_BS`` is ``gen_capture_batch_sizes``,
+``COSMOS3_GEN_CAPTURE_VIDEO`` is ``gen_capture_video``,
+``COSMOS3_GRAPH_MAX_LATENT_AREA`` is ``graph_max_latent_area`` and
+``COSMOS3_PREFILL_CAPTURE_BS`` is ``prefill_capture_batch_sizes``.
+
 Cosmos3 image-to-video conditioning
 -----------------------------------
 

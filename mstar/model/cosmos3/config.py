@@ -37,6 +37,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from mstar.model.utils import capture_ladder
+
 DENOISE_COMPILE_MODES = ("deterministic", "default", "level")
 
 
@@ -506,11 +508,26 @@ class Cosmos3Config:
     # ----- denoise CUDA-graph capture (serving knobs) -----
     # Capture the fixed-shape denoise step as a CUDA graph (the launch-bound-tier
     # accelerator). Set False to serve the denoise loop eagerly. The env var
-    # COSMOS3_DISABLE_CUDA_GRAPH, when set, overrides this.
+    # COSMOS3_DISABLE_ACCELERATOR_GRAPH, when set, also turns it off.
     accelerator_graph: bool = True
+    # Image sizes, as (height, width) pixel pairs, to capture a denoise step
+    # for (the order of ``gen_capture_video``; ``image_size_default`` is
+    # (width, height)); any other size runs eager. One graph per size and per batch size in
+    # ``gen_capture_batch_sizes``, each holding the guidance branches the
+    # deployment's default guidance runs (one for a distilled checkpoint, two
+    # otherwise): a request at other guidance runs eager. A graph removes
+    # launch overhead, biggest at low resolution. Sizes past
+    # ``graph_max_latent_area`` are skipped.
+    gen_capture_sizes: tuple[tuple[int, int], ...] = ((192, 320), (480, 832), (720, 1280))
+    # Batch sizes to capture per size: concurrent requests replay the smallest
+    # captured size that holds them, padded, and uncaptured sizes run the
+    # eager cross-request step.
+    gen_capture_batch_sizes: tuple[int, ...] = (1,)
+    # Batch sizes to capture the text prefill at (token sizes: the serving
+    # config's ``prefill_token_buckets``).
+    prefill_capture_batch_sizes: tuple[int, ...] = (1,)
     # Only capture resolutions whose latent H*W is at or below this; larger tiers
-    # (720p+, video) run eager+dense where the graph is net-slower. The env var
-    # COSMOS3_GRAPH_MAX_LATENT_AREA overrides this.
+    # (720p+, video) run eager+dense where the graph is net-slower.
     graph_max_latent_area: int = 2000
     # Video denoise steps to capture as CUDA graphs, as (height, width,
     # frames) pixel tiers: a plain t2v/i2v clip length and/or the windowed
@@ -521,8 +538,7 @@ class Cosmos3Config:
     # the clean/noisy layout as a per-token mask input, so one graph per shape
     # serves t2v, i2v (anchor frame) and chained windows (overlap frames);
     # kv-mode windows run eager (their commit iteration is a different step).
-    # Empty = no video capture. COSMOS3_GEN_CAPTURE_VIDEO ("480x832x29,...",
-    # height x width x frames) overrides.
+    # Empty = no video capture.
     gen_capture_video: tuple[tuple[int, int, int], ...] = ()
     # torch.compile the denoise compute (the generation-layer stack around the
     # attention op). Always a win in serving; the parity tests set False to keep
@@ -607,6 +623,20 @@ class Cosmos3Config:
                 f"Cosmos3 denoise_compile_mode must be one of {DENOISE_COMPILE_MODES}, "
                 f"got {self.denoise_compile_mode!r}."
             )
+
+    def check_capture(self) -> None:
+        """Reject capture settings the capture build would misread: a size that
+        is not a (height, width) pair of positive integers, and a batch-size
+        ladder with a 0, negative or repeated entry (or none, which would
+        quietly mean the default)."""
+        for pair in self.gen_capture_sizes:
+            if (not isinstance(pair, (list, tuple)) or len(pair) != 2
+                    or any(isinstance(n, bool) or not isinstance(n, int) or n < 1 for n in pair)):
+                raise ValueError(
+                    f"Cosmos3 gen_capture_sizes must be (height, width) pairs of positive integers, got {pair!r}."
+                )
+        capture_ladder("gen_capture_batch_sizes", self.gen_capture_batch_sizes)
+        capture_ladder("prefill_capture_batch_sizes", self.prefill_capture_batch_sizes)
 
     @property
     def nemotron_norm(self) -> bool:

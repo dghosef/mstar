@@ -20,13 +20,21 @@ set -eu
 # --------------------------------------------------------------------------
 serve_mstar() {
   : "${MSTAR:?set MSTAR to the repo checkout}"
-  local sock upload
-  sock=$(mktemp -d); upload=$(mktemp -d)
+  local sock upload config
+  sock=$(mktemp -d); upload=$(mktemp -d); config="$sock/cosmos3_edge.yaml"
+  python - "$MSTAR/configs/cosmos3_edge.yaml" "$config" <<'PY'
+import sys
+
+import yaml
+
+deployment = yaml.safe_load(open(sys.argv[1]))
+deployment["model_kwargs"]["gen_capture_sizes"] = [[192, 320], [480, 832], [640, 640]]
+yaml.safe_dump(deployment, open(sys.argv[2], "w"))
+PY
   CUDA_VISIBLE_DEVICES="$1" PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    COSMOS3_GEN_CAPTURE_RES=192x320,480x832,640x640 \
     PYTHONPATH="$MSTAR" \
     python "$MSTAR/mstar/api_server/entrypoint.py" \
-    --config "$MSTAR/configs/cosmos3_edge.yaml" \
+    --config "$config" \
     --socket-path-prefix "$sock/" --upload-dir "$upload/" \
     --port "$2" --mooncake-port "$(($2 + 1000))" --tensor-comm-protocol SHM
 }

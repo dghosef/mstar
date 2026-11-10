@@ -187,6 +187,16 @@ def plan_label(labels: tuple[str, ...]) -> str:
     return CFG_BATCHED_LABEL if len(labels) > 1 else labels[0]
 
 
+# Capture settings that were environment variables, and the model_kwargs key
+# that sets each now.
+_RETIRED_CAPTURE_ENV = {
+    "COSMOS3_GEN_CAPTURE_RES": "gen_capture_sizes",
+    "COSMOS3_GEN_CAPTURE_BS": "gen_capture_batch_sizes",
+    "COSMOS3_GEN_CAPTURE_VIDEO": "gen_capture_video",
+    "COSMOS3_GRAPH_MAX_LATENT_AREA": "graph_max_latent_area",
+    "COSMOS3_PREFILL_CAPTURE_BS": "prefill_capture_batch_sizes",
+}
+
 # A captured denoise step's static-buffer inputs, each stacked on a leading
 # batch dim: the latents, the timestep, the rotary table (cos and sin, one
 # entry per guidance branch: ``[branches, tokens, head_dim]``) and the
@@ -418,26 +428,17 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
     # Cap on how many concurrent requests share one batched denoise step.
     max_gen_batch_size = 8
 
-    # t2i (num_frames=1) resolutions to capture a bs=1 denoise-step CUDA graph
-    # for; others run eager. The graph removes launch overhead (biggest at low
-    # resolution) and replays identically to eager. Override with
-    # COSMOS3_GEN_CAPTURE_RES; concurrent requests batch via the eager path.
-    gen_capture_resolutions: tuple[tuple[int, int], ...] = (
-        (192, 320), (480, 832), (720, 1280),
-    )
-    # Batch sizes to capture per resolution.
-    gen_capture_batch_sizes: tuple[int, ...] = (1,)
-
-    # Understanding-tower prefill capture: combined cond+uncond token buckets,
-    # rounded up at replay; prompts past the largest bucket run eager. The
-    # serving config's `prefill_token_buckets` sets the token buckets, and
-    # COSMOS3_PREFILL_CAPTURE_BS the batch sizes.
+    # Understanding-tower prefill capture: token buckets (all the branches'
+    # tokens together), rounded up at replay; prompts past the largest bucket
+    # run eager. The serving config's `prefill_token_buckets` sets the token
+    # buckets, and `prefill_capture_batch_sizes` the batch sizes.
     prefill_capture_token_buckets: tuple[int, ...] = (16, 32, 64, 128, 256)
-    prefill_capture_batch_sizes: tuple[int, ...] = (1,)
 
     def __init__(self, transformer, config, scheduler=None, head_decode_vae=None, head_encode_vae=None):
         super().__init__()
         warn_retired_ladder_env("COSMOS3_PREFILL_CAPTURE_TOKENS", "prefill_token_buckets: {dit: {prefill: [...]}}")
+        for name, setting in _RETIRED_CAPTURE_ENV.items():
+            warn_retired_ladder_env(name, f"model_kwargs: {{{setting}: ...}}")
         self.transformer = transformer
         self.config = config
         # The loop-back edges of this deployment's scheduler, beside the latents.
@@ -2314,30 +2315,20 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         per-prompt rotary tables, the latents and the timestep flow in as
         static-buffer inputs.
 
-        Set ``COSMOS3_DISABLE_CUDA_GRAPH=1`` to skip capture and run the denoise
-        loop eagerly (escape hatch for a misbehaving driver, and an A/B switch).
-        Set ``COSMOS3_GEN_CAPTURE_RES`` (e.g. ``"192x320,480x832"``, height x
-        width) to override which resolutions are captured, and
-        ``COSMOS3_GEN_CAPTURE_BS`` (e.g. ``"1,4,8"``) to also capture batched
-        denoise steps so concurrent requests replay a padded graph instead of
-        falling back to the eager path."""
+        ``model_kwargs.accelerator_graph: false`` (or the env var
+        ``COSMOS3_DISABLE_ACCELERATOR_GRAPH``) skips capture and runs the
+        denoise loop eagerly (escape hatch for a misbehaving driver, and an
+        A/B switch). ``gen_capture_sizes`` and ``gen_capture_batch_sizes`` pick
+        which sizes are captured, and ``gen_capture_batch_sizes`` also
+        captures batched denoise steps so concurrent requests replay a padded
+        graph instead of falling back to the eager path."""
         if (
             self.transformer is None or not self.config.accelerator_graph
             or os.environ.get("COSMOS3_DISABLE_ACCELERATOR_GRAPH")
         ):
             return []
-        res_env = os.environ.get("COSMOS3_GEN_CAPTURE_RES")
-        if res_env:
-            resolutions = tuple(
-                tuple(int(x) for x in pair.split("x")) for pair in res_env.split(",")
-            )
-        else:
-            resolutions = self.gen_capture_resolutions
-        bs_env = os.environ.get("COSMOS3_GEN_CAPTURE_BS")
-        if bs_env:
-            capture_batch_sizes = [int(x) for x in bs_env.split(",")]
-        else:
-            capture_batch_sizes = list(self.gen_capture_batch_sizes)
+        resolutions = self.config.gen_capture_sizes
+        capture_batch_sizes = list(self.config.gen_capture_batch_sizes)
         # the static latents buffer holds the fp32 loop state; windowed bf16
         # latents copy into it exactly
         dtype = LATENT_DTYPE
@@ -2351,19 +2342,12 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         # are inputs, built outside the graph), but only HELPS
         # the launch-bound tiers: the graph's per-step input copies grow
         # with resolution and lose to the eager dense path at large latents.
-        # Capture only below COSMOS3_GRAPH_MAX_LATENT_AREA (latent H*W).
-        max_area = int(os.environ.get(
-            "COSMOS3_GRAPH_MAX_LATENT_AREA", self.config.graph_max_latent_area))
+        # Capture only up to ``graph_max_latent_area`` (latent H*W).
+        max_area = self.config.graph_max_latent_area
         # Video tiers (height, width, frames): a plain clip length and/or the
         # windowed rollout's window; one graph per latent shape serves t2v,
         # i2v and chained windows (see ``_capture_key``).
-        video_env = os.environ.get("COSMOS3_GEN_CAPTURE_VIDEO")
-        if video_env:
-            video_tiers = tuple(
-                tuple(int(x) for x in tier.split("x")) for tier in video_env.split(",") if tier.strip()
-            )
-        else:
-            video_tiers = tuple(tuple(int(x) for x in tier) for tier in (self.config.gen_capture_video or ()))
+        video_tiers = tuple(tuple(int(x) for x in tier) for tier in (self.config.gen_capture_video or ()))
         tiers = [(h, w, 1, IMAGE_GEN_WALK, None) for h, w in resolutions] + [
             (h, w, f, VIDEO_GEN_WALK, [VIDEO_GEN_WALK, VIDEO_GEN_AR_WALK]) for h, w, f in video_tiers
         ]
@@ -2384,6 +2368,18 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
                 walk, replay_walks,
             ))
 
+        logger.info(
+            "Cosmos3 denoise capture: %d size(s) at batch sizes %s with %d guidance branch(es); "
+            "a request at another size or other guidance runs eager",
+            len(configs), capture_batch_sizes, len(labels),
+        )
+        width, height = self.config.image_size_default
+        sizes = {tuple(pair) for pair in resolutions}
+        if (width, height) in sizes and (height, width) not in sizes:
+            logger.warning(
+                "Cosmos3 gen_capture_sizes lists %dx%d, but sizes are (height, width) and the default image "
+                "size is %dx%d (width x height): that size is not captured", width, height, width, height,
+            )
         configs.extend(self._prefill_capture_configs(device, labels))
         return configs
 
@@ -2440,7 +2436,7 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
             capture_forward_method="forward_captured",
             compile=False,
             capture_batch_sizes=capture_batch_sizes,
-            # The captured sizes (default bs=1; COSMOS3_GEN_CAPTURE_BS adds
+            # The captured sizes (default bs=1; `gen_capture_batch_sizes` adds
             # more) are an acceleration subset, not a batch ceiling —
             # uncaptured sizes / mixed resolutions run the eager batched
             # denoise, so don't cap max_batch_size to them.
@@ -2460,11 +2456,7 @@ class Cosmos3DiTSubmodule(ARNodeSubmodule):
         # one sequence (batched CFG when there are two). The dummy zeros are placeholders — the real
         # input_ids / mrope ids are copied into the static buffers at replay.
         if not os.environ.get("COSMOS3_DISABLE_PREFILL_ACCELERATOR_GRAPH"):
-            bs_env = os.environ.get("COSMOS3_PREFILL_CAPTURE_BS")
-            prefill_bs = (
-                [int(x) for x in bs_env.split(",")] if bs_env
-                else list(self.prefill_capture_batch_sizes)
-            )
+            prefill_bs = list(self.config.prefill_capture_batch_sizes)
             mrope_dtype = torch.float32 if self.config.enable_fps_modulation else torch.long
 
             configs.append(PackedAcceleratorGraphConfig(

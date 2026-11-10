@@ -8,10 +8,27 @@ resources:
 model_kwargs:
   accelerator_graph: true
   graph_max_latent_area: 2000
+  # The served size is 640x640, one branch (guidance 1): capture its denoise
+  # step at batch sizes 1, 2 and 4. Any other size runs eager. Concurrent
+  # requests also prefill as one batch, so the text prefill is captured at the
+  # same batch sizes, over the token sizes under `prefill_token_buckets` below.
+  gen_capture_sizes: [[640, 640]]
+  gen_capture_batch_sizes: [1, 2, 4]
+  prefill_capture_batch_sizes: [1, 2, 4]
   # Distilled: 4 fixed sigmas, guidance baked into the weights. The distilled
   # sampler reads its sigma list from the checkpoint scheduler config.
   num_inference_steps: 4
   guidance_scale: 1.0
+# Token sizes of the text prefill capture (all the batch's tokens together), one
+# ladder per range of batch sizes, so four ~120-token prompts replay. A batch
+# replays while its prompts total at most 1024 tokens (the bs4 ladder), taking
+# the tightest captured bucket that fits; a longer batch runs eager.
+prefill_token_buckets:
+  dit:
+    prefill:
+      1: [16, 32, 64, 128, 256]
+      2: [32, 64, 128, 256, 512]
+      4: [64, 128, 256, 512, 1024]
 node_groups:
   - node_names: ["dit"]
     ranks: [0, 1]
