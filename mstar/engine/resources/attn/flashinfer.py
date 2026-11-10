@@ -14,6 +14,7 @@ from mstar.engine.resources.attn.base import (
 from mstar.engine.resources.attn.config import AttentionStep, refuse_context_only
 from mstar.engine.resources.attn.workspace import Workspace, WorkspacePool
 from mstar.engine.resources.attn.wrappers import (
+    FlashInferCascadeDecodeWrapper,
     FlashInferDecodeWrapper,
     FlashInferMixedWrapper,
     FlashInferPrefillWrapper,
@@ -48,6 +49,7 @@ class FlashInferManager(AttentionManager):
         decode_tensor_cores: bool = True,
         sliding_window: int | None = None,
         decode_fmha: bool = False,
+        cascade_min_rows: int | None = None,
         layers: tuple[int, ...] | None = None,
         sm_scale: float | None = None,
     ):
@@ -98,6 +100,7 @@ class FlashInferManager(AttentionManager):
             and fmha_decode_applies(device)
         )
         self._sm_scale = sm_scale
+        self._cascade_min_rows = cascade_min_rows
 
         self._workspaces = WorkspacePool(device, owner=kv_cache)
 
@@ -191,6 +194,12 @@ class FlashInferManager(AttentionManager):
                 use_tensor_cores=self._decode_tensor_cores,
                 decode_wrapper=self._fmha_wrapper(decode_workspace, num_rows),
                 **kv_kwargs,
+            )
+        elif bucket.bs == bucket.num_tokens and not force_prefill and (
+            self._cascade_min_rows is not None and num_rows >= self._cascade_min_rows
+        ):
+            wrapper = FlashInferCascadeDecodeWrapper(
+                workspace_buffer=workspace, batch_size=num_rows, **kv_kwargs,
             )
         elif bucket.bs == bucket.num_tokens and not force_prefill:
             wrapper = self._fmha_wrapper(workspace, num_rows) or FlashInferDecodeWrapper(

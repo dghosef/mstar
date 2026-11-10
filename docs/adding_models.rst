@@ -755,7 +755,14 @@ The spec types are:
        captured one-token decode rows on FlashInfer's trtllm-gen fmha kernel on Blackwell,
        with no FlashInfer plan per step; a geometry trtllm-gen has no kernel for keeps
        the paged kernel, with a warning. Eager steps and prompt rows stay on the paged
-       kernels. Qwen3.5 declares ``True``. ``sm_scale`` (default
+       kernels. Qwen3.5 declares ``True``. ``cascade_min_rows`` (default ``None``, off) makes
+       captured one-token decode buckets of at least that many rows read the prefix-cache
+       pages their rows share once per group of rows, not once per row (cascade attention).
+       It pays off for long prompts that many running requests share, such as an agent's
+       system prompt and tools, from about 32 rows; a bucket with nothing shared pays about
+       10 us a layer for it. It runs with neither ``decode_fmha``, ``sliding_window`` nor
+       ``decode_tensor_cores=False``.
+       ``sm_scale`` (default
        ``1/sqrt(head_dim)``) sets the softmax scale; FlashInfer and ``FLASHINFER_MLA``
        read it, and the other backends refuse it. ``FLASHINFER_MLA`` is
        Multi-head Latent Attention over a ``KVLayout.MLA`` cache. It needs ``sm_scale``,
@@ -2667,7 +2674,8 @@ that a misspelled setting is never silently ignored:
    * - ``AttentionSpec``
      - ``backend`` (``auto`` / ``flashinfer`` / ``dense`` / ``flex`` / ``xpu_paged``),
        ``flashinfer_backend`` (``auto`` / ``fa2`` / ``fa3``), ``decode_tensor_cores``
-       (``true`` / ``false``), ``decode_fmha`` (``true`` / ``false``)
+       (``true`` / ``false``), ``decode_fmha`` (``true`` / ``false``), ``cascade_min_rows``
+       (an integer of at least 2)
    * - ``CrossAttentionSpec``
      - ``backend`` (``auto`` / ``flashinfer``), ``flashinfer_backend``
        (``auto`` / ``fa2`` / ``fa3``), ``decode_tensor_cores`` (``true`` / ``false``)

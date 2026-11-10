@@ -3,6 +3,8 @@
 Provides:
 - FlashInferPrefillWrapper: batched prefill with paged KV cache, optional CUDA graph mode
 - FlashInferDecodeWrapper: batched decode with paged KV cache, optional CUDA graph mode
+- FlashInferCascadeDecodeWrapper: captured decode whose rows' shared prefix-cache pages are
+  read once per group (cascade attention)
 
 CUDA graph mode requires:
 - Static buffer pointers passed at construction (qo_indptr_buf, paged_kv_indptr_buf, etc.)
@@ -434,17 +436,18 @@ class FlashInferPrefillWrapper:
         w._plan_info = w._cached_module.plan(*args)
 
     @torch.compiler.disable
-    def run(self, q: torch.Tensor, kv_cache_layer: torch.Tensor) -> torch.Tensor:
+    def run(self, q: torch.Tensor, kv_cache_layer: torch.Tensor, return_lse: bool = False):
         """Run planned batched prefill attention.
 
         Args:
             q: [total_tokens, num_qo_heads, head_dim]
             kv_cache_layer: [max_pages, 2, page_size, num_kv_heads, head_dim]
                 (single layer slice of the full KV cache)
+            return_lse: also return each query head's log-sum-exp, [total_tokens, num_qo_heads]
         Returns:
-            output: [total_tokens, num_qo_heads, head_dim]
+            output: [total_tokens, num_qo_heads, head_dim], and the lse if ``return_lse``
         """
-        return self.attn_wrapper.run(q.to(self.dtype), kv_cache_layer)
+        return self.attn_wrapper.run(q.to(self.dtype), kv_cache_layer, return_lse=return_lse)
 
 
 class FlashInferDecodeWrapper:
@@ -916,6 +919,19 @@ def fmha_decode_applies(device: torch.device) -> bool:
     return capability is not None and capability[0] == 10
 
 
+def _pinned_view(store: dict[str, torch.Tensor], name: str, values: np.ndarray, dtype: torch.dtype) -> torch.Tensor:
+    """``values`` in the page-locked buffer ``store[name]``, grown as needed."""
+    n = len(values)
+    buf = store.get(name)
+    if buf is None or buf.shape[0] < n:
+        buf = store[name] = torch.empty(
+            max(n, 256, 2 * (buf.shape[0] if buf is not None else 0)), dtype=dtype, pin_memory=True,
+        )
+    view = buf[:n]
+    view.numpy()[:] = values
+    return view
+
+
 class FlashInferMixedWrapper:
     """A step mixing one-token rows (decode) with prompt rows, on two plans.
 
@@ -1009,17 +1025,7 @@ class FlashInferMixedWrapper:
         self.dtype = torch.bfloat16
 
     def _pin(self, name: str, values: np.ndarray, dtype: torch.dtype) -> torch.Tensor:
-        """``values`` in this wrapper's page-locked buffer ``name``."""
-        n = len(values)
-        buf = self._pinned.get(name)
-        if buf is None or buf.shape[0] < n:
-            buf = self._pinned[name] = torch.empty(
-                max(n, 256, 2 * (buf.shape[0] if buf is not None else 0)),
-                dtype=dtype, pin_memory=True,
-            )
-        view = buf[:n]
-        view.numpy()[:] = values
-        return view
+        return _pinned_view(self._pinned, name, values, dtype)
 
     def plan(
         self,
@@ -1161,3 +1167,197 @@ class FlashInferMixedWrapper:
             self._dec_mask[:m].view(-1, 1, 1), out_rows[:m].to(out.dtype), out[:m],
         )
         return out[: q.shape[0]]
+
+
+def shared_prefix_groups(
+    kv_indptr: np.ndarray, indices: np.ndarray, min_pages: int = 1,
+) -> list[tuple[np.ndarray, int]]:
+    """The rows of a step that start with the same run of at least ``min_pages`` pages, as
+    (rows, shared pages) per group of two rows or more.
+
+    Rows share pages only through the prefix cache, so the candidates for a group are the rows
+    whose first page is the same page. Each one matches the longest of them for some leading
+    pages, short of its own last page (the one the step writes). The group's run is the one
+    that saves the most page reads, (rows matching it - 1) x its length, and the rows matching
+    less are left out of it. Rows on the sink page (a bucket's padding) are in no group.
+    """
+    from mstar.engine.resources.kv.plan import SINK_PAGE
+
+    kv_indptr = np.asarray(kv_indptr, dtype=np.int64)
+    starts, npages = kv_indptr[:-1], np.diff(kv_indptr)
+    rows = np.flatnonzero(npages > min_pages)
+    if len(rows) < 2:
+        return []
+    first = indices[starts[rows]]
+    rows, first = rows[first != SINK_PAGE], first[first != SINK_PAGE]
+    by_first = np.argsort(first, kind="stable")
+    rows, first = rows[by_first], first[by_first]
+    groups = []
+    for cand in np.split(rows, np.flatnonzero(np.diff(first)) + 1):
+        if len(cand) < 2:
+            continue
+        ref = cand[np.argmax(npages[cand])]
+        width = int(npages[ref]) - 1
+        cap = np.minimum(npages[cand] - 1, width)
+        cols = np.arange(width)
+        block = indices[starts[cand][:, None] + np.minimum(cols, cap[:, None] - 1).clip(0)]
+        same = (block == indices[starts[ref] + cols]) & (cols < cap[:, None])
+        match = np.where(same.all(axis=1), cap, np.argmin(same, axis=1))
+        # the run saving the most reads among the lengths rows match
+        runs = np.unique(match[match >= min_pages])
+        if len(runs) == 0:
+            continue
+        saved = [(int((match >= r).sum()) - 1) * int(r) for r in runs]
+        run = int(runs[int(np.argmax(saved))])
+        members = cand[match >= run]
+        if len(members) >= 2:
+            groups.append((np.sort(members), run))
+    return groups
+
+
+class FlashInferCascadeDecodeWrapper:
+    """Captured one-token decode in which rows sharing prefix-cache pages read them once.
+
+    Each step, ``plan`` finds the groups of rows that start with the same pages
+    (`shared_prefix_groups`) and plans one FA2 paged-prefill pass, the kernel tensor-core decode
+    runs, over the queries twice: first in group order, one qo row per group over its shared
+    pages (so a group's queries read them once, the KV split over the SMs), then one qo row per
+    query over the rest of its row's pages. The two halves are merged by their log-sum-exps.
+    A row in no group (padding too) reads all its pages in the second half, and its first-half
+    row, over one token of the sink page, is masked out of the merge. Every shape is the
+    bucket's, padded to its most groups, so one capture serves any grouping.
+    """
+
+    # planned on the host: a resident step fills nothing of it in its graph
+    plans_in_graph = False
+    supports_gather_resident = False
+
+    def __init__(
+        self,
+        workspace_buffer: Workspace,
+        num_qo_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        page_size: int,
+        batch_size: int,
+        max_num_pages: int,
+        device: torch.device,
+        backend: str = "auto",
+        sm_scale: float | None = None,
+    ):
+        from mstar.engine.resources.kv.plan import SINK_PAGE
+
+        self._sink_page = SINK_PAGE
+        self._page_size = page_size
+        self._bs = batch_size
+        # a group has two rows or more, and the rows in none take one more qo row
+        self._groups = batch_size // 2 + 1
+        self._attn = FlashInferPrefillWrapper(
+            workspace_buffer=workspace_buffer, batch_size=self._groups + batch_size,
+            max_total_tokens=2 * batch_size, max_num_pages=max_num_pages + self._groups,
+            accelerator_graph=True, num_qo_heads=num_qo_heads, num_kv_heads=num_kv_heads,
+            head_dim=head_dim, page_size=page_size, device=device, sm_scale=sm_scale,
+            backend="fa2" if backend == "auto" else backend,
+        )
+        # the rows in first-half order, each row's place in it, and whether it takes that half
+        self._order = torch.zeros(batch_size, dtype=torch.long, device=device)
+        self._place = torch.zeros(batch_size, dtype=torch.long, device=device)
+        self._member = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        self._pinned: dict[str, torch.Tensor] = {}
+        self._done = None
+        self.dtype = torch.bfloat16
+
+    def plan(
+        self,
+        paged_kv_indptr: torch.Tensor,
+        paged_kv_indices: torch.Tensor,
+        paged_kv_last_page_len: torch.Tensor,
+        dtype: torch.dtype = torch.bfloat16,
+        kv_lens: torch.Tensor | None = None,
+        window_left: int = -1,
+        **kwargs,
+    ):
+        from mstar.engine.resources.kv.plan import HostLens
+
+        if window_left != -1:
+            raise ValueError("cascade decode reads whole shared pages; it has no sliding window")
+        self.dtype = dtype
+        if self._done is None:
+            self._done = torch.cuda.Event()
+        else:
+            # this wrapper's previous plan, a step or more back: long since done
+            self._done.synchronize()
+
+        kvp = paged_kv_indptr.numpy().astype(np.int64)
+        idx = paged_kv_indices.numpy()
+        last = paged_kv_last_page_len.numpy()
+        npages = np.diff(kvp)
+        rows = len(npages)
+        if rows != self._bs:
+            raise ValueError(f"cascade decode captured for {self._bs} rows, planned with {rows}")
+        lens = (
+            np.asarray(kv_lens, dtype=np.int64) if kv_lens is not None
+            else np.maximum(npages - 1, 0) * self._page_size + last
+        )
+        groups = shared_prefix_groups(kvp, idx)
+        shared = np.zeros(rows, dtype=np.int64)  # each row's pages in its group's run
+        member = np.zeros(rows, dtype=bool)
+        for members, run in groups:
+            shared[members] = run
+            member[members] = True
+        order = np.concatenate([m for m, _ in groups] + [np.flatnonzero(~member)])
+        place = np.empty(rows, dtype=np.int64)
+        place[order] = np.arange(rows)
+
+        # first half: a row per group over its run, one over a sink token for the rest, empty
+        # rows to the captured count; second half: a one-token row per query over its own pages
+        sinks = self._groups - len(groups)
+        spans = [len(m) for m, _ in groups] + [rows - int(member.sum())] + [0] * (sinks - 1) + [1] * rows
+        qo = np.zeros(len(spans) + 1, dtype=np.int32)
+        np.cumsum(spans, out=qo[1:])
+        own = npages - shared
+        runs = np.array([run for _, run in groups], dtype=np.int64)
+        cnt = np.concatenate([runs, np.ones(sinks, dtype=np.int64), own])
+        kv_indptr = np.zeros(len(cnt) + 1, dtype=np.int32)
+        np.cumsum(cnt, out=kv_indptr[1:])
+        page_row = np.repeat(np.arange(rows), npages)
+        keep = (np.arange(len(idx)) - kvp[page_row]) >= shared[page_row]
+        indices = np.concatenate(
+            [idx[kvp[m[0]]:kvp[m[0]] + run] for m, run in groups]
+            + [np.full(sinks, self._sink_page, dtype=idx.dtype), idx[keep]]
+        ).astype(np.int32)
+        last_len = np.concatenate([np.full(len(groups), self._page_size), np.ones(sinks), last]).astype(np.int32)
+        kv_len = np.concatenate(
+            [runs * self._page_size, np.ones(sinks, dtype=np.int64), lens - shared * self._page_size]
+        ).astype(np.int32)
+
+        try:
+            self._order.copy_(_pinned_view(self._pinned, "order", order, torch.int64), non_blocking=True)
+            self._place.copy_(_pinned_view(self._pinned, "place", place, torch.int64), non_blocking=True)
+            self._member.copy_(_pinned_view(self._pinned, "member", member, torch.bool), non_blocking=True)
+            self._attn.plan(
+                qo_indptr=torch.from_numpy(qo),
+                paged_kv_indptr=torch.from_numpy(kv_indptr),
+                paged_kv_indices=torch.from_numpy(indices),
+                paged_kv_last_page_len=torch.from_numpy(last_len),
+                kv_lens=torch.from_numpy(kv_len).as_subclass(HostLens),
+                causal=False, dtype=dtype,
+            )
+        finally:
+            # also on a raise: copies already issued still read the pinned buffers
+            self._done.record()
+
+    @torch.compiler.disable
+    def run(self, q: torch.Tensor, kv_cache_layer: torch.Tensor) -> torch.Tensor:
+        from flashinfer.cascade import merge_state_in_place
+
+        out, lse = self._attn.run(
+            torch.cat((q.index_select(0, self._order), q)), kv_cache_layer, return_lse=True,
+        )
+        bs = self._bs
+        own, own_lse = out[bs:], lse[bs:]
+        merge_state_in_place(
+            own, own_lse, out[:bs].index_select(0, self._place), lse[:bs].index_select(0, self._place),
+            mask=self._member,
+        )
+        return own
