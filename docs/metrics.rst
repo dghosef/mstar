@@ -232,8 +232,13 @@ From the conductor's status message, sent every second while metrics are on.
    conductor dispatched and has not heard back from. The conductor sees whole passes,
    so a node running a request's decode loop counts it once for the loop.
 
+``mstar_pool_load{model_name, nodes, replica}``
+   Gauge, up to a second old. The live requests the replica pick counts on one replica of a set of node
+   groups placed together (``nodes`` is the set's nodes, comma-joined). Work queued on the workers is
+   not included.
+
 ``mstar_routing_predicted_saving_total{model_name, term}``
-   Counter, up to a second old. Per term of the data-parallel replica cost (see
+   Counter, up to a second old. Per built-in term of the data-parallel replica cost, not a ``routing_terms`` term (see
    "Data-parallel routing" in :doc:`serving`), the saving predicted on the replica each
    request was sent to, in request-equivalents, unweighted. For ``prefix``, each request
    adds the share of its prompt predicted cached there, so its rate over the request rate

@@ -3,7 +3,7 @@
 A replica is one lockstep instance of a group: its ``cfg_size * sp_size * tp_size`` ranks,
 or one rank. A replica's cost for the request is ``routing_weights.load`` times
 its live requests, plus ``routing_cost`` of the facts the mirrors predict for
-the request there:
+the request there, plus the deployment's own terms:
 
 - the live requests are counted per set of groups that pick together, so
   groups on other ranks that share a worker don't skew each other's picks, and
@@ -12,7 +12,9 @@ the request there:
 - a resource whose spec offers a mirror for the set
   (``NodeResourceSpec.routing_mirror``) reports ``RoutingFacts``, a row per
   replica, such as a paged KV cache's predicted prefix hit. The rows of every
-  mirror on the set add up before they are priced.
+  mirror on the set add up before they are priced;
+- a deployment's own ``routing_terms`` (``CostTerm``), each adding its own cost for a replica, which the weights
+  do not scale; the startup warmup requests skip them, so they still spread by load.
 
 Every cost is in request-equivalents. The cheapest replica wins, ties to the
 one picked longest ago, so requests that never overlap still take turns over
@@ -23,8 +25,9 @@ slower.
 """
 
 import logging
+import math
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, NamedTuple
 
 from mstar.engine.resources.kv.config import prefix_caches_by_rank
@@ -42,6 +45,47 @@ from mstar.observability.recorders import Counter as MetricCounter
 logger = logging.getLogger(__name__)
 
 Instance = tuple[int, ...]
+
+# Far above any useful weight or term cost, and low enough that no replica's cost overflows to inf, where
+# inf - inf would make it NaN and fail every pick.
+MAX_ROUTING_WEIGHT = 1e6
+
+
+class UnitView(NamedTuple):
+    """A set of node groups placed together, as a cost term sees it: its nodes (the model's walks in order, each
+    walk's graph in order) and, per replica, the ranks it runs on."""
+    nodes: tuple[str, ...]
+    instances: tuple[Instance, ...]
+
+
+class CostTerm:
+    """An extra term of a replica's cost, a deployment's own (``routing_terms: ["pkg.module:Class"]``): what a
+    request placed on each replica of ``unit`` would cost beyond load and the predicted prefix hit, in
+    request-equivalents, a positive number to avoid a replica and a negative one to prefer it. ``cost`` returns one
+    number per replica of ``unit.instances``, which hold their ranks. It runs once per request per set of groups the
+    request runs, in the conductor; the weights do not scale it, and a NaN counts as 0 (logged once) and a value past
+    +-``MAX_ROUTING_WEIGHT`` is cut to it. ``picked`` maps every node of each earlier set the request runs (sets
+    come in the model's walk order, and each set's nodes in its walks' graph order) to the ranks of the replica chosen
+    for it, so a term can follow a request across sets (stay on the hosts it already uses). A term that raises, or
+    returns the wrong number of values, fails the request as a server error. Warmup requests skip the terms, so they
+    still spread over the replicas. The default adds nothing."""
+
+    def cost(self, unit: UnitView, picked: Mapping[str, Instance]) -> Sequence[float]:
+        return [0.0] * len(unit.instances)
+
+
+def cost_term(name: str) -> CostTerm:
+    """The class ``"pkg.module:Class"`` names, built with no arguments."""
+    import importlib
+
+    module, _, attr = name.partition(":")
+    try:
+        term = getattr(importlib.import_module(module), attr)()
+    except (ImportError, AttributeError, ValueError, TypeError) as exc:
+        raise ValueError(f"routing_terms {name!r} is not a 'pkg.module:Class' of a CostTerm") from exc
+    if not isinstance(term, CostTerm):
+        raise ValueError(f"routing_terms {name!r} is not a CostTerm")
+    return term
 
 
 class RoutingWeights(NamedTuple):
@@ -107,8 +151,12 @@ class RoutingHandle(NamedTuple):
 class _Unit(NamedTuple):
     """Node groups placed on the same ranks, replica for replica: one pick places them all."""
     groups: tuple[int, ...]
-    instances: tuple[Instance, ...]
+    view: UnitView  # its nodes and replicas' ranks, for a cost term and the load gauge
     mirrors: tuple[_Mirror, ...]
+
+    @property
+    def instances(self) -> tuple[Instance, ...]:
+        return self.view.instances
 
 
 class ReplicaRouter:
@@ -118,12 +166,15 @@ class ReplicaRouter:
         worker_graphs: Iterable,
         specs: Iterable[NodeResourceSpec] = (),
         weights: Mapping[str, Any] | None = None,
+        terms: Iterable[str] = (),
     ):
         """``weights`` are the serving config's ``routing_weights``, which
         ``validate_deployment`` checked. Each spec is asked for a mirror once per
         set of groups with replicas that holds one of its nodes."""
         worker_graphs, specs = list(worker_graphs), list(specs)
         self._weights = RoutingWeights(**{name: float(w) for name, w in (weights or {}).items()})
+        self._terms = [cost_term(name) for name in terms]
+        self._nan_terms: set[str] = set()
         units: dict[tuple[Instance, ...], list] = {}
         for wg in worker_graphs:
             units.setdefault(tuple(map(tuple, wg.replica_ranks)), []).append(wg)
@@ -153,7 +204,8 @@ class ReplicaRouter:
                 if mirror is not None:
                     mirrors.append(_Mirror(spec.resource_key, frozenset(wg._group_id for wg in holding), mirror))
             groups = tuple(dict.fromkeys(wg._group_id for wg in wgs))
-            self._units.append(_Unit(groups, instances, tuple(mirrors)))
+            nodes = tuple(dict.fromkeys(node for wg in wgs for node in wg.section.get_nodes()))
+            self._units.append(_Unit(groups, UnitView(nodes, instances), tuple(mirrors)))
         if any(len(unit.instances) > 1 for unit in self._units):
             logger.info(
                 "Replica pick: weights %s; mirrors %s", self._weights._asdict(),
@@ -170,16 +222,44 @@ class ReplicaRouter:
         self._picks = 0
         self.predicted_saving = MetricCounter(catalog.ROUTING_PREDICTED_SAVING)
 
+    def _term_row(self, term: CostTerm, view: UnitView, picked: Mapping[str, Instance]) -> list[float]:
+        """``term``'s cost for each replica, kept finite as ``routing_weights`` are, so no term can make a pick fail.
+        A term that is broken fails the request as a server error, not a client's."""
+        name = type(term).__name__
+        try:
+            row = [float(value) for value in term.cost(view, picked)]
+        except Exception as exc:
+            raise RuntimeError(f"routing term {name} failed: {exc!r}") from exc
+        if len(row) != len(view.instances):
+            raise RuntimeError(f"routing term {name} returned {len(row)} costs for {len(view.instances)} replicas")
+        if any(map(math.isnan, row)) and name not in self._nan_terms:
+            self._nan_terms.add(name)
+            logger.warning("routing term %s returned NaN; counting it as 0", name)
+        return [0.0 if math.isnan(v) else max(-MAX_ROUTING_WEIGHT, min(MAX_ROUTING_WEIGHT, v)) for v in row]
+
+    def loads(self) -> list[tuple[tuple[str, str], int]]:
+        """The live requests on each replica of each set of groups placed together, as ``((nodes, replica), count)``,
+        for the pool load gauge."""
+        return [
+            ((",".join(sorted(unit.view.nodes)), str(i)), self._load[(u, i)])
+            for u, unit in enumerate(self._units) for i in range(len(unit.instances))
+        ]
+
     def groups_run(self, partitions: Iterable[str]) -> frozenset[int]:
         """The node groups of these partitions: what a request whose other partitions are done runs."""
         return frozenset().union(*(self._partition_groups[p] for p in partitions))
 
-    def pick(self, configs: Mapping[str, ResourceReqConfig], groups_run: frozenset[int]) -> Placement:
+    def pick(
+        self, configs: Mapping[str, ResourceReqConfig], groups_run: frozenset[int], warmup: bool = False,
+    ) -> Placement:
         """Each node group's replica for a new request that runs ``groups_run``
-        and opens its resources with ``configs``. Records nothing."""
+        and opens its resources with ``configs``. A ``warmup`` request skips the
+        ``routing_terms``, so a burst of them spreads by load. Records nothing."""
         replicas: dict[int, int] = {}
         picked: dict[int, RoutingFacts] = {}
+        chosen: dict[str, Instance] = {}
         for u, unit in enumerate(self._units):
+            runs = not groups_run.isdisjoint(unit.groups)
             choice = 0
             if len(unit.instances) > 1:
                 # the facts on each replica, every mirror's fields added
@@ -193,6 +273,8 @@ class ReplicaRouter:
                     + (0.0 if row is None else routing_cost(row[i], self._weights))
                     for i in range(len(unit.instances))
                 ]
+                for term in self._terms if runs and not warmup else ():
+                    cost = [c + extra for c, extra in zip(cost, self._term_row(term, unit.view, chosen), strict=True)]
                 least = min(cost)
                 choice = min(
                     (i for i, c in enumerate(cost) if c == least), key=lambda i: self._last_pick[(u, i)],
@@ -201,6 +283,8 @@ class ReplicaRouter:
                     picked[u] = row[choice]
             for group in unit.groups:
                 replicas[group] = choice
+            if self._terms and runs:
+                chosen.update(dict.fromkeys(unit.view.nodes, unit.instances[choice]))
         return Placement(replicas, picked)
 
     def add(

@@ -261,9 +261,16 @@ A config maps the model's computation-graph nodes to physical GPU ranks. The key
        starts (see below). Defaults to the model's ``UNPAUSABLE_OUTPUTS``, which is ``[audio]``
        unless the model declares otherwise. ``[]`` gives a voice deployment a fast first chunk
        under KV pressure, at the cost of a pause when its requests are preempted.
+   * - ``routing_terms``
+     - *(optional)* Extra terms of the data-parallel replica cost, a list of ``"pkg.module:Class"``, each a
+       ``mstar.conductor.routing.CostTerm`` built with no arguments: ``cost(unit, picked)`` returns the
+       request-equivalents to add for each replica of ``unit.instances`` (negative to prefer it), which hold the
+       replicas' ranks, and ``picked`` maps every node of each earlier set of groups the request runs to the ranks of
+       the replica chosen for it. The weights do not scale a term, a NaN counts as 0 and a value past 1e6 is cut to it; a term that raises
+       fails the request as a server error. Warmup requests skip the terms. None by default. A name that does not resolve fails loading.
    * - ``routing_weights``
      - *(optional)* The weights of the data-parallel replica pick (see below), one per
-       term: ``load`` for the live requests on a replica, and ``prefix`` for the share of
+       built-in term (a ``routing_terms`` term has none): ``load`` for the live requests on a replica, and ``prefix`` for the share of
        the prompt predicted in its KV prefix cache. Each is a number from 0 to 1e6; ``load``
        defaults to 1.0 and ``prefix`` to 8.0. Any other key, or ``load: 0`` while another
        weight is above 0, fails loading. ``prefix: 0`` picks by load alone, and ``prefix: 1``
@@ -697,7 +704,7 @@ logs a warning at load.
 replica. The conductor picks it per request, at ingest, as the replica with the lowest
 cost: ``routing_weights.load`` times the live requests on the replica (counted per set of
 groups that pick together, for each request with a partition on them that is not done at
-ingest), plus the price of what the conductor predicts about the request there. Ties go
+ingest), plus the price of what the conductor predicts about the request there, plus the deployment's own ``routing_terms``, if any, for a set of groups the request runs (the startup warmup requests skip them, so a burst of them still spreads by load). Ties go
 to the replica picked longest ago, so requests that never overlap still take turns. Every
 term is in request-equivalents. Groups whose replicas sit on the same ranks, replica for
 replica, take one pick together.
@@ -1213,7 +1220,9 @@ second old:
   ``node_names`` of the config's ``node_groups``), running requests with a pass on that
   node that the conductor dispatched and has not heard back from. The conductor sees
   whole passes, so a node running a request's decode loop counts it once for the loop.
-- ``mstar_routing_predicted_saving_total{model_name, term}``: counter, per term of the
+- ``mstar_pool_load{model_name, nodes, replica}``: gauge, the live requests the replica pick counts on a
+  replica of a set of node groups placed together; queued work is not included.
+- ``mstar_routing_predicted_saving_total{model_name, term}``: counter, per built-in term of the
   data-parallel replica cost, the saving predicted on the replica each request went to,
   in request-equivalents. For ``prefix``, each request adds the share of its prompt
   predicted cached there.

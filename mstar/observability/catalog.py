@@ -44,9 +44,15 @@ COMPONENT_IN_FLIGHT = Family(
     "dispatched and whose completion it has not received yet.",
     ("component",),
 )
+POOL_LOAD = Family(
+    "mstar_pool_load", GAUGE,
+    "Live requests the replica pick counts on one replica of a set of node groups placed together (the set's "
+    "nodes, comma-joined, and the replica); work queued on the workers is not included.",
+    ("nodes", "replica"),
+)
 ROUTING_PREDICTED_SAVING = Family(
     "mstar_routing_predicted_saving_total", COUNTER,
-    "Per term of the data-parallel replica cost, the saving the mirrors "
+    "Per built-in term of the data-parallel replica cost (not a routing_terms term), the saving the mirrors "
     "predicted on the replica each request was sent to, in request-equivalents: "
     "for prefix, the share of the request's prompt predicted cached there.",
     ("term",),
@@ -203,5 +209,5 @@ WORKER_FAMILIES: dict[str, Family] = {
 #: Families the conductor's status message carries, exported from the latest
 #: message.
 STATUS_FAMILIES: dict[str, Family] = {
-    f.name: f for f in (CONDUCTOR_REQUESTS, COMPONENT_IN_FLIGHT, ROUTING_PREDICTED_SAVING)
+    f.name: f for f in (CONDUCTOR_REQUESTS, COMPONENT_IN_FLIGHT, POOL_LOAD, ROUTING_PREDICTED_SAVING)
 } | WORKER_FAMILIES

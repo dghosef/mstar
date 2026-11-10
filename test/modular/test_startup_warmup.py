@@ -48,6 +48,7 @@ def test_warmup_requests_run_as_generate_requests(caplog) -> None:
     assert third["file_paths"] == {"image": ["/tmp/obs.jpg"]}
     assert third["input_modalities"] == ["image", "text"]
     assert [p.modality for p in third["prompt_parts"]] == ["image", "text"]
+    assert all(kw.get("warmup") for kw in fake.submitted)  # so the conductor routes them by load alone
     assert caplog.text.count("done in") == 3
 
 
