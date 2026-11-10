@@ -23,13 +23,14 @@ import os
 
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
+import pytest
 import torch
 import torch.nn.functional as F
 
 from mstar.engine.resources import AdmitOutcome, StepContext, StepRunner
 from mstar.engine.resources.base import AttentionResource
 from mstar.engine.resources.kv.plan import group_by_plan_label
-from mstar.model.cosmos3.submodules import ATTN, KV_CACHE, LATENT_DTYPE
+from mstar.model.cosmos3.submodules import ATTN, DENOISE_LOOP_FOR_WALK, IMAGE_GEN_LOOP, KV_CACHE, LATENT_DTYPE
 from mstar.model.submodule_base import ModelInputsFromEngine
 
 PROMPT = "A red cube resting on a polished wooden table, soft daylight."
@@ -37,8 +38,8 @@ PROMPT = "A red cube resting on a polished wooden table, soft daylight."
 # CUDA-graph check below captures at whatever (H, W) it sets. NOTE: the in-process
 # graph-vs-fused PSNR is a coarse smoke check — it carries a cache-setup artifact
 # of this harness. The authoritative bit-exactness gate for the served graph is
-# the HTTP A/B (graph-on vs COSMOS3_DISABLE_CUDA_GRAPH=1), which is byte-identical
-# at every resolution.
+# the HTTP A/B (graph-on vs COSMOS3_DISABLE_ACCELERATOR_GRAPH=1), whose latents agree to
+# bf16 rounding (a one-branch capture runs the dynamic-shape batched step, eager the static one).
 H = W = 256
 STEPS = 12
 GS = 6.0
@@ -324,9 +325,10 @@ def _forward_step(
             out_ids = cg_runner.slot_for(lease).dummy_rids
             # A copy per request, as the engine's collect step makes: the
             # runner keeps ``raw`` as its static output mapping, and the
-            # submodule's postprocess rewrites the dict it is handed.
+            # submodule's postprocess rewrites the dict it is handed. A prefill
+            # emits nothing, so its entry is absent.
             out = {
-                rid: dict(raw[out_id])
+                rid: dict(raw.get(out_id, {}))
                 for rid, out_id in zip(real_ids, out_ids, strict=False)
             }
         else:
@@ -338,6 +340,45 @@ def _forward_step(
         if lease is not None:
             cg_runner.release(lease, len(real_ids))
     return out
+
+
+def _denoise_loop(
+    dit, resources, rids, fwds, walk, count, init=None, cg_runner=None, batched=False, starts=None, on_step=None,
+):
+    """``count`` iterations of a denoise walk's loop for ``rids``, each through
+    ``_forward_step``; returns each request's final latents. The loop state
+    rides the loop-back edges as in the engine: the step index in
+    ``dynamic_loop_iter_counts``, and the latents and the scheduler's solver
+    state from the previous outputs. ``init`` is each request's starting
+    latents; without it the request seeds its own noise. A captured step is
+    finished by the submodule's ``postprocess`` right after replay.
+    ``starts`` (rid -> the lockstep tick its loop begins at, default 0)
+    staggers the requests: one joins the batch at its start, so rows of one
+    step sit at different iterations. ``on_step(rid, outputs)`` sees every
+    step's outputs."""
+    starts = starts or {}
+    loop = DENOISE_LOOP_FOR_WALK.get(walk, IMAGE_GEN_LOOP)
+    state = {rid: {} for rid in rids}
+    if init is not None:
+        for rid in rids:
+            state[rid] = {"latents": init[rid], **dit._first_solver_state(dit.request_state(rid), init[rid])}
+    for tick in range(count + max(starts.values(), default=0)):
+        live = [rid for rid in rids if 0 <= tick - starts.get(rid, 0) < count]
+        nis = []
+        for rid in live:
+            fwds[rid].graph_walk = walk
+            fwds[rid].dynamic_loop_iter_counts[loop] = tick - starts.get(rid, 0)
+            nis.append(dit.prepare_inputs(walk, fwds[rid], {name: [t] for name, t in state[rid].items()}))
+        out = _forward_step(dit, walk, resources, live, fwds, nis, batched=batched, cg_runner=cg_runner)
+        if not batched and cg_runner is None:  # one request's forward returns its own outputs
+            out = {live[0]: out}
+        for rid, ni in zip(live, nis, strict=True):
+            if cg_runner is not None:
+                dit.postprocess(rid, fwds[rid], out[rid], inputs=ni)
+            state[rid] = {name: out[rid][name][0] for name in ("latents", *dit._solver_state)}
+            if on_step is not None:
+                on_step(rid, out[rid])
+    return {rid: state[rid]["latents"] for rid in rids}
 
 
 def _engine_resources(model, rids, device, dtype, max_num_pages=64, backend=None):
@@ -402,13 +443,7 @@ def _run_cache_once(model, dit, resources, init, cond_ids, uncond_ids, device, n
     ni = dit.prepare_inputs("prefill", fwd, {"text_inputs": text_inputs})
     _forward_step(dit, "prefill", resources, [rid], {rid: fwd}, [ni])
 
-    latents = init.clone()
-    time_index = torch.zeros(1, dtype=torch.long, device=device)
-    fwd.graph_walk = "image_gen"
-    for _ in range(STEPS):
-        ni = dit.prepare_inputs("image_gen", fwd, {"latents": [latents], "time_index": [time_index]})
-        out = _forward_step(dit, "image_gen", resources, [rid], {rid: fwd}, [ni])
-        latents, time_index = out["latents"][0], out["time_index"][0]
+    latents = _denoise_loop(dit, resources, [rid], {rid: fwd}, "image_gen", STEPS, {rid: init.clone()})[rid]
     dit.cleanup_request(rid)
     return latents
 
@@ -438,21 +473,8 @@ def _run_batched(model, dit, resources, init, conds, unconds, device, rids):
         ni = dit.prepare_inputs("prefill", fwd, {"text_inputs": ti})
         _forward_step(dit, "prefill", resources, [rid], {rid: fwd}, [ni])
 
-    for rid in rids:
-        fwds[rid].graph_walk = "image_gen"
-    latents = {rid: init.clone() for rid in rids}
-    time_index = {rid: torch.zeros(1, dtype=torch.long, device=device) for rid in rids}
-    for _ in range(STEPS):
-        inputs = [
-            dit.prepare_inputs("image_gen", fwds[rid],
-                               {"latents": [latents[rid]], "time_index": [time_index[rid]]})
-            for rid in rids
-        ]
-        out = _forward_step(
-            dit, "image_gen", resources, rids, fwds, inputs, batched=True,
-        )
-        for rid in rids:
-            latents[rid], time_index[rid] = out[rid]["latents"][0], out[rid]["time_index"][0]
+    inits = {rid: init.clone() for rid in rids}
+    latents = _denoise_loop(dit, resources, rids, fwds, "image_gen", STEPS, inits, batched=True)
     for rid in rids:
         dit.cleanup_request(rid)
     return latents
@@ -519,9 +541,7 @@ def _scenario(num_frames):
 
 def _check_cache_once_exact(num_frames, tag):
     ctx = _scenario(num_frames)
-    if ctx is None:
-        print(f"  (skipped {tag} cache-once parity: needs COSMOS3_NANO_DIR + CUDA)")
-        return
+    _skip_without_gpu_checks(ctx)
     dit = ctx["dit"]
     prev = dit.batched_cfg
     # The sequential guidance path matches the fused pipeline bit-for-bit; the
@@ -541,14 +561,11 @@ def _check_cache_once_exact(num_frames, tag):
 
 def _check_engine_psnr(num_frames, tag):
     ctx = _scenario(num_frames)
-    if ctx is None:
-        print(f"  (skipped {tag} engine cache parity: needs COSMOS3_NANO_DIR + CUDA)")
-        return
+    _skip_without_gpu_checks(ctx)
     try:
         cm = _engine_resources(ctx["model"], ["r0"], ctx["device"], ctx["dtype"])
-    except Exception as exc:  # noqa: BLE001
-        print(f"  (skipped {tag} engine cache parity: FlashInfer unavailable: {exc})")
-        return
+    except ImportError as exc:
+        pytest.skip(f"{tag} engine cache parity: FlashInfer unavailable: {exc}")
     lat = _run_cache_once(
         ctx["model"], ctx["dit"], cm, ctx["init"], ctx["cond"], ctx["uncond"], ctx["device"], num_frames,
     )
@@ -569,9 +586,7 @@ def _check_dense_fa3(num_frames, tag):
     decoded images must match closely, and the dense path must clear the same
     fused-reference bar the paged path meets."""
     ctx = _scenario(num_frames)
-    if ctx is None:
-        print(f"  (skipped {tag} dense-FA3 parity: needs COSMOS3_NANO_DIR + CUDA)")
-        return
+    _skip_without_gpu_checks(ctx)
     try:
         # Paged baseline vs the dense backend (cosmos3 config defaults dense on):
         # the same submodule code runs against each backend class.
@@ -589,9 +604,8 @@ def _check_dense_fa3(num_frames, tag):
             ctx["model"], ctx["dit"], cm2, ctx["init"], ctx["cond"], ctx["uncond"],
             ctx["device"], num_frames,
         )
-    except Exception as exc:  # noqa: BLE001
-        print(f"  (skipped {tag} dense-FA3 parity: FA3/FlashInfer unavailable: {exc})")
-        return
+    except ImportError as exc:
+        pytest.skip(f"{tag} dense-FA3 parity: FA3/FlashInfer unavailable: {exc}")
     shape = ctx["lat_fused"].shape
     img_fused = ctx["mpipe"]._decode(ctx["lat_fused"]).squeeze().float().cpu()
     img_paged = ctx["mpipe"]._decode(lat_paged.reshape(shape)).squeeze().float().cpu()
@@ -643,9 +657,7 @@ def test_anchor_encode_matches_full() -> None:
     must give a bit-identical frame 0 to the repeat-padded full-clip encode it
     runs for action policy / forward-dynamics — at a fraction of the cost."""
     base = _load()
-    if base is None:
-        print("  (skipped anchor-encode parity: needs COSMOS3_NANO_DIR + CUDA)")
-        return
+    _skip_without_gpu_checks(base)
     device = base["device"]
     # [C, H, W] in [0, 1] on the 8-bit grid, like load_image: the i2v
     # conditioning recipe rounds to 8 bits, the action path does not, so an
@@ -673,9 +685,7 @@ def _check_compile_vae(num_frames, tag):
     banding that tanks the PSNR. Checked for both a single image frame and a
     multi-frame video clip (video is the lever's main beneficiary)."""
     ctx = _scenario(num_frames)
-    if ctx is None:
-        print(f"  (skipped {tag} compile-VAE parity: needs COSMOS3_NANO_DIR + CUDA)")
-        return
+    _skip_without_gpu_checks(ctx)
     from mstar.model.cosmos3.submodules import Cosmos3VAEDecoderSubmodule
 
     model, lat = ctx["model"], ctx["lat_fused"]
@@ -693,8 +703,7 @@ def _check_compile_vae(num_frames, tag):
         compiled = Cosmos3VAEDecoderSubmodule(vae=vae, config=config)
         img_comp = compiled.forward(walk, None, latents=lat.clone())[out_key][0]
     except ImportError as exc:
-        print(f"  (skipped {tag} compile-VAE parity: VAE unavailable: {exc})")
-        return
+        pytest.skip(f"{tag} compile-VAE parity: VAE unavailable: {exc}")
     finally:
         if had is None:
             os.environ.pop("COSMOS3_COMPILE_VAE", None)
@@ -723,18 +732,15 @@ def test_batched_cfg_matches_sequential() -> None:
     them sequentially. The two paths differ only in bf16 GEMM rounding (a batched
     matmul tiles differently), so compare the decoded images by PSNR."""
     ctx = _scenario(1)
-    if ctx is None:
-        print("  (skipped batched-CFG vs sequential: needs COSMOS3_NANO_DIR + CUDA)")
-        return
+    _skip_without_gpu_checks(ctx)
     dit, prev, decoded = ctx["dit"], ctx["dit"].batched_cfg, {}
     try:
         for flag in (False, True):
             dit.batched_cfg = flag
             try:
                 cm = _engine_resources(ctx["model"], ["r0"], ctx["device"], ctx["dtype"])
-            except Exception as exc:  # noqa: BLE001
-                print(f"  (skipped batched-CFG vs sequential: FlashInfer unavailable: {exc})")
-                return
+            except ImportError as exc:
+                pytest.skip(f"batched-CFG vs sequential: FlashInfer unavailable: {exc}")
             lat = _run_cache_once(
                 ctx["model"], dit, cm, ctx["init"], ctx["cond"], ctx["uncond"], ctx["device"], 1
             )
@@ -772,9 +778,7 @@ def test_cross_request_batch_matches_individual() -> None:
     path (per-prompt fidelity varies with the FlashInfer kernel, so the bar is
     relative to bs=1, not an absolute PSNR)."""
     base = _load()
-    if base is None:
-        print("  (skipped cross-request batch parity: needs COSMOS3_NANO_DIR + CUDA)")
-        return
+    _skip_without_gpu_checks(base)
     from mstar.model.cosmos3.components.packing import tokenize_prompt
 
     model, dit, mpipe = base["model"], base["dit"], base["mpipe"]
@@ -815,9 +819,8 @@ def test_cross_request_batch_matches_individual() -> None:
         for i, _rid in enumerate(rids):
             cm = _engine_resources(model, ["r0"], device, dtype)
             bs1.append(_dec(_run_cache_once(model, dit, cm, init, conds[i], unconds[i], device, 1)))
-    except Exception as exc:  # noqa: BLE001
-        print(f"  (skipped cross-request batch parity: FlashInfer unavailable: {exc})")
-        return
+    except ImportError as exc:
+        pytest.skip(f"cross-request batch parity: FlashInfer unavailable: {exc}")
 
     shared = _engine_resources(model, rids, device, dtype, max_num_pages=256)
     bat = _run_batched(model, dit, shared, init, conds, unconds, device, rids)
@@ -921,15 +924,11 @@ def _run_windowed_kv_served(dit, resources, md, cond_ids, uncond_ids, device):
     ni = dit.prepare_inputs("prefill", fwd, {"text_inputs": text_inputs})
     _forward_step(dit, "prefill", resources, [rid], {rid: fwd}, [ni])
 
-    fwd.graph_walk = "video_gen_ar"
     windows = []
-    inputs = {}
-    for _ in range(md["num_windows"] * (md["num_inference_steps"] + 1)):
-        ni = dit.prepare_inputs("video_gen_ar", fwd, inputs)
-        out = _forward_step(dit, "video_gen_ar", resources, [rid], {rid: fwd}, [ni])
-        if "window_latents" in out:
-            windows.append(out["window_latents"][0].clone())
-        inputs = {"latents": [out["latents"][0]], "time_index": [out["time_index"][0]]}
+    _denoise_loop(
+        dit, resources, [rid], {rid: fwd}, "video_gen_ar", md["num_windows"] * (md["num_inference_steps"] + 1),
+        on_step=lambda _rid, out: windows.append(out["window_latents"][0].clone()) if "window_latents" in out else None,
+    )
     dit.cleanup_request(rid)
     return windows
 
@@ -940,9 +939,7 @@ def test_windowed_kv_matches_reference() -> None:
     reference bit-tightly on the sdpa resources (sequential guidance, the
     bit-exact regime), window by window."""
     ctx = _windowed_scenario()
-    if ctx is None:
-        print("  (skipped windowed-kv reference parity: needs COSMOS3_NANO_DIR + CUDA)")
-        return
+    _skip_without_gpu_checks(ctx)
     dit, prev = ctx["dit"], ctx["dit"].batched_cfg
     dit.batched_cfg = False
     sdpa = _SdpaResources()
@@ -976,16 +973,13 @@ def test_windowed_kv_engine_release_and_psnr() -> None:
     fidelity is the bit-exact sdpa check above); they get a corruption
     floor, not the precision bar."""
     ctx = _windowed_scenario()
-    if ctx is None:
-        print("  (skipped windowed-kv engine parity: needs COSMOS3_NANO_DIR + CUDA)")
-        return
+    _skip_without_gpu_checks(ctx)
     try:
         resources = _engine_resources(
             ctx["model"], ["r0"], ctx["device"], ctx["dtype"], backend="flashinfer",
         )
-    except Exception as exc:  # noqa: BLE001
-        print(f"  (skipped windowed-kv engine parity: FlashInfer unavailable: {exc})")
-        return
+    except ImportError as exc:
+        pytest.skip(f"windowed-kv engine parity: FlashInfer unavailable: {exc}")
     kv = resources[KV_CACHE]
     free0 = kv._arena.num_free
     wins = _run_windowed_kv_served(
@@ -1031,9 +1025,7 @@ def test_windowed_kv_dense_matches_paged() -> None:
     context (same autoregressive-feedback regime as the reference
     comparison) and get the corruption floor."""
     ctx = _windowed_scenario()
-    if ctx is None:
-        print("  (skipped windowed-kv dense-vs-paged: needs COSMOS3_NANO_DIR + CUDA)")
-        return
+    _skip_without_gpu_checks(ctx)
     try:
         outs = {}
         for backend in ("flashinfer", "dense_gen"):
@@ -1044,9 +1036,8 @@ def test_windowed_kv_dense_matches_paged() -> None:
                 ctx["dit"], resources, ctx["md"], ctx["cond"], ctx["uncond"], ctx["device"],
             )
             resources[KV_CACHE].remove_request("r0")
-    except Exception as exc:  # noqa: BLE001
-        print(f"  (skipped windowed-kv dense-vs-paged: FA3/FlashInfer unavailable: {exc})")
-        return
+    except ImportError as exc:
+        pytest.skip(f"windowed-kv dense-vs-paged: FA3/FlashInfer unavailable: {exc}")
     psnrs = []
     for paged, dense in zip(outs["flashinfer"], outs["dense_gen"], strict=True):
         img_p = ctx["mpipe"]._decode(paged).squeeze().float().cpu()
@@ -1103,14 +1094,19 @@ def _run_accelerator_graph_denoise(ctx):
         autocast_dtype=None if dit.disable_autocast else model.get_autocast_dtype(),
         joint_comm_group=groups, num_slots=1,
     )
-    cg_runner.warmup_and_capture()
+    cg_runner.warmup_and_capture(None)
     assert cg_runner.any_graphs, "no CUDA graph captured for cosmos3 image_gen"
 
     fwd.graph_walk = "image_gen"
     latents = ctx["init"].clone()
-    time_index = torch.zeros(1, dtype=torch.long, device=device)
-    for _ in range(STEPS):
-        ni = dit.prepare_inputs("image_gen", fwd, {"latents": [latents], "time_index": [time_index]})
+    # The loop state rides the loop-back edges: the latents and the scheduler's
+    # solver state. The step index is the engine's loop counter.
+    solver = dit._first_solver_state(dit.request_state(rid), latents)
+    for k in range(STEPS):
+        fwd.dynamic_loop_iter_counts["image_gen_loop"] = k
+        ni = dit.prepare_inputs(
+            "image_gen", fwd, {"latents": [latents], **{n: [t] for n, t in solver.items()}},
+        )
         out = _forward_step(
             dit, "image_gen", resources, [rid], {rid: fwd}, [ni],
             cg_runner=cg_runner,
@@ -1118,7 +1114,8 @@ def _run_accelerator_graph_denoise(ctx):
         # The engine finishes the captured step (CFG combine + scheduler) in
         # the submodule's postprocess right after replay; mirror it here.
         dit.postprocess(rid, fwd, out[rid], inputs=ni)
-        latents, time_index = out[rid]["latents"][0], out[rid]["time_index"][0]
+        latents = out[rid]["latents"][0]
+        solver = {n: out[rid][n][0] for n in solver}
     dit.cleanup_request(rid)
     return latents
 
@@ -1170,6 +1167,8 @@ def _main() -> None:
         try:
             fn()
             print(f"PASS  {name}")
+        except pytest.skip.Exception as exc:
+            print(f"SKIP  {name}: {exc}")
         except Exception as exc:  # noqa: BLE001
             failures.append((name, exc))
             print(f"FAIL  {name}: {exc!r}")
