@@ -142,7 +142,7 @@ def test_lora_changes_no_capture_bucket_and_captures_on_the_zero_slot(qwen_adapt
                 for c in configs for bs in (c.capture_batch_sizes or ()) for n in c.get_total_tokens(bs)}
 
     assert configs and buckets(configs) == buckets(plain.get_accelerator_graph_configs(CPU))
-    pool.ingest_request("live", LoraReqConfig(adapter="a1"))  # resident, not in any capture
+    pool.ingest_request("live", Q.lora_request(pool, "a1"))  # resident, not in any capture
     num_slots, seen = pool.spec.num_slots, 0
     for config in configs:
         walk = config.capture_graph_walk
@@ -176,7 +176,7 @@ def test_a_replay_reaches_the_graph_through_the_captured_views(qwen_adapters, wa
     llm, pool, _ = _llm(qwen_adapters)
     named = {"d0": "a1", "d1": None, "d2": "a2", "p0": "a2"}
     for rid, _, _ in rows:
-        pool.ingest_request(rid, None if named[rid] is None else LoraReqConfig(adapter=named[rid]))
+        pool.ingest_request(rid, Q.lora_request(pool, named[rid]))
     config = next(c for c in llm.get_accelerator_graph_configs(CPU) if c.capture_graph_walk == walk)
     captured, lease = _capture_plan(llm, pool, config, bs, n)
     # the replay's plan, padded as AcceleratorGraphRunner pads it, on the capture's handles
@@ -275,7 +275,7 @@ def test_a_refusal_unwinds_the_pools_partial_takes_through_the_runner(adapters):
     assert not outcome.ok and outcome.failed_resource == "lora"
     assert outcome.reason.request_id == "r2" and kv.calls == ["admit", "rollback"]
     assert pool.slot_of("r1") is None and pool.slot_state(1).refcount == 0
-    assert pool.resident_slot("a1") == 1
+    assert pool.resident_slot(Q.digest_of(pool, "a1")) == 1
 
 
 def test_a_delta_runs_only_between_its_steps_plan_and_commit(adapters):
@@ -468,7 +468,7 @@ def test_each_nodes_pool_reads_the_config_the_conductor_opens_a_request_with():
     import dataclasses
 
     from mstar.conductor.conductor import Conductor
-    from mstar.engine.resources.lora import LORA_ADAPTER_KWARG
+    from mstar.engine.resources.lora import LORA_ADAPTER_KWARG, LORA_DIGEST_KWARG
     from mstar.testing_utils.model import make_model
 
     spec = P.make_spec({})
@@ -478,8 +478,8 @@ def test_each_nodes_pool_reads_the_config_the_conductor_opens_a_request_with():
     conductor.model = make_model(get_node_resources=lambda: [spec], get_request_resource_configs=lambda *a, **kw: {})
     conductor.model_config = {"resources": {LORA_RESOURCE_KEY: {}}}
     conductor._kv_labels = {}
-    configs = conductor._get_resource_configs([], [], {LORA_ADAPTER_KWARG: "a1"})
-    assert configs == {"lora@LLM": LoraReqConfig("a1"), "lora@vision": LoraReqConfig("a1")}
+    configs = conductor._get_resource_configs([], [], {LORA_ADAPTER_KWARG: "a1", LORA_DIGEST_KWARG: b"d"})
+    assert configs == {"lora@LLM": LoraReqConfig("a1", b"d"), "lora@vision": LoraReqConfig("a1", b"d")}
     assert conductor._get_resource_configs([], [], {}) == {}
 
 

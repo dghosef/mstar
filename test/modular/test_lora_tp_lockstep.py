@@ -21,11 +21,13 @@ import torch
 pytest.importorskip("safetensors")
 
 try:
-    from .test_lora_pool import admitted, ctx, ingest, lora_runner, make_spec, settle_reads, step, write_adapter
+    from .test_lora_pool import admitted, ctx, digest_of, ingest, lora_runner, make_spec, settle_reads, step, write_adapter
 except ImportError:  # collected without package context
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from test_lora_pool import admitted, ctx, ingest, lora_runner, make_spec, settle_reads, step, write_adapter
+    from test_lora_pool import admitted, ctx, digest_of, ingest, lora_runner, make_spec, settle_reads, step, write_adapter
 
+from mstar.engine.resources.lora.checkpoint import read_lora_file  # noqa: E402
+from mstar.engine.resources.lora.identity import adapter_digest  # noqa: E402
 from mstar.engine.resources.lora.pool import LoraAdapterPool  # noqa: E402
 from mstar.engine.resources.step import (  # noqa: E402
     ADMIT_OK,
@@ -97,12 +99,20 @@ class _Rank:
 
 
 def _simulate(paths, seed: int, admits: bool, fenced: bool = True, steps: int = 60, timeout: float = 5.0):
-    """A leader sending ingests, steps, stamped removes and an unload to a follower in FIFO
-    order. ``admits`` picks rows through the leader's admission, as the scheduler does;
-    ``fenced=False`` lands some removes on the leader before the admit of the step they are
-    stamped behind."""
+    """A leader sending ingests, steps, stamped removes, an unload and a reload in place to a
+    follower in FIFO order. ``admits`` picks rows through the leader's admission, as the
+    scheduler does; ``fenced=False`` lands some removes on the leader before the admit of
+    the step they are stamped behind. The reload moves a2 to new weights as the API server
+    does: the new weights loaded beside the old, then requests on them, then the old ones
+    unloaded while requests on them may still run."""
     barrier = _Barrier(2, timeout)
     leader, follower = (_Rank(paths, r, barrier.for_rank(r), seed) for r in (0, 1))
+    reloaded = os.path.join(os.path.dirname(paths["a2"]), "a2-v2.safetensors")
+    if not os.path.exists(reloaded):
+        write_adapter(reloaded, rank=3, seed=99)
+    old_a2 = digest_of(leader.pool, "a2")
+    new_a2 = adapter_digest(read_lora_file(reloaded, convert_keys=leader.pool.spec.convert_keys))
+    on = {name: digest_of(leader.pool, name) for name in ADAPTERS}
     wire: queue.Queue = queue.Queue()
     errors: list = []
     rng = random.Random(seed)
@@ -122,8 +132,9 @@ def _simulate(paths, seed: int, admits: bool, fenced: bool = True, steps: int = 
                 for _ in range(rng.choice((0, 0, 1, 2))):
                     rid, adapter = f"r{n}", rng.choice(names)
                     n += 1
-                    ingest(leader.pool, rid, adapter)
-                    wire.put(("ingest", rid, adapter))
+                    digest = None if adapter is None else on[adapter]
+                    ingest(leader.pool, rid, adapter, digest)
+                    wire.put(("ingest", rid, adapter, digest))
                     waiting.append(rid)
                 fresh = waiting[:3]
                 if admits:
@@ -137,8 +148,15 @@ def _simulate(paths, seed: int, admits: bool, fenced: bool = True, steps: int = 
                 if seq >= steps // 3 and "a4" in names:
                     # the leader unloads before this admit, the follower after it
                     names = (*ADAPTERS[:3], None)
-                    leader.pool.unload_adapter("a4")
-                    wire.put(("unload", "a4"))
+                    leader.pool.unload_adapter("a4", on["a4"])
+                    wire.put(("unload", "a4", on["a4"]))
+                if seq >= steps // 2 and on["a2"] == old_a2:
+                    leader.pool.load_adapter("a2", reloaded, new_a2)
+                    wire.put(("load", "a2", reloaded, new_a2))
+                    on["a2"] = new_a2
+                elif seq >= 2 * steps // 3 and leader.pool.serves(old_a2):
+                    leader.pool.unload_adapter("a2", old_a2)
+                    wire.put(("unload", "a2", old_a2))
                 for rid in late:
                     remove(rid)
                 late = []
@@ -179,6 +197,8 @@ def _simulate(paths, seed: int, admits: bool, fenced: bool = True, steps: int = 
                     follower.admit(*body)
                 elif kind == "unload":
                     follower.pool.unload_adapter(*body)
+                elif kind == "load":
+                    follower.pool.load_adapter(*body)
                 else:
                     follower.pool.remove_request(*body)
                 follower.land_commit(maybe=True)
@@ -197,8 +217,9 @@ def _simulate(paths, seed: int, admits: bool, fenced: bool = True, steps: int = 
 
 @pytest.mark.parametrize("admits", [False, True])
 def test_ranks_agree_step_by_step_under_adapter_churn(tmp_path, admits):
-    """Four adapters through two slots, one unloaded, each rank landing commits and the
-    unload at its own moment: every admit has the same verdict and slot table on both ranks.
+    """Four adapters through two slots, one unloaded and one reloaded in place, each rank
+    landing commits and the unload at its own moment: every admit has the same verdict and
+    slot table on both ranks.
     With the leader's admission, no step is refused for want of a slot."""
     paths = _write_adapters(tmp_path, ADAPTERS)
     full = evict = 0
@@ -244,8 +265,8 @@ def test_the_host_tier_follows_the_ingests_not_when_reads_land(tmp_path):
         pool.remove_request("x")
     gate.set()
     settle_reads(slow)
-    assert list(fast.store._adapters) == list(slow.store._adapters) == ["a2", "a3"]
-    assert "a2" in slow.store and "a3" in slow.store
+    assert list(fast.store._adapters) == list(slow.store._adapters) == [digest_of(fast, "a2"), digest_of(fast, "a3")]
+    assert digest_of(slow, "a2") in slow.store and digest_of(slow, "a3") in slow.store
 
 
 def test_no_rank_waits_on_a_retry_once_a_load_has_failed(tmp_path):
@@ -399,7 +420,7 @@ def test_a_teardown_inside_a_two_miss_admit_does_not_split_the_ranks(tmp_path, p
     settle_reads(follower)  # the retry, k gone on both, loads both adapters on both
     (v1, v2), errors = _on_both(lambda: admit(leader, ["rA", "rB"]), lambda: admit(follower, ["rA", "rB"]))
     assert not errors and v1 == v2 == "ok" and _slots(leader) == _slots(follower)
-    assert {leader.slot_state(i).adapter for i in (1, 2)} == {"a2", "a3"}
+    assert {leader.slot_state(i).adapter for i in (1, 2)} == {digest_of(leader, "a2"), digest_of(leader, "a3")}
 
 
 # --- the agreement over real gloo ----------------------------------------------------------
@@ -430,7 +451,7 @@ def _gloo_worker(rank: int, store: str, out_dir: str, lora_paths: dict):
     for rid, adapter in (("ok", "a1"), ("bad", "a2")):
         ingest(pool, rid, adapter)
     result = {"agree": [_verdict(pool.admit(step([rid]), ctx([rid]))) for rid in ("ok", "bad")],
-              "slots": [pool.slot_state(i).adapter for i in range(3)]}
+              "slots": [pool.slot_state(i).adapter for i in range(3)], "a2": digest_of(pool, "a2")}
     torch.save(result, os.path.join(out_dir, f"rank{rank}.pt"))
     dist.destroy_process_group()
 
@@ -443,5 +464,5 @@ def test_gloo_a_load_failing_on_one_rank_is_refused_on_both(tmp_path):
     for r in range(2):
         result = torch.load(tmp_path / f"rank{r}.pt")
         assert result["agree"] == ["ok", ("load", ("bad",))]
-        assert "a2" not in result["slots"]  # rank 0's good read was not installed
+        assert result["a2"] not in result["slots"]  # rank 0's good read was not installed
 

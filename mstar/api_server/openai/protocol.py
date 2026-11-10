@@ -159,7 +159,11 @@ class ModelList(BaseModel):
 
 class LoadLoraAdapterRequest(BaseModel):
     lora_name: str
+    # a local path or a Hugging Face repo id
     lora_path: str
+    # move an already loaded name to these weights (vLLM's field); its running requests
+    # finish on the old ones
+    load_inplace: bool = False
 
 
 class UnloadLoraAdapterRequest(BaseModel):

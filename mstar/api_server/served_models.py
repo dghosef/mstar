@@ -56,6 +56,11 @@ class ServedModels:
     def adapters(self) -> tuple[str, ...]:
         return tuple(self._digests)
 
+    @property
+    def digests(self) -> frozenset[bytes]:
+        """The weights some selectable name is on."""
+        return frozenset(self._digests.values())
+
     def add(self, name: str, digest: bytes) -> None:
         """Make ``name`` selectable, serving the weights ``digest`` names."""
         with self._lock:

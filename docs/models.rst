@@ -884,14 +884,25 @@ the server log. A worker that does not answer within ``runtime_update_timeout_s`
 (default 120) fails the load with a 504, and the load is undone everywhere, so the name
 is free to try again.
 
-To change an adapter's weights, unload it and load it again: each adapter is pinned to
-the digest of the weights checked when it was configured or loaded, and a worker that
-reads other weights from its path (the file overwritten in place) refuses them, on every
-rank, rather than serve them under the old name and prefix-cache entries. An unload stops
-new requests on the name at once (they get the 400 an unknown adapter gets; an unknown
-name in the unload is a 404); if the conductor refuses it, the name is selectable again.
-Requests already running on it finish on its weights, after which its slot and host copy
-are freed; loading the name again before then is a 400 that says so.
+To change an adapter's weights, load the name again with ``"load_inplace": true`` (vLLM's
+field; without it a loaded name is a 400 that says so). The new weights are read by every
+worker beside the old ones, then the name is moved to them, then the old weights are
+unloaded. Requests already running on the old weights finish on them, and requests on the
+old weights are not refused while the new ones are read. Unlike vLLM's, a running
+request never switches weights mid-answer, and prompts keep separate prefix-cache entries
+per weights. A reload that fails on any worker leaves the name on its old weights.
+
+Each adapter is pinned to the digest of the weights checked when it was configured or
+loaded, and a worker that reads other weights from its path (the file overwritten in
+place) refuses them, on every rank, rather than serve them under the old name and
+prefix-cache entries. So write each new version to a new path: a request on the old
+weights that has to read them from disk again (its host copy evicted) fails once the file
+holds other weights. Two names on the same weights share them on the workers.
+
+An unload stops new requests on the name at once (they get the 400 an unknown adapter
+gets; an unknown name in the unload is a 404); if the conductor refuses it, the name is
+selectable again. Requests already running on it finish on its weights, after which its
+slot and host copy are freed. Loading the name again before then serves it at once.
 
 Qwen3.8-27B (``qwen3_8_27b``) is the Qwen3.5 architecture and runs on the same
 code, served from ``configs/qwen3_8_27b_tp4.yaml`` (TP4)::

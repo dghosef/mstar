@@ -494,7 +494,8 @@ Endpoints and model coverage:
      - any LoRA model whose ``resources: lora:`` block sets ``runtime_updates: true``;
        404 otherwise
      - Load or unload a LoRA adapter while serving, with vLLM's bodies
-       (``{"lora_name", "lora_path"}`` / ``{"lora_name"}``; a missing field is a 400). See
+       (``{"lora_name", "lora_path", "load_inplace"}`` / ``{"lora_name"}``; a missing field is a
+       400; ``lora_path`` may be a Hugging Face repo id). See
        the Qwen3.5 notes in :doc:`models`.
    * - ``POST /v1/audio/speech``
      - ``kokoro``, ``orpheus``, ``qwen3_omni``

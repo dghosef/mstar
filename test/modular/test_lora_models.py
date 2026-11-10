@@ -27,7 +27,7 @@ import lora_module_helpers as H  # noqa: E402
 from safetensors.torch import save_file  # noqa: E402
 
 from mstar.distributed.communication import CommGroup  # noqa: E402
-from mstar.engine.resources.lora import LORA_RESOURCE_KEY, LoraReqConfig, LoraSpec  # noqa: E402
+from mstar.engine.resources.lora import LORA_RESOURCE_KEY, LoraSpec  # noqa: E402
 from mstar.engine.resources.lora.checkpoint import normalize_lora_key, parse_lora_key  # noqa: E402
 from mstar.engine.resources.lora.serving import lora_spec  # noqa: E402
 from mstar.engine.resources.spec import instance_key  # noqa: E402
@@ -427,7 +427,7 @@ def _vision_pool(paths, max_slots=2):
 def _admit(lora_pool, step, rid, adapter, walk="encode", lease=None):
     from test_lora_pool import engine_lean
 
-    lora_pool.ingest_request(rid, None if adapter is None else LoraReqConfig(adapter=adapter))
+    lora_pool.ingest_request(rid, H.lora_request(lora_pool, adapter))
     # lean as the engine sets it: a lease's bucket's, or what an eager step's rows allow
     lean = engine_lean(lora_pool, [rid]) if lease is None else lease.bucket.lean
     ctx = StepContext(request_ids=[rid], graph_walk=walk, slot=0, capture=False, slot_lease=lease, lean=lean)
@@ -520,7 +520,7 @@ def test_qwen3_5_text_only_adapter_holds_no_vision_slot(tmp_path):
     sub = _vision_node(tower(), {VISION_POOL: lora_pool})
 
     def encode(rid, adapter):
-        lora_pool.ingest_request(rid, LoraReqConfig(adapter=adapter))
+        lora_pool.ingest_request(rid, H.lora_request(lora_pool, adapter))
         assert lora_pool.admit_retrieve(rid, "vision_encoder", "encode", None).ready
         ctx = StepContext(request_ids=[rid], graph_walk="encode", slot=0, capture=False)
         assert lora_pool.admit(engine_step(sub, "encode", [rid], [_prompt(sub)]).steps[VISION_POOL], ctx).ok
@@ -528,7 +528,7 @@ def test_qwen3_5_text_only_adapter_holds_no_vision_slot(tmp_path):
 
     assert encode("r0", "v") == 1  # the one slot, held
     assert encode("r1", "t") == 0 and encode("r2", "t") == 0  # ready with the pool full
-    assert lora_pool.slot_state(1).adapter == "v" and lora_pool.slot_state(1).refcount == 1
+    assert lora_pool.slot_state(1).adapter == H.digest_of(lora_pool, "v") and lora_pool.slot_state(1).refcount == 1
 
 
 # --- Qwen3.5: the tied head ------------------------------------------------------------------------

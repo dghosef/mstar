@@ -5,9 +5,11 @@ with the LoRA pool and answers once all of them have acknowledged. A load is ans
 done only when every worker loaded it; if any failed, the others are told to unload it
 again. Which names are served is the API server's to track (``ServedModels``, which a
 request's adapter is selected from): the conductor keeps no registry of its own, only
-the operations in flight, during which it refuses requests on their adapters with a 409:
-each worker finishes an operation in its own time, so the ranks of one lockstep instance
-could open such a request differently.
+the operations in flight, during which it refuses requests on their weights (by digest)
+with a 409: each worker finishes an operation in its own time, so the ranks of one
+lockstep instance could open such a request differently. Requests on a name's other
+weights go on, so a reload in place (load the new weights, then unload the old) refuses
+none of the requests on the old weights while the new ones are read.
 
 A worker that never answers (hung, dead) would leave the name refused with a 409 for good.
 Past ``runtime_update_timeout_s`` an operation is given up: a load is undone on every
@@ -103,12 +105,13 @@ class LoraAdapterOps:
             self._finish(op)
 
     def refuse_request(self, configs: Iterable[ResourceReqConfig]) -> None:
-        """Refuse (409) a request whose adapter a load or unload is in flight for."""
+        """Refuse (409) a request on weights a load or unload is in flight for."""
         if not self._pending:
             return
-        busy = {op.body.lora_name for op in self._pending.values()}
+        busy = {bytes.fromhex(op.body.lora_digest) for op in self._pending.values()}
         for config in configs:
-            if isinstance(config, LoraReqConfig) and config.adapter in busy:
+            # a config without its digest is refused when it is validated, after this
+            if isinstance(config, LoraReqConfig) and config.digest in busy:
                 raise HTTPException(
                     status_code=409,
                     detail=f"LoRA adapter '{config.adapter}' is being loaded or unloaded; retry once that is done",
@@ -189,9 +192,12 @@ class LoraAdapterOps:
         )
 
     def _roll_back(self, op: _PendingOp, workers) -> None:
-        """Have ``workers`` forget a load. Nothing can be running on it, so each forgets
-        at once, and a later load of the name reaches each after this."""
-        rollback = UnloadLoraAdapter(op_id=f"{op.body.op_id}:rollback", lora_name=op.body.lora_name)
+        """Have ``workers`` forget a load: its weights only, so a name reloaded in place
+        keeps its old ones. Nothing can be running on it, so each forgets at once, and a
+        later load of the weights reaches each after this."""
+        rollback = UnloadLoraAdapter(
+            op_id=f"{op.body.op_id}:rollback", lora_name=op.body.lora_name, lora_digest=op.body.lora_digest,
+        )
         for worker_id in workers:
             self._send(worker_id, WorkerMessage(
                 message_type=WorkerMessageType.UNLOAD_LORA_ADAPTER, body=rollback,

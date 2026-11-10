@@ -129,7 +129,7 @@ def check(got, want, what):  # bf16 inputs and weights, plus a bf16 rounding of 
 def eager_step(pool, rows, walk="prefill_text", ingest=True):
     """Admit and plan ``rows`` of (rid, adapter, tokens) as one eager step."""
     for rid, name, _ in rows if ingest else ():
-        pool.ingest_request(rid, None if name is None else LoraReqConfig(adapter=name))
+        pool.ingest_request(rid, None if name is None else LoraReqConfig(name, pool.spec.adapter_digests[name]))
     step = ResourceStep(segments=tuple(Segment(rid, "main", n) for rid, _, n in rows))
     ctx = StepContext(request_ids=[rid for rid, *_ in rows], graph_walk=walk, slot=0, capture=False)
     assert pool.admit(step, ctx).ok
@@ -274,7 +274,7 @@ def test_one_capture_serves_every_adapter_mix(adapters, head_adapters, case):
     g = torch.Generator(device="cuda").manual_seed(13)
     for mix in mixes:
         for rid, name, _ in mix:
-            pool.ingest_request(rid, None if name is None else LoraReqConfig(adapter=name))
+            pool.ingest_request(rid, None if name is None else LoraReqConfig(name, pool.spec.adapter_digests[name]))
         step, ctx = bucket_step(pool, [(rid, n) for rid, _, n in mix], lease)
         spans = [1 if head else n for *_, n in mix]
         real = sum(spans)
@@ -592,7 +592,7 @@ def test_bound_experts_match_each_rows_merged_adapter(tmp_path, case):
     graph, (out, base) = capture(fn)
     for mix in mixes:
         for rid, name, _ in mix:
-            pool.ingest_request(rid, None if name is None else LoraReqConfig(adapter=name))
+            pool.ingest_request(rid, None if name is None else LoraReqConfig(name, pool.spec.adapter_digests[name]))
         bucket_step(pool, [(rid, n) for rid, _, n in mix], lease)
         for static, fresh in zip((x, weights, ids), routed(BUCKET_TOKENS, g), strict=True):
             static.copy_(fresh)

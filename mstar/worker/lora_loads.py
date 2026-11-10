@@ -44,7 +44,7 @@ class LoraLoad:
     body: LoadLoraAdapter
     reads: list[tuple["LoraAdapterPool", Future]] = field(default_factory=list)
     error: str | None = None
-    # later loads and unloads of the same name, applied in order after its ack: an
+    # later loads and unloads of the same weights, applied in order after its ack: an
     # unload before the load lands would be a no-op, and the load would then serve a name
     # nothing else does; a load (a retry after the conductor gave up on this one) would
     # race this one's read and the rollback behind it
@@ -57,7 +57,7 @@ class LoraLoads:
 
     Each is applied as the message arrives: a load or an unload touches no slot state an
     admit decides from (``LoraAdapterPool``'s docstring), so the ranks of a lockstep
-    instance need not apply it at the same step. A load or an unload of a name still being
+    instance need not apply it at the same step. A load or an unload of weights still being
     read waits for that load's ack."""
 
     def __init__(self, services: "WorkerServices"):
@@ -96,7 +96,7 @@ class LoraLoads:
         error = None
         try:
             for pool in lora_pools(self._engines.engine.resources):
-                pool.unload_adapter(body.lora_name)
+                pool.unload_adapter(body.lora_name, bytes.fromhex(body.lora_digest))
         except Exception as exc:  # noqa: BLE001
             logger.exception("Worker %s: LoRA adapter %s failed to unload", self._worker_id, body.lora_name)
             error = describe_load_error(exc)
@@ -114,9 +114,9 @@ class LoraLoads:
                     self.unload(body)
 
     def _defer(self, body: LoadLoraAdapter | UnloadLoraAdapter) -> bool:
-        """Hold ``body`` behind a load of the same name still being read; False if none is."""
+        """Hold ``body`` behind a load of the same weights still being read; False if none is."""
         for load in self._loads:
-            if load.body.lora_name == body.lora_name:
+            if load.body.lora_digest == body.lora_digest:
                 load.behind.append(body)
                 return True
         return False
@@ -143,7 +143,7 @@ class LoraLoads:
                     load.error = load.error or describe_load_error(exc)
             if load.error is not None:
                 for pool in loaded:
-                    pool.unload_adapter(load.body.lora_name)
+                    pool.unload_adapter(load.body.lora_name, bytes.fromhex(load.body.lora_digest))
         return done
 
     def _ack(self, op_id: str, error: str | None) -> None:
