@@ -156,11 +156,7 @@ class Preemption:
 
     def _rebuild_refusal(self, rid: int, node_name: str) -> str | None:
         """Why a rebuild can't write ``rid``'s KV on ``node_name`` again, or None."""
-        info = self._request_state.get_fwd_info(rid, self._request_state.get_partition_for_node(node_name))
-        return self._rebuilds.refusal(
-            rid, node_name, info.graph_walk, info.dynamic_loop_iter_counts,
-            self._scheduler.prefilling(node_name, rid, info.graph_walk),
-        )
+        return self._rebuilds.refusal(rid, node_name, self._prefilling(rid, node_name))
 
     def _tokens(self, rid: int, node_name: str) -> int:
         """`Rebuilds.tokens` for ``rid``, which keeps ids or is mid-prefill once `_rebuild_refusal` allows its drop."""

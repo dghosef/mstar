@@ -7,6 +7,7 @@ from typing import Any
 from mstar.engine.resources.kv.config import KVSpec, PagedKVConfig
 from mstar.engine.resources.lora.config import LoraSpec
 from mstar.engine.resources.position.config import PositionSpec, PosScheme
+from mstar.engine.resources.recurrent.checkpoints import checkpoint_policy
 from mstar.engine.resources.recurrent.config import RecurrentStateSpec
 from mstar.engine.resources.runner import topo_sort
 from mstar.engine.resources.spec import (
@@ -43,6 +44,7 @@ def check_resources(
     problems += _uncacheable_positions(specs, model)
     problems += _unskippable_resources(specs, model)
     problems += _unknown_prefix_walks(model)
+    problems += _unmarkable_messages(specs, model)
     problems += _undeclared_pools(specs, model)
     problems += _unservable_walks(specs, model)
     return problems
@@ -170,6 +172,31 @@ def _unskippable_resources(
             "which the model keyed for prefix reuse; either drop the stream "
             "or give the resource the prefix hooks"
         )
+
+
+def _unmarkable_messages(specs: Sequence[NodeResourceSpec], model: Model) -> Iterator[str]:
+    """A recurrent pool whose checkpoint policy reads the prompt's message boundaries (`checkpoints: messages`) over
+    a member with no chat template to find them in, or whose tokenizer can't map tokens to characters (the boundaries
+    are found by offsets): the policy would quietly keep only a row's last boundary."""
+    members = list(model.members.values()) if hasattr(model, "members") else [model]
+    for spec in specs:
+        if not (isinstance(spec, RecurrentStateSpec) and checkpoint_policy(spec.config.checkpoints).wants_marks):
+            continue
+        owner = next(
+            (m for m in members if spec.resource_key in {s.resource_key for s in m.get_node_resources()}), model,
+        )
+        tokenizer = getattr(owner, "tokenizer", None)
+        why = (
+            "has no chat template to find them in (it declares no `chat_template_kwargs`)"
+            if owner.chat_template_kwargs() is None
+            else "has a tokenizer with no offsets (not a fast one)" if getattr(tokenizer, "is_fast", True) is False
+            else None
+        )
+        if why:
+            yield (
+                f"resource {spec.resource_key!r} keeps snapshots at message boundaries "
+                f"(checkpoints: {spec.config.checkpoints!r}), but {type(owner).__name__} {why}; use `checkpoints: rows`"
+            )
 
 
 def _unknown_prefix_walks(model: Model) -> Iterator[str]:

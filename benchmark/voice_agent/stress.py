@@ -18,12 +18,35 @@ Phases
            the prefix cache and the ones it already held (the server's counters, read around each turn), so the next
            turn's reuse is a number. Run alone, so the deltas are the turn's.
   faults   (small-KV arm) backpressure; a tool that hangs, crashes or prints a lot; the budget used up mid round.
+
+The KV-management phases (`mm/3-kv-management`; each arm is a server, `ARMS`):
+  flashstate   (default and messages arms: the recurrent pool's `checkpoints: rows` and `checkpoints: messages`) the
+           same long-history conversations, typed and with tool rounds, 5 turns: per turn the prompt tokens, the
+           cached ones and the time to the first chunk. `flashstate_rows_<arm>.json` holds the rows (a phase's own
+           `<name>.json` is its checks).
+  diverge      (default and messages arms) three requests that share a long system block, tools and a first exchange
+           and differ in their last message: A, then B, then C. Linear conversations extend the last prompt, so
+           the row-end snapshot already covers them; only a request that diverges inside a shared prefix needs a
+           snapshot at the boundary. B's cached tokens must reach the shared prefix on `messages`; `rows` is recorded.
+  subagents    a parent that spawns 2 and 4 children: the cached tokens the children's first prefills found, from the
+           counters' deltas against a control request of the same shape that spawns nothing.
+  eviction     (pressure arm: a small KV pool) many sessions cycling long-history turns: the hit rate, preemptions and
+           drops, and the pages the cache names, sampled through the run. The counters that exist; there is none
+           for the recurrent pool's snapshots, so orphaned snapshots are not counted.
+  rebuild_reference  (default arm) the long tool-round and short spoken requests, all at once on an unconstrained
+           server, twice (the run-to-run variance), and the pool size the next phase needs. Run before `rebuild`.
+  rebuild      (preempt arm: a pool the long answers outgrow) the same requests: the arm must have dropped requests,
+           and every answer must be whole. Token-exactness is information (per-request first difference against
+           the reference and its rerun), required only of the short spoken requests; rebuild exactness is pinned
+           on the CPU (`test_worker_rebuild`).
+A run of just these: --phases flashstate,diverge,subagents,eviction,rebuild_reference,rebuild
 """
 from __future__ import annotations
 
 import argparse
 import base64
 import json
+import math
 import os
 import random
 import re
@@ -31,7 +54,9 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import traceback
 import wave
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -49,9 +74,17 @@ GREEDY = {"temperature": 0.0, "top_k": 1}
 TOOL_CALL = re.compile(r"<tool_call>")
 KV_USED = "mstar_kv_pages_used"
 KV_CACHED = "mstar_kv_pages_cached"
+KV_TOTAL = "mstar_kv_pages_total"
+PREEMPTIONS = "mstar_kv_preemptions_total"
+DROPS = "mstar_kv_drops_total"
+REBUILD_TOKENS = "mstar_kv_rebuild_tokens_total"
+REBUILD_CACHED = "mstar_kv_rebuild_cached_pages_total"
 QUERIED = "mstar_prefix_cache_query_tokens_total"
 HELD = "mstar_prefix_cache_hit_tokens_total"
 RUNNING = "mstar_conductor_requests"
+
+# pages: below this one long request's footprint may not fit at all (the `preempt` arm's floor)
+PREEMPT_FLOOR = 48
 
 # the server arms: name -> changes to the config (a dotted path into it -> value)
 ARMS = {
@@ -61,6 +94,14 @@ ARMS = {
     # the speculated step is also pre-planned on its own thread.
     "pre_plan": {"knobs.pre_plan": True, "knobs.step_threads": "threaded"},
     "small_kv": {"resources.kv_cache.max_num_pages": 256, "max_concurrent_requests": 16},
+    # where a prefill keeps recurrent snapshots: the pool's checkpoint policy (`rows` is the default)
+    "messages": {"resources.gdn_state.checkpoints": "messages"},
+    # pools sized in the LLM's 128-token pages (the spec logs `page_size=None`; the prefix counters move in 128s). The
+    # eviction phase measures one session's pages and runs enough sessions to hold twice the pool; a tool request
+    # reserves about 25 pages, so 64 holds a few of the 16 the rebuild phase sends at once
+    "pressure": {"resources.kv_cache.max_num_pages": 96, "max_concurrent_requests": 64},
+    # sized by `rebuild_reference` from the pages one long request takes (`PREEMPT_FLOOR` pages at least)
+    "preempt": {"resources.kv_cache.max_num_pages": 64, "max_concurrent_requests": 16},
 }
 
 
@@ -78,6 +119,7 @@ class Server:
         # the process group the harness started (--launch) and where to put what a hang leaves
         self.group: int | None = None
         self.out: Path | None = None
+        self.log: Path | None = None
         self.hung = False
 
     def dump_stacks(self, why: str) -> None:
@@ -99,6 +141,12 @@ class Server:
             except (OSError, subprocess.TimeoutExpired) as error:
                 text = f"py-spy failed: {error}"
             (folder / f"{pid}.txt").write_text(f"{' '.join(args)}\n\n{text}")
+
+    def dropped_requests(self) -> set[str]:
+        """The client request ids the server's log says the pool dropped (a launched server's)."""
+        if self.log is None or not self.log.exists():
+            return set()
+        return set(re.findall(r"dropped (\S+?)#\d+", self.log.read_text(errors="replace")))
 
     def healthy(self) -> bool:
         try:
@@ -154,7 +202,8 @@ class Server:
         if request_id:
             data["request_id"] = request_id
         files = [("files", (wav.name, wav.read_bytes(), "audio/wav"))] if wav else None
-        out = {"text": "", "heard": "", "audio": 0, "pcm": bytearray(), "status": None, "error": None, "chunks": 0}
+        out = {"text": "", "heard": "", "audio": 0, "pcm": bytearray(), "status": None, "error": None, "chunks": 0,
+               "ttft": None}
         started = time.monotonic()
         try:
             with requests.post(f"{self.url}/generate", data=data, files=files, stream=True, timeout=timeout) as r:
@@ -168,6 +217,8 @@ class Server:
                     chunk = json.loads(line)
                     out["chunks"] += 1
                     payload = base64.b64decode(chunk["data"])
+                    if out["ttft"] is None and chunk["modality"] in ("text", "audio"):
+                        out["ttft"] = round(time.monotonic() - started, 3)
                     signal_name = (chunk.get("metadata") or {}).get("signal", "")
                     if chunk["modality"] == "audio":
                         out["audio"] += len(payload)
@@ -263,7 +314,10 @@ def run_phase(name: str, server: Server, out: Path, body) -> dict:
     try:
         body(phase)
     except Exception as error:  # noqa: BLE001  a harness failure is a result, not a crash
-        phase.check("phase ran to the end", False, f"{type(error).__name__}: {error}")
+        frames = traceback.extract_tb(error.__traceback__)[-3:]
+        phase.check("phase ran to the end", False, {
+            "error": f"{type(error).__name__}: {error}",
+            "frames": [f"{Path(f.filename).name}:{f.lineno} in {f.name}: {f.line}" for f in frames]})
     return phase.finish(started, base)
 
 
@@ -412,9 +466,443 @@ def phase_faults(phase: Phase) -> None:
     phase.check("the budget used up mid-round ends the request cleanly", served(tight), tight["error"])
 
 
+# -- the KV-management phases ---------------------------------------------------------------------------------------
+
+SYSTEM = ("You are a careful assistant for a long-running voice agent. " + "Answer briefly. " * 5 +
+          "Background notes the user may ask about: " +
+          " ".join(f"Note {i}: the {w} is kept on shelf {i} of the archive." for i, w in enumerate(
+              ["atlas", "lantern", "compass", "ledger", "violin", "kettle", "barometer", "telescope"] * 6)))
+LONG_SCRIPTS = {
+    "plain": ["Name a colour.", "Name another one.", "Which two did you name?", "Name a third, different one.",
+              "List all three in one line."],
+    "tool_round": ["Use python to print 6 * 7.", "Now use python to print 7 * 8.", "Now print 8 * 9 with python.",
+                   "And 9 * 10.", "What were the four results?"],
+}
+
+
+def counters(s: Server) -> dict:
+    """The prefix-cache and preemption counters, from one scrape (the server reports once a second)."""
+    text = s.scrape() or ""
+    return {name: Server.total(text, name) or 0.0
+            for name in (QUERIED, HELD, PREEMPTIONS, DROPS, REBUILD_TOKENS, REBUILD_CACHED)} | {
+        # the LLM's pool alone: the gauges also report Whisper's two caches, which the unlabelled sum would add in
+        "kv_cached": Server.total(text, KV_CACHED, resource="kv_cache") or 0.0,
+        "kv_total": Server.total(text, KV_TOTAL, resource="kv_cache") or 0.0,
+        "kv_used": Server.total(text, KV_USED, resource="kv_cache") or 0.0}
+
+
+def settled(s: Server) -> dict:
+    """`counters` once the server has reported what the last request did."""
+    time.sleep(2.5)
+    return counters(s)
+
+
+def conversation(s: Server, turns: list[str], system: str | None = SYSTEM, measure: bool = True) -> list[dict]:
+    """One conversation, each turn sent with the whole history before it: its prompt tokens, the cached ones, its
+    time to the first chunk and its reply. ``measure`` reads the counters around each turn, which is only right for
+    a conversation run alone; concurrent ones skip it."""
+    history: list[dict] = [{"role": "system", "content": system}] if system else []
+    rows = []
+    for n, text in enumerate(turns, 1):
+        before = settled(s) if measure else None
+        result = s.generate(
+            text, history=history, kwargs={**GREEDY, "max_output_tokens": 300, "return_token_ids": True})
+        row = {"turn": n, "ttft": result["ttft"], "served": served(result), "error": result["error"],
+               "reply_tokens": len(result.get("token_ids", [])), "token_ids": result.get("token_ids", []),
+               "text": result["text"]}
+        if measure:
+            after = settled(s)
+            row |= {"prompt_tokens": after[QUERIED] - before[QUERIED], "cached_tokens": after[HELD] - before[HELD]}
+        rows.append(row)
+        history += [{"role": "user", "content": text}, {"role": "assistant", "content": result["text"]}]
+    return rows
+
+
+def phase_flashstate(phase: Phase) -> None:
+    """Per turn: prompt tokens, cached tokens and time to the first chunk, for each conversation. Run once per
+    checkpoint policy arm; the second arm's rows are set against the first's when its file is there."""
+    s, arm = phase.server, phase.name.removeprefix("flashstate_")
+    if s.metric(QUERIED) is None:
+        phase.check("the prefix-cache counters are served (--enable-metrics)", False)
+        return
+    rows = []
+    for name, turns in LONG_SCRIPTS.items():
+        for row in conversation(s, turns):
+            rows.append({"arm": arm, "conversation": name, **{k: v for k, v in row.items() if k != "token_ids"}})
+            phase.check(f"{name} turn {row['turn']} answers", row["served"], row["error"])
+    (phase.out / f"flashstate_rows_{arm}.json").write_text(json.dumps(rows, indent=2))
+    for row in rows:
+        print(f"  {arm:8s} {row['conversation']:10s} turn {row['turn']}: {row['cached_tokens']:.0f} of "
+              f"{row['prompt_tokens']:.0f} prompt tokens cached, first chunk {row['ttft']} s")
+    later = [r for r in rows if r["turn"] > 1]
+    phase.check("a later turn finds part of its prompt cached", all(r["cached_tokens"] > 0 for r in later), later)
+    other = phase.out / "flashstate_rows_default.json"
+    if arm != "default" and other.exists():
+        base = {(r["conversation"], r["turn"]): r for r in json.loads(other.read_text())}
+        gain = [{"conversation": r["conversation"], "turn": r["turn"],
+                 "cached_tokens_vs_rows": r["cached_tokens"] - base[(r["conversation"], r["turn"])]["cached_tokens"],
+                 "ttft_vs_rows": None if None in (r["ttft"], base[(r["conversation"], r["turn"])]["ttft"])
+                 else round(r["ttft"] - base[(r["conversation"], r["turn"])]["ttft"], 3)}
+                for r in rows if (r["conversation"], r["turn"]) in base]
+        phase.check("the arm's gain over `rows`, turn by turn (information)", True, gain)
+
+
+def server_prompt_ids(history: list[dict], question: str) -> list[int]:
+    """The prompt ids the server tokenizes for a typed turn: its own `process_prompt` on a model built without
+    weights (the tokenizer from the HF cache), with the config's tools, so the template, the tools block and the
+    rendering of the history are the server's and not a re-implementation of them."""
+    from types import SimpleNamespace
+
+    from transformers import AutoTokenizer
+
+    sys.path.insert(0, str(REPO))
+    from mstar.model.multimodal import TEXT
+    from mstar.model.qwen3_5.qwen3_5_model import Qwen3_5DenseModel
+
+    model = object.__new__(Qwen3_5DenseModel)
+    model.tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3.5-9B", local_files_only=True)
+    model.media, model.vision_config, model._submodule_cache, model.sampling_defaults = (), None, {}, {}
+    model.config = SimpleNamespace(max_position_embeddings=32768)
+    model.tools = tuple(yaml.safe_load(CONFIG.read_text())["model_kwargs"]["members"]["llm"]["tools"])
+    model.stream_in = ""
+    out = model.process_prompt(question, [TEXT], ["text"], history=history, enable_thinking=False)
+    return out.new_input_tensors["text_inputs"][0].tolist()
+
+
+def common_prefix(a: list[int], b: list[int]) -> int:
+    return next((k for k, (x, y) in enumerate(zip(a, b, strict=False)) if x != y), min(len(a), len(b)))
+
+
+def diverge_question(i: int) -> str:
+    """A question whose tail is about 700 tokens and unlike the others', so the three requests share their opening
+    and nothing after it, and the shared prefix ends pages before each request's own last boundary."""
+    words = ["atlas", "lantern", "compass", "ledger", "violin", "kettle", "barometer", "telescope"]
+    tail = " ".join(f"Entry {j} of the {chr(65 + i)} list says the {words[(j + i) % len(words)]} number {j * (i + 2)}."
+                    for j in range(60))
+    return f"What is kept on shelf {3 + 4 * i}? First read this list, which you may ignore: {tail}"
+
+
+DIVERGE_QUESTIONS = [diverge_question(i) for i in range(3)]
+
+
+SHARED_TARGET = 1800   # tokens: its page floor, 1792, sits 384 above the first chunk end and 640 below the second
+PAGE = 128
+CHUNK_GUESSES = (1024, 2048)   # the prefill chunk the scheduler cuts A into (1024 in try 3); both are checked
+
+
+def exchange_for(target: int) -> tuple[list[dict], int]:
+    """The system block and a first exchange whose answer is padded until the A/B prompts share ``target`` tokens (as
+    the server counts them), and that shared length."""
+    system = f"tag {random.Random().randrange(10**9)}: {SYSTEM}"
+    answer, sentence = "The atlas is kept on shelf 0 of the archive.", 0
+    while True:
+        exchange = [{"role": "system", "content": system}, {"role": "user", "content": "Which shelf holds the atlas?"},
+                    {"role": "assistant", "content": answer}]
+        shared = common_prefix(server_prompt_ids(exchange, DIVERGE_QUESTIONS[0]),
+                               server_prompt_ids(exchange, DIVERGE_QUESTIONS[1]))
+        if shared >= target:
+            return exchange, shared
+        answer += "".join(f" Shelf {sentence + k} holds notes of the archive." for k in range(10))
+        sentence += 10
+
+
+def rows_kept_points(restored: int, prompt: int, chunk: int) -> list[int]:
+    """The boundaries the default policy leaves a snapshot at when A is prefilled from ``restored`` in chunks of
+    ``chunk``: each chunk's end (a chunk with more to come keeps its own end), A's last boundary, and the
+    restored one."""
+    ends = [restored + k * chunk for k in range(1, (prompt - restored - 1) // chunk + 1)]
+    return sorted({restored, *ends, (prompt - 1) // PAGE * PAGE})
+
+
+def phase_diverge(phase: Phase) -> None:
+    """A, B and C: the same system block, tools and first exchange, each ending in a different question. The system
+    block opens with a tag no earlier request used, so the shared prefix is new to this server. B diverges inside
+    what A left in the cache; C finds what B's prefill kept. The shared length is set so that its page floor is at
+    least two pages from every boundary the default policy leaves a snapshot at while prefilling A (its chunk ends
+    and its last boundary), so only a snapshot at the end of the first exchange (`messages`) can serve B."""
+    s, arm = phase.server, phase.name.removeprefix("diverge_")
+    if s.metric(QUERIED) is None:
+        phase.check("the prefix-cache counters are served (--enable-metrics)", False)
+        return
+    exchange, shared = exchange_for(SHARED_TARGET)
+    floor = shared // PAGE * PAGE
+    rows = []
+    for name, question in zip("ABC", DIVERGE_QUESTIONS, strict=True):
+        before = settled(s)
+        r = s.generate(question, history=exchange, kwargs={**GREEDY, "max_output_tokens": 24})
+        after = settled(s)
+        phase.check(f"{name} served", served(r), r["error"])
+        rows.append({"arm": arm, "request": name, "prompt_tokens": after[QUERIED] - before[QUERIED],
+                     "cached_tokens": after[HELD] - before[HELD], "ttft": r["ttft"], "shared_prefix_tokens": shared,
+                     "shared_prefix_page_floor": floor})
+    restored, prompt = int(rows[0]["cached_tokens"]), int(rows[0]["prompt_tokens"])
+    points = {chunk: rows_kept_points(restored, prompt, chunk) for chunk in CHUNK_GUESSES}
+    # what `rows` can serve B: the highest boundary A left a snapshot at that is within the shared prefix
+    predicted_rows = {chunk: max(p for p in kept if p <= floor) for chunk, kept in points.items()}
+    nearest = min(abs(floor - p) for kept in points.values() for p in kept)
+    for row in rows:
+        row["rows_kept_points_for_A"] = points
+        row["predicted_B_cached_rows"] = predicted_rows
+        row["predicted_B_cached_messages"] = floor
+    (phase.out / f"diverge_rows_{arm}.json").write_text(json.dumps(rows, indent=2))
+    for row in rows:
+        print(f"  {arm:8s} {row['request']}: {row['cached_tokens']:.0f} of {row['prompt_tokens']:.0f} cached "
+              f"(shared prefix {shared}, page floor {floor}), first chunk {row['ttft']} s")
+    print(f"  A restored {restored} of {prompt}; rows keeps {points}; predicted B: rows {predicted_rows}, "
+          f"messages {floor}")
+    phase.check("the shared prefix's page floor is 2 pages from every boundary rows keeps for A", nearest >= 2 * PAGE,
+                {"floor": floor, "nearest_distance": nearest, "points": points})
+    b_cached = rows[1]["cached_tokens"]
+    if arm == "messages":
+        phase.check("B reaches the shared prefix (within a page)", b_cached >= floor - PAGE, rows)
+        phase.check("B is served from beyond what `rows` could (predicted)", b_cached > max(predicted_rows.values()),
+                    {"B": b_cached, "predicted_rows": predicted_rows})
+        other = phase.out / "diverge_rows_default.json"
+        if other.exists():
+            rows_b = json.loads(other.read_text())[1]["cached_tokens"]
+            phase.check("messages-B > rows-B (measured, the rows arm)", b_cached > rows_b,
+                        {"messages": b_cached, "rows": rows_b})
+    else:
+        phase.check("rows: B and C recorded, set against the prediction (information)", True,
+                    {"B": b_cached, "C": rows[2]["cached_tokens"], "predicted_B": predicted_rows})
+
+
+def spawn_markup(text: str) -> int:
+    """The agent tasks a reply's spawn call wrote (its markup reaches the client as text)."""
+    return len(re.findall(r"<parameter=task", text)) or len(re.findall(r'"task"', text))
+
+
+def phase_subagents(phase: Phase) -> None:
+    """A parent that spawns n children: what the children's first prefills found cached. The counters are global, so
+    it is a delta against a control of the same shape that spawns nothing (the parent's own prompt hits the same
+    shared block in both, each prompt's own words being new)."""
+    s = phase.server
+    if s.metric(QUERIED) is None:
+        phase.check("the prefix-cache counters are served (--enable-metrics)", False)
+        return
+    rows = []
+    for n, tasks in ((2, ("the sum of 1..10", "the sum of 1..20")),
+                     (4, ("the sum of 1..5", "the sum of 1..6", "the sum of 1..7", "the sum of 1..8"))):
+        tag = f"run {random.Random(n).randrange(10**6)}"
+        control = f"{tag}: use python to print {n} * {n}, once, and say the result."
+        spawn = (f"{tag}: call spawn_agent {n} times in this turn, one call per task and one task in each call, "
+                 f"for these tasks: " + "; ".join(f"'{t}'" for t in tasks) + ". Then report all the answers.")
+        before = settled(s)
+        c = s.generate(control, kwargs={**GREEDY, "max_output_tokens": 300})
+        mid = settled(s)
+        p = s.generate(spawn, kwargs={**GREEDY, "max_output_tokens": 600})
+        after = settled(s)
+        phase.check(f"{n} children asked: both requests served", served(c) and served(p), (c["error"], p["error"]))
+        started = spawn_markup(p["text"])
+        extra_held = (after[HELD] - mid[HELD]) - (mid[HELD] - before[HELD])
+        extra_asked = (after[QUERIED] - mid[QUERIED]) - (mid[QUERIED] - before[QUERIED])
+        row = {"children_asked": n, "children_started": started, "control_cached": mid[HELD] - before[HELD],
+               "control_prompt": mid[QUERIED] - before[QUERIED], "spawn_cached": after[HELD] - mid[HELD],
+               "spawn_prompt": after[QUERIED] - mid[QUERIED], "children_cached_total": extra_held,
+               "children_prompt_total": extra_asked,
+               "cached_per_child": round(extra_held / started, 1) if started else None}
+        rows.append(row)
+        phase.check(f"{n} asked, {started} started: enough children started", started >= (2 if n == 4 else 1),
+                    p["text"][-200:])
+        phase.check(f"{n} asked, {started} started: they found part of their prompt cached", extra_held > 0, row)
+    (phase.out / "subagents_rows.json").write_text(json.dumps(rows, indent=2))
+
+
+class Sampler:
+    """The counters every ``every`` seconds on a thread of its own, between ``with`` and exit."""
+
+    def __init__(self, s: Server, every: float = 1.0):
+        self.s, self.every, self.series, self._stop = s, every, [], threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        t0 = time.monotonic()
+        while not self._stop.is_set():
+            self.series.append({"t": round(time.monotonic() - t0, 1), **counters(self.s)})
+            self._stop.wait(self.every)
+
+    def __enter__(self) -> Sampler:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        self._thread.join()
+
+
+def phase_eviction(phase: Phase) -> None:
+    """Sessions cycling long-history turns through a pool too small for them: the cache's hit rate under eviction,
+    and the counters of what the pool did, with the pages the cache names sampled through the run. Each session
+    has a system block of its own, so no pages are shared between them. One session is run alone first to measure
+    the pages it takes, and enough run together to hold twice the pool."""
+    s = phase.server
+    if s.metric(QUERIED) is None:
+        phase.check("the prefix-cache counters are served (--enable-metrics)", False)
+        return
+    pool = counters(s)["kv_total"]
+    base = counters(s)["kv_used"]
+    with Sampler(s) as alone:
+        conversation(s, LONG_SCRIPTS["plain"], f"session 0: {SYSTEM}", False)
+        time.sleep(2.5)
+    per_session = max(1.0, max(p["kv_used"] for p in alone.series) - base)
+    sessions = max(4, min(64, math.ceil(2 * pool / per_session)))
+    before = settled(s)
+    with Sampler(s, 3.0) as sampler, ThreadPoolExecutor(sessions) as pool_threads:
+        futures = [pool_threads.submit(conversation, s, LONG_SCRIPTS["plain" if i % 2 else "tool_round"],
+                                       f"session {i + 1}: {SYSTEM}", False) for i in range(sessions)]
+        results = [f.result() for f in futures]
+    after = settled(s)
+    series = sampler.series
+    turns = [row for rows in results for row in rows]
+    phase.check("every turn of every session was served", all(r["served"] for r in turns),
+                [r["error"] for r in turns if not r["served"]][:3])
+    asked, held = after[QUERIED] - before[QUERIED], after[HELD] - before[HELD]
+    used_max = max((p["kv_used"] for p in series), default=0.0)
+    summary = {"pool_pages": pool, "pages_one_session": per_session, "sessions": sessions, "turns": len(turns),
+               "prompt_tokens": asked, "cached_tokens": held, "hit_rate": round(held / asked, 4) if asked else None,
+               "preemptions": after[PREEMPTIONS] - before[PREEMPTIONS], "drops": after[DROPS] - before[DROPS],
+               "rebuild_tokens": after[REBUILD_TOKENS] - before[REBUILD_TOKENS],
+               "rebuild_cached_pages": after[REBUILD_CACHED] - before[REBUILD_CACHED],
+               "pages_cached_max": max((p["kv_cached"] for p in series), default=None), "pages_used_max": used_max,
+               "snapshot_counters": "none exist: orphaned snapshots are not counted"}
+    (phase.out / "eviction_series.json").write_text(json.dumps({"summary": summary, "series": series}, indent=2))
+    print(f"  eviction: hit rate {summary['hit_rate']}, preemptions {summary['preemptions']}, "
+          f"drops {summary['drops']}, LLM pages used up to {used_max:.0f} of {pool:.0f}")
+    phase.check("the pool was small enough to be pressed (preempted, or full to 90%)",
+                summary["preemptions"] > 0 or used_max >= 0.9 * pool, summary)
+
+
+REBUILD_TOOLS = [
+    f"Use python to print {i} * {i + 3}, then write a long, detailed explanation of how that product is computed, "
+    f"in at least 600 words." for i in range(1, 13)]
+REBUILD_SAY = ["good morning to you all", "the weather is fine today", "please read me the first note",
+               "what time does the archive open"]
+REBUILD_TOKENS_MAX = 1000
+REBUILD_JOBS = [("tool", i) for i in range(len(REBUILD_TOOLS))] + [("spoken", i) for i in range(len(REBUILD_SAY))]
+
+
+def rebuild_request(s: Server, kind: str, i: int, clips: Path, tag: str) -> dict:
+    kwargs = {**GREEDY, "max_output_tokens": REBUILD_TOKENS_MAX, "return_token_ids": True}
+    # the client's request id comes back in the server's log lines, which say which requests the pool dropped
+    rid = f"rb-{tag}-{kind}{i}"
+    if kind == "tool":
+        r = s.generate(REBUILD_TOOLS[i], kwargs=kwargs, timeout=600, request_id=rid)
+    else:
+        r = s.generate(wav=clips / f"clip_{i}.wav", kwargs=kwargs, timeout=600, request_id=rid)
+    return {"kind": kind, "i": i, "request_id": rid, "served": served(r), "error": r["error"],
+            "token_ids": r.get("token_ids", []), "text": r["text"], "heard": r["heard"]}
+
+
+def run_rebuild_jobs(s: Server, clips: Path, tag: str) -> list[dict]:
+    """All the requests at once, so the batches have a shape like the constrained server's."""
+    with ThreadPoolExecutor(len(REBUILD_JOBS)) as pool:
+        return list(pool.map(lambda job: rebuild_request(s, *job, clips, tag), REBUILD_JOBS))
+
+
+def first_difference(a: list[int], b: list[int]) -> int | None:
+    return next((k for k, (x, y) in enumerate(zip(a, b, strict=False)) if x != y),
+                None if len(a) == len(b) else min(len(a), len(b)))
+
+
+def phase_rebuild_reference(phase: Phase) -> None:
+    """The answers the `rebuild` phase is compared with: the same requests, all at once, on the unconstrained server,
+    twice (`rebuild_answers.json`, `rebuild_answers_again.json`), so the run-to-run variance of 1000 greedy bf16
+    tokens under batching is on record. One request of its own alone first, to measure the pages a long answer
+    takes; `rebuild_sizing.json` gives the `preempt` arm a pool that the 16 at once overrun."""
+    s, clips = phase.server, phase.out / "clips"
+    clips.mkdir(exist_ok=True)
+    for i, said in enumerate(REBUILD_SAY):
+        spoke = s.generate(f"Say '{said}' out loud using the speak tool.", speak=True,
+                           kwargs={**GREEDY, "max_output_tokens": 200})
+        phase.check(f"clip {i} made", served(spoke) and spoke["audio"] > 0, spoke["error"])
+        pcm_wav(clips / f"clip_{i}.wav", spoke["pcm"])
+    base = counters(s)["kv_used"]
+    # a request of its own kind (a system tag no job shares), so the jobs' prefixes are not warmed by it
+    with Sampler(s) as alone:
+        s.generate(
+            "Use python to print 17 * 19, then write a long, detailed explanation of how that product is computed, "
+            "in at least 600 words.",
+            history=[{"role": "system", "content": f"sizing run {random.Random().randrange(10**9)}"}],
+            kwargs={**GREEDY, "max_output_tokens": REBUILD_TOKENS_MAX}, timeout=600)
+        time.sleep(2.5)
+    pages = max(1.0, max(p["kv_used"] for p in alone.series) - base)
+    sizing = {"pages_per_request": pages,
+              "preempt_pages": max(PREEMPT_FLOOR, math.ceil(0.35 * len(REBUILD_JOBS) * pages))}
+    (phase.out / "rebuild_sizing.json").write_text(json.dumps(sizing, indent=2))
+    phase.check("the pool for the preempt arm is sized from one long request's pages", True, sizing)
+    for name, tag in (("rebuild_answers.json", "ref1"), ("rebuild_answers_again.json", "ref2")):
+        answers = run_rebuild_jobs(s, clips, tag)
+        phase.check(f"every request of {name} was served", all(r["served"] for r in answers),
+                    [r["error"] for r in answers if not r["served"]][:3])
+        (phase.out / name).write_text(json.dumps(answers, indent=2))
+
+
+def well_formed(r: dict) -> str | None:
+    """Why an answer is not a whole one, or None: served, not empty, and (a tool request) the tool call was made and
+    an answer follows it."""
+    if not r["served"]:
+        return f"not served: {r['error']}"
+    if not r["token_ids"] or not r["text"].strip():
+        return "empty"
+    if r["kind"] == "tool":
+        answer = r["text"].rpartition("</tool_call>")
+        if not answer[1]:
+            return "no tool call"
+        if not answer[2].strip():
+            return "nothing after the tool call"
+    return None
+
+
+def phase_rebuild(phase: Phase) -> None:
+    """The reference's requests, all at once on a pool the long answers outgrow, so the pool drops and rebuilds some.
+
+    Required: drops happened; every request is served and its answer whole (a tool call made and an answer after it).
+    Not required: the same tokens as the reference. Greedy bf16 over 1000 tokens differs between two runs of a
+    server under batching, which the reference run twice shows, so token-exactness is judged only for a request that
+    matched itself (the short spoken ones). That a rebuild writes what the request had written is pinned on the CPU
+    (`test_worker_rebuild`, `test_rebuild_policy`); here the rebuild runs on the GPU, in a real batch.
+    The first differing token against the reference and against the reference's rerun, per request, are in
+    `rebuild_compare.json`, with the requests the server's log says were dropped."""
+    s, clips = phase.server, phase.out / "clips"
+    paths = [phase.out / "rebuild_answers.json", phase.out / "rebuild_answers_again.json"]
+    if not all(p.exists() for p in paths):
+        phase.check("the reference is there (run rebuild_reference first, in the same --out)", False)
+        return
+    ref, again = ({(r["kind"], r["i"]): r for r in json.loads(p.read_text())} for p in paths)
+    before = settled(s)
+    got = run_rebuild_jobs(s, clips, "pool")
+    after = settled(s)
+    drops = after[DROPS] - before[DROPS]
+    phase.check("the pool forced drops (so some answers below are rebuilt requests)", drops > 0,
+                {"drops": drops, "preemptions": after[PREEMPTIONS] - before[PREEMPTIONS],
+                 "rebuild_tokens": after[REBUILD_TOKENS] - before[REBUILD_TOKENS], "pool": after["kv_total"]})
+    dropped = s.dropped_requests()
+    rows = []
+    for r in got:
+        key = (r["kind"], r["i"])
+        vs_ref = first_difference(r["token_ids"], ref[key]["token_ids"])
+        vs_rerun = first_difference(again[key]["token_ids"], ref[key]["token_ids"])
+        rows.append({"request": r["request_id"], "rebuilt": r["request_id"] in dropped,
+                     "first_difference_vs_reference": vs_ref, "reference_vs_its_rerun": vs_rerun,
+                     "tokens": len(r["token_ids"])})
+        why = well_formed(r)
+        phase.check(f"{r['kind']} request {r['i']} is whole" + (" (rebuilt)" if rows[-1]["rebuilt"] else ""),
+                    why is None, why)
+        if r["kind"] == "spoken" and vs_rerun is None:
+            # it matched itself, so the pool run must match too
+            phase.check(f"spoken request {r['i']} answers token for token as the reference does",
+                        vs_ref is None and r["heard"] == ref[key]["heard"], rows[-1])
+    (phase.out / "rebuild_compare.json").write_text(json.dumps(rows, indent=2))
+    phase.check("per request: first difference from the reference, and the reference's own (information)", True, rows)
+
+
 PHASES = {"parity": (phase_parity, ("default", "pre_plan")), "paths": (phase_paths, ("default",)),
           "load": (phase_load, ("default",)), "multiturn": (phase_multiturn, ("default",)),
-          "faults": (phase_faults, ("small_kv",))}
+          "faults": (phase_faults, ("small_kv",)),
+          "flashstate": (phase_flashstate, ("default", "messages")),
+          "diverge": (phase_diverge, ("default", "messages")), "subagents": (phase_subagents, ("default",)),
+          "eviction": (phase_eviction, ("pressure",)),
+          "rebuild_reference": (phase_rebuild_reference, ("default",)), "rebuild": (phase_rebuild, ("preempt",))}
 
 
 # -- launching an arm -----------------------------------------------------------------------------------------------
@@ -424,7 +912,11 @@ def arm_config(arm: str, dest: Path) -> Path:
     if yaml is None:
         raise SystemExit("--launch needs pyyaml")
     config = yaml.safe_load(CONFIG.read_text())
-    for dotted, value in ARMS[arm].items():
+    arm_changes = dict(ARMS[arm])
+    sizing = dest / "rebuild_sizing.json"
+    if arm == "preempt" and sizing.exists():
+        arm_changes["resources.kv_cache.max_num_pages"] = json.loads(sizing.read_text())["preempt_pages"]
+    for dotted, value in arm_changes.items():
         *path, leaf = dotted.split(".")
         target = config
         for key in path:
@@ -442,7 +934,7 @@ def launch(arm: str, port: int, dest: Path) -> tuple[subprocess.Popen, Server]:
          "--port", str(port), "--enable-metrics"],
         env=env, stdout=(dest / f"server_{arm}.log").open("w"), stderr=subprocess.STDOUT, start_new_session=True)
     server = Server(f"http://localhost:{port}")
-    server.group, server.out = process.pid, dest
+    server.group, server.out, server.log = process.pid, dest, dest / f"server_{arm}.log"
     deadline = time.monotonic() + 1800
     while time.monotonic() < deadline:
         if process.poll() is not None:

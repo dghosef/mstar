@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from mstar.conductor.request_info import APPENDS, PREFILL_END, TOOLS, TURN_IDS, WalkStep
+from mstar.conductor.request_info import PREFILL_END, TOOLS, TURN_IDS, WalkStep
 from mstar.model.components.python_tool import (
     AGENT_ANSWER,
     AGENT_PROMPTS,
@@ -224,8 +224,6 @@ def test_a_model_with_the_tool_has_its_walk_its_cycle_and_a_reserve_that_is_the_
     assert [step.walk for step in plan] == ["prefill_text", "decode", "route", "tool", "prefill_text"]
     assert plan[2].exits == {"answer": 5, "speak": 5, "tools": 3} and plan[4].exits == {"": 1}
     assert all(step.step_metadata.get(TOOLS) for step in (plan[0], plan[1], plan[4]))
-    # the continuation writes text no rebuild replays, so its request is not dropped (`Rebuilds.note_appended`)
-    assert plan[4].step_metadata[APPENDS] and not plan[0].step_metadata.get(APPENDS)
     assert model.get_loop_caps(max_output_tokens=100) == {"decode_loop": 101}
 
     # speaking is a tool with no handler: the template offers it, and the plan tells the router a speech edge exists

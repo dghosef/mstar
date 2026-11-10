@@ -78,6 +78,7 @@ def test_backend_takes_the_sink_setting_off_the_pool():
             ),
             EngineResourceInfo(device=cpu, dependencies={POOL: spec}),
         )
+        backend._pool = pool
         wrapper = backend._get_wrapper("main", is_decode=False)
         assert pool.pad_index == (PAD_SLOT_ID if disable_sink else 0)
         assert wrapper._has_sink_state is not disable_sink
@@ -117,6 +118,7 @@ def make_inputs(total_tokens: int, device) -> dict:
 
 def make_wrapper(device, has_sink: bool, accelerator_graph: bool = False):
     return GDNPrefillWrapper(
+        snapshots_per_row=2,
         device=device,
         pad_slot_id=PAD_SLOT_ID,
         has_sink_state=has_sink,

@@ -198,3 +198,36 @@ def test_only_a_deployment_that_serves_the_agent_loop_renders_history_as_it_was_
     model.tokenizer = SimpleNamespace(chat_template="a template that changed")
     with pytest.raises(ValueError, match="earlier turns"):
         model._exact_history(False)
+
+
+
+def test_a_chats_message_boundaries_are_the_token_counts_its_earlier_turns_render_to(tokenizer):
+    """What the `messages` checkpoint policy keeps a snapshot at: each count is a prefix of the whole prompt's ids,
+    and an assistant turn's boundary falls after its text, where a next turn's prompt still agrees with this one's."""
+    model = _qwen(tokenizer)
+    history = [{"role": "system", "content": "You are brief."}, {"role": "user", "content": "Hi"},
+               {"role": "assistant", "content": "Hello!"}]
+    out = model.process_prompt(
+        "What time is it?", [TEXT], ["text"], history=history, enable_thinking=False, message_marks=True)
+    ids = out.new_input_tensors["text_inputs"][0]
+    ends = out.metadata["message_ends"]["text_inputs"]
+    # (the template refuses a chat that is only a system message, so the first boundary is after the first user turn)
+    assert len(ends) == 2 and ends == sorted(ends) and ends[-1] < ids.numel()
+    for count, text in zip(ends, ("Hi<|im_end|>", "Hello!<|im_end|>"), strict=True):
+        assert tokenizer.decode(ids[:count]).rstrip().endswith(text)
+    # a request that does not ask for marks, or has one turn, carries none
+    assert "message_ends" not in model.process_prompt("Hi", [TEXT], ["text"], message_marks=True).metadata
+    assert "message_ends" not in model.process_prompt(
+        "What time is it?", [TEXT], ["text"], history=history, enable_thinking=False).metadata
+
+
+def test_an_agents_prompt_uses_the_template_arguments_a_model_declares_even_when_there_are_none(monkeypatch):
+    seen = {}
+    model = object.__new__(Qwen3_5DenseModel)
+    model.tokenizer = SimpleNamespace(apply_chat_template=lambda *args, **kwargs: seen.update(kwargs) or "")
+    model.chat_template_kwargs = lambda **kwargs: {}
+    monkeypatch.setattr("mstar.model.multimodal_decoder.encode_ids", lambda tokenizer, text: [])
+
+    model.render_agent("do it", enable_thinking=False)
+
+    assert seen == {"tokenize": False, "add_generation_prompt": True}, "an empty declaration got the default's"

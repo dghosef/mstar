@@ -21,7 +21,7 @@ from test_kv_preemption import PAGE_SIZE, _pool, _running
 from test_kv_preemption import _step as _kv_step
 from test_kv_prefix_lease import _StubTransfer
 
-from mstar.conductor.request_info import APPENDS, CurrentForwardPassInfo
+from mstar.conductor.request_info import CurrentForwardPassInfo
 from mstar.engine.chunking import ChunkRange
 from mstar.engine.engine import ExecutingBatch, PagedKVCache
 from mstar.engine.resources import AllocationFailed, Residency, StepAllowance, StepContext
@@ -282,18 +282,14 @@ def test_a_rebuild_row_runs_under_its_recorded_metadata_even_when_empty():
     assert node_batch.per_request_info[R].step_metadata == {}, "the rebuild row would run under decode's metadata"
 
 
-@pytest.mark.parametrize("why", ["no ids", "backlog", "prefill walk", "samples short", "appended text"])
+@pytest.mark.parametrize("why", ["no ids", "backlog", "unsampled"])
 def test_a_drop_is_refused_when_its_rebuild_could_not_follow(why):
     w, eng = _worker()
     w._rebuilds._kept[NODE].update({} if why == "no ids" else {R: _kept(5)})
-    if why == "appended text":
-        # its samples cover its KV, but a step (a tool's text, a transcript) wrote ids no kept id holds: a
-        # rebuild would lose them, so the drop is refused
-        info = SimpleNamespace(step_metadata={APPENDS: True})
-        w._rebuilds.note_appended(SimpleNamespace(node_name=NODE, per_request_info_wrapped={R: info, A: info}))
+    if why == "unsampled":
+        # it wrote a row (a tool's text, a transcript) that has no sample after it yet
+        w._rebuilds._kept[NODE][R].unsampled = True
     w.scheduler.backlog.update({(NODE, DECODE): ScheduledBatch(NODE, DECODE, {R: 0})} if why == "backlog" else {})
-    w.infos[R].graph_walk = PREFILL if why == "prefill walk" else DECODE
-    w.infos[R].dynamic_loop_iter_counts["loop"] = 1 if why == "samples short" else 0
 
     with pytest.raises(RuntimeError):
         w.preemption._drop(R, NODE)

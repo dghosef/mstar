@@ -58,7 +58,6 @@ from mstar.conductor.request_info import (
     AGENT_ANSWER,
     AGENT_ANSWERS,
     AGENT_CHILD,
-    APPENDS,
     FINAL_PREFILL,
     PREFILL_END,
     TOOLS,
@@ -301,7 +300,7 @@ def tool_plan(
         """The prefill that continues the reply with the tool's text, and back to decode."""
         return WalkStep(
             prefill_walk, bind={"text_inputs": TOOL_TEXT}, exits={"": at["decode"]},
-            step_metadata={FINAL_PREFILL: True, TOOLS: True, APPENDS: True},
+            step_metadata={FINAL_PREFILL: True, TOOLS: True},
         )
 
     plan = [
