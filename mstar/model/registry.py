@@ -53,6 +53,7 @@ MODEL_REGISTRY: dict[str, tuple[str, str]] = {
     "wan22": ("mstar.model.wan22.wan22_model", "Wan22Model"),
     "waypoint": ("mstar.model.waypoint.waypoint_model", "WaypointModel"),
     "whisper_large": ("mstar.model.whisper.whisper_model", "WhisperModel"),
+    "voice_agent": ("mstar.model.multimodel", "MultiModel"),
     "whisper_large_v3_turbo": ("mstar.model.whisper.whisper_model", "WhisperModel"),
     "z_image_turbo": ("mstar.model.z_image.z_image_model", "ZImageModel"),
 }

@@ -99,6 +99,7 @@ def _worker(tmp_path):
             check_stop_for_batch=lambda batch, outputs, **kwargs: {},
             after_output_copy=lambda batch: None,
             step_finished=lambda batch, outputs, **kwargs: None,
+            unreal_sample_rids=lambda batch: set(),
             materialize_publish=lambda batch, rids: None,
         )),
         request_state=request_state,
