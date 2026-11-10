@@ -17,6 +17,7 @@ from test_kv_prefix_lease import _StubTransfer
 from test_tp_async_teardown_order import _rank, _Stop
 
 import mstar.communication.wire_types  # noqa: F401  (registers the tags)
+from mstar.engine.chunking import ChunkRange
 from mstar.engine.engine import Engine
 from mstar.engine.resources import StepRunner, apply_yaml_overrides
 from mstar.engine.resources.base import KeyedWalks
@@ -24,7 +25,7 @@ from mstar.engine.resources.kv import manager as manager_mod
 from mstar.engine.resources.kv.config import KVSpec, KVStep, PagedKVConfig, opening_prefix_caches
 from mstar.engine.resources.kv.manager import KVManager
 from mstar.engine.resources.step import Segment, StepContext
-from mstar.model.submodule_base import ARNodeInputs, ARNodeSubmodule
+from mstar.model.submodule_base import ARNodeInputs, ARNodeSubmodule, ChunkingPolicy, InputSeqLenInfo, NodeInputs
 from mstar.testing_utils.engine import make_engine, make_mgmt
 from mstar.testing_utils.worker import make_scheduler, make_worker
 from mstar.utils.ipc_format import ScheduleTPNode
@@ -396,36 +397,88 @@ def test_a_tp_leader_admits_a_yield_away_step_unplanned_as_its_followers_do(cach
     assert leader.plans_ahead(spec("other", True)), "a node with no followers keeps its pre-plan"
 
 
-def test_a_chunked_row_starts_past_the_prefix_rank_0_measured_on_every_rank():
-    """Rank 0 leases the cached prefix a chunked row's chunks start past as it
-    sends the step. The lease goes out with the step, so a
-    follower's first chunk finds the same prefix; its own probe would find
-    none, and its chunk would not start where rank 0's does."""
-    from mstar.engine.chunking import ChunkRange
+class _Prompt(_Submodule):
+    def __init__(self, prompt: list[int]):
+        self.prompt = prompt
 
-    ranks = leader, follower = _manager(0), _manager(1)
-    shared = _tokens(5 * PAGE_SIZE + 3, seed=0)
-    prompt = shared[:5 * PAGE_SIZE] + _tokens(40, seed=1)
-    _cache(ranks, "b0", shared)
-    for kv in ranks:
-        _ingest(kv, "b", prompt)
+    def get_input_sequence_len(self, graph_walk, fwd_info, inputs):
+        return InputSeqLenInfo(len(self.prompt))
 
-    head = _send(leader, "b")  # rank 0 leases the prefix as it sends the step
-    start = leader.resolve_cached_prefix("b", NODE, WALK, ARNodeInputs(input_seq_len=len(prompt))).tokens
-    assert start == 5 * PAGE_SIZE
-    assert _follow(follower, head)
+    def prepare_inputs(self, **kwargs):
+        return ARNodeInputs(input_ids=torch.tensor(self.prompt), input_seq_len=len(self.prompt))
 
-    class _Prompt(_Submodule):
-        def prepare_inputs(self, **kwargs):
-            return ARNodeInputs(input_ids=torch.tensor(prompt), input_seq_len=len(prompt))
 
-    engine = _engine(follower)
-    engine._submodules[NODE] = make_mgmt(_Prompt())
+def _chunking_engine(kv: KVManager, prompt: list[int]) -> Engine:
+    engine = _engine(kv)
+    engine._submodules[NODE] = make_mgmt(_Prompt(prompt))
+    engine._chunking.set_policies({(NODE, WALK): ChunkingPolicy(walks=(WALK,), chunkable=True)})
+    return engine
+
+
+def _first_chunk(kv: KVManager, rid: str, prompt: list[int], start: int, end: int) -> tuple[NodeInputs, KVStep]:
+    """What the GPU thread does with a row's first chunk up to its commit: prepare it, which applies the
+    cached prefix it starts past, then admit and plan it."""
     batch = SimpleNamespace(
-        node_name=NODE, per_request_info_wrapped={"b": None}, per_request_input_tensors={},
+        node_name=NODE, per_request_info_wrapped={rid: None}, per_request_input_tensors={},
         final_stream_rids=set(), per_request_input_metadata={}, first_chunk_rids=set(),
     )
-    end = start + PAGE_SIZE
-    first = engine._prepare_chunk(batch, "b", WALK, ChunkRange(start, end, len(prompt), end))
+    part = _chunking_engine(kv, prompt)._prepare_chunk(batch, rid, WALK, ChunkRange(start, end, len(prompt), end))
+    step = KVStep(segments=(Segment(rid, "main", part.input_seq_len),))
+    assert kv.admit(step, _ctx(rid)).ok
+    kv.plan(step, _ctx(rid))
+    return part, step
 
-    assert (first.chunk_start, first.input_seq_len) == (start, PAGE_SIZE)
+
+def _chunked_prompt():
+    ranks = _manager(0), _manager(1)
+    shared = _tokens(5 * PAGE_SIZE + 3, seed=0)
+    return ranks, shared, shared[:5 * PAGE_SIZE] + _tokens(40, seed=1)
+
+
+def test_a_chunked_row_starts_past_the_prefix_rank_0_measured_on_every_rank():
+    """Rank 0 leases the cached prefix as it measures a chunked row, before the chunks are cut, and the
+    lease goes out with the first chunk. So every rank's first chunk starts past the same prefix, and the
+    next chunk, sent while the first is in flight, carries no second lease."""
+    (leader, follower), shared, prompt = _chunked_prompt()
+    _cache((leader, follower), "b0", shared)
+    for kv in (leader, follower):
+        _ingest(kv, "b", prompt)
+
+    measured = _chunking_engine(leader, prompt).input_sequence_len(NODE, WALK, None, {}, rid="b")
+    start = measured.cached_prefix
+    assert start == 5 * PAGE_SIZE
+    assert _follow(follower, _send(leader, "b"))
+    end = start + PAGE_SIZE
+    chunk = {}
+    for kv in (leader, follower):
+        part, chunk[kv] = _first_chunk(kv, "b", prompt, start, end)
+        assert (part.chunk_start, part.input_seq_len) == (start, PAGE_SIZE)
+
+    second = _send(leader, "b")
+    for kv in (leader, follower):
+        kv.commit(chunk[kv], _ctx("b"))
+    assert _follow(follower, second, caught_up=False)
+    assert not second.prefix_hits
+
+
+def test_a_hit_that_lands_after_rank_0_measured_a_chunked_row_is_leased_once():
+    """B-291: measured with no hit, the row's first chunk is cut from 0, and pages that land before it is
+    sent are leased with it and declined. Rank 0 sends the next chunk once the first is admitted but before
+    it commits; leasing the hit again there reached a follower that had committed the first chunk, whose
+    adopt stopped the worker."""
+    (leader, follower), shared, prompt = _chunked_prompt()
+    for kv in (leader, follower):
+        _ingest(kv, "b", prompt)
+    assert not _chunking_engine(leader, prompt).input_sequence_len(NODE, WALK, None, {}, rid="b").cached_prefix
+    _cache((leader, follower), "b0", shared)
+
+    first = _send(leader, "b")
+    assert first.prefix_hits
+    assert _follow(follower, first)
+    chunk = {kv: _first_chunk(kv, "b", prompt, 0, PAGE_SIZE)[1] for kv in (leader, follower)}
+
+    second = _send(leader, "b")
+    for kv in (leader, follower):
+        kv.commit(chunk[kv], _ctx("b"))
+    assert _follow(follower, second, caught_up=False)
+    assert not second.prefix_hits

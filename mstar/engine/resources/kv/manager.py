@@ -842,8 +842,8 @@ class KVManager(AttentionResource):
             if stream.stored_len or stream.offloaded or stream.read_pending:
                 return None
             if self._world_size > 1:
-                # Above one rank, use only the lease taken when rank 0 sent the step. A lookup now
-                # would also see this rank's later commits.
+                # Above one rank, use only the lease rank 0 took as it measured the row or sent the
+                # step. A lookup now would also see this rank's later commits.
                 return self._answer(label, cursor, step, 0)
         if not self._lease(rid, node_name, label, stream, chain):
             return None
@@ -924,7 +924,9 @@ class KVManager(AttentionResource):
             chain.rooted, chain.rooted_ends = rooted, ends
 
     def lease_cached_prefix(self, rid: str, node_name: str, graph_walk: str) -> list[int] | None:
-        """Returns the same lease with every step until `admit` converts it."""
+        """Returns the same lease with every step until `admit` converts it. A stream that has
+        started takes none: rank 0 sends a row's next chunk once the last one is admitted, before
+        it commits, so `stored_len` alone would not show the start."""
         with self._lock:
             label = self._keyed_label(rid, node_name, graph_walk)
             if label is None:
@@ -936,7 +938,8 @@ class KVManager(AttentionResource):
             if (
                 chain is None or cursor.done == len(chain.spans)
                 or chain.spans[cursor.done].walk != graph_walk
-                or stream.converted or stream.stored_len or stream.offloaded or stream.read_pending
+                or stream.converted or stream.stored_len or stream.step_in_flight
+                or stream.offloaded or stream.read_pending
             ):
                 return None
         if not self._lease(rid, node_name, label, stream, chain):

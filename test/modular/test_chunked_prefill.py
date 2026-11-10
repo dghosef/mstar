@@ -396,6 +396,9 @@ class _Runner:
     def apply_cached_prefix(self, rid, node_name, graph_walk, inputs, prefix):
         self.applied.append((rid, inputs.input_seq_len, prefix and prefix.tokens))
 
+    def lease_cached_prefix(self, rid, node_name, graph_walk):
+        return {}
+
 
 class _KeyedPrompt(_Prompt):
     def __init__(self, n, reuses=True, guided=False):

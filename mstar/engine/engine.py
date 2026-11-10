@@ -1576,8 +1576,8 @@ class Engine:
                 )
 
     def decide_cached_prefix(self, batch: ExecutingBatch) -> dict[str, dict[str, list[int]]]:
-        """Rank 0's cached-prefix leases for the step it is sending, by wire id, taken now so the
-        followers can take the same pages before they build it."""
+        """Rank 0's cached-prefix leases for the step it is sending, by wire id, taken now or when it
+        measured the row, so the followers can take the same pages before they build it."""
         keyed = self._keyed_walks.get(batch.node_name)
         ctx = batch.step_context
         if (
@@ -2987,6 +2987,9 @@ class Engine:
                 and not policy.reuses_cached_prefix(request_info))
         ):
             return info
+        # Rank 0 of a TP node decides the hit here, before the chunks are cut, and sends the lease
+        # with the first chunk, so every rank's first chunk starts past the same prefix.
+        self._runner.lease_cached_prefix(rid, node_name, graph_walk)
         prefix = self._runner.resolve_cached_prefix(
             rid, node_name, graph_walk, _MeasuredRow(info.seq_len),
         )
