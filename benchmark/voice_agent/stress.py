@@ -18,6 +18,21 @@ Phases
            the prefix cache and the ones it already held (the server's counters, read around each turn), so the next
            turn's reuse is a number. Run alone, so the deltas are the turn's.
   faults   (small-KV arm) backpressure; a tool that hangs, crashes or prints a lot; the budget used up mid round.
+
+The KV-management phases (`mm/3-kv-management`; each arm is a server, `ARMS`):
+  flashstate   (default and messages arms: the recurrent pool's `checkpoints: rows` and `checkpoints: messages`) the
+           same long-history conversations, typed and with tool rounds, 5 turns: per turn the prompt tokens, the
+           cached ones and the time to the first chunk. `flashstate_<arm>.json` holds the rows.
+  subagents    a parent that spawns 2 and 4 children: the cached tokens the children's first prefills found, from the
+           counters' deltas against a control request of the same shape that spawns nothing.
+  eviction     (pressure arm: a small KV pool) many sessions cycling long-history turns: the hit rate, preemptions and
+           drops, and the pages the cache names, sampled through the run. The counters that exist; there is none
+           for the recurrent pool's snapshots, so orphaned snapshots are not counted.
+  rebuild_reference  (default arm) greedy tool-round and spoken requests on an unconstrained server: the answers and
+           the clips it sent, saved in `rebuild_reference.json`. Run before `rebuild`.
+  rebuild      (preempt arm: a pool small enough to force drops) the same requests, concurrently: every answer must be
+           token-identical to the reference, and the arm must have dropped requests (the drops counter).
+A run of just these: --phases flashstate,subagents,eviction,rebuild_reference,rebuild
 """
 from __future__ import annotations
 
@@ -49,6 +64,10 @@ GREEDY = {"temperature": 0.0, "top_k": 1}
 TOOL_CALL = re.compile(r"<tool_call>")
 KV_USED = "mstar_kv_pages_used"
 KV_CACHED = "mstar_kv_pages_cached"
+PREEMPTIONS = "mstar_kv_preemptions_total"
+DROPS = "mstar_kv_drops_total"
+REBUILD_TOKENS = "mstar_kv_rebuild_tokens_total"
+REBUILD_CACHED = "mstar_kv_rebuild_cached_pages_total"
 QUERIED = "mstar_prefix_cache_query_tokens_total"
 HELD = "mstar_prefix_cache_hit_tokens_total"
 RUNNING = "mstar_conductor_requests"
@@ -61,6 +80,12 @@ ARMS = {
     # the speculated step is also pre-planned on its own thread.
     "pre_plan": {"knobs.pre_plan": True, "knobs.step_threads": "threaded"},
     "small_kv": {"resources.kv_cache.max_num_pages": 256, "max_concurrent_requests": 16},
+    # where a prefill keeps recurrent snapshots: the pool's checkpoint policy (`rows` is the default)
+    "messages": {"resources.gdn_state.checkpoints": "messages"},
+    # a pool a few dozen sessions' histories overfill, so the cache evicts; and one a dozen concurrent tool rounds
+    # overrun, so requests are dropped and rebuilt (the `rebuild` phase checks the drops happened)
+    "pressure": {"resources.kv_cache.max_num_pages": 200, "max_concurrent_requests": 24},
+    "preempt": {"resources.kv_cache.max_num_pages": 120, "max_concurrent_requests": 12},
 }
 
 
@@ -154,7 +179,8 @@ class Server:
         if request_id:
             data["request_id"] = request_id
         files = [("files", (wav.name, wav.read_bytes(), "audio/wav"))] if wav else None
-        out = {"text": "", "heard": "", "audio": 0, "pcm": bytearray(), "status": None, "error": None, "chunks": 0}
+        out = {"text": "", "heard": "", "audio": 0, "pcm": bytearray(), "status": None, "error": None, "chunks": 0,
+               "ttft": None}
         started = time.monotonic()
         try:
             with requests.post(f"{self.url}/generate", data=data, files=files, stream=True, timeout=timeout) as r:
@@ -168,6 +194,8 @@ class Server:
                     chunk = json.loads(line)
                     out["chunks"] += 1
                     payload = base64.b64decode(chunk["data"])
+                    if out["ttft"] is None and chunk["modality"] in ("text", "audio"):
+                        out["ttft"] = round(time.monotonic() - started, 3)
                     signal_name = (chunk.get("metadata") or {}).get("signal", "")
                     if chunk["modality"] == "audio":
                         out["audio"] += len(payload)
@@ -412,9 +440,230 @@ def phase_faults(phase: Phase) -> None:
     phase.check("the budget used up mid-round ends the request cleanly", served(tight), tight["error"])
 
 
+# -- the KV-management phases ---------------------------------------------------------------------------------------
+
+SYSTEM = ("You are a careful assistant for a long-running voice agent. " + "Answer briefly. " * 5 +
+          "Background notes the user may ask about: " +
+          " ".join(f"Note {i}: the {w} is kept on shelf {i} of the archive." for i, w in enumerate(
+              ["atlas", "lantern", "compass", "ledger", "violin", "kettle", "barometer", "telescope"] * 6)))
+LONG_SCRIPTS = {
+    "plain": ["Name a colour.", "Name another one.", "Which two did you name?", "Name a third, different one.",
+              "List all three in one line."],
+    "tool_round": ["Use python to print 6 * 7.", "Now use python to print 7 * 8.", "Now print 8 * 9 with python.",
+                   "And 9 * 10.", "What were the four results?"],
+}
+
+
+def counters(s: Server) -> dict:
+    """The prefix-cache and preemption counters, from one scrape (the server reports once a second)."""
+    text = s.scrape() or ""
+    return {name: Server.total(text, name) or 0.0
+            for name in (QUERIED, HELD, PREEMPTIONS, DROPS, REBUILD_TOKENS, REBUILD_CACHED)} | {
+        "kv_cached": Server.total(text, KV_CACHED) or 0.0, "kv_used": Server.total(text, KV_USED) or 0.0}
+
+
+def settled(s: Server) -> dict:
+    """`counters` once the server has reported what the last request did."""
+    time.sleep(2.5)
+    return counters(s)
+
+
+def conversation(s: Server, turns: list[str], system: str | None = SYSTEM, measure: bool = True) -> list[dict]:
+    """One conversation, each turn sent with the whole history before it: its prompt tokens, the cached ones, its
+    time to the first chunk and its reply. ``measure`` reads the counters around each turn, which is only right for
+    a conversation run alone; concurrent ones skip it."""
+    history: list[dict] = [{"role": "system", "content": system}] if system else []
+    rows = []
+    for n, text in enumerate(turns, 1):
+        before = settled(s) if measure else None
+        result = s.generate(
+            text, history=history, kwargs={**GREEDY, "max_output_tokens": 300, "return_token_ids": True})
+        row = {"turn": n, "ttft": result["ttft"], "served": served(result), "error": result["error"],
+               "reply_tokens": len(result.get("token_ids", [])), "token_ids": result.get("token_ids", []),
+               "text": result["text"]}
+        if measure:
+            after = settled(s)
+            row |= {"prompt_tokens": after[QUERIED] - before[QUERIED], "cached_tokens": after[HELD] - before[HELD]}
+        rows.append(row)
+        history += [{"role": "user", "content": text}, {"role": "assistant", "content": result["text"]}]
+    return rows
+
+
+def phase_flashstate(phase: Phase) -> None:
+    """Per turn: prompt tokens, cached tokens and time to the first chunk, for each conversation. Run once per
+    checkpoint policy arm; the second arm's rows are set against the first's when its file is there."""
+    s, arm = phase.server, phase.name.removeprefix("flashstate_")
+    if s.metric(QUERIED) is None:
+        phase.check("the prefix-cache counters are served (--enable-metrics)", False)
+        return
+    rows = []
+    for name, turns in LONG_SCRIPTS.items():
+        for row in conversation(s, turns):
+            rows.append({"arm": arm, "conversation": name, **{k: v for k, v in row.items() if k != "token_ids"}})
+            phase.check(f"{name} turn {row['turn']} answers", row["served"], row["error"])
+    (phase.out / f"flashstate_{arm}.json").write_text(json.dumps(rows, indent=2))
+    for row in rows:
+        print(f"  {arm:8s} {row['conversation']:10s} turn {row['turn']}: {row['cached_tokens']:.0f} of "
+              f"{row['prompt_tokens']:.0f} prompt tokens cached, first chunk {row['ttft']} s")
+    later = [r for r in rows if r["turn"] > 1]
+    phase.check("a later turn finds part of its prompt cached", all(r["cached_tokens"] > 0 for r in later), later)
+    other = phase.out / "flashstate_default.json"
+    if arm != "default" and other.exists():
+        base = {(r["conversation"], r["turn"]): r for r in json.loads(other.read_text())}
+        gain = [{"conversation": r["conversation"], "turn": r["turn"],
+                 "cached_tokens_vs_rows": r["cached_tokens"] - base[(r["conversation"], r["turn"])]["cached_tokens"],
+                 "ttft_vs_rows": None if None in (r["ttft"], base[(r["conversation"], r["turn"])]["ttft"])
+                 else round(r["ttft"] - base[(r["conversation"], r["turn"])]["ttft"], 3)}
+                for r in rows if (r["conversation"], r["turn"]) in base]
+        phase.check("the arm's gain over `rows`, turn by turn (information)", True, gain)
+
+
+def spawn_markup(text: str) -> int:
+    """The agent tasks a reply's spawn call wrote (its markup reaches the client as text)."""
+    return len(re.findall(r"<parameter=task", text)) or len(re.findall(r'"task"', text))
+
+
+def phase_subagents(phase: Phase) -> None:
+    """A parent that spawns n children: what the children's first prefills found cached. The counters are global, so
+    it is a delta against a control of the same shape that spawns nothing (the parent's own prompt hits the same
+    shared block in both, each prompt's own words being new)."""
+    s = phase.server
+    if s.metric(QUERIED) is None:
+        phase.check("the prefix-cache counters are served (--enable-metrics)", False)
+        return
+    rows = []
+    for n, tasks in ((2, ("the sum of 1..10", "the sum of 1..20")),
+                     (4, ("the sum of 1..5", "the sum of 1..6", "the sum of 1..7", "the sum of 1..8"))):
+        tag = f"run {random.Random(n).randrange(10**6)}"
+        control = f"{tag}: use python to print {n} * {n}, once, and say the result."
+        spawn = (f"{tag}: use spawn_agent exactly once with {n} tasks: " + "; ".join(f"'{t}'" for t in tasks) +
+                 ". Report all the answers.")
+        before = settled(s)
+        c = s.generate(control, kwargs={**GREEDY, "max_output_tokens": 300})
+        mid = settled(s)
+        p = s.generate(spawn, kwargs={**GREEDY, "max_output_tokens": 600})
+        after = settled(s)
+        phase.check(f"{n} children: both requests served", served(c) and served(p), (c["error"], p["error"]))
+        started = spawn_markup(p["text"])
+        extra_held = (after[HELD] - mid[HELD]) - (mid[HELD] - before[HELD])
+        extra_asked = (after[QUERIED] - mid[QUERIED]) - (mid[QUERIED] - before[QUERIED])
+        row = {"children": n, "children_started": started, "control_cached": mid[HELD] - before[HELD],
+               "control_prompt": mid[QUERIED] - before[QUERIED], "spawn_cached": after[HELD] - mid[HELD],
+               "spawn_prompt": after[QUERIED] - mid[QUERIED], "children_cached_total": extra_held,
+               "children_prompt_total": extra_asked,
+               "cached_per_child": round(extra_held / started, 1) if started else None}
+        rows.append(row)
+        phase.check(f"{n} children: the spawn call reached the client", started >= 1, p["text"][-200:])
+        phase.check(f"{n} children: they found part of their prompt cached", extra_held > 0, row)
+    (phase.out / "subagents.json").write_text(json.dumps(rows, indent=2))
+
+
+def phase_eviction(phase: Phase) -> None:
+    """Sessions cycling long-history turns through a pool too small for them: the cache's hit rate under eviction,
+    and the counters of what the pool did, with the pages the cache names sampled through the run."""
+    s = phase.server
+    if s.metric(QUERIED) is None:
+        phase.check("the prefix-cache counters are served (--enable-metrics)", False)
+        return
+    sessions, series, stop_sampling = 24, [], False
+
+    def sample() -> None:
+        while not stop_sampling:
+            series.append({"t": round(time.monotonic() - t0, 1), **counters(s)})
+            time.sleep(3.0)
+
+    before, t0 = settled(s), time.monotonic()
+    with ThreadPoolExecutor(sessions + 1) as pool:
+        sampler = pool.submit(sample)
+        shared = [pool.submit(conversation, s, LONG_SCRIPTS["plain" if i % 2 else "tool_round"],
+                              SYSTEM if i % 3 else None, False) for i in range(sessions)]
+        results = [f.result() for f in shared]
+        stop_sampling = True
+        sampler.result()
+    after = settled(s)
+    turns = [row for rows in results for row in rows]
+    phase.check("every turn of every session was served", all(r["served"] for r in turns),
+                [r["error"] for r in turns if not r["served"]][:3])
+    asked, held = after[QUERIED] - before[QUERIED], after[HELD] - before[HELD]
+    summary = {"sessions": sessions, "turns": len(turns), "prompt_tokens": asked, "cached_tokens": held,
+               "hit_rate": round(held / asked, 4) if asked else None,
+               "preemptions": after[PREEMPTIONS] - before[PREEMPTIONS], "drops": after[DROPS] - before[DROPS],
+               "rebuild_tokens": after[REBUILD_TOKENS] - before[REBUILD_TOKENS],
+               "rebuild_cached_pages": after[REBUILD_CACHED] - before[REBUILD_CACHED],
+               "pages_cached_max": max((p["kv_cached"] for p in series), default=None),
+               "pages_used_max": max((p["kv_used"] for p in series), default=None),
+               "snapshot_counters": "none exist: orphaned snapshots are not counted"}
+    (phase.out / "eviction.json").write_text(json.dumps({"summary": summary, "series": series}, indent=2))
+    print(f"  eviction: hit rate {summary['hit_rate']}, preemptions {summary['preemptions']}, drops {summary['drops']}")
+    phase.check("the pool was small enough to evict (the cache named fewer pages than it was given)",
+                summary["pages_cached_max"] is not None and summary["pages_cached_max"] > 0, summary)
+
+
+REBUILD_TOOLS = [f"Use python to print {i} * {i + 3}, then tell me the result in one sentence." for i in range(1, 13)]
+REBUILD_SAY = ["good morning to you all", "the weather is fine today", "please read me the first note",
+               "what time does the archive open"]
+
+
+def rebuild_request(s: Server, kind: str, i: int, clips: Path) -> dict:
+    kwargs = {**GREEDY, "max_output_tokens": 300, "return_token_ids": True}
+    if kind == "tool":
+        r = s.generate(REBUILD_TOOLS[i], kwargs=kwargs)
+    else:
+        r = s.generate(wav=clips / f"clip_{i}.wav", kwargs=kwargs)
+    return {"kind": kind, "i": i, "served": served(r), "error": r["error"], "token_ids": r.get("token_ids", []),
+            "text": r["text"], "heard": r["heard"]}
+
+
+def phase_rebuild_reference(phase: Phase) -> None:
+    """The answers the `rebuild` phase is held to: one request at a time on an unconstrained server."""
+    s, clips = phase.server, phase.out / "clips"
+    clips.mkdir(exist_ok=True)
+    for i, said in enumerate(REBUILD_SAY):
+        spoke = s.generate(f"Say '{said}' out loud using the speak tool.", speak=True,
+                           kwargs={**GREEDY, "max_output_tokens": 200})
+        phase.check(f"clip {i} made", served(spoke) and spoke["audio"] > 0, spoke["error"])
+        pcm_wav(clips / f"clip_{i}.wav", spoke["pcm"])
+    reference = [rebuild_request(s, "tool", i, clips) for i in range(len(REBUILD_TOOLS))] + [
+        rebuild_request(s, "spoken", i, clips) for i in range(len(REBUILD_SAY))]
+    phase.check("every reference request was served", all(r["served"] for r in reference),
+                [r["error"] for r in reference if not r["served"]][:3])
+    (phase.out / "rebuild_reference.json").write_text(json.dumps(reference, indent=2))
+
+
+def phase_rebuild(phase: Phase) -> None:
+    """The reference's requests, all at once on a pool that overruns: the ones the pool dropped and rebuilt (mid
+    tool round, mid spoken turn) must answer with the same tokens."""
+    s, clips = phase.server, phase.out / "clips"
+    path = phase.out / "rebuild_reference.json"
+    if not path.exists():
+        phase.check("the reference is there (run rebuild_reference first, in the same --out)", False)
+        return
+    reference = {(r["kind"], r["i"]): r for r in json.loads(path.read_text())}
+    before = settled(s)
+    jobs = [("tool", i) for i in range(len(REBUILD_TOOLS))] + [("spoken", i) for i in range(len(REBUILD_SAY))]
+    with ThreadPoolExecutor(len(jobs)) as pool:
+        got = list(pool.map(lambda job: rebuild_request(s, *job, clips), jobs))
+    after = settled(s)
+    drops = after[DROPS] - before[DROPS]
+    phase.check("the pool forced drops (so some answers below are rebuilt requests)", drops > 0,
+                {"drops": drops, "preemptions": after[PREEMPTIONS] - before[PREEMPTIONS],
+                 "rebuild_tokens": after[REBUILD_TOKENS] - before[REBUILD_TOKENS]})
+    for r in got:
+        ref = reference[(r["kind"], r["i"])]
+        same = r["served"] and r["token_ids"] == ref["token_ids"] and r["heard"] == ref["heard"]
+        got_ids, ref_ids = r["token_ids"], ref["token_ids"]
+        at = next((k for k, (x, y) in enumerate(zip(got_ids, ref_ids, strict=False)) if x != y),
+                  None if len(got_ids) == len(ref_ids) else min(len(got_ids), len(ref_ids)))
+        detail = {"first_difference_at_token": at, "got": r["text"][-120:], "reference": ref["text"][-120:]}
+        phase.check(f"{r['kind']} request {r['i']} answers as it does unconstrained", same, r["error"] or detail)
+
+
 PHASES = {"parity": (phase_parity, ("default", "pre_plan")), "paths": (phase_paths, ("default",)),
           "load": (phase_load, ("default",)), "multiturn": (phase_multiturn, ("default",)),
-          "faults": (phase_faults, ("small_kv",))}
+          "faults": (phase_faults, ("small_kv",)),
+          "flashstate": (phase_flashstate, ("default", "messages")), "subagents": (phase_subagents, ("default",)),
+          "eviction": (phase_eviction, ("pressure",)),
+          "rebuild_reference": (phase_rebuild_reference, ("default",)), "rebuild": (phase_rebuild, ("preempt",))}
 
 
 # -- launching an arm -----------------------------------------------------------------------------------------------

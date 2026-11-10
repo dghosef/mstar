@@ -374,12 +374,8 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
         # pre-closed `<think>` block, which is how Qwen turns reasoning off.
         try:
             text = self.tokenizer.apply_chat_template(
-                messages_from_parts(parts),
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=enable_thinking,
-                tools=self.tool_schemas(),
-                **self._exact_history(enable_thinking),
+                messages_from_parts(parts), tokenize=False, add_generation_prompt=True,
+                **self.chat_template_kwargs(**kwargs),
             )
         except TemplateError as exc:
             # a chat the template refuses (a system message after the first turn,
@@ -391,6 +387,12 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
             )
         # a long prompt is encoded as parallel chunks, identical ids
         return torch.tensor(encode_ids(self.tokenizer, text), dtype=torch.long)
+
+    def chat_template_kwargs(self, **kwargs) -> dict:
+        enable_thinking = kwargs.get("enable_thinking", True)
+        return {
+            "enable_thinking": enable_thinking, "tools": self.tool_schemas(), **self._exact_history(enable_thinking),
+        }
 
     def _merge(self) -> int:
         if self.vision_config is None:

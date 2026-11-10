@@ -22,6 +22,7 @@ from mstar.engine.resources.base import (
     PublishedInfo,
     Rebuild,
     Residency,
+    Resource,
     StepAllowance,
 )
 from mstar.engine.resources.kv.arena import PageArena, StreamPages, columns_from_raw, new_page_arena, plan_columns
@@ -35,12 +36,13 @@ from mstar.engine.resources.kv.config import (
     PagedKVConfig,
     PrefixSpan,
     RetentionPolicy,
+    SpanKind,
     StreamLayout,
     step_end,
 )
 from mstar.engine.resources.kv.cpu_page_pool import CPUPagePool, PageCopies
 from mstar.engine.resources.kv.host_writes import HostWrites
-from mstar.engine.resources.kv.keys import PageItem, fingerprint, page_items, page_key
+from mstar.engine.resources.kv.keys import PageItem, chain, fingerprint, page_items, page_key
 from mstar.engine.resources.kv.plan import (
     SINK_PAGE,
     HostLens,
@@ -78,7 +80,6 @@ from mstar.utils.profiler import PhaseLaps
 
 if TYPE_CHECKING:
     from mstar.engine.resources.kv.resident import KVResidentTables
-    from mstar.engine.resources.recurrent.pool import RecurrentStatePool
     from mstar.engine.resources.resident import (
         CapturedResidentStep,
         ResidentPlan,
@@ -675,6 +676,8 @@ class KVManager(AttentionResource):
         # the walks of each label whose rows are the ids its keys name; one past the layout's spans
         # is text appended after the prompt (`extend_appended`)
         self._write_walks: dict[str, frozenset[str]] = {}
+        # label -> the input that holds the ids its ids span is keyed by
+        self._keyed_tensor: dict[str, str] = {}
         # nodes already warned that a declared stream reached them unkeyed
         self._warned_unkeyed: set[str] = set()
         self._overran: set[tuple[str, bool]] = set()
@@ -699,8 +702,8 @@ class KVManager(AttentionResource):
         # `_unused` counts the pages admitted requests were allotted and haven't used yet.
         # `_guaranteed` holds the requests that reserve what they grow into and are never preempted once they start,
         #   decided at their first `ask`, or later when the host has no room to set aside for their move.
-        # `_snapshots` holds the pools that restore a hit's recurrent state. A prefill hit counts only as far as they
-        #   restore it.
+        # `_restorers` holds the resources that restore state a hit needs (a recurrent pool's snapshots). A prefill hit
+        #   counts only as far as they restore it.
         # `_footprints` holds each request's `_footprint` as it was at intake.
         # `_kept` counts the room kept for `_keeper`, a waiting request that isn't a passer, up to what it asks for:
         #   the pages passers freed while it waited, and the pages moves made for it freed before they covered it.
@@ -715,7 +718,7 @@ class KVManager(AttentionResource):
         self._allotments: dict[str, Allotment] = {}
         self._unused = 0
         self._guaranteed: set[str] = set()
-        self._snapshots: list["RecurrentStatePool"] = []
+        self._restorers: list[Resource] = []
         self._footprints: dict[str, int] = {}
         self._kept = 0
         self._keeper: str | None = None
@@ -894,8 +897,10 @@ class KVManager(AttentionResource):
         """Open the index under ``root``, the identity every key hangs from."""
         self._keyed_walks = {}
         self._write_walks = {}
+        self._keyed_tensor = {}
         for label, named in (walks or {}).items():
             self._write_walks[label] = frozenset(named.writes)
+            self._keyed_tensor[label] = named.tensor
             keyed = set(named.writes)
             # Above one rank a growth walk isn't keyed, since each rank reads its sampled ids at a
             # different step.
@@ -919,6 +924,11 @@ class KVManager(AttentionResource):
     def close_prefix_cache(self) -> None:
         self._index = None
 
+    def keeps_prefix(self, key: bytes) -> bool:
+        """Whether the prefix index holds a page under ``key`` (`Resource.keeps_prefix`)."""
+        index = self._index
+        return index is not None and index.page_for(key) is not None
+
     def page_counts(self) -> KVPageCounts:
         """The pool's pages right now, without the manager lock: each count is
         read whole, though the three may straddle an allocation. In pages of every
@@ -940,6 +950,7 @@ class KVManager(AttentionResource):
         is prepared again, so it answers the same every time it is asked and
         takes one reference however often that is.
         """
+        self._key_from_ids(rid, node_name, graph_walk, inputs)
         with self._lock:
             label = self._keyed_label(rid, node_name, graph_walk)
             if label is None:
@@ -976,6 +987,53 @@ class KVManager(AttentionResource):
             if stream.lease is None:
                 return None
             return self._answer(label, cursor, step, self._leased(rid, stream))
+
+    def _key_from_ids(self, rid: str, node_name: str, graph_walk: str, inputs) -> None:
+        """Key a prompt the API server never saw (`KVReqConfig.key_from_ids`) from the ids its first row carries, as
+        `prepare_rebuild` keys a rebuild's, so a child request leases the pages its parent's prompt shares with it.
+        The measuring probe carries the row's tensors and keys it, so the hit is counted when the row is cut into
+        chunks. Done once: the request's keys are then the ones a prompt of those ids would have had. A prompt
+        that is not one ids span this row writes whole is left unkeyed."""
+        overrides = self._overrides.get(rid)
+        if overrides is None or not overrides.key_from_ids:
+            return  # a lock-free read: only a child's config sets it
+        with self._lock:
+            overrides = self._overrides.get(rid)
+            if overrides is None or not overrides.key_from_ids:
+                return
+            layouts = overrides.kv_layout or {}
+            label = next((name for name in overrides.get_labels(node_name, graph_walk) if layouts.get(name)), None)
+            if label is None or self._index is None or not overrides.prefix_cache:
+                return
+            ids = inputs.input_ids
+            if ids is None:
+                ids = inputs.tensor_inputs.get(self._keyed_tensor.get(label, ""))
+            if ids is None:
+                return
+            layout = layouts[label]
+            self._overrides[rid] = overrides = replace(overrides, key_from_ids=False)
+        ids = ids.reshape(-1).tolist()
+        (span,) = layout.spans if len(layout.spans) == 1 else (None,)
+        if span is None or span.kind is not SpanKind.IDS or span.length != len(ids):
+            return
+        page_size = self.config.tokens_per_page
+        pages = [ids[start:start + page_size] for start in range(0, len(ids), page_size)]
+        # hashed before the lock, as `resolve_cached_prefix` hashes outside it
+        keys = chain(pages, root=overrides.prefix_root)
+        with self._lock:
+            if self._overrides.get(rid) is not overrides or rid not in self._streams:
+                return
+            self._overrides[rid] = replace(
+                overrides,
+                prefix_keys={**(overrides.prefix_keys or {}), label: keys},
+                prefix_tail={**(overrides.prefix_tail or {}), label: list(pages[-1]) if len(ids) % page_size else []},
+                kv_layout={**layouts, label: replace(layout, keyed_spans=1)},
+            )
+            stream = self._streams[rid].get(label)
+            if stream is not None:
+                stream.forget_chain()
+                self._lay_out(rid, label, stream)
+                self._seed_keys(rid, label, stream)
 
     def _extend_appended(self, stream: CacheStream, chain: PrefixChain, inputs) -> None:
         """Under the lock: key the ids a row writes after the layout's spans (a tool's text, a spoken
@@ -1352,8 +1410,12 @@ class KVManager(AttentionResource):
     def _evict(self, n: int) -> int:
         """`PrefixIndex.evict`, counting the pages it drops that have no copy on the host. Pages still waiting
         for their copy to the host go last."""
-        writes = self._host_writes
-        dropped = self._index.evict(n, None if writes is None else writes.awaits)
+        writes, restorers = self._host_writes, self._restorers
+        awaits = None if writes is None else writes.awaits
+        # a page every restorer holds state for goes last, as a page whose copy to the host is pending does
+        keeps = (lambda key: all(r.keeps_prefix(key) for r in restorers)) if restorers else None
+        spare = awaits if keeps is None else keeps if awaits is None else (lambda key: awaits(key) or keeps(key))
+        dropped = self._index.evict(n, spare)
         if writes is not None:
             writes.evicted(dropped)
         if self._cpu_pool is not None:
@@ -1499,9 +1561,22 @@ class KVManager(AttentionResource):
         with self._lock:
             return self._keyed_label(rid, node_name, graph_walk)
 
-    def bind_snapshots(self, pool: "RecurrentStatePool") -> None:
-        """Count a prefill hit only as far as ``pool`` restores the recurrent state under it."""
-        self._snapshots.append(pool)
+    def bind_restorer(self, resource: Resource) -> None:
+        """Count a prefill hit only as far as ``resource`` restores the state under it (`Resource.restorable`), and
+        evict first the pages it keeps none for (`Resource.keeps_prefix`). Refused above one rank: those answers are
+        rank-local."""
+        if self._world_size > 1:
+            raise ValueError(
+                f"KV {self.name}: {type(resource).__name__} restores prefixes, which the cache pairs with its pages "
+                "on one rank only, since its answers differ between ranks"
+            )
+        self._restorers.append(resource)
+
+    def prefix_marks(self, rid: str, label: str) -> tuple[int, ...]:
+        """The token counts where ``rid``'s prompt breaks into messages, page-floored (`KVReqConfig.prefix_marks`)."""
+        with self._lock:
+            overrides = self._overrides.get(rid)
+        return tuple(((overrides.prefix_marks or {}).get(label) or ()) if overrides is not None else ())
 
     def keyed_walks(self, label: str) -> frozenset[str]:
         """The walks whose writes under ``label`` the prefix cache keys."""
@@ -4735,7 +4810,7 @@ class KVManager(AttentionResource):
         requests have ever taken out of its evictable set."""
         if self._index is None:
             return 0, 0
-        return self._index.filed + sum(pool.filed for pool in self._snapshots), self._index.taken
+        return self._index.filed + sum(pool.filed for pool in self._restorers), self._index.taken
 
     # Preemption
 
@@ -5121,8 +5196,8 @@ class KVManager(AttentionResource):
                 and self._keyed_label(rid, node_name, chain.spans[cursor.done].walk) == label
             ):
                 pages = self._index.pages_for(chain.rooted)[:len(chain.rooted) - 1]
-                for pool in self._snapshots:
-                    pages = pages[:pool.restorable(chain.rooted[:len(pages)])]
+                for restorer in self._restorers:
+                    pages = pages[:restorer.restorable(chain.rooted[:len(pages)])]
                 whole += len(pages)
                 total = sum(span.length for span in chain.spans)
                 image_end = self._image_end(chain.rooted_ends, len(pages) * page_size, total)

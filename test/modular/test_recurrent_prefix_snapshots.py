@@ -42,7 +42,7 @@ from mstar.model.base import KVLabel, PrefixKeys
 from mstar.testing_utils.engine import make_engine
 from mstar.testing_utils.model import StubModel
 from mstar.testing_utils.resource import StubResource
-from mstar.validation.resources import _unskippable_resources
+from mstar.validation.resources import _unmarkable_messages, _unskippable_resources
 
 NODE, WALK, PAGE = "llm", "prefill", 4
 
@@ -53,6 +53,9 @@ class _StubChains:
     def __init__(self):
         self.config = PagedKVConfig(num_layers=1, num_kv_heads=1, head_dim=8, max_seq_len=4 * PAGE, page_size=PAGE)
         self.keys: dict[str, list[bytes]] = {}
+        self.marks: dict[str, tuple[int, ...]] = {}
+        # the keys the cache still holds a page under; None holds every one
+        self.held: set[bytes] | None = None
 
     def add(self, rid: str, tokens: list[int]) -> None:
         whole = len(tokens) // PAGE * PAGE
@@ -65,10 +68,16 @@ class _StubChains:
         keys = self.keys.get(rid, [])
         return keys[pages - 1] if 0 < pages <= len(keys) else None
 
+    def keeps_prefix(self, key):
+        return self.held is None or key in self.held
+
+    def prefix_marks(self, rid, label):
+        return self.marks.get(rid, ())
+
     def chain_keys(self, rid, label, pages):
         return self.keys.get(rid, [])[:pages]
 
-    def bind_snapshots(self, pool):
+    def bind_restorer(self, pool):
         del pool
 
 
@@ -86,10 +95,12 @@ def _build(config: RecurrentStateConfig, world_size: int = 1, prefix_cache: bool
     ))
 
 
-def _pool(prefix_slots: int = 2, world_size: int = 1, prefix_cache: bool = True) -> RecurrentStatePool:
+def _pool(
+    prefix_slots: int = 2, world_size: int = 1, prefix_cache: bool = True, checkpoints: str = "rows",
+) -> RecurrentStatePool:
     config = RecurrentStateConfig(
         num_layers=2, blocks={"state": RecurrentBlockConfig(shape=(3,), dtype=torch.float32)},
-        max_slots=4, prefix_slots=prefix_slots, kv_cache="kv",
+        max_slots=4, prefix_slots=prefix_slots, kv_cache="kv", checkpoints=checkpoints,
     )
     pool = _build(config, world_size, prefix_cache)
     pool.bind_kv(_StubChains())
@@ -182,6 +193,17 @@ def test_a_declined_hit_gives_its_snapshot_back_and_restores_nothing():
     step, ctx = _step("b", 4), _ctx("b")
     assert pool.admit(step, ctx).ok
     assert not pool._restores, "a row running from token 0 restored a snapshot"
+
+
+def test_a_full_set_evicts_a_snapshot_whose_page_the_cache_lost_before_an_older_one_it_still_holds():
+    """A hit stops at the cache's pages, so a snapshot under a key the cache dropped can no longer serve one."""
+    pool = _pool(prefix_slots=2)
+    old = _snapshot(pool, "a", A, 4, 1.0)
+    dead = _snapshot(pool, "b", list(range(100, 120)), 4, 2.0)
+    pool._kv.held = {pool._kv.chain_key("a", "main", 1)}
+    assert pool._reserve_snapshot() == dead and old in pool._snap_meta
+    # and it tells the cache which keys it keeps state for
+    assert pool.keeps_prefix(pool._kv.chain_key("a", "main", 1)) and not pool.keeps_prefix(b"none")
 
 
 def test_a_full_set_evicts_the_oldest_snapshot_nothing_holds():
@@ -507,6 +529,42 @@ def test_a_keyed_node_still_refuses_a_resource_that_cant_skip_a_prefix(depends_o
     assert problems and "'other' cannot serve a request" in problems[0], problems
 
 
+def test_a_pool_that_keeps_snapshots_at_message_boundaries_needs_a_member_with_a_chat_template():
+    """A member that declares no `chat_template_kwargs` has no boundaries to find, so `messages` would quietly be
+    `rows`: the deployment is refused, per member that owns a pool, and for a tokenizer with no offsets."""
+    specs = _specs(prefix_slots=2)
+    pool = list(specs.values())
+
+    class _Owner(_Keyed):
+        tokenizer = SimpleNamespace(is_fast=True)
+
+        def get_node_resources(self):
+            return pool
+
+    class _Templated(_Owner):
+        def chat_template_kwargs(self, **kwargs):
+            return {}
+
+    class _Slow(_Templated):
+        tokenizer = SimpleNamespace(is_fast=False)
+
+    class _Multi(_Keyed):
+        def __init__(self, *members):
+            self.members = dict(enumerate(members))
+
+    def problems(model):
+        return list(_unmarkable_messages(pool, model))
+
+    assert not problems(_Owner()), "the default policy needs no boundaries"
+    specs["state"].config.checkpoints = "messages"
+    assert "no chat template" in problems(_Owner())[0]
+    assert not problems(_Templated())
+    assert "not a fast one" in problems(_Slow())[0]
+    # the member that owns the pool decides, not whichever member declares
+    assert not problems(_Multi(_Keyed(), _Templated()))
+    assert "no chat template" in problems(_Multi(_Owner(), _Keyed()))[0]
+
+
 def _prefill(pool: RecurrentStatePool, rid: str, tokens: list[int], hit: int | None) -> RecurrentStep:
     """Probe and admit a prompt's prefill: a KV cache holding ``hit`` tokens, or none."""
     if hit is None:
@@ -532,6 +590,24 @@ def test_a_prefill_from_token_0_keeps_its_last_boundary(length, kept):
     pool = _pool()
     _prefill(pool, "a", A[:length], hit=None)
     assert _kept(pool) == kept
+
+
+@pytest.mark.parametrize("policy, kept", [("rows", {16: 16}), ("messages", {8: 8, 16: 16})])
+def test_a_checkpoint_policy_decides_which_boundaries_of_a_row_keep_a_snapshot(policy, kept):
+    """The default keeps the row's last boundary only; `messages` adds the page floor of each message boundary the
+    request carries (here the prompt breaks at token 10, whose page floor is 8). A mark the row does not cross, or
+    off the row's checkpoint grid, adds nothing."""
+    pool = _pool(prefix_slots=4, checkpoints=policy)
+    pool._kv.marks["a"] = (8, 30)
+    _prefill(pool, "a", A[:19], hit=None)
+    assert _kept(pool) == kept
+
+
+def test_a_policy_the_config_cannot_resolve_is_refused():
+    pool = _pool()
+    with pytest.raises(ValueError, match="neither a built-in"):
+        RecurrentStateSpec(resource_key="state", nodes={NODE}, config=pool.config).apply_yaml_overrides(
+            checkpoints="not.a.module:Policy")
 
 
 def test_a_prefill_from_a_restored_boundary_keeps_its_last():
