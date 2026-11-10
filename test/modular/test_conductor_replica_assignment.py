@@ -14,9 +14,12 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from test_ingest_unpersist import DECODE, _decoder_walks, _ToyModel  # noqa: E402
+from test_ingest_unpersist import _conductor as _ingest_conductor  # noqa: E402
+
 from mstar.conductor.conductor import Conductor  # noqa: E402
 from mstar.conductor.request_info import WalkStep  # noqa: E402
-from mstar.conductor.routing import ReplicaRouter, RoutingWeights, routing_cost  # noqa: E402
+from mstar.conductor.routing import CostTerm, Placement, ReplicaRouter, RoutingWeights, routing_cost  # noqa: E402
 from mstar.engine.resources.kv import manager as manager_mod  # noqa: E402
 from mstar.engine.resources.kv.config import (  # noqa: E402
     KVReqConfig,
@@ -38,6 +41,7 @@ from mstar.engine.resources.step import Segment, StepContext  # noqa: E402
 from mstar.model.base import WorkerGraph  # noqa: E402
 from mstar.model.submodule_base import ARNodeInputs  # noqa: E402
 from mstar.testing_utils.model import StubModel, make_model  # noqa: E402
+from mstar.utils.ipc_format import NewRequestConductor  # noqa: E402
 
 PAGE = 4
 
@@ -87,11 +91,12 @@ class _Model(StubModel):
         return "/a/checkpoint"
 
 
-def _conductor(worker_graphs, specs=(), weights=None, model=None):
+def _conductor(worker_graphs, specs=(), weights=None, model=None, terms=()):
     conductor = object.__new__(Conductor)
     conductor.worker_graphs = worker_graphs
     conductor.requests = {}
-    conductor._router = ReplicaRouter(model or _Model(), worker_graphs.values(), specs=specs, weights=weights)
+    conductor._router = ReplicaRouter(
+        model or _Model(), worker_graphs.values(), specs=specs, weights=weights, terms=terms)
     return conductor
 
 
@@ -133,6 +138,108 @@ def test_requests_alternate_over_dp_replicas():
     conductor._drop_request("a")
     assert sorted(conductor._router._load.values()) == [0, 1]
     assert _admit(conductor, "c")[0] == first[0]
+
+
+class _PreferTheSecond(CostTerm):
+    """A deployment's own term: the second replica is worth three live requests."""
+
+    def cost(self, unit, picked):
+        return [0.0, -3.0] + [0.0] * (len(unit.instances) - 2)
+
+
+class _SameHost(CostTerm):
+    """Host locality, as a deployment writes it: a rank's host is its parity; prefer replicas on a host an earlier
+    pick of the request already uses. Records what it was shown."""
+
+    seen: list = []
+
+    def cost(self, unit, picked):
+        self.seen.append((unit.nodes, dict(picked)))
+        hosts = {r % 2 for ranks in picked.values() for r in ranks}
+        return [-3.0 if {r % 2 for r in ranks} & hosts else 0.0 for ranks in unit.instances]
+
+
+class _Broken(CostTerm):
+    def cost(self, unit, picked):
+        return [float("nan"), float("inf"), -float("inf"), 0.0]
+
+
+class _Raises(CostTerm):
+    def cost(self, unit, picked):
+        raise ValueError("a bug in the term")
+
+
+def _terms_router(term, *graphs):
+    return ReplicaRouter(_Model(), graphs, terms=[f"test_conductor_replica_assignment:{term}"])
+
+
+def test_a_cost_term_moves_the_pick_and_the_default_does_not():
+    plain = _conductor({0: _wg(0, [0, 1])})
+    termed = _conductor({0: _wg(0, [0, 1])}, terms=["test_conductor_replica_assignment:_PreferTheSecond"])
+    # load alone alternates the replicas; the term holds requests on the second until its load is 3 above the first's
+    picks = [_admit(plain, rid)[0][0] for rid in "abc"]
+    assert picks[0] != picks[1] and picks[0] == picks[2]
+    assert {_admit(termed, rid)[0][0] for rid in "abc"} == {"worker_1"}
+    with pytest.raises(ValueError, match="not a 'pkg.module:Class'"):
+        _conductor({0: _wg(0, [0, 1])}, terms=["no.such.module:Term"])
+
+
+def test_a_term_can_prefer_the_replica_on_a_host_an_earlier_pick_uses_and_sees_only_units_the_request_runs():
+    asr, llm = _wg(0, [0, 1], nodes=("whisper", "asr")), _wg(1, [2, 3], nodes=("llm", "glue"))
+    router = _terms_router("_SameHost", asr, llm)
+    configs, both, llm_only = {}, frozenset({0, 1}), frozenset({1})
+    on_host = router.pick(configs, both).replicas[0]  # where the asr goes: rank `on_host`, host `on_host`
+    # load the llm's replica on that same host (rank 2 + on_host), so load alone sends a request to the other one
+    router.add(Placement({0: 0, 1: on_host}, {}), configs, llm_only)
+    _SameHost.seen.clear()
+    assert router.pick(configs, llm_only).replicas[1] == 1 - on_host
+    # the term is asked once, about the llm, and a request that does not run the asr is not shown its pick
+    assert _SameHost.seen == [(("llm", "glue"), {})]
+    _SameHost.seen.clear()
+    # a request that runs both follows its asr's host although that llm replica is busier
+    assert router.pick(configs, both).replicas == {0: on_host, 1: on_host}
+    # an earlier set's pick is found under any of its nodes
+    assert _SameHost.seen[-1] == (("llm", "glue"), {"whisper": (on_host,), "asr": (on_host,)})
+
+
+def test_warmup_requests_still_spread_with_a_term_configured(tmp_path, monkeypatch):
+    # through the conductor's ingest: only a request the API server marked as a warmup skips the term
+    model = _ToyModel(_decoder_walks([("prefill", ())]), {"default": [WalkStep("prefill"), DECODE]})
+    node_groups = [{"node_names": ["llm"], "ranks": [0, 1]}]
+    terms = ["test_conductor_replica_assignment:_PreferTheSecond"]
+    for warmup, expected in ((True, {"worker_0", "worker_1"}), (False, {"worker_1"})):
+        (tmp_path / str(warmup)).mkdir()
+        conductor = _ingest_conductor(model, node_groups, tmp_path / str(warmup), monkeypatch, routing_terms=terms)
+        for rid in ("a", "b"):
+            conductor._do_ingest_request(NewRequestConductor(
+                request_id=rid, initial_signals={}, initial_input_modalities=["text"],
+                initial_output_modalities=["text"], input_metadata={}, model_kwargs={}, warmup=warmup,
+            ))
+        placed = {w for r in "ab" for ws in conductor.requests[r].worker_graph_to_workers.values() for w in ws}
+        assert placed == expected
+
+
+def test_a_term_that_returns_nan_or_infinity_cannot_fail_a_pick():
+    router = _terms_router("_Broken", _wg(0, [0, 1, 2, 3]))
+    # nan counts as 0, +inf is cut to a large finite cost, -inf to a large finite preference
+    assert router.pick({}, frozenset({0})).replicas == {0: 2}
+
+
+def test_a_term_that_raises_or_returns_the_wrong_number_of_costs_fails_as_a_server_error():
+    # not a ValueError, which the conductor would answer as the client's 400
+    with pytest.raises(RuntimeError, match="_Raises failed"):
+        _terms_router("_Raises", _wg(0, [0, 1])).pick({}, frozenset({0}))
+    with pytest.raises(RuntimeError, match="returned 4 costs for 2 replicas"):
+        _terms_router("_Broken", _wg(0, [0, 1])).pick({}, frozenset({0}))
+
+
+def test_the_pool_load_gauge_reads_the_live_requests_on_each_replica():
+    conductor = _conductor({0: _wg(0, [0, 1], nodes=("llm", "vision"))})
+    _admit(conductor, "a")
+    assert sorted(dict(conductor._router.loads()).items()) in (
+        [(("llm,vision", "0"), 1), (("llm,vision", "1"), 0)], [(("llm,vision", "0"), 0), (("llm,vision", "1"), 1)])
+    conductor._drop_request("a")
+    assert set(dict(conductor._router.loads()).values()) == {0}
 
 
 def test_lockstep_instances_are_balanced_whole():

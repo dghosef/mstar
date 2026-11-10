@@ -380,6 +380,8 @@ class NewRequestConductor(MessageBody):
     # rather than queued at max_concurrent_requests.
     input_open: bool = False
     streaming: bool = False
+    # a startup warmup request, which the replica pick routes by load alone (the API server sets it, never a client)
+    warmup: bool = False
     # the prompt's token count, echoed on RequestComplete for the response's usage
     prompt_tokens: int | None = None
 

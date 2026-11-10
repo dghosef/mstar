@@ -178,6 +178,8 @@ class PreprocessInput:
     # the client streams the opening ends; the others stay open for appends
     ends: frozenset[str] = frozenset()
     streaming: bool = False
+    # a startup warmup request (see ``submit_request``)
+    warmup: bool = False
     # Inputs the API server already holds decoded, by modality and in order,
     # in place of that modality's files (an image is RGB uint8 ``[3, H, W]``):
     # each goes to ``Model.load_decoded_<modality>``, with no file between.

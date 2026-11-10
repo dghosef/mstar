@@ -666,10 +666,11 @@ class Conductor:
         self._components = sorted({n for nodes in self._wg_nodes.values() for n in nodes})
         self._router = ReplicaRouter(
             model, self.worker_graphs.values(), specs=self._node_resources(),
-            weights=self.model_config.get("routing_weights"),
+            weights=self.model_config.get("routing_weights"), terms=self.model_config.get("routing_terms") or (),
         )
         self._requests_gauge = Gauge(catalog.CONDUCTOR_REQUESTS)
         self._in_flight_gauge = Gauge(catalog.COMPONENT_IN_FLIGHT)
+        self._pool_gauge = Gauge(catalog.POOL_LOAD)
         # worker id -> its latest WorkerStatus snapshots (cumulative)
         self._worker_metrics: dict[str, list[MetricSnapshot]] = {}
 
@@ -1636,7 +1637,8 @@ class Conductor:
         groups_run = self._router.groups_run(
             name for name, pstate in partition_states.items() if not pstate.is_done
         )
-        placement = self._router.pick(resource_configs, groups_run)
+        placement = self._router.pick(
+            resource_configs, groups_run, warmup=body.warmup)
         worker_graph_to_workers = self._assign_worker_graphs_to_workers(placement.replicas)
 
         # Build per-connection streaming state. None for a client stream: the
@@ -2668,6 +2670,8 @@ class Conductor:
         states.set(("draining",), len(self.draining))
         for node, count in in_flight.items():
             self._in_flight_gauge.set((node,), count)
+        for labels, count in self._router.loads():
+            self._pool_gauge.set(labels, count)
         # Summed across workers: a node's replicas each report their own; for
         # the engine families the other ranks of a lockstep instance report
         # nothing, while every rank counts the tensor transfers it reads.
@@ -2676,7 +2680,8 @@ class Conductor:
             for snap in snapshots:
                 by_family.setdefault(snap.name, []).append(snap)
         return ConductorStatus(metrics=[
-            states.snapshot(), self._in_flight_gauge.snapshot(), self._router.predicted_saving.snapshot(),
+            states.snapshot(), self._in_flight_gauge.snapshot(), self._pool_gauge.snapshot(),
+            self._router.predicted_saving.snapshot(),
             *(merge(family, by_family.get(name, ()))
               for name, family in catalog.WORKER_FAMILIES.items()),
         ])
