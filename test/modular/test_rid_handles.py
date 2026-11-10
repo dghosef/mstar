@@ -278,7 +278,7 @@ def test_add_new_request_hands_the_handle_to_every_subsystem():
     body = SimpleNamespace(
         request_id="wire-1", request_info=info,
         partition_worker_graph_ids={}, worker_graph_to_workers={},
-        initial_inputs=[], loop_caps={},
+        initial_inputs=[], loop_caps={}, silent=False,
     )
     w.ingest._add_new_request(body)
 
@@ -323,7 +323,7 @@ def test_add_new_request_keeps_the_stream_buffer_and_primes_it_for_its_consumer(
         )
         body = SimpleNamespace(
             request_id="wire-1", request_info=info, partition_worker_graph_ids={},
-            worker_graph_to_workers={}, initial_inputs=[], loop_caps={},
+            worker_graph_to_workers={}, initial_inputs=[], loop_caps={}, silent=False,
         )
         w.ingest._add_new_request(body)
 

@@ -869,6 +869,12 @@ class GraphRuntime(PhasedPostprocess, ABC):
         pass
 
     @abstractmethod
+    def set_silent(self, rid: int):
+        """Send nothing of ``rid`` to the client from here on: its client emits are dropped. For a request
+        nobody outside reads (a spawned agent)."""
+        pass
+
+    @abstractmethod
     def remove_request(
         self, rid: int
     ):
