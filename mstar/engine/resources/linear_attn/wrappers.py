@@ -153,6 +153,8 @@ class GDNPrefillWrapper(GDNWrapper):
         accelerator_graph: bool=False,
         null_slot_id: int = 0,
         stage_inputs: bool = False,
+        *,
+        snapshots_per_row: int,
     ):
         super().__init__(
             device=device,
@@ -165,6 +167,8 @@ class GDNPrefillWrapper(GDNWrapper):
             null_slot_id=null_slot_id,
         )
         self._has_sink_state = has_sink_state
+        # the most snapshots a row keeps (the pool's checkpoint policy), which a captured graph is sized for
+        self._snapshots_per_row = snapshots_per_row
         # `gdn_stage_applies`: one kernel prepares q/k/v and the gates. It also
         # normalizes q and k and reads the strided views as they are.
         self._stage_inputs = stage_inputs
@@ -335,9 +339,10 @@ class GDNPrefillWrapper(GDNWrapper):
         for span in spans:
             starts.append(starts[-1] + span)
             checkpoint_cu.append(checkpoint_cu[-1] + span // every)
-        # under capture `rows` is the bucket's row count, and a row keeps at most two snapshots
+        # under capture `rows` is the bucket's row count, and a row keeps at most `snapshots_per_row` snapshots
         capacity = (
-            min(2 * rows, self._max_num_tokens // every) if self._accelerator_graph else len(snapshots)
+            min(self._snapshots_per_row * rows, self._max_num_tokens // every)
+            if self._accelerator_graph else len(snapshots)
         )
         assert len(snapshots) <= capacity, f"{len(snapshots)} snapshots in a step captured for {capacity}"
         pad = capacity - len(snapshots)
@@ -694,6 +699,8 @@ class GDNMixedWrapper(GDNWrapper):
         # the chunked half's prompt rows under capture; eagerly, the step's own
         max_prefill_rows: int | None = None,
         stage_inputs: bool = False,
+        *,
+        snapshots_per_row: int,
     ):
         super().__init__(
             device=device, pad_slot_id=pad_slot_id, sm_scale=sm_scale,
@@ -714,7 +721,7 @@ class GDNMixedWrapper(GDNWrapper):
             qk_l2norm=qk_l2norm, prefill_dtype=prefill_dtype,
             num_tokens=num_tokens, bs=max_prefill_rows + 1 if accelerator_graph else None,
             has_sink_state=has_sink_state, accelerator_graph=accelerator_graph,
-            null_slot_id=null_slot_id, stage_inputs=stage_inputs,
+            null_slot_id=null_slot_id, stage_inputs=stage_inputs, snapshots_per_row=snapshots_per_row,
         )
         self._decode = GDNDecodeWrapper(
             device=device, pad_slot_id=pad_slot_id, sm_scale=sm_scale,

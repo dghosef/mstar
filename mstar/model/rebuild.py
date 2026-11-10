@@ -45,6 +45,17 @@ class RebuildPolicy:
         """The walks of ``walks`` in which ``node`` reads ``ids_input``: those an ids span can be written in."""
         return frozenset(walk for walk in self.walks if self.ids_input in self._reads(node, graphs, walk))
 
+    def appended_walks(self, node: str, graphs: Mapping[str, GraphSection]) -> frozenset[str]:
+        """The walks, outside ``loop``, where ``node`` reads ``ids_input`` and nothing else: a row of one writes ids
+        after the prompt (a tool's text, a spoken turn's transcript) that the worker keeps for a rebuild. A walk that
+        also reads something a copy would have to hold is left out: its rows are not logged, and the KV's count of
+        the slots a drop's rebuild would write (`KVManager.check_drop`) refuses the request's drop."""
+        loops = self.loop_walks(node, graphs)
+        return frozenset(
+            walk for walk, graph in graphs.items()
+            if walk not in loops and node in graph.get_nodes() and self._reads(node, graphs, walk) == {self.ids_input}
+        )
+
     def check(self, node: str, graphs: Mapping[str, GraphSection]) -> dict[str, frozenset[str]]:
         """What ``node`` reads in each of ``walks`` besides ``ids_input``, which the worker copies. Raise unless
         every walk runs ``node``, some walk reads ``ids_input``, ``copy_width`` names each walk where ``node`` reads
