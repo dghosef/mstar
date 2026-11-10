@@ -770,8 +770,8 @@ none, share a batch::
           pirate: William-Gao1/qwen3.5-4b-pirate-lora   # a Hugging Face repo id
 
 A name that is no local path is read as a Hugging Face repo id, as vLLM reads one. The API
-server fetches its ``adapter_model.safetensors`` (and its ``adapter_config.json`` and
-``config.json``, where it has them, for the alpha) into the HF cache once, and nothing else
+server fetches its ``adapter_model.safetensors`` (and its ``adapter_config.json``, and
+``config.json`` only when that gives no alpha, as a local read takes them) into the HF cache once, and nothing else
 of the repo, and the workers read that file. A repo without ``adapter_model.safetensors``
 (a ``.bin`` adapter) is refused, and so is one whose configs could not be fetched. With
 ``HF_HUB_OFFLINE=1`` it is taken from the cache alone.

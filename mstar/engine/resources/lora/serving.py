@@ -94,12 +94,12 @@ def resolve_lora_adapters(spec: LoraSpec | None, model_config: dict) -> dict[str
 def fetch_adapter_path(source: str) -> str:
     """The local safetensors file ``source`` names: a local path as ``resolve_adapter_path``
     reads it, else a Hugging Face repo id (as vLLM's ``lora_path`` may be), whose
-    ``adapter_model.safetensors`` and the configs among ``SIDECAR_CONFIGS`` it has (where
-    its alpha may be: ``sidecar_default_alpha``) alone are fetched into the HF cache, at one
-    commit, from the cache alone under ``HF_HUB_OFFLINE``. A config is taken as absent only
-    when the hub says so, now or in the cache's record of an earlier answer; one that could
-    not be fetched fails the read, as the weights would, so an adapter is never served with
-    another alpha than its files give it. Every worker reads the file checked here. Called
+    ``adapter_model.safetensors``, its ``adapter_config.json``, and its ``config.json`` only
+    when that gives no alpha (``sidecar_default_alpha``), as a local read takes them, alone
+    are fetched into the HF cache, at one commit, from the cache alone under ``HF_HUB_OFFLINE``.
+    A config is taken as absent only when the hub says so, now or in the cache's record of an
+    earlier answer; one that could not be fetched fails the read, as the weights would, so an
+    adapter is never served with another alpha than its files give it. Every worker reads the file checked here. Called
     where the API server checks adapters (startup and runtime loads), never while a config
     is parsed.
 
@@ -134,8 +134,6 @@ def fetch_adapter_path(source: str) -> str:
         ) from exc
     commit = os.path.basename(os.path.dirname(path))
     for config in SIDECAR_CONFIGS:
-        if sidecar_default_alpha(path) is not None:
-            break  # the configs fetched so far give the alpha, as a local read takes it
         try:
             hf_hub_download(source, config, revision=commit)
         except RemoteEntryNotFoundError:
@@ -144,4 +142,6 @@ def fetch_adapter_path(source: str) -> str:
             # the hub could not be asked (offline, unreachable, an error answer)
             if try_to_load_from_cache(source, config, revision=commit) is not _CACHED_NO_EXIST:
                 raise OSError(f"{config} of the Hugging Face repo {source!r} could not be fetched") from exc
+        if sidecar_default_alpha(path) is not None:
+            break  # this config gives the alpha, as a local read takes it: no later one is fetched
     return path

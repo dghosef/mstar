@@ -666,6 +666,7 @@ def test_a_configured_adapter_may_be_a_hugging_face_repo_id(adapters, tmp_path, 
     file. Online, only the adapter's weights and its configs are fetched, never the repo's
     other files. A repo that cannot be fetched fails startup, named, as does a config
     that may be there but could not be fetched (its alpha would be lost)."""
+    import hashlib
     import os
     import shutil
 
@@ -720,6 +721,7 @@ def test_a_configured_adapter_may_be_a_hugging_face_repo_id(adapters, tmp_path, 
         "org/chat": {ADAPTER_WEIGHTS_FILE: weights, "adapter_config.json": b'{"lora_alpha": 8}',
                      "model.safetensors": bytes(1 << 16)},
         "org/bare": {ADAPTER_WEIGHTS_FILE: weights},
+        "org/mixed": {ADAPTER_WEIGHTS_FILE: weights, "adapter_config.json": b'{"lora_alpha": 16}'},
         "org/bin": {"adapter_model.bin": weights},
         "org/torn": {ADAPTER_WEIGHTS_FILE: weights},
         "org/down": {ADAPTER_WEIGHTS_FILE: weights, "adapter_config.json": 503},
@@ -731,6 +733,23 @@ def test_a_configured_adapter_may_be_a_hugging_face_repo_id(adapters, tmp_path, 
     asked.clear()
     resolve({"bare": "org/bare"})  # no adapter_config.json: config.json is asked too
     assert set(asked) == {ADAPTER_WEIGHTS_FILE, "adapter_config.json", "config.json"}
+    # another tool left the weights and a config.json with an alpha in the snapshot: the
+    # hub's adapter_config.json is still fetched, as a local read prefers it
+    mixed = tmp_path / "hub" / "models--org--mixed"
+    (mixed / "snapshots" / commit).mkdir(parents=True)
+    (mixed / "blobs").mkdir()
+    (mixed / "blobs" / hashlib.sha256(weights).hexdigest()).write_bytes(weights)
+    (mixed / "snapshots" / commit / ADAPTER_WEIGHTS_FILE).symlink_to(
+        mixed / "blobs" / hashlib.sha256(weights).hexdigest())
+    (mixed / "snapshots" / commit / "config.json").write_text('{"alpha": 2}')
+    asked.clear()
+    config, digests = resolve({"mixed": "org/mixed"})
+    assert "adapter_config.json" in asked
+    local = tmp_path / "local"
+    local.mkdir()
+    shutil.copy(paths["a1"], local / ADAPTER_WEIGHTS_FILE)
+    (local / "adapter_config.json").write_text('{"lora_alpha": 16}')
+    assert digests == {"mixed": adapter_digest(read_lora_file(str(local / ADAPTER_WEIGHTS_FILE)))}
     with pytest.raises(ValueError) as err:
         resolve({"bin": "org/bin", "gone": "org/gone", "torn": "org/torn", "down": "org/down"})
     assert "'bin': the Hugging Face repo 'org/bin' has no adapter_model.safetensors" in str(err.value)
