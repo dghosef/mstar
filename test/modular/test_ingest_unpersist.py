@@ -495,9 +495,38 @@ def _exit_jump(exit_name):
     return model, signals, kwargs, script, expected
 
 
-def _tool_round(rounds):
+def _streamed_middle():
+    """Qwen3.5 on speech: the history's prefill, the transcript's chunks (a walk the stream feeds), then the
+    suffix's prefill, which the stream's end moves on to; the partition ends with the last step."""
+    walks = {
+        "a": GraphNode(name="na", input_names=["text_inputs"], outputs=[
+            StreamingGraphEdge(next_node="nb", name="tok", target_partition="B")]),
+        "h": GraphNode(name="nb", input_names=["hist"], outputs=[]),
+        # `go` is the empty edge the conductor sends with each pass, which tells the worker its walk
+        "c": GraphNode(name="nb", input_names=["tok", "go"], outputs=[]),
+        "s": GraphNode(name="nb", input_names=["suf"], outputs=[]),
+    }
+    model = _ToyModel(walks, {"A": [WalkStep("a")], "B": [WalkStep("h"), WalkStep("c"), WalkStep("s")]},
+                      {"A": ["a"], "B": ["h", "c", "s"]},
+                      connections=[Connection("A", "B", "tok", lambda: FixedChunkPolicy(chunk_size=1))])
+    return model, {"text_inputs": [PROMPT], "hist": [REF], "suf": [TAIL]}, {}, [
+        ("B", "h", {}, False), ("B", "c", {}, False), ("A", "a", {}, True), ("B", "c", {}, True), ("B", "s", {}, False),
+    ], [
+        ("NEW_REQUEST", "A", "a", {("na", "text_inputs"): [PROMPT]}, False),
+        ("NEW_REQUEST", "B", "h", {("nb", "hist"): [REF]}, False),
+        ("UNPERSIST_TENSORS", PREPROCESS, {PROMPT: 1, REF: 1}),
+        ("INPUT_SIGNALS", "B", "c", {("nb", "go"): []}, False),   # the history is in; the stream's step
+        ("INPUT_SIGNALS", "B", "c", {("nb", "go"): []}, False),   # a chunk's pass
+        ("INPUT_SIGNALS", "B", "c", {}, False),                    # producer_done
+        ("INPUT_SIGNALS", "B", "s", {("nb", "suf"): [TAIL]}, False),   # the stream's end moved the plan on
+        ("UNPERSIST_TENSORS", PREPROCESS, {TAIL: 1}),
+    ]
+
+
+def _tool_round(rounds, ending="answer"):
     """Qwen3.5 with tools: prefill, decode, a router walk, a tool walk, then a prefill that continues the
-    reply and comes back to decode; the router ends the plan with ``answer`` when the turn made no call.
+    reply and comes back to decode; the router ends the plan with ``answer`` when the turn made no call, or
+    with ``speak`` when the turn is spoken.
     Each walk persists what the next reads and replaces its predecessor's, so a round releases the last
     one's tensors."""
     walks = {
@@ -512,7 +541,7 @@ def _tool_round(rounds):
         "pc": GraphNode(name="n", input_names=["x"], outputs=[
             GraphEdge(next_node=EMPTY_DESTINATION, name="first", persist=True)]),
     }
-    plan = [WalkStep("p"), WalkStep("d"), WalkStep("r", exits={"answer": 5, "tools": 3}), WalkStep("t"),
+    plan = [WalkStep("p"), WalkStep("d"), WalkStep("r", exits={"answer": 5, "speak": 5, "tools": 3}), WalkStep("t"),
             WalkStep("pc", bind={"x": "tool_text"}, exits={"": 1})]
     model = _ToyModel(walks, {"default": plan}, {"default": list(walks)})
     script = [("default", "p", {"first": 601}, False)]
@@ -523,7 +552,7 @@ def _tool_round(rounds):
         # a decode, then the router: it sends the turn's calls to the tool, or ends the plan
         last = _ == rounds
         script += [("default", "d", {"turn": uuid}, False),
-                   ("default", "r", {"calls": uuid + 1}, False, "answer" if last else "tools")]
+                   ("default", "r", {"calls": uuid + 1}, False, ending if last else "tools")]
         first = 601 if _ == 0 else uuid - 1
         expected += [("INPUT_SIGNALS", "default", "d", {("n", "first"): [first]}, False),
                      ("INPUT_SIGNALS", "default", "r", {("router", "first"): [first], ("router", "turn"): [uuid]},
@@ -543,8 +572,10 @@ def _tool_round(rounds):
 
 
 _PLANS = {
+    "a stream's end moves the plan on": _streamed_middle,
     "a tool round comes back to decode": lambda: _tool_round(1),
     "an answer with no tool call ends the plan": lambda: _tool_round(0),
+    "a spoken turn ends the plan": lambda: _tool_round(0, "speak"),
     "an exit jumps over the step that re-persists a name": lambda: _exit_jump("skip"),
     "an unlisted exit takes the next step": lambda: _exit_jump("typo"),
     "every partition's reads": _every_partitions_reads,
@@ -611,6 +642,18 @@ def test_a_walk_plan_sends_each_steps_inputs_and_releases_their_last_read(tmp_pa
         "the plan's last step did not end the request"
 
 
+def test_a_stop_checks_end_at_a_step_the_stream_feeds_ends_the_partition(tmp_path, monkeypatch):
+    """The same report as a stream's end, but with the stop check's END_PARTITION exit: the first token of
+    the reply was a stop token, so the suffix's step is not run."""
+    from mstar.model.submodule_base import END_PARTITION
+
+    model, signals, kwargs, script, _ = _streamed_middle()
+    script = [*script[:3], ("B", "c", {}, True, END_PARTITION)]
+    c = _play(model, signals, kwargs, script, tmp_path, monkeypatch)
+    assert [(b.request_info.graph_walk) for _, _, b in _sends(c, ("INPUT_SIGNALS",))] == ["c", "c", "c"]
+    assert any(getattr(msg, "message_type", None) == "request_complete" for _, msg in c.comm.sent)
+
+
 def test_a_plan_that_comes_back_runs_under_the_budget_it_has_left(tmp_path, monkeypatch):
     """Each step of a tool round's plan gets what is left of the output budget, so the rounds' decode
     steps together stay in it."""
@@ -638,9 +681,6 @@ _REFUSED = {
     # nothing tells B's worker its walk changed
     "a later step only a stream feeds": ({"A": [WalkStep("a")], "B": [WalkStep("b"), WalkStep("c")]}, _STREAMED,
                                          _tok_stream(), 500, "takes no input the conductor sends"),
-    # c runs once per chunk until the stream's end, which ends B's partition: b would never run
-    "a step after one that runs per chunk": ({"A": [WalkStep("a")], "B": [WalkStep("c"), WalkStep("b")]}, _STREAMED,
-                                             _tok_stream(), 500, "so it would never run"),
     # an exit is an edge of the plan, or its end
     "an exit past the plan's end": ({"default": [WalkStep("a", exits={"x": 2})]}, None, (), 500, "or its end"),
     # the stream-moved lookup finds a step by walk name, going forward

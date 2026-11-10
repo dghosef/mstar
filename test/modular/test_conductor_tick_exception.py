@@ -86,12 +86,12 @@ def _conductor(*ticks, requests):
     c._walk_inputs = {"decode": ()}
     c._repeating_walks = frozenset()
 
-    def _next_plan_args(request_data, partition_name, done):
+    def _next_plan_args(request_data, partition_name, done, stream_ended=False):
         pstate = request_data.partition_states[partition_name]
         raise_ = pstate.plan[pstate.cursor].step_metadata["raise"]
         if raise_ is not None:
             raise raise_("this request's step failed")
-        return Conductor._next_plan_args(c, request_data, partition_name, done)
+        return Conductor._next_plan_args(c, request_data, partition_name, done, stream_ended)
     c._next_plan_args = _next_plan_args
     c.enable_nvtx = False
     c.enable_prof = False

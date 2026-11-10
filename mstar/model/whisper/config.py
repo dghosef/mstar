@@ -35,7 +35,7 @@ CONTEXT_LABEL = "main"
 # Whisper's walks, loop, signals and decoder resources carry their own names, so that it can be a
 # member of a `MultiModel` beside a model on the shared scaffolds (which use `decode`, `decode_loop`,
 # `new_token`, `text_inputs`, `kv_cache`, `attn` and `sampler`): no name is shared deployment-wide.
-# The decoder's sampled token, and the ids fed back and prefilled (each also what the client reads).
+# The decoder's sampled token, and the ids fed back and prefilled (also every token the client reads).
 NEW_TOKEN = "asr_token"
 TEXT_INPUTS = "asr_text"
 

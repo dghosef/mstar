@@ -769,6 +769,17 @@ so the pages that hold it are shared; a hybrid model's recurrent-state snapshots
 request that repeats the tool text recomputes its state from there. **The code is whatever the model wrote and runs on
 the host with no network or filesystem isolation: serve this only where every caller is trusted.**
 
+**Speech in, audio out (a multimodel).** A ``Link`` streams Whisper's tokens into Qwen3.5's streamed prefill walk: the
+``Glue`` node (first in that walk, on the LLM's rank) turns Whisper's ids into text and the text into Qwen's ids a
+word at a time, so the prompt is prefilled while Whisper still decodes. The request's plan is the history's prefill,
+the transcript's chunks, the chat template's suffix (whose sampled token is the reply's first), then decode and the
+tool rounds; a typed request is Qwen's alone. Audio out: a member that lists ``speak`` in ``tools`` (and a second,
+unglued ``Link`` from its ``Router`` node's ``speak_text`` signal to Kokoro, built with ``stream_in``) lets a reply
+that asks for an audio output call ``speak(text)``: the router exits through ``speak``, writes the text onto that
+stream edge (it writes nothing on any other exit, so a request that never speaks leaves Kokoro idle and closes it) and
+the turn ends, spoken and not answered to the model. A turn that mixes ``speak`` with other calls runs the others and
+is not spoken.
+
 **LoRA adapters.** A ``resources: lora:`` block in the serving config serves
 per-request LoRA adapters (PEFT ``adapter_model.safetensors``; the scaling comes
 from the ``adapter_config.json`` beside it). The OpenAI ``model`` field picks one,

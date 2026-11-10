@@ -5,11 +5,17 @@ A model with ``tools`` adds a ``route`` walk of a ``Router`` node and a ``tool``
 
     prefill -> decode -> route -(tools)-> tool -> prefill that continues the reply -> decode ...
                            `-(answer)-> end
+                           `-(speak)-> end
 
 Decode ends on the turn-ending token, as it always does. The router reads the turn's ids
 (the first token the prefill sampled, then the decode loop's accumulated ``turn_ids``),
 parses the tool calls out of them, persists them as ``tool_calls`` and names the exit:
-``tools`` when there are calls, ``answer`` when there are none (the plan ends).
+``tools`` when there are calls, ``answer`` when there are none (the plan ends). A turn whose
+calls are all ``speak`` (when the request asks for audio) takes the ``speak`` exit instead: the
+router writes the text onto its ``speak_text`` stream edge, which a `MultiModel` link connects to
+a speech model, and the plan ends (the turn is spoken, not answered to the model); on every other
+exit it writes nothing there. A turn that mixes ``speak`` with other calls runs the others as tools,
+and the speech model hears nothing of it.
 The tool node runs the calls it is
 given, each by the handler of its name (`TOOL_HANDLERS`), all of a turn's at once, and
 persists ``tool_text``: the rest of the conversation as the chat template writes it, for
@@ -55,6 +61,7 @@ from mstar.conductor.request_info import (
 from mstar.engine.engine import ExecutingBatch
 from mstar.graph.base import GraphEdge, GraphNode, GraphSection
 from mstar.graph.special_destinations import EMPTY_DESTINATION
+from mstar.model.keys import SPEAK_TEXT
 from mstar.model.submodule_base import (
     ARNodeInputs,
     ModelInputsFromEngine,
@@ -74,6 +81,7 @@ TOOL_TEXT = "tool_text"
 # the exits of the router: a turn with no tool call answers (the plan ends); one with calls runs them
 ANSWER = "answer"
 TOOLS_EXIT = "tools"
+SPEAK = "speak"
 PYTHON_TOOL_SCHEMA = {
     "type": "function",
     "function": {
@@ -165,10 +173,27 @@ def _python(arguments: Mapping[str, str]) -> str:
     return run_python(arguments["code"])
 
 
+SPEAK_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": SPEAK,
+        "description": "Say text aloud to the user. Use it when the user asks to hear the answer.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "what to say"},
+                "voice": {"type": "string", "description": "a voice name; leave out for the default"},
+            },
+            "required": ["text"],
+        },
+    },
+}
+
 # The tools a serving config's ``tools`` can name: the schema the chat template shows the model, and for
-# those the tool node runs, a handler (arguments to the text the model reads back).
+# those the tool node runs, a handler (arguments to the text the model reads back). ``speak`` has none:
+# the router sends its text to the speech model.
 TOOL_HANDLERS: dict[str, Callable[[Mapping[str, str]], str]] = {"python": _python}
-TOOL_SCHEMAS = {"python": PYTHON_TOOL_SCHEMA}
+TOOL_SCHEMAS = {"python": PYTHON_TOOL_SCHEMA, SPEAK: SPEAK_SCHEMA}
 
 
 def check_tools(names: Sequence[str]) -> tuple[str, ...]:
@@ -194,7 +219,7 @@ def tool_walks() -> dict[str, GraphSection]:
 
 
 def tool_plan(
-    prefills: list[WalkStep], decode_walk: str, prefill_walk: str, enable_thinking: bool,
+    prefills: list[WalkStep], decode_walk: str, prefill_walk: str, enable_thinking: bool, speak: bool = False,
 ) -> list[WalkStep]:
     """The plan's own ``prefills`` (one, or a spoken prompt's several), decode, the router, the tool, and
     the prefill that continues the reply and comes back to decode; the router's ``answer`` ends the plan."""
@@ -202,7 +227,10 @@ def tool_plan(
     return [
         *(replace(step, step_metadata={**step.step_metadata, TOOLS: True}) for step in prefills),
         WalkStep(decode_walk, bind={"text_inputs": "new_token"}, step_metadata={TOOLS: True}),
-        WalkStep(ROUTE_WALK, exits={ANSWER: n + 4, TOOLS_EXIT: n + 2}),
+        # ``speak``: whether the request has a speech output the router may send a spoken turn's text to
+        WalkStep(
+            ROUTE_WALK, exits={ANSWER: n + 4, SPEAK: n + 4, TOOLS_EXIT: n + 2}, step_metadata={SPEAK: speak},
+        ),
         WalkStep(TOOL_WALK, step_metadata={"enable_thinking": enable_thinking}),
         WalkStep(
             prefill_walk, bind={"text_inputs": TOOL_TEXT}, exits={"": n},
@@ -265,7 +293,9 @@ class ToolRouterSubmodule(_CpuNode):
         # the last id of the turn (its stop token) is fed by the decode step that follows it, and
         # the turn's others by the steps before: it belongs at the prefill's end plus all the rest
         start = int(inputs[PREFILL_END][0]) + ids.numel() - 1
-        return ARNodeInputs(input_seq_len=0, kwargs={"ids": ids, "start": start})
+        return ARNodeInputs(input_seq_len=0, kwargs={
+            "ids": ids, "start": start, SPEAK: bool(fwd_info.step_metadata.get(SPEAK, False)),
+        })
 
     def forward_batched(
         self, graph_walk: str, engine_inputs: ModelInputsFromEngine, rows=(), **kwargs,
@@ -279,11 +309,19 @@ class ToolRouterSubmodule(_CpuNode):
                 "calls": [[c.name, dict(c.arguments)] for c in calls],
             }
             out[rid] = {TOOL_CALLS: [self._tensor(_pack(payload), torch.uint8)]}
+            said = [c.arguments for c in calls if c.name == SPEAK and str(c.arguments.get("text", "")).strip()]
+            if row[SPEAK] and calls and len(said) == len(calls):
+                # a spoken turn: its text goes to the speech model, one item. Any other turn writes
+                # nothing there, so that model hears nothing of it.
+                text = " ".join(str(args["text"]).strip() for args in said)
+                out[rid][SPEAK_TEXT] = [self._tensor(_pack({"text": text, "voice": said[0].get("voice")}), torch.uint8)]
         return out
 
     def check_stop(
         self, request_id: str, request_info: CurrentForwardPassInfo, outputs: Mapping[str, list[torch.Tensor]],
     ) -> StopCheck:
+        if SPEAK_TEXT in outputs:
+            return StopCheck(exit=SPEAK)
         return StopCheck(exit=TOOLS_EXIT if _unpack(outputs[TOOL_CALLS][0])["calls"] else ANSWER)
 
 
