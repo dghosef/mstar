@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from itertools import repeat
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Collection, Iterator, Mapping, NamedTuple, Protocol, Sequence
 
 import torch
@@ -193,11 +194,13 @@ class PagedKVCache(NamedTuple):
 
 
 class _MeasuredRow(NamedTuple):
-    """What a prefix probe reads of a row before its inputs are prepared."""
+    """What a prefix probe reads of a row before its inputs are prepared: its length, and the first tensor of each
+    input it reads (``NodeInputs.tensor_inputs``, as a prepared row names its own)."""
     input_seq_len: int
     custom_pos_ids: None = None
     input_ids: None = None
     starts_at: None = None
+    tensor_inputs: Mapping[str, torch.Tensor] = MappingProxyType({})
 
 
 class SlotRotation:
@@ -1307,6 +1310,7 @@ class Engine:
             resource.enable_prefix_cache(fingerprint(*shared, *parts), {
                 label: KeyedWalks(
                     kv_label.keys.walks, tuple(walk for walk, _ in kv_label.growth if kv_label.keys.growth),
+                    kv_label.keys.tensor,
                 )
                 for label, kv_label in declared.get(key, {}).items()
             })
@@ -3085,11 +3089,11 @@ class Engine:
         info = submodule.get_input_sequence_len(graph_walk, request_info, inputs)
         if info is None or rid is None:
             return info
-        return self.unserved_len(node_name, graph_walk, request_info, rid, info.seq_len, info.seq_len)
+        return self.unserved_len(node_name, graph_walk, request_info, rid, info.seq_len, info.seq_len, inputs)
 
     def unserved_len(
         self, node_name: str, graph_walk: str, request_info: CurrentForwardPassInfo, rid: int,
-        length: int, end: int,
+        length: int, end: int, inputs: NameToTensorList = MappingProxyType({}),
     ) -> InputSeqLenInfo:
         """The tokens up to ``end`` of ``rid``'s ``length``-token row, as `input_sequence_len` measures them. A
         rebuild of a prompt mid-prefill writes only the tokens before ``end``."""
@@ -3103,9 +3107,8 @@ class Engine:
                 and not policy.reuses_cached_prefix(request_info))
         ):
             return InputSeqLenInfo(end)
-        prefix = self._runner.resolve_cached_prefix(
-            rid, node_name, graph_walk, _MeasuredRow(length),
-        )
+        measured = _MeasuredRow(length, tensor_inputs={name: row[0] for name, row in inputs.items() if row})
+        prefix = self._runner.resolve_cached_prefix(rid, node_name, graph_walk, measured)
         matched = min(prefix.tokens if prefix is not None else 0, end)
         return InputSeqLenInfo(end - matched, cached_prefix=matched)
 

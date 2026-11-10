@@ -484,3 +484,19 @@ def test_a_prompt_prefilled_beside_a_decode_is_matched_by_its_repeat():
     assert node.walk(TEXT_WALK, len(prompt)) == 2 * PAGE_SIZE, (
         "a prompt prefilled in a step of a combined walk filed no pages, so its repeat recomputed it"
     )
+
+
+def test_the_hit_counter_counts_the_prefix_the_resources_agreed_to_serve_not_the_index_match():
+    """A recurrent pool can serve less of a match than the index holds (it restores only at a snapshot), and the walk
+    runs the rest, so the counter that says how much of a prompt the cache saved counts what was served."""
+    node = _Node()
+    walk, length = _walks(PARTS)[0]
+    inputs = ARNodeInputs(input_seq_len=length)
+    agreed = node.runner.resolve_cached_prefix(RID, NODE, walk, inputs)
+    assert agreed.tokens > PAGE_SIZE
+    capped = agreed._replace(tokens=PAGE_SIZE, position=agreed.position - agreed.tokens + PAGE_SIZE)
+    for _ in range(2):   # a repeated probe counts nothing more
+        node.runner.apply_cached_prefix(RID, NODE, walk, inputs, capped)
+
+    queried, hit = node.kv.prefix_tokens[NODE]
+    assert hit == PAGE_SIZE and queried == sum(span.length for span in node.stream.span_cursor.spans)

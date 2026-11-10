@@ -31,7 +31,7 @@ from mstar.engine.resources.recurrent.config import (
     RecurrentStateConfig,
     RecurrentStateSpec,
 )
-from mstar.engine.resources.recurrent.pool import NO_SLOT, SINK_SLOT
+from mstar.engine.resources.recurrent.pool import NO_SLOT, SINK_SLOT, RecurrentStatePool
 from mstar.engine.resources.spec import CombinedSplit
 from mstar.engine.resources.step import BucketKey, SlotLease
 from mstar.platforms import current_platform
@@ -118,6 +118,7 @@ def _reference(device, x, weight, inputs, layout, null_slot=SINK_SLOT):
     # capture-sized: only a captured step carries padding rows, and the eager
     # wrapper does not size its token mask for their borrowed tokens
     w = GDNPrefillWrapper(
+        snapshots_per_row=2,
         device=device, pad_slot_id=PAD_SLOT_ID, null_slot_id=null_slot,
         num_tokens=x.shape[0], bs=len(SPANS), accelerator_graph=True,
         has_sink_state=null_slot != NO_SLOT,
@@ -154,6 +155,7 @@ def _mixed(device, x, weight, inputs, accelerator_graph, layout, decode_rows=Non
         bucket_tokens = bucket_bs = None
         spans, slots, has = SPANS, SLOT_IDS, HAS_STATE
     w = GDNMixedWrapper(
+        snapshots_per_row=2,
         device=device, pad_slot_id=PAD_SLOT_ID, null_slot_id=null_slot,
         num_tokens=bucket_tokens, bs=decode_rows or bucket_bs,
         accelerator_graph=accelerator_graph, max_prefill_rows=MAX_PROMPTS,
@@ -244,6 +246,7 @@ def test_a_replay_of_another_layout_matches_the_chunked_path():
     device = torch.device("cuda")
     bucket_tokens, bucket_bs = 32, 10
     w = GDNMixedWrapper(
+        snapshots_per_row=2,
         device=device, pad_slot_id=PAD_SLOT_ID, null_slot_id=SINK_SLOT,
         num_tokens=bucket_tokens, bs=bucket_bs, accelerator_graph=True,
         max_prefill_rows=MAX_PROMPTS,
@@ -317,6 +320,7 @@ def test_the_decode_halfs_width_changes_no_real_rows_result():
 
 def test_too_many_prompt_rows_for_the_bucket_is_refused():
     w = GDNMixedWrapper(
+        snapshots_per_row=2,
         device=torch.device("cpu"), pad_slot_id=PAD_SLOT_ID, null_slot_id=SINK_SLOT,
         num_tokens=64, bs=8, accelerator_graph=True, max_prefill_rows=2,
     )
@@ -324,10 +328,8 @@ def test_too_many_prompt_rows_for_the_bucket_is_refused():
         w.plan([4, 4, 4, 1], (1, 2, 3, 4), (False, False, False, True))
 
 
-def test_a_captured_splits_decode_half_runs_the_buckets_rows():
-    """The decode half runs every row it is sized for, so it is sized to its
-    bucket rather than to the largest capture, as the other wrappers' buffers
-    are; a 16-row mixed step would otherwise run the decode kernel on 128."""
+def _captured_manager(checkpoints: str = "rows") -> GDNManager:
+    """The GDN backend over a real pool whose checkpoint policy is ``checkpoints``, with a split walk captured."""
     cpu = torch.device("cpu")
     spec = RecurrentStateSpec(
         "gdn_state", {"llm"},
@@ -338,7 +340,7 @@ def test_a_captured_splits_decode_half_runs_the_buckets_rows():
                 # [q|k|v] with two k heads
                 "conv": RecurrentBlockConfig(shape=((4 + HEADS) * DIM, WIDTH - 1), dtype=torch.float32),
             },
-            max_slots=SLOTS,
+            max_slots=SLOTS, checkpoints=checkpoints,
         ),
     )
     manager = GDNManager.build(
@@ -351,7 +353,16 @@ def test_a_captured_splits_decode_half_runs_the_buckets_rows():
         ),
         EngineResourceInfo(device=cpu, dependencies={"gdn_state": spec}),
     )
+    manager.bind_dependencies({"gdn_state": RecurrentStatePool.build(spec, EngineResourceInfo(device=cpu))})
     manager.build_accelerator_graph_buffers([], max_bs=128, max_seq_len=2048)
+    return manager
+
+
+def test_a_captured_splits_decode_half_runs_the_buckets_rows():
+    """The decode half runs every row it is sized for, so it is sized to its
+    bucket rather than to the largest capture, as the other wrappers' buffers
+    are; a 16-row mixed step would otherwise run the decode kernel on 128."""
+    manager = _captured_manager()
 
     def lease(walk, bs, tokens):
         return SlotLease(slot=0, bucket=BucketKey(graph_walk=walk, bs=bs, num_tokens=tokens))
@@ -363,6 +374,28 @@ def test_a_captured_splits_decode_half_runs_the_buckets_rows():
     decode = manager._get_wrapper("main", is_decode=True, lease=lease("decode", 16, 16))
     assert mixed._decode._bs == 16
     assert decode._bs == 128
+
+
+@pytest.mark.parametrize("walk, rows", [("prefill_text", 1), ("mixed", 2)])
+def test_a_captured_step_is_sized_for_the_snapshots_per_row_the_pools_policy_keeps(walk, rows):
+    """Through the manager that builds the wrapper: the step captured for a bucket plans as many snapshots a row as the
+    pool's policy keeps (three under `messages`, one more than the default's two), and is refused without the bound
+    (the prefill walk's bucket has one row, a mixed bucket's chunked half two)."""
+    manager = _captured_manager("messages")
+    count = manager._pool.snapshots_per_row * rows
+    split = manager._splits["mixed"] if walk == "mixed" else None
+    wrapper = manager._get_wrapper(
+        "main", is_decode=False, split=split,
+        lease=SlotLease(slot=0, bucket=BucketKey(graph_walk=walk, bs=1, num_tokens=1024)),
+    )
+    prefill = wrapper._prefill if walk == "mixed" else wrapper   # a mixed wrapper plans its prompt rows there
+    every = 128
+    prefill.plan(
+        [128 * (count + 1)] + [0] * (rows - 1), slots=torch.zeros(rows, dtype=torch.int32),
+        has_state=torch.zeros(rows, dtype=torch.bool),
+        snapshots=[(0, every * k, k) for k in range(1, count + 1)], every=every,
+        checkpoints=torch.zeros(1024 // every + rows + 1, 4, 4),
+    )
 
 
 @requires_gpu
@@ -402,6 +435,7 @@ def test_a_mixed_steps_prompt_rows_save_the_snapshots_the_chunked_path_saves(acc
 
     ref_state, ref_conv = pools()
     ref = GDNPrefillWrapper(
+        snapshots_per_row=2,
         device=device, pad_slot_id=PAD_SLOT_ID, null_slot_id=SINK_SLOT,
         num_tokens=tokens, bs=len(spans), accelerator_graph=True,
     )
@@ -430,6 +464,7 @@ def test_a_mixed_steps_prompt_rows_save_the_snapshots_the_chunked_path_saves(acc
         # as `GDNManager` sizes an eager step's buffer
         buffer = checkpoints(sum(max(span, 1) // every for span in spans))
     w = GDNMixedWrapper(
+        snapshots_per_row=2,
         device=device, pad_slot_id=PAD_SLOT_ID, null_slot_id=SINK_SLOT,
         num_tokens=bucket_tokens, bs=bucket_bs,
         accelerator_graph=accelerator_graph, max_prefill_rows=MAX_PROMPTS,
