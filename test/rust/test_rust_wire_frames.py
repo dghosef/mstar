@@ -451,6 +451,16 @@ def test_a_stream_item_whose_descriptor_is_gone_is_not_counted(tmp_path):
     assert got["conductor"][0].body.stream_items_sent == {"out": {PEER: 1}}
 
 
+def test_a_row_with_nothing_on_its_stream_output_sends_no_item_and_counts_none(tmp_path):
+    """The Tool node answers one request with a call to speak and another with none: the second routes
+    no tensor on the stream edge into the speech model, so the consumer is sent nothing and told of nothing."""
+    mesh = _stream_mesh(tmp_path)
+    rid = mesh.admit(wgs=(WG_ID, 1), workers=(ME, PEER))
+    got = mesh.run(rid, uuids=[])
+    assert not [m for m in got[PEER] if m.message_type == WorkerMessageType.EDGE_ITEMS]
+    assert not got["conductor"][0].body.stream_items_sent
+
+
 # --- stop loops ---------------------------------------------------------------
 
 def _loop_mesh(tmp_path):
