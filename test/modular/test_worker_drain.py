@@ -422,6 +422,21 @@ def test_a_request_removed_to_keep_its_outputs_gives_up_the_rest_and_frees_tenso
     assert w.forced == ["X"] and handles == ["X"]
 
 
+def test_a_release_for_a_request_whose_remove_frees_the_handle_does_not_wait_for_the_next_one_to_use_it():
+    """The handle is recycled: a `ReleaseOutputs` left over from a remove that kept no outputs would free the
+    outputs of whichever request gets the handle next."""
+    w = _worker()
+    handles = []
+    w._graph_runtime.remove_request = handles.append
+    w.lifecycle.pending_removes["X"] = -1
+    w.ingest._release_outputs(ReleaseOutputs("X"))
+    w.lifecycle.pending_removes.clear()
+    _remove(w, request_id="X")
+    w.pipeline._teardown(w.pipeline.in_flight_rids)
+    assert w.forced == ["X"] and handles == ["X"], "the handle was released twice"
+    assert w.lifecycle.release_after_remove == set()
+
+
 def _input(uuid, streaming=True):
     """An input for request X: a stream item, or a plain one-pass input."""
     info = TensorPointerInfo(

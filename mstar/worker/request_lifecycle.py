@@ -182,6 +182,10 @@ class RequestLifecycle:
         """Forget a request that was torn down, or never admitted (``rid`` None).
         Returns the messages that were parked for it, for the caller to drop."""
         if rid is not None:
+            # a handle the remove frees takes its marks with it; one kept for `ReleaseOutputs` keeps its release
+            if rid not in self.keep_outputs:
+                self.release_after_remove.discard(rid)
+            self.keep_outputs.discard(rid)
             self.arrivals.pop(rid, None)
             self.failed_rids.discard(rid)
             self.pending_removes.pop(rid, None)

@@ -934,8 +934,6 @@ class StepPipeline:
         laps = PhaseLaps("worker.msg.remove_request.")
         for message in self.lifecycle.removed(rid, wire_rid):
             self.ingest.drop_for_removed(message)
-        keep = rid in self.lifecycle.keep_outputs
-        self.lifecycle.keep_outputs.discard(rid)
         try:
             self._release_request(rid, wire_rid, laps, keep)
         except BaseException:
