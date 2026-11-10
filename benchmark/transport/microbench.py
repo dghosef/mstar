@@ -49,8 +49,8 @@ SENDER, RECEIVER = "worker_0", "worker_1"
 #: tcp-pool / rdma-pool: Mooncake reads from a buffer registered once, copied
 #: into (or, with --pool-mode zerocopy, produced in) per send. Not an M* path
 #: today; the contrast with tcp shows what per-tensor registration costs.
-PATHS = ("control", "tcp", "rdma", "shm", "arena", "tcp-pool", "rdma-pool")
-SAME_HOST_PATHS = ("shm", "arena")
+PATHS = ("control", "tcp", "rdma", "shm", "arena", "tcp-pool", "rdma-pool", "ipc")
+SAME_HOST_PATHS = ("shm", "arena", "ipc")
 
 
 # -- arguments ---------------------------------------------------------------
@@ -165,6 +165,8 @@ def unavailable_reason(path: str, args) -> str | None:
     for dev in {args.device, args.receiver_device}:
         if dev.startswith("cuda") and not torch.cuda.is_available():
             return "CUDA requested but not available"
+    if path == "ipc" and not (args.device.startswith("cuda") and args.receiver_device.startswith("cuda")):
+        return "ipc needs CUDA devices on both sides"
     return None
 
 
@@ -438,6 +440,7 @@ class Sender:
             "tcp": self._run_manager, "rdma": self._run_manager,
             "shm": self._run_manager, "arena": self._run_manager,
             "tcp-pool": self._run_pool, "rdma-pool": self._run_pool,
+            "ipc": self._run_ipc,
         }[path]
         out = []
         mgr = make_manager(path, SENDER, self.args.device, self.comm, self.args) \
@@ -571,6 +574,51 @@ class Sender:
             t1 = time.perf_counter()
             self._ctl("pool", seq=i, slot=slot, addr=buf.data_ptr(), nbytes=t.nbytes,
                       session=engine.get_session_id())
+            if timed[0]:
+                res.add_phase("copy", t1 - t0)
+                res.add_phase("send", time.perf_counter() - t1)
+            slot_of[i] = slot
+            return i
+
+        def finish(msg):
+            if isinstance(msg, dict) and msg.get("kind") == "pool_ack":
+                free.append(slot_of.pop(msg["seq"]))
+                return [msg["seq"]]
+            return []
+
+        self._windowed(self.args.warmup, start, finish, None)
+        self._ctl("timing_start")
+        timed[0] = True
+        t_wall = time.perf_counter()
+        self._windowed(res.iters, start, finish, res, base=self.args.warmup)
+        res.wall_s = time.perf_counter() - t_wall
+
+    def _run_ipc(self, path, size, res: SizeResult, mgr) -> None:
+        """A device buffer shared once over CUDA IPC; each send copies the tensor into a slot
+        (D2D on the sender's GPU, as a producer would stage it), sends the slot in a control
+        message, and the receiver copies peer to local on a copy stream and acks."""
+        if getattr(self, "_ipc_pool", None) is None:
+            cap = max(self.args.sizes)
+            self._ipc_pool = torch.empty(cap * self.args.inflight, dtype=torch.uint8, device=self.args.device)
+            self._ipc_slots = [self._ipc_pool[i * cap:(i + 1) * cap] for i in range(self.args.inflight)]
+            share = self._ipc_pool.untyped_storage()._share_cuda_()
+            self._ctl("ipc_handle", share=list(share), nbytes=self._ipc_pool.nbytes, cap=cap)
+            self._await(self._reply("ipc_ready"), timeout_s=60)
+        n = len(self._ipc_slots)
+        tensors = [self._tensor(size) for _ in range(n)]
+        _sync(self.args.device)
+        free = deque(range(n))
+        slot_of: dict[int, int] = {}
+        timed = [False]
+        stream = torch.cuda.current_stream(self.args.device)
+
+        def start(i, t0):
+            slot = free.popleft()
+            t = tensors[slot]
+            self._ipc_slots[slot][: t.nbytes].copy_(t.reshape(-1).view(torch.uint8), non_blocking=True)
+            stream.synchronize()
+            t1 = time.perf_counter()
+            self._ctl("ipc", seq=i, slot=slot, nbytes=t.nbytes)
             if timed[0]:
                 res.add_phase("copy", t1 - t0)
                 res.add_phase("send", time.perf_counter() - t1)
@@ -799,6 +847,27 @@ class Receiver:
                 remote_ptr=msg["addr"], nbytes=msg["nbytes"],
             )])
             self.pool_pending.append((msg["seq"], fut, time.perf_counter()))
+        elif kind == "ipc_handle":
+            from torch.multiprocessing.reductions import rebuild_cuda_tensor
+            sh = msg["share"]
+            self.ipc_remote = rebuild_cuda_tensor(
+                torch.Tensor, (msg["nbytes"],), (1,), 0, torch.UntypedStorage, torch.uint8,
+                sh[0], sh[1], sh[2], sh[3], False, sh[4], sh[5], sh[6], sh[7])
+            cap = msg["cap"]
+            self.ipc_cap = cap
+            self.ipc_local = torch.empty(msg["nbytes"], dtype=torch.uint8, device=self.args.receiver_device)
+            self.ipc_stream = torch.cuda.Stream(device=self.args.receiver_device)
+            self.pool_reader = "ipc"
+            self.pool_pending = []
+            self._send({"kind": "ipc_ready"})
+        elif kind == "ipc":
+            off = msg["slot"] * self.ipc_cap
+            t0 = time.perf_counter()
+            with torch.cuda.stream(self.ipc_stream):
+                self.ipc_local[off:off + msg["nbytes"]].copy_(self.ipc_remote[off:off + msg["nbytes"]], non_blocking=True)
+                ev = torch.cuda.Event()
+                ev.record(self.ipc_stream)
+            self.pool_pending.append((msg["seq"], ev, t0))
         elif kind == "bg":
             self.copier.from_bytes(msg["data"], torch.uint8, [len(msg["data"])])
             self.bg_received += 1
@@ -851,8 +920,12 @@ class Receiver:
     def _drain_pool(self) -> None:
         still = []
         for seq, fut, t0 in self.pool_pending:
-            if fut is None or fut.done():
-                if fut is not None:
+            if isinstance(fut, torch.cuda.Event):
+                done = fut.query()
+            else:
+                done = fut is None or fut.done()
+            if done:
+                if fut is not None and not isinstance(fut, torch.cuda.Event):
                     fut.result()
                 self._phase("read", time.perf_counter() - t0)
                 self._send({"kind": "pool_ack", "seq": seq})
