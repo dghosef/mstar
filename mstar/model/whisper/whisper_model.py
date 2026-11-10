@@ -94,10 +94,12 @@ from mstar.model.whisper.config import (
     DETECT_LANGUAGE_WALK,
     ENCODER_NODE,
     KV_CACHE,
+    NEW_TOKEN,
     POS,
     PREFILL_PROMPT_WALK,
     PREFILL_WALK,
     SAMPLER,
+    TEXT_INPUTS,
     TS_RULES,
     WORDS_MARKER,
     WhisperModelConfig,
@@ -155,6 +157,8 @@ class WhisperDetokenizer(ByteLevelDetokenizer):
 class WhisperModel(Model):
     """Whisper ASR: native batched encoder + native AR decoder."""
 
+    stream_out = False
+
     DECODE_LOOP = DECODE_LOOP
 
     # the checkpoint's sampling defaults, set by __init__; a model built without it has the built-in ones
@@ -186,6 +190,9 @@ class WhisperModel(Model):
     ):
         self.cache_dir = cache_dir
         self.model_path_hf = model_path_hf
+        # whether the decode loop also emits each token as `asr_token`, for a stream into another model
+        # (a `Link` of a `MultiModel`); the prompt walks emit it already
+        self.stream_out = bool(kwargs.get("stream_out"))
 
         self.local_dir = _resolve_local_hf_snapshot(model_path_hf, cache_dir=cache_dir)
         self.config = WhisperModelConfig.from_pretrained(self.local_dir)
@@ -348,7 +355,7 @@ class WhisperModel(Model):
             return [
                 GraphEdge(
                     next_node=EMIT_TO_CLIENT,
-                    name="new_token",
+                    name=NEW_TOKEN,
                     output_modality="text",
                     persist=True,
                 ),
@@ -366,14 +373,14 @@ class WhisperModel(Model):
                 ),
                 GraphNode(
                     name=DECODER_NODE,
-                    input_names=["encoder_states", "text_inputs"],
+                    input_names=["encoder_states", TEXT_INPUTS],
                     outputs=emit_first_token(),
                 ),
             ])
 
         prefill_prompt = GraphNode(
             name=DECODER_NODE,
-            input_names=["text_inputs", "prompt_tail"],
+            input_names=[TEXT_INPUTS, "prompt_tail"],
             outputs=emit_first_token(),
         )
 
@@ -381,7 +388,7 @@ class WhisperModel(Model):
             name=DECODE_LOOP,
             section=GraphNode(
                 name=DECODER_NODE,
-                input_names=["text_inputs", "ts_rules"],
+                input_names=[TEXT_INPUTS, "ts_rules"],
                 outputs=[
                     # The sampled token loops back as the next input and goes to
                     # the client; the rule state it advanced loops back too. The
@@ -390,9 +397,9 @@ class WhisperModel(Model):
                     # so a decode step stores no tensor per request (the client
                     # joins the text chunks; the align walk reads the tokens the
                     # decoder recorded, see its `_token_stops`).
-                    GraphEdge(next_node=DECODER_NODE, name="text_inputs"),
+                    GraphEdge(next_node=DECODER_NODE, name=TEXT_INPUTS),
                     GraphEdge(next_node=DECODER_NODE, name="ts_rules"),
-                    GraphEdge(next_node=EMIT_TO_CLIENT, name="text_inputs", output_modality="text"),
+                    GraphEdge(next_node=EMIT_TO_CLIENT, name=TEXT_INPUTS, output_modality="text"),
                 ],
             ),
             # the default request's iterations: past them a request overruns the position table
@@ -445,7 +452,7 @@ class WhisperModel(Model):
             # to be detected: the detected language token leads it in the second walk
             plan = [
                 WalkStep(DETECT_LANGUAGE_WALK, step_metadata=prompt),
-                WalkStep(PREFILL_PROMPT_WALK, bind={"text_inputs": "new_token"}, step_metadata=prompt),
+                WalkStep(PREFILL_PROMPT_WALK, bind={TEXT_INPUTS: NEW_TOKEN}, step_metadata=prompt),
             ]
         else:
             plan = [WalkStep(PREFILL_WALK, step_metadata=prompt)]
@@ -453,7 +460,7 @@ class WhisperModel(Model):
         # nothing to do. The conductor's fit to the caches never cuts a budget to one:
         # a request with no room for a decode step is refused.
         if self.get_max_output_tokens(**model_kwargs) > 1:
-            plan.append(WalkStep(DECODE_WALK, bind={"text_inputs": "new_token"}))
+            plan.append(WalkStep(DECODE_WALK, bind={TEXT_INPUTS: NEW_TOKEN}))
         if word_timestamps:
             # The transcript the decoder recorded, aligned against the persisted encoder
             # output under the forced prompt. Its tokens are resolved here, not read off
@@ -530,7 +537,7 @@ class WhisperModel(Model):
 
         out: NameToTensorList = {
             "audio": [window],
-            "text_inputs": [torch.tensor(prompt_ids, dtype=torch.long)],
+            TEXT_INPUTS: [torch.tensor(prompt_ids, dtype=torch.long)],
         }
         # the encoder takes the padded window whole, so its context is always this long
         context = self.config.max_source_positions
@@ -540,12 +547,12 @@ class WhisperModel(Model):
             # detection commits the prompt up to <|sot|>; the prompt walk commits the
             # detected language token and the tail
             spans = (
-                Span("ids", DETECT_LANGUAGE_WALK, len(prompt_ids), len(prompt_ids), "text_inputs"),
+                Span("ids", DETECT_LANGUAGE_WALK, len(prompt_ids), len(prompt_ids), TEXT_INPUTS),
                 Span("rows", PREFILL_PROMPT_WALK, 1 + len(tail), 1 + len(tail), "prompt_tail"),
             )
             encoder_walk = DETECT_LANGUAGE_WALK
         else:
-            spans = (Span("ids", PREFILL_WALK, len(prompt_ids), len(prompt_ids), "text_inputs"),)
+            spans = (Span("ids", PREFILL_WALK, len(prompt_ids), len(prompt_ids), TEXT_INPUTS),)
             encoder_walk = PREFILL_WALK
         kv_layout = {
             KV_CACHE: {"main": LabelLayout(spans=spans, growth=((DECODE_LOOP, 1),))},
@@ -706,4 +713,4 @@ class WhisperModel(Model):
         decoder.eval()
 
         from mstar.model.whisper.submodules import WhisperDecoderSubmodule
-        return WhisperDecoderSubmodule(decoder=decoder, config=self.config)
+        return WhisperDecoderSubmodule(decoder=decoder, config=self.config, stream_out=self.stream_out)

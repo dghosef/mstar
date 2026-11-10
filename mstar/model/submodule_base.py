@@ -124,10 +124,13 @@ class StopCheck(NamedTuple):
     request, e.g. a frame streamed beside a stop token: a streaming edge then
     gets no item for it, so its consumer needs no device read to find and drop
     it. A plain ``set`` return is the same as ``StopCheck(stops)``.
+
+    ``exit`` names the exit the step's walk ends through (``WalkStep.exits``).
     """
 
     stops: set[str] | frozenset[str] = frozenset()
     withheld: tuple[str, ...] = ()
+    exit: str = ""
 
 
 class BatchedStopCheck(NamedTuple):
@@ -1658,7 +1661,7 @@ class ARNodeSubmodule(NodeSubmodule):
         for rid, token in pairs:
             if verdict(rid, token, info := request_infos[rid]):
                 stops[rid] = names(info)
-            if token in stop.stop_ids:
+            if stop.withhold and token in stop.stop_ids:
                 withheld[rid] = stop.withhold
         return BatchedStopCheck(stops, withheld) if withheld else stops
 

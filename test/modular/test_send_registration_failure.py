@@ -194,6 +194,7 @@ def _postprocess_worker(refuse, follower=False, **fields):
         # like the engine's, reads each stopped rid's info
         finalize_stopped_requests=lambda nb, rids: [nb.per_request_info[r] for r in rids],
         step_finished=lambda batch, outputs, **kwargs: None,
+        unreal_sample_rids=lambda batch: set(),
     )
 
     def store(rids, outputs, signals, **kwargs):
@@ -268,7 +269,7 @@ def _decode_step(rids, final_stream=()):
         node_name="llm", request_ids=list(rids), per_request_info=dict.fromkeys(rids),
         failed_requests={}, completion_event=None,
         final_stream_rids=set(final_stream), resource_publish_info={},
-        partition_done_rids=set(), cached_rids=set(), no_forward_rids=set(), withheld_outputs={},
+        partition_done_rids=set(), exits={}, cached_rids=set(), no_forward_rids=set(), withheld_outputs={},
     )
     batch = ScheduledBatch(
         node_name="llm", graph_walk="decode",

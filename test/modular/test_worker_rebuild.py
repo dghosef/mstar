@@ -126,13 +126,16 @@ def test_postprocess_appends_kept_samples_and_lands_a_rebuild_row_beside_them():
     assert landed == [R], "the rebuilt request would never be ready to decode again"
 
 
-@pytest.mark.parametrize("why", ["no ids", "backlog", "prefill walk", "samples short"])
+@pytest.mark.parametrize("why", ["no ids", "backlog", "prefill walk", "samples short", "past a tool round"])
 def test_a_drop_is_refused_when_its_rebuild_could_not_follow(why):
     w, eng = _worker()
-    w._rebuilds._kept[NODE].update({} if why == "no ids" else {R: _kept(5)})
+    # (a request past a tool round kept the samples of its earlier decodes too, and its tool text, which
+    # no kept id holds, is in its KV: rebuilding it would lose the text)
+    kept = _kept(5, 6, 7, 8) if why == "past a tool round" else _kept(5)
+    w._rebuilds._kept[NODE].update({} if why == "no ids" else {R: kept})
     w.scheduler.backlog.update({(NODE, DECODE): ScheduledBatch(NODE, DECODE, {R: 0})} if why == "backlog" else {})
     w.infos[R].graph_walk = PREFILL if why == "prefill walk" else DECODE
-    w.infos[R].dynamic_loop_iter_counts["loop"] = 1 if why == "samples short" else 0
+    w.infos[R].dynamic_loop_iter_counts["loop"] = 1 if why in ("samples short", "past a tool round") else 0
 
     with pytest.raises(RuntimeError):
         w.preemption._drop(R, NODE)

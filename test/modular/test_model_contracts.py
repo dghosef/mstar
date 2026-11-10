@@ -728,19 +728,22 @@ def test_whisper_request_kwargs_are_the_keys_it_reads():
 
 
 def test_whisper_default_is_the_decode_loop_bound():
+    from mstar.model.whisper.config import DECODE_WALK
     model = _whisper_model()
     assert model.get_max_output_tokens() == 444
     # the prefill samples the first of the 444
-    assert model.get_graph_walk_graphs()["decode"].max_iters == 443
+    assert model.get_graph_walk_graphs()[DECODE_WALK].max_iters == 443
 
 
 @pytest.mark.parametrize("over", [445, 448])
 def test_whisper_over_limit_is_refused_not_clamped(over):
     """448, the position table's size, is past the 444 the forced prompt leaves."""
+    from mstar.model.whisper.config import DECODE_LOOP
+
     c = _loop_conductor(_whisper_model())
     assert c._max_output_tokens({"max_output_tokens": 444}) == 444
     # the prefill samples the first token
-    assert c._loop_caps({"max_output_tokens": 10}) == {"decode_loop": 9}
+    assert c._loop_caps({"max_output_tokens": 10}) == {DECODE_LOOP: 9}
     c._loop_caps({"max_output_tokens": 444})
     with pytest.raises(ValueError, match="at most 443"):
         c._loop_caps({"max_output_tokens": over})

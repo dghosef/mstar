@@ -355,6 +355,12 @@ pub struct GraphRuntime {
                 .unwrap_or(false);
 
         let partition = self.interner.get(partition_name);
+        // Taken, not read: a request that re-enters a walk exits afresh. A
+        // speculative pass leaves it for the frame that really ends the walk.
+        let exit = match (speculative, partition) {
+            (false, Some(p)) => self.requests[rid as usize].as_mut().and_then(|i| i.take_exit(p)),
+            _ => None,
+        };
         let (persist, new_tokens, output_signals, stream_items) =
             match self.requests[rid as usize].as_mut() {
                 Some(info) => info.pending.take_for_send(partition),
@@ -372,6 +378,7 @@ pub struct GraphRuntime {
             output_signal_names: output_signals,
             partition_name,
             partition_done,
+            exit,
             graph_walk,
             stream_items_sent: stream_items,
             resource_publish_info: frames::spliced_value(publication_encoded),
@@ -1861,6 +1868,13 @@ impl GraphRuntime {
         self.pending_loop_stops.retain(|&(r, _, _)| r != rid);
     }
 
+    /// Drop `rid`'s client emits from here on (a request nobody outside reads).
+    fn set_silent(&mut self, rid: u32) {
+        if let Some(info) = self.requests.get_mut(rid as usize).and_then(|r| r.as_mut()) {
+            info.silent = true;
+        }
+    }
+
     fn get_rid_handle(&self, rid: &str) -> Option<u32> {
         self.rids.handle(rid)
     }
@@ -1904,6 +1918,13 @@ impl GraphRuntime {
         let Some(p) = self.interner.get(partition) else { return };
         if let Some(info) = self.requests.get_mut(rid as usize).and_then(|r| r.as_mut()) {
             info.mark_partition_done(p);
+        }
+    }
+
+    fn mark_exit(&mut self, rid: u32, partition: &str, name: String) {
+        let Some(p) = self.interner.get(partition) else { return };
+        if let Some(info) = self.requests.get_mut(rid as usize).and_then(|r| r.as_mut()) {
+            info.mark_exit(p, name);
         }
     }
 
@@ -3672,9 +3693,11 @@ impl GraphRuntime {
                     _ => (None, 1),
                 }
             };
+            let silent = self.requests[rid as usize].as_ref().is_some_and(|i| i.silent);
             for e in edges {
                 let name = self.interner.name(e.name).to_string();
                 match e.dest {
+                    Dest::EmitToClient if silent => {}
                     Dest::EmitToClient => match emit_inline.get(&rid) {
                         Some(&(sig, modality, value)) if sig == e.name => {
                             plan.emit_inline.push((

@@ -644,6 +644,9 @@ class KVManager(AttentionResource):
         self.rebuild_pages: dict[str, int] = {}
         # label -> the walks its keys describe; a label not here is not gated
         self._keyed_walks: dict[str, frozenset[str]] = {}
+        # the walks of each label whose rows are the ids its keys name; one past the layout's spans
+        # is text appended after the prompt (`extend_appended`)
+        self._write_walks: dict[str, frozenset[str]] = {}
         # nodes already warned that a declared stream reached them unkeyed
         self._warned_unkeyed: set[str] = set()
         self._overran: set[tuple[str, bool]] = set()
@@ -838,7 +841,9 @@ class KVManager(AttentionResource):
     def enable_prefix_cache(self, root: bytes, walks: dict[str, KeyedWalks] | None = None) -> None:
         """Open the index under ``root``, the identity every key hangs from."""
         self._keyed_walks = {}
+        self._write_walks = {}
         for label, named in (walks or {}).items():
+            self._write_walks[label] = frozenset(named.writes)
             keyed = set(named.writes)
             # Above one rank a growth walk isn't keyed, since each rank reads its sampled ids at a
             # different step.
@@ -890,6 +895,8 @@ class KVManager(AttentionResource):
             stream = self._ensure_label(rid, label)
             chain, cursor = stream.chain, stream.span_cursor
             if chain is None or cursor.done >= len(chain.spans):
+                if chain is not None and graph_walk in self._write_walks.get(label, ()):
+                    self._extend_appended(stream, chain, inputs)
                 return None
             step = cursor.next_step(graph_walk)
             self._check_positions(step, chain.spans[cursor.done], graph_walk, inputs)
@@ -916,6 +923,19 @@ class KVManager(AttentionResource):
             if stream.lease is None:
                 return None
             return self._answer(label, cursor, step, self._leased(rid, stream))
+
+    def _extend_appended(self, stream: CacheStream, chain: PrefixChain, inputs) -> None:
+        """Under the lock: key the ids a row writes after the layout's spans (a tool's text, a spoken
+        turn's transcript), as the sampled ids are, so the pages they fill are named and the chain
+        goes on. They are keyed before the commit that fills a page, and after the sampled ids that
+        precede them (the backlog is flushed first). The chain may already hold the row's first ids,
+        a stop token the decode sampled and the row writes, so only what lies past the chain is added;
+        a probe repeated for the same row adds nothing."""
+        self.flush_chain_backlog()
+        if inputs.input_ids is None or chain.unkeyed is None or stream.released:
+            return
+        ids = inputs.input_ids.reshape(-1).tolist()
+        chain.extend(ids[max(chain.covered_len - stream.stored_len, 0):], self.config.tokens_per_page)
 
     def _lease(self, rid: str, node_name: str, label: str, stream: CacheStream, chain: PrefixChain) -> bool:
         """Lease what the index holds of the stream's prompt, unless the stream holds a lease already.

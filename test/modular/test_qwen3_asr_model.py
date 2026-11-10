@@ -700,7 +700,7 @@ def test_decode_loop_emits_its_one_signal_inline_and_loops_it_back_on_the_device
     row = sub.prepare_inputs(DECODE_WALK, None, {}, has_loopback=True)
     assert row.input_ids is None and row.input_seq_len == 1
     assert sub.uniform_row_inputs(DECODE_WALK, has_loopback=True).input_seq_len == 1
-    routed = sub.prepare_inputs(DECODE_WALK, None, {"text_inputs": [torch.tensor([7])]})
+    routed = sub.prepare_inputs(DECODE_WALK, SimpleNamespace(step_metadata={}), {"text_inputs": [torch.tensor([7])]})
     from mstar.engine.resources.sampler.resource import SamplerResource
 
     sampler = type("S", (), {
