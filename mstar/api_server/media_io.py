@@ -721,18 +721,22 @@ class AudioTooLongError(AudioRefusedError):
 
 
 def read_soundfile_capped(path: str, max_seconds: float = MAX_AUDIO_SECONDS) -> tuple[np.ndarray, int]:
-    """libsndfile decode of ``path``: float32 mono at the file's own rate.
+    """Decode of ``path`` (libsndfile; FFmpeg for a FLAC with no sample count):
+    float32 mono at the file's own rate, the mean of its channels (FFmpeg's
+    downmix where FFmpeg decodes).
 
     Reads in blocks and counts the frames it decodes, so a header that hides
     or understates the length cannot make the read unbounded; past
     ``max_seconds`` it raises :class:`AudioTooLongError`. A rate outside
     ``1..MAX_SAMPLE_RATE`` is refused (:class:`AudioRefusedError`) before
-    any read. A container libsndfile cannot read raises soundfile's own error.
+    any read. A container libsndfile cannot open raises soundfile's own error.
 
     A FLAC whose header has no sample count (written to a pipe) cannot seek
     past its last block, and libsndfile raises on the read that reaches it,
     losing that block; FFmpeg decodes it whole, so it does where available
-    (see :func:`_read_unsized`).
+    (see :func:`_read_unsized`). There a file FFmpeg cannot decode raises
+    torchcodec's error, and without FFmpeg a clip shorter than that last
+    block raises ``RuntimeError`` rather than decode empty.
     """
     import soundfile as sf
 
