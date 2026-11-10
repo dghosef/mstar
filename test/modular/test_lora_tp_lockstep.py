@@ -21,10 +21,30 @@ import torch
 pytest.importorskip("safetensors")
 
 try:
-    from .test_lora_pool import admitted, ctx, digest_of, ingest, lora_runner, make_spec, settle_reads, step, write_adapter
+    from .test_lora_pool import (
+        admitted,
+        ctx,
+        digest_of,
+        ingest,
+        lora_runner,
+        make_spec,
+        settle_reads,
+        step,
+        write_adapter,
+    )
 except ImportError:  # collected without package context
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from test_lora_pool import admitted, ctx, digest_of, ingest, lora_runner, make_spec, settle_reads, step, write_adapter
+    from test_lora_pool import (
+        admitted,
+        ctx,
+        digest_of,
+        ingest,
+        lora_runner,
+        make_spec,
+        settle_reads,
+        step,
+        write_adapter,
+    )
 
 from mstar.engine.resources.lora.checkpoint import read_lora_file  # noqa: E402
 from mstar.engine.resources.lora.identity import adapter_digest  # noqa: E402
