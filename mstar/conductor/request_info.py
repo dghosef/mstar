@@ -10,6 +10,10 @@ DEFAULT_PARTITION = "default"
 # Step metadata a walk plan sets on the step that samples the reply's first
 # token, the last prefill before decode (`TokenStop.last_prefill_flag`).
 FINAL_PREFILL = "final_prefill"
+# Step metadata of a step that writes ids into the request's KV after its prompt (a continuation prefill, a spoken
+# turn's transcript and suffix, a join). A rebuild replays the prompt and the samples only, so a request that ran
+# such a step is not rebuilt (`Rebuilds.note_appended`).
+APPENDS = "appends"
 
 
 @dataclass

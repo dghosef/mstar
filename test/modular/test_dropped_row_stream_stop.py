@@ -49,8 +49,8 @@ class _Sub:
     """A stream consumer; ``bad`` rows raise in the named stage, ``skip`` rows
     are declined by prepare_inputs."""
 
-    def __init__(self, bad=(), stage="prepare", skip=(), stops=None):
-        self.bad, self.stage, self.skip = set(bad), stage, set(skip)
+    def __init__(self, bad=(), stage="prepare", skip=(), stops=None, empty=()):
+        self.bad, self.stage, self.skip, self.empty = set(bad), stage, set(skip), set(empty)
         self.stops = stops or {}
 
     def uniform_row_inputs(self, graph_walk, has_loopback=False):
@@ -62,7 +62,9 @@ class _Sub:
             raise RuntimeError("bad chunk")
         if rid in self.skip:
             return None
-        return SimpleNamespace(input_seq_len=1)
+        if rid in self.empty:
+            return SimpleNamespace(input_seq_len=0, input_ids=torch.empty(0, dtype=torch.long))
+        return SimpleNamespace(input_seq_len=1, input_ids=None)
 
     def can_batch(self, batch, model_inputs):
         return True
@@ -237,6 +239,16 @@ def test_a_row_that_declines_its_final_chunk_still_ends_its_streams():
     assert batch.request_ids == [1]
     assert batch.final_stream_rids == {1, 2}
     assert batch.partition_done_rids == {1, 2}
+
+
+def test_a_row_with_no_ids_to_write_runs_no_forward_and_still_completes_its_node():
+    """A transcript pass with no finished word brings an empty row: it is neither declined (which would
+    leave its pass unfinished) nor run."""
+    eng = _engine(_Sub(empty={2}))
+    batch = _batch([1, 2], streams=False)
+    eng.prepare_inputs(batch)
+    assert batch.request_ids == [1] and batch.cached_rids == {2}
+    assert batch.no_forward_rids == {2}
 
 
 def test_a_failed_check_stop_row_does_not_fail_the_batch():

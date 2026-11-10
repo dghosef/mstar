@@ -220,6 +220,7 @@ def test_a_walk_the_cache_served_whole_is_still_routed():
         check_stop_for_batch=lambda batch, outputs, **kwargs: {},
         after_output_copy=lambda batch: None,
         step_finished=lambda batch, outputs, **kwargs: None,
+        unreal_sample_rids=lambda batch: set(),
         materialize_publish=lambda batch, rids: None,
     )
     w.request_state.get_fwd_info = lambda rid, partition: None

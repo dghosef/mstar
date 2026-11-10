@@ -69,7 +69,7 @@ def test_the_kernel_follows_a_packed_capture_not_the_spans(force_prefill, spans,
     ("prefill_vision", {"text_inputs": [torch.zeros(7, dtype=torch.long)]}, None),
 ])
 def test_text_and_decode_rows_report_their_length(walk, inputs, length):
-    info = object.__new__(LLMSubmodule).get_input_sequence_len(walk, None, inputs)
+    info = object.__new__(LLMSubmodule).get_input_sequence_len(walk, _info(walk), inputs)
 
     assert (info.seq_len if info is not None else None) == length
 
@@ -87,3 +87,126 @@ def test_text_prefill_chunks_under_a_budget_that_fits_the_captures():
     # decode rows count inside the budget, and a step over a bucket pads to the next one up
     assert LLMSubmodule.MAX_BATCH_TOKENS in LLMSubmodule.PREFILL_TOKEN_BUCKETS
 
+
+
+class _State:
+    """What a request's position counter and KV hold, as the engine commits steps."""
+
+    def __init__(self):
+        self.tokens: list[int] = []
+
+    def position(self, rid, label):
+        return len(self.tokens)
+
+
+def _decoder(state):
+    llm = object.__new__(LLMSubmodule)
+    torch.nn.Module.__init__(llm)
+    llm.node_resources, llm.request_states = {llm.POS_KEY: state}, {}
+    return llm
+
+
+def _info(walk, **metadata):
+    from mstar.conductor.request_info import CurrentForwardPassInfo
+    return CurrentForwardPassInfo(
+        request_id="wire", rid_handle="r", graph_walk=walk, fwd_index=0, random_seed=0,
+        max_tokens=64, step_metadata=metadata,
+    )
+
+
+@pytest.mark.parametrize("speculated_step_ran", [False, True])
+@pytest.mark.parametrize("ran_before_prepare", [False, True])
+def test_a_prefill_after_a_decode_lands_after_the_stop_token_whether_or_not_the_speculated_step_ran(
+    speculated_step_ran, ran_before_prepare,
+):
+    """A decode loop stopped by a token has its next iteration launched already, and that step's row is dropped
+    only after it ran: the stop token is in the request's state if it did and is not if it did not. The row is
+    prepared on a host thread that may run before that step commits, so the prefill decides when it is declared,
+    in step order: the same ids land either way. A plain request's row is not touched."""
+    prompt, turn, tail = [11, 12, 13], [21, 22, 23, 99], [31, 32]      # 99 = <|im_end|>, the stop token
+    state = _State()
+    llm = _decoder(state)
+
+    state.tokens += prompt                                              # the prefill commits the prompt
+    end = len(prompt)                                                   # where its state ends
+    state.tokens += turn[:-1]                                           # a decode step feeds each token but the stop
+
+    def speculated_step():
+        if speculated_step_ran:
+            state.tokens.append(turn[-1])                               # the one speculated past the stop
+
+    # what the plan hands over: the ids to write from the stop token on, and where it belongs
+    row = [torch.tensor([turn[-1], *tail]), torch.tensor([end + len(turn) - 1])]
+    info = _info("prefill_text")
+    if ran_before_prepare:
+        speculated_step()
+    inp = llm.prepare_inputs("prefill_text", info, {"text_inputs": row})
+    assert llm.get_input_sequence_len("prefill_text", info, {"text_inputs": row}).seq_len == len(inp.input_ids)
+    if not ran_before_prepare:
+        speculated_step()                                               # it commits after the row was prepared
+    llm.declare_step("prefill_text", ["r"], [inp])
+    llm.declare_step("prefill_text", ["r"], [inp])                      # a retried declaration drops nothing more
+    assert inp.input_seq_len == inp.input_ids.numel()
+    state.tokens += inp.input_ids.tolist()
+
+    assert state.tokens == prompt + turn + tail
+    plain = llm.prepare_inputs("prefill_text", _info("prefill_text"), {"text_inputs": [torch.tensor([1, 2, 3])]})
+    llm.declare_step("prefill_text", ["r"], [plain])
+    assert plain.input_ids.tolist() == [1, 2, 3] and plain.input_seq_len == 3
+
+
+def test_a_prefill_after_a_decode_that_finds_its_request_off_by_more_than_the_speculated_step_fails():
+    state = _State()
+    llm = _decoder(state)
+    state.tokens += [4, 5, 6]                       # three ids past where the row says its first belongs
+    inp = llm.prepare_inputs(
+        "prefill_text", _info("prefill_text"), {"text_inputs": [torch.tensor([99, 31]), torch.tensor([0])]})
+    with pytest.raises(AssertionError, match="already written"):
+        llm.declare_step("prefill_text", ["r"], [inp])
+
+
+def test_a_transcript_chunk_prepared_while_the_one_before_it_runs_is_not_taken_for_a_written_id():
+    state = _State()
+    llm = _decoder(state)
+    state.tokens += [1, 2, 3]                       # the previous chunk (9 ids) has not committed: the row is ahead
+    inp = llm.prepare_inputs(
+        "prefill_stream", _info("prefill_stream"), {"text_inputs": [torch.tensor([7, 8]), torch.tensor([12])]})
+    llm.declare_step("prefill_stream", ["r"], [inp])
+    assert inp.input_ids.tolist() == [7, 8] and inp.starts_at == 12
+
+
+def test_a_prefill_that_is_not_the_last_before_decode_routes_no_token():
+    from mstar.conductor.request_info import FINAL_PREFILL
+
+    llm = _decoder(_State())
+    outputs = {"new_token": [torch.tensor([7])], "text_inputs": [torch.tensor([7])]}
+    llm.postprocess("wire", _info("prefill_text", **{FINAL_PREFILL: False}), outputs)
+    assert not outputs
+    outputs = {"new_token": [torch.tensor([7])]}
+    llm.postprocess("wire", _info("prefill_text", **{FINAL_PREFILL: True}), outputs)
+    assert outputs["new_token"]
+
+
+def test_the_rows_of_a_prefill_that_is_not_the_last_before_decode_have_no_real_sample():
+    from types import SimpleNamespace
+
+    from mstar.conductor.request_info import FINAL_PREFILL
+    from mstar.model.submodule_base import TokenStop
+    from mstar.testing_utils.engine import make_engine, make_mgmt
+
+    stop = TokenStop(
+        loop="decode_loop", buffer="new_token", stop_ids=frozenset({99}), sampler="sampler", walk="decode",
+        runtime_check=True, prefill_walks=frozenset({"prefill_text"}), last_prefill_flag=FINAL_PREFILL)
+    eng = make_engine(_submodules={"LLM": make_mgmt(SimpleNamespace(token_stop=stop))})
+    infos = {1: _info("prefill_text", **{FINAL_PREFILL: False}), 2: _info("prefill_text", **{FINAL_PREFILL: True}),
+             3: _info("decode"), 4: _info("prefill_text")}
+
+    def batch(rids, walk, request_walks=None):
+        return SimpleNamespace(
+            node_name="LLM", request_ids=rids, per_request_info_wrapped=infos,
+            step_context=SimpleNamespace(graph_walk=walk, request_walks=request_walks))
+
+    # a step of one walk, and a mixed step; a step of decode rows is not looked into
+    assert eng.unreal_sample_rids(batch([1, 2], "prefill_text")) == {1}
+    assert eng.unreal_sample_rids(batch([1, 3, 4], "mixed", request_walks={1: "prefill_text"})) == {1}
+    assert eng.unreal_sample_rids(batch([3], "decode")) == set()

@@ -357,7 +357,7 @@ class SampledTokenDecoder(TokenStepNode, ARNodeSubmodule):
             embeds = torch.cat(pieces) if pieces else None
         media = {} if embeds is None else {MEDIA_EMBEDS: embeds, MEDIA_MASK: mask}
         # the stream's counter is keyed by the worker's handle (AGENTS.md invariant 14)
-        start = self.node_resources[self.POS_KEY].position(rid=fwd_info.rid_handle, label="main")
+        start = self._position(fwd_info)
         pos_ids, advance = self.prompt_positions(start, layout, ids.shape[0])
         if pos_ids is not None:
             pos_ids = to_device_nonblocking(pos_ids, self.get_device())
@@ -368,6 +368,36 @@ class SampledTokenDecoder(TokenStepNode, ARNodeSubmodule):
             tensor_inputs=media,
             resource_step_info=advance,
         )
+
+    def _text_row(self, inputs: NameToTensorList) -> ARNodeInputs:
+        """A text prefill row. A row after a decode brings a second tensor: the position its first id belongs
+        at. That id is the one the decode sampled last (the stop token), which the step speculated past it may
+        already have written (its row is dropped after its forward). Whether it has is known only when the
+        step is declared, in step order (`declare_step`): the host counter `prepare_inputs` could read may not
+        have seen that step's commit yet, and a TP rank would act on its own."""
+        ids = inputs["text_inputs"][0]
+        start = int(inputs["text_inputs"][1]) if len(inputs["text_inputs"]) > 1 else None
+        return ARNodeInputs(input_seq_len=ids.shape[0], input_ids=ids, starts_at=start)
+
+    def _position(self, fwd_info: CurrentForwardPassInfo) -> int:
+        # the stream's counter is keyed by the worker's handle (AGENTS.md invariant 14)
+        return self.node_resources[self.POS_KEY].position(rid=fwd_info.rid_handle, label="main")
+
+    def postprocess(
+        self,
+        request_id: str,
+        request_info: CurrentForwardPassInfo,
+        outputs: dict[str, list[torch.Tensor]],
+        **kwargs,
+    ):
+        super().postprocess(request_id, request_info, outputs, **kwargs)
+        if (
+            request_info.step_metadata.get(FINAL_PREFILL) is False
+            and request_info.graph_walk != self.DECODE_WALK
+        ):
+            # a prompt's earlier prefill (the history before a spoken turn): its sampled token is nobody's
+            outputs.pop(self.TOKEN_SIGNAL, None)
+            outputs.pop(self.FEEDBACK_SIGNAL, None)
 
     def prepare_inputs(
         self,
@@ -383,8 +413,7 @@ class SampledTokenDecoder(TokenStepNode, ARNodeSubmodule):
             # one token per row, read off the sampler's slot master in
             # `preprocess`; the routed signal is empty (or ignored) here
             return row
-        input_ids = inputs["text_inputs"][0]
-        return ARNodeInputs(input_seq_len=input_ids.shape[0], input_ids=input_ids)
+        return self._text_row(inputs)
 
     def get_input_sequence_len(
         self, graph_walk: str, fwd_info: CurrentForwardPassInfo,
@@ -546,6 +575,9 @@ class SampledTokenDecoder(TokenStepNode, ARNodeSubmodule):
         per_request_info: Mapping[int, CurrentForwardPassInfo] | None = None,
         **kwargs,
     ) -> SubmoduleStep:
+        for rid, inp in zip(request_ids, inputs, strict=True):
+            if inp.starts_at is not None and not inp.chunk_start:
+                self._skip_written(rid, inp)
         # A prompt's ids, media pads and sentinels included, feed the
         # repetition penalty, as in transformers and vLLM. A mixed step's
         # decode rows track their token through the sampler as usual.
@@ -580,6 +612,20 @@ class SampledTokenDecoder(TokenStepNode, ARNodeSubmodule):
                 self.POS_KEY: PositionStep(advance=advance),
             },
         )
+
+    def _skip_written(self, rid: str, inp: ARNodeInputs) -> None:
+        """Drop the row's first id when the request's position says it is written. The step is declared on the
+        engine thread after every step before it committed, and each TP rank declares the same steps, so this is
+        the one answer for all ranks. A repeated declaration finds nothing more written."""
+        written = self.node_resources[self.POS_KEY].position(rid=rid, label="main") - inp.starts_at
+        # (a transcript chunk that is prepared while the one before it is still running finds the position behind)
+        assert written <= 1, f"a prefill after a decode found its first id {written} ids already written"
+        if written > 0:
+            inp.input_ids = inp.input_ids[written:]
+            inp.input_seq_len -= written
+            inp.starts_at += written
+            if inp.chunk_total is not None:
+                inp.chunk_total -= written
 
     # ------------------------------------------------------------------
     # Forward

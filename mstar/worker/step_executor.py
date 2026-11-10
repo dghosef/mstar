@@ -835,15 +835,15 @@ class StepExecutor:
         self._rebuilds.record(batch_N.node_batch, {
             rid: self.request_state.get_fwd_info(rid, batch_N.partition) for rid in batch_N.node_batch.cached_rids
         })
-        # Until its last chunk a row's sampled token is not a real sample, so it
-        # keys no prefix and decides no stop (`_check_stops`).
-        engine.step_finished(
-            batch_N.node_batch, cpu_outputs, host_rows=host_rows,
-            skip_rids=batch_N.batch.incomplete_node_rids,
-        )
-        forgot = self._rebuilds.keep_samples(
-            batch_N.node_batch, cpu_outputs, host_rows, skip_rids=batch_N.batch.incomplete_node_rids,
-        )
+        # Until its last chunk, or after a prefill that is not the last before decode, a row's sampled
+        # token is not a real sample, so it keys no prefix, is kept for no rebuild and decides no stop
+        # (`_check_stops`).
+        unreal = batch_N.batch.incomplete_node_rids
+        if prefix_rows := engine.unreal_sample_rids(batch_N.node_batch):
+            unreal = unreal | prefix_rows
+        self._rebuilds.note_appended(batch_N.node_batch)
+        engine.step_finished(batch_N.node_batch, cpu_outputs, host_rows=host_rows, skip_rids=unreal)
+        forgot = self._rebuilds.keep_samples(batch_N.node_batch, cpu_outputs, host_rows, skip_rids=unreal)
         self.preemption.refuse_drops(forgot, batch_N.node_name)
         _pp_stage("prematerialize")
         runtime_stops, tokens = self._runtime_stop_column(batch_N, host_rows)

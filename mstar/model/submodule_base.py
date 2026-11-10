@@ -625,6 +625,11 @@ class ARNodeInputs(NodeInputs):
     # Tensor for single cache label, dict for multi-label
     custom_pos_ids: torch.Tensor | dict[str, torch.Tensor] | None = None
 
+    # The position the row's first id belongs at, for a row whose request may have written that id already (the
+    # stop token a decode loop speculated past). The step's `declare_step` drops what the position resource
+    # says is written (`SampledTokenDecoder.declare_step`); None for every other row.
+    starts_at: int | None = None
+
     @classmethod
     def collate(cls, inputs_list: list["ARNodeInputs"], stacking_method=StackingMethod.NONE):
         out = defaultdict(list)

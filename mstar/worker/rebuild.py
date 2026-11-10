@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import torch
 
 from mstar.communication.tensors import NameToTensorList
-from mstar.conductor.request_info import CurrentForwardPassInfo
+from mstar.conductor.request_info import APPENDS, CurrentForwardPassInfo
 from mstar.engine.chunking import ChunkRange
 from mstar.engine.resources import Rebuild, StepAllowance
 from mstar.engine.resources.kv.config import SpanKind, StreamLayout, rebuild_refusal
@@ -69,6 +69,8 @@ class KeptIds:
     sampled: array = field(default_factory=lambda: array("i"))
     used: int = 0
     laid_out: int = 0
+    # whether a step wrote ids after the prompt that neither the records nor the samples hold (`note_appended`)
+    appended: bool = False
 
 
 class QueuedCopy(NamedTuple):
@@ -341,6 +343,16 @@ class Rebuilds:
         self.forget(rid, node)
         return self._writes[rid][node]
 
+    def note_appended(self, node_batch: ExecutingBatch) -> None:
+        """Mark the requests whose step wrote ids past their prompt (`APPENDS`): their KV holds text no kept id
+        does, so a drop would rebuild it wrong, and `refusal` refuses them."""
+        kept = self._kept.get(node_batch.node_name)
+        if not kept:
+            return
+        for rid, info in node_batch.per_request_info_wrapped.items():
+            if rid in kept and info.step_metadata.get(APPENDS):
+                kept[rid].appended = True
+
     def record(
         self, node_batch: ExecutingBatch, cached_infos: Mapping[int, CurrentForwardPassInfo] = MappingProxyType({}),
     ) -> None:
@@ -540,6 +552,8 @@ class Rebuilds:
         kept = self._kept[node].get(rid)
         if kept is None:
             return f"it keeps no log on {node}"
+        if kept.appended:
+            return "its KV holds text written after its prompt, which a rebuild would not replay"
         if prefilling is None and len(kept.records) < len(kept.rows):
             return "its prefill hasn't run every step its layout lays out"
         if not all(record.ready() for record in (kept.records[:-1] if prefilling is not None else kept.records)):

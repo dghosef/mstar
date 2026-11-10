@@ -194,6 +194,7 @@ def _postprocess_worker(refuse, follower=False, **fields):
         # like the engine's, reads each stopped rid's info
         finalize_stopped_requests=lambda nb, rids: [nb.per_request_info[r] for r in rids],
         step_finished=lambda batch, outputs, **kwargs: None,
+        unreal_sample_rids=lambda batch: set(),
     )
 
     def store(rids, outputs, signals, **kwargs):

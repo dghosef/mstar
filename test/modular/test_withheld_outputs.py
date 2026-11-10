@@ -220,6 +220,7 @@ def test_the_worker_routes_no_tensor_for_a_withheld_output(tmp_path):
             materialize_publish=lambda batch, rids: None,
             after_output_copy=lambda batch: None,
             step_finished=lambda batch, outputs, **kwargs: None,
+            unreal_sample_rids=lambda batch: set(),
         )),
         request_state=request_state,
         streams=StreamBufferManager(request_state, tensor_manager, []),  # no streams

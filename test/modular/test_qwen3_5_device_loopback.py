@@ -34,7 +34,7 @@ def _sub(sampler):
 
 def _prepare(sub, walk, inputs, has_loopback=True):
     return LLMSubmodule.prepare_inputs(
-        sub, graph_walk=walk, fwd_info=None, inputs=inputs, has_loopback=has_loopback,
+        sub, graph_walk=walk, fwd_info=SimpleNamespace(step_metadata={}), inputs=inputs, has_loopback=has_loopback,
     )
 
 
