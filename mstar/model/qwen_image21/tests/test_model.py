@@ -146,3 +146,31 @@ def test_vae_pixels_are_the_image_processors_to_the_bit_and_layout():
         pil, height=64, width=96).unsqueeze(2)
     ours = vae_pixels(rgba)
     assert torch.equal(ours, ref) and ours.stride() == ref.stride()
+
+
+@pytest.mark.parametrize("layout", ["preprocessor_config", "processor_config"])
+def test_config_reads_the_pixel_bounds_from_either_processor_layout(tmp_path, layout):
+    """The base repo saves the image processor alone, the Turbo repo inside its whole processor."""
+    import json
+
+    def write(path, data):
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text(json.dumps(data))
+
+    text = {"model_type": "qwen3_vl_text", "vocab_size": 8, "hidden_size": 8, "intermediate_size": 8,
+            "num_hidden_layers": 2, "num_attention_heads": 1, "num_key_value_heads": 1, "head_dim": 8,
+            "rope_scaling": {"rope_type": "default", "mrope_section": [2, 1, 1], "mrope_interleaved": True}}
+    vision = {"depth": 1, "hidden_size": 8, "intermediate_size": 8, "num_heads": 1, "in_channels": 3, "patch_size": 16,
+              "temporal_patch_size": 2, "spatial_merge_size": 2, "num_position_embeddings": 4, "out_hidden_size": 8}
+    write("text_encoder/config.json", {"text_config": text, "vision_config": vision, "image_token_id": 5})
+    write("transformer/config.json", {"num_layers": 1})
+    write("vae/config.json", {"z_dim": 64})
+    write("model_index.json", {"sample_sigmas": [1.0, 0.5]})
+    write("scheduler/scheduler_config.json", {"shift": 1.0, "use_dynamic_shifting": False})
+    bounds = {"size": {"shortest_edge": 1234, "longest_edge": 99999}}
+    if layout == "preprocessor_config":
+        write("processor/preprocessor_config.json", bounds)
+    else:
+        write("processor/processor_config.json", {"image_processor": bounds})
+    config = QwenImage21Config.from_snapshot(tmp_path)
+    assert (config.min_pixels, config.max_pixels) == (1234, 99999) and config.sample_sigmas == (1.0, 0.5)

@@ -51,6 +51,14 @@ def _read(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
+def _image_processor_config(directory: Path) -> dict:
+    """The image processor's settings: ``preprocessor_config.json``, or the ``image_processor`` entry of
+    ``processor_config.json`` where a checkpoint saves its processor whole (the Turbo repo does)."""
+    if (directory / "preprocessor_config.json").exists():
+        return _read(directory / "preprocessor_config.json")
+    return _read(directory / "processor_config.json")["image_processor"]
+
+
 @dataclass(frozen=True)
 class QwenImage21TransformerConfig:
     """``transformer/config.json`` (``QwenImage21Transformer2DModel``)."""
@@ -127,7 +135,7 @@ class QwenImage21Config:
         text_cfg = _read(snapshot / "text_encoder" / "config.json")
         layers = int(text_cfg.get("text_config", text_cfg)["num_hidden_layers"])
         rope = text_cfg["text_config"].get("rope_scaling") or text_cfg["text_config"].get("rope_parameters") or {}
-        processor = _read(snapshot / "processor" / "preprocessor_config.json")
+        processor = _image_processor_config(snapshot / "processor")
         vae = _read(snapshot / "vae" / "config.json")
         sigmas = _read(snapshot / "model_index.json").get("sample_sigmas")
         scheduler_cfg = _read(snapshot / "scheduler" / "scheduler_config.json")
