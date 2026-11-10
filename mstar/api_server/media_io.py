@@ -760,12 +760,16 @@ def read_soundfile_capped(path: str, max_seconds: float = MAX_AUDIO_SECONDS) -> 
             frames += len(data)
             if frames > limit:
                 raise AudioTooLongError(max_seconds)
-            # a mono block is its own mean, and numpy's reduction over the
-            # length-1 axis costs ~10x the copy
-            parts.append(data[:, 0] if data.shape[1] == 1 else data.mean(axis=1))
+            parts.append(_mono(data))
     if unsized:
         return _read_unsized(path, max_seconds)
     return (np.concatenate(parts) if parts else np.zeros(0, dtype=np.float32)), rate
+
+
+def _mono(block: np.ndarray) -> np.ndarray:
+    """The channel mean of a (frames, channels) block. A mono block is its own
+    mean, and numpy's reduction over the length-1 axis costs ~10x the copy."""
+    return block[:, 0] if block.shape[1] == 1 else block.mean(axis=1)
 
 
 def _read_unsized(path: str, max_seconds: float) -> tuple[np.ndarray, int]:
@@ -787,8 +791,7 @@ def _read_unsized(path: str, max_seconds: float) -> tuple[np.ndarray, int]:
         return samples.data[0].numpy(), samples.sample_rate
     with sf.SoundFile(path) as f:
         rate = f.samplerate
-        parts = [data[:, 0] if data.shape[1] == 1 else data.mean(axis=1)
-                 for data in sound_file_blocks(f, max_seconds, "float32")]
+        parts = [_mono(data) for data in sound_file_blocks(f, max_seconds, "float32")]
     if sum(map(len, parts)) > max_seconds * rate:
         raise AudioTooLongError(max_seconds)
     if not parts:

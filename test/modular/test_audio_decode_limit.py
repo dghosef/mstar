@@ -554,12 +554,18 @@ def test_flac_without_a_length_holds_its_channels_one_block_at_a_time(tmp_path, 
     monkeypatch.setattr(media_limits, "ffmpeg_unavailable", lambda: "not installed")
     path = tmp_path / "wide.flac"
     _flac_without_length(path, 20, rate=48000, channels=8)
-    tracemalloc.start()
+    # measured from here, so tracing started earlier (PYTHONTRACEMALLOC) adds nothing
+    tracing = tracemalloc.is_tracing()
+    if not tracing:
+        tracemalloc.start()
+    tracemalloc.reset_peak()
     try:
+        before = tracemalloc.get_traced_memory()[0]
         audio, _ = media_io.read_soundfile_capped(str(path))
-        peak = tracemalloc.get_traced_memory()[1]
+        peak = tracemalloc.get_traced_memory()[1] - before
     finally:
-        tracemalloc.stop()
+        if not tracing:
+            tracemalloc.stop()
     # the mono parts and their concatenation are 2/8 of every channel
     assert peak < 8 * audio.nbytes / 2
 
