@@ -19,6 +19,12 @@ from typing import Any
 SYNTH_NODE = "kokoro"
 SYNTH_WALK = "synth"
 CHUNK_LOOP = "chunk_loop"
+# With `stream_in`: a CPU node that turns streamed text into the synth node's inputs, one sentence chunk
+# a stream item, and the walk that synthesizes the chunks as they arrive (one pass each, no loop).
+FRONT_NODE = "kokoro_front"
+FRONT_WALK = "speak_front"
+STREAM_SYNTH_WALK = "synth_stream"
+FRONT_PARTITION = "front"
 
 # Names of the tensors ``process_prompt`` produces for one request.
 PHONEME_IDS = "phoneme_ids"

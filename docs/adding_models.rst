@@ -1728,7 +1728,9 @@ methods are:
    it. A prefill whose row is empty runs no forward and completes its node. Text written after
    the prompt is keyed for prefix caching when its walk is in ``PrefixKeys.walks``. A step whose
    ``step_metadata`` sets ``APPENDS`` wrote text a rebuild would not replay, so a preemption
-   drop refuses its request (``Rebuilds.note_appended``).
+   drop refuses its request (``Rebuilds.note_appended``). A step a stream feeds that runs once
+   per chunk may be followed by more steps: the stream's final chunk then moves the plan on,
+   where a stop check's ``END_PARTITION`` still ends the partition.
    To also keep some of this step's outputs from being routed, return
    ``StopCheck(stops, withheld=(names...))``, for example a frame streamed alongside the
    EOS token: its consumer then never receives it, instead of finding and dropping it with

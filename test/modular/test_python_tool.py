@@ -20,6 +20,7 @@ from mstar.model.components.python_tool import (
     _unpack,
     run_python,
 )
+from mstar.model.keys import SPEAK_TEXT
 from mstar.model.qwen3_5.qwen3_5_model import Qwen3_5DenseModel
 
 CALLS = (
@@ -74,11 +75,11 @@ def _turn(tokenizer, text):
     return torch.tensor(tokenizer.encode(text, add_special_tokens=False) + [stop])
 
 
-def _routed(tokenizer, text):
+def _routed(tokenizer, text, speak=False):
     """The router's output for a turn, and the exit it names."""
     router = ToolRouterSubmodule(tokenizer)
     ids = _turn(tokenizer, text)
-    row = {"ids": ids, "start": 100}
+    row = {"ids": ids, "start": 100, "speak": speak}
     out = router.forward_batched("route", SimpleNamespace(request_ids=["r"]), rows=[row])["r"]
     return ids, out[TOOL_CALLS][0], router.check_stop("r", None, out).exit, out
 
@@ -95,6 +96,7 @@ def test_the_router_sends_a_turn_with_calls_to_the_tools_and_one_without_to_its_
     assert _unpack(calls) == {"tail": ids[-1].item(), "start": 100, "calls": [
         ["python", {"code": "print(6 * 7)"}], ["python", {"code": "print('b')"}]]}
     assert _routed(tokenizer, "The answer is 42.")[2] == ANSWER
+    assert SPEAK_TEXT not in _routed(tokenizer, CALLS, speak=True)[3]
     # the stop token is fed by the step after it: the turn's last id belongs at the prefill's end plus the rest
     row = ToolRouterSubmodule(tokenizer).prepare_inputs(
         "route", SimpleNamespace(step_metadata={}),
@@ -123,6 +125,18 @@ def test_a_call_to_a_tool_nobody_handles_is_an_error_the_model_reads_and_a_spent
     assert _ran(tokenizer, calls, ids, budget=5)[0].tolist() == [ids[-1].item()]
 
 
+SAY = '<tool_call>\n<function=speak>\n<parameter=text>\nIt is 42.\n</parameter>\n</function>\n</tool_call>'
+
+
+def test_a_turn_that_only_speaks_exits_through_speak_and_writes_its_text_to_the_speech_edge(tokenizer):
+    _, _, exit_name, out = _routed(tokenizer, SAY, speak=True)
+    assert exit_name == "speak" and _unpack(out[SPEAK_TEXT][0]) == {"text": "It is 42.", "voice": None}
+    # nothing on the speech edge when the request has no audio output, or the turn also calls a tool
+    for text, speak in ((SAY, False), (CALLS + SAY, True)):
+        _, _, exit_name, out = _routed(tokenizer, text, speak=speak)
+        assert exit_name == TOOLS_EXIT and SPEAK_TEXT not in out
+
+
 def _model():
     model = object.__new__(Qwen3_5DenseModel)
     model.config, model.media, model.tools = SimpleNamespace(max_position_embeddings=64), (), ("python",)
@@ -139,11 +153,19 @@ def test_a_model_with_the_tool_has_its_walk_its_cycle_and_a_reserve_that_is_the_
 
     plan = model.walk_plan("LLM", ["text"], ["text"], {"text_inputs": [object()]}, {})
     assert [step.walk for step in plan] == ["prefill_text", "decode", "route", "tool", "prefill_text"]
-    assert plan[2].exits == {"answer": 5, "tools": 3} and plan[4].exits == {"": 1}
+    assert plan[2].exits == {"answer": 5, "speak": 5, "tools": 3} and plan[4].exits == {"": 1}
     assert all(step.step_metadata.get(TOOLS) for step in (plan[0], plan[1], plan[4]))
     # the continuation writes text no rebuild replays, so its request is not dropped (`Rebuilds.note_appended`)
     assert plan[4].step_metadata[APPENDS] and not plan[0].step_metadata.get(APPENDS)
     assert model.get_loop_caps(max_output_tokens=100) == {"decode_loop": 101}
+
+    # speaking is a tool with no handler: the template offers it, and the plan tells the router a speech edge exists
+    model.tools = ("python", "speak")
+    assert model.walk_plan("LLM", ["text"], ["text", "audio"], {"text_inputs": [object()]}, {})[2].step_metadata[
+        "speak"] is True
+    assert model.walk_plan("LLM", ["text"], ["text"], {"text_inputs": [object()]}, {})[2].step_metadata[
+        "speak"] is False
+
 
     model.tools = ()
     assert "tool" not in model.get_graph_walk_graphs()
