@@ -676,11 +676,8 @@ def test_load_audio_resamples_a_flac_written_to_a_pipe(model, tmp_path):
     assert 3 * 16000 - _LAST_FLAC_FRAME / 3 - 1 <= samples <= 3 * 16000
 
 
-@pytest.mark.parametrize("seconds, refused", [(0.3, r"reference clip is 0\.\d\d s; it must be between"),
-                                               (75.0, r"longer than the 60 s limit")])
-def test_load_audio_bounds_a_flac_written_to_a_pipe_at_its_counted_length(
-    model, tmp_path, monkeypatch, seconds, refused,
-):
+@pytest.mark.parametrize("seconds, shown", [(0.3, r"0\.\d\d"), (75.0, r"60\.\d\d")])
+def test_load_audio_bounds_a_flac_written_to_a_pipe_at_its_counted_length(model, tmp_path, monkeypatch, seconds, shown):
     """Too short or too long is refused at the length counted; a long one is
     decoded only just past the 60 s limit."""
     from mstar.model import media_limits
@@ -695,7 +692,7 @@ def test_load_audio_bounds_a_flac_written_to_a_pipe_at_its_counted_length(
             yield block
 
     monkeypatch.setattr(media_limits, "sound_file_blocks", counting)
-    with pytest.raises(ValueError, match=refused):
+    with pytest.raises(ValueError, match=rf"reference clip is {shown} s; it must be between"):
         model.load_audio(str(path), "cpu")
     assert sum(blocks) <= 61 * 16000
 
