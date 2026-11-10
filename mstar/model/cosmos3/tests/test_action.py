@@ -250,7 +250,7 @@ def test_action_batched_one_matches_single() -> None:
         cache2.plan("main", [("main", und_len)], causal=True)
         model.prefill_und(s["input_ids"], s["text_mrope_ids"], "main")
         cache2.kv.promote()
-        cache2.plan("_cfg_batched", [("main", n_gen)], causal=False)
+        cache2.plan("main", [("main", n_gen)], causal=False)
         req = {
             "latents": latents, "action_latents": action_lat,
             "vision_timesteps": vts, "action_timesteps": ats,
@@ -265,7 +265,7 @@ def test_action_batched_one_matches_single() -> None:
         }
         with torch.no_grad():
             ((bv, ba),), = model.denoise_step_action_batched(
-                [req], "_cfg_batched", cache2.attn, with_cfg=False
+                [req], "main", cache2.attn, with_cfg=False
             )
         assert (dv - bv).abs().max().item() < 1e-5, mode
         assert (da - ba).abs().max().item() < 1e-5, mode

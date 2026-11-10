@@ -190,10 +190,19 @@ def test_denoise_steps_take_the_table(monkeypatch) -> None:
             latent, ts, cond["rotary"], uncond["rotary"], cond["vision_token_shapes"],
             cond["vision_noisy_frame_indexes"], cond["mse_gen_indexes"], CFG_BATCHED_LABEL, attn,
         ))
-        req = Cosmos3OmniTransformer.denoise_step_row(cond, latent, ts, cond["rotary"], uncond["rotary"])
+        req = Cosmos3OmniTransformer.denoise_step_row(cond, latent, ts, (cond["rotary"], uncond["rotary"]))
         ((x_c, x_u),) = _run(
             res, CFG_BATCHED_LABEL, both, lambda: model.denoise_step_batched([req], CFG_BATCHED_LABEL, attn),
         )
+        # a guidance-free row is the conditional branch's own step, at any batch size
+        one = Cosmos3OmniTransformer.denoise_step_row(cond, latent, ts, (cond["rotary"],))
+        singles = [
+            _run(res, COND_LABEL, [(COND_LABEL, n)] * k, lambda k=k: model.denoise_step_batched(
+                [one] * k, COND_LABEL, attn))
+            for k in (1, 2)
+        ]
+    for (got,) in (*singles[0], *singles[1]):
+        assert torch.allclose(got, v_c, atol=1e-5)
     for got in (b_c, x_c):
         assert torch.allclose(got, v_c, atol=1e-5)
     for got in (b_u, x_u):
@@ -278,15 +287,13 @@ def test_served_batched_paths_run_the_real_step() -> None:
         eager = _run(res, CFG_BATCHED_LABEL, groups(n), lambda: sub.forward_batched(
             C.VIDEO_GEN_WALK, ei, latents=latents,
         ))
-        sub._capture_layout = {tuple(latents["a"].shape): cond}
+        sub._capture_layout = {(tuple(latents["a"].shape), (COND_LABEL, UNCOND_LABEL)): cond}
         captured = _run(res, CFG_BATCHED_LABEL, groups(n), lambda: sub.forward_captured(
             C.VIDEO_GEN_WALK, ei,
             latents=torch.stack([latents[rid] for rid in rids]),
             vision_timesteps=torch.stack([torch.full((n,), t) for t in sched.timesteps.tolist()]),
-            cos_cond=torch.stack([cond["rotary"][0]] * 2),
-            sin_cond=torch.stack([cond["rotary"][1]] * 2),
-            cos_uncond=torch.stack([uncond["rotary"][0]] * 2),
-            sin_uncond=torch.stack([uncond["rotary"][1]] * 2),
+            cos=torch.stack([torch.stack([cond["rotary"][0], uncond["rotary"][0]])] * 2),
+            sin=torch.stack([torch.stack([cond["rotary"][1], uncond["rotary"][1]])] * 2),
             noisy_token_mask=torch.ones(2, n),
         ))
     for rid in rids:
@@ -299,9 +306,9 @@ def test_served_batched_paths_run_the_real_step() -> None:
 
 
 def test_captured_inputs_stack_the_tables(monkeypatch) -> None:
-    """The capture bucket's static inputs are each branch's cos and sin; a
-    request at the captured shape stages its statics' tables as they are, the
-    replay-side preprocess stacks them on the batch dim, and
+    """The capture bucket's static inputs are the branches' cos and sin
+    stacked; a request at the captured shape stages its statics' tables
+    stacked once, the replay-side preprocess stacks them on the batch dim, and
     ``forward_captured`` hands every row its own pair per branch."""
     monkeypatch.setenv("COSMOS3_GEN_CAPTURE_RES", "64x64")
     monkeypatch.setenv("COSMOS3_GEN_CAPTURE_VIDEO", "64x64x9")
@@ -312,8 +319,8 @@ def test_captured_inputs_stack_the_tables(monkeypatch) -> None:
     assert video_cfg.capture_graph_walk == C.VIDEO_GEN_WALK
     single = video_cfg.single_request_inputs.tensor_inputs
     assert set(single) == set(CAPTURED_GEN_INPUTS)
-    for key in ("cos_cond", "sin_cond", "cos_uncond", "sin_uncond"):
-        assert single[key].shape == (3 * STRIDE, cfg.head_dim) and single[key].dtype == torch.bfloat16
+    for key in ("cos", "sin"):
+        assert single[key].shape == (2, 3 * STRIDE, cfg.head_dim) and single[key].dtype == torch.bfloat16
 
     sched = StubSampler(torch.tensor([900.0, 500.0]))
     sub._solver_state = ()
@@ -330,17 +337,21 @@ def test_captured_inputs_stack_the_tables(monkeypatch) -> None:
         fwd = SimpleNamespace(
             request_id=rid, rid_handle=rid, random_seed=0, dynamic_loop_iter_counts={"video_gen_loop": 1},
         )
+        want = [tuple(table.clone() for table in s["rotary"]) for s in (cond, uncond)]
         inp = sub.prepare_inputs(C.VIDEO_GEN_WALK, fwd, {"latents": [x]})
         t = inp.tensor_inputs
-        assert t["cos_cond"] is cond["rotary"][0] and t["sin_cond"] is cond["rotary"][1]
-        assert t["cos_uncond"] is uncond["rotary"][0] and t["sin_uncond"] is uncond["rotary"][1]
+        assert _equal((t["cos"][0], t["sin"][0]), want[0])
+        assert _equal((t["cos"][1], t["sin"][1]), want[1])
+        # the statics' own tables are views of the stack: one copy per request
+        assert all(table.untyped_storage().data_ptr() == t["cos"].untyped_storage().data_ptr()
+                   for table in (cond["rotary"][0], uncond["rotary"][0]))
         inputs.append(inp)
-    assert not torch.equal(inputs[0].tensor_inputs["cos_uncond"], inputs[1].tensor_inputs["cos_uncond"])
+    assert not torch.equal(inputs[0].tensor_inputs["cos"][1], inputs[1].tensor_inputs["cos"][1])
 
     packed = sub.preprocess(C.VIDEO_GEN_WALK, SimpleNamespace(captured=True), inputs)
     assert set(packed) == set(CAPTURED_GEN_INPUTS)
-    for key in ("cos_cond", "sin_cond", "cos_uncond", "sin_uncond"):
-        assert packed[key].shape == (2, 3 * STRIDE, cfg.head_dim)
+    for key in ("cos", "sin"):
+        assert packed[key].shape == (2, 2, 3 * STRIDE, cfg.head_dim)
         assert torch.equal(packed[key], torch.stack([inp.tensor_inputs[key] for inp in inputs]))
 
     calls = []
@@ -351,11 +362,11 @@ def test_captured_inputs_stack_the_tables(monkeypatch) -> None:
     ei = SimpleNamespace(request_ids=rids, step=None, resources={ATTN: "paged"})
     sub.forward_captured(C.VIDEO_GEN_WALK, ei, **packed)
     for i, req in enumerate(calls[-1]):
-        assert _equal(req["rotary_cond"], (packed["cos_cond"][i], packed["sin_cond"][i]))
-        assert _equal(req["rotary_uncond"], (packed["cos_uncond"][i], packed["sin_uncond"][i]))
+        for b, table in enumerate(req["rotaries"]):
+            assert _equal(table, (packed["cos"][i, b], packed["sin"][i, b]))
     one = {key: value[:1] for key, value in packed.items()}
     sub.forward_captured(C.VIDEO_GEN_WALK, SimpleNamespace(request_ids=rids[:1], step=None,
                                                            resources={ATTN: "paged"}), **one)
     args = calls[-1]
-    assert _equal(args[2], (one["cos_cond"][0], one["sin_cond"][0]))
-    assert _equal(args[3], (one["cos_uncond"][0], one["sin_uncond"][0]))
+    assert _equal(args[2], (one["cos"][0, 0], one["sin"][0, 0]))
+    assert _equal(args[3], (one["cos"][0, 1], one["sin"][0, 1]))

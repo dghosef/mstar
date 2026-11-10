@@ -16,7 +16,7 @@ import torch
 from mstar.engine.windowing import WindowSchedule
 from mstar.model.cosmos3 import constants as C
 from mstar.model.cosmos3.config import Cosmos3Config
-from mstar.model.cosmos3.submodules import Cosmos3DiTSubmodule
+from mstar.model.cosmos3.submodules import CFG_BATCHED_LABEL, COND_LABEL, UNCOND_LABEL, Cosmos3DiTSubmodule, GenStepInfo
 from mstar.model.cosmos3.tests.stubs import StubSampler
 from mstar.model.cosmos3.tests.test_rotary_table import stand_in_rotary
 from mstar.model.submodule_base import ARNodeInputs
@@ -30,12 +30,18 @@ def _fake_transformer(cfg):
     )
 
 
-def _dit_with_buckets(monkeypatch):
+BOTH, ONE = (COND_LABEL, UNCOND_LABEL), (COND_LABEL,)
+
+
+def _dit_with_buckets(monkeypatch, prefill=False, **config):
     monkeypatch.setenv("COSMOS3_GEN_CAPTURE_RES", "64x64")
     monkeypatch.setenv("COSMOS3_GEN_CAPTURE_VIDEO", "64x64x9")
-    monkeypatch.setenv("COSMOS3_DISABLE_PREFILL_ACCELERATOR_GRAPH", "1")
+    if prefill:
+        monkeypatch.delenv("COSMOS3_DISABLE_PREFILL_ACCELERATOR_GRAPH", raising=False)
+    else:
+        monkeypatch.setenv("COSMOS3_DISABLE_PREFILL_ACCELERATOR_GRAPH", "1")
     monkeypatch.delenv("COSMOS3_DISABLE_ACCELERATOR_GRAPH", raising=False)
-    cfg = Cosmos3Config(compile_denoise=False)
+    cfg = Cosmos3Config(compile_denoise=False, **config)
     sub = Cosmos3DiTSubmodule(transformer=_fake_transformer(cfg), config=cfg, scheduler=None)
     configs = sub.get_accelerator_graph_configs("cpu")
     return sub, configs
@@ -46,16 +52,16 @@ def test_video_capture_buckets_and_keys(monkeypatch) -> None:
     ch = sub.config.latent_channel
     image_shape, video_shape = (1, ch, 1, 4, 4), (1, ch, 3, 4, 4)  # 9 frames -> 3 latent frames
     assert [c.capture_graph_walk for c in configs] == [C.IMAGE_GEN_WALK, C.VIDEO_GEN_WALK]
-    assert [c.additional_key_info for c in configs] == [image_shape, video_shape]
+    assert [c.additional_key_info for c in configs] == [(image_shape, BOTH), (video_shape, BOTH)]
     assert configs[1].replay_graph_walks == [C.VIDEO_GEN_WALK, C.VIDEO_GEN_AR_WALK]
     video_inputs = configs[1].single_request_inputs.tensor_inputs
     assert video_inputs["noisy_token_mask"].shape == (12,) and video_inputs["noisy_token_mask"].all()
     assert video_inputs["vision_timesteps"].shape == (12,) and video_inputs["latents"].shape == video_shape
-    assert set(sub._capture_layout) == {image_shape, video_shape}
-    assert len(sub._capture_layout[video_shape]["vision_noisy_frame_indexes"][0]) == 3  # all frames noisy
+    assert set(sub._capture_layout) == {(image_shape, BOTH), (video_shape, BOTH)}
+    assert len(sub._capture_layout[video_shape, BOTH]["vision_noisy_frame_indexes"][0]) == 3  # all frames noisy
 
     def st(shape, kv=None, cfg=True):
-        d = {"latent_shape": shape, "uncond": {} if cfg else None}
+        d = {"latent_shape": shape, "uncond": {} if cfg else None, "gs": 6.0 if cfg else 1.0}
         if kv is not None:
             d.update(ar_schedule=WindowSchedule(6, 3), ar_kv_mode=kv)
         return d
@@ -66,15 +72,45 @@ def test_video_capture_buckets_and_keys(monkeypatch) -> None:
                        ("odd", st((1, ch, 5, 4, 4)))):
         sub.request_state(rid).add_all(**state)
     info = lambda *rids: {r: None for r in rids}  # noqa: E731
-    assert sub.cg_key_info(C.IMAGE_GEN_WALK, info("img")) == image_shape
-    assert sub.cg_key_info(C.VIDEO_GEN_WALK, info("vid")) == video_shape
-    assert sub.cg_key_info(C.VIDEO_GEN_AR_WALK, info("ch")) == video_shape
+    assert sub.cg_key_info(C.IMAGE_GEN_WALK, info("img")) == (image_shape, BOTH)
+    assert sub.cg_key_info(C.VIDEO_GEN_WALK, info("vid")) == (video_shape, BOTH)
+    assert sub.cg_key_info(C.VIDEO_GEN_AR_WALK, info("ch")) == (video_shape, BOTH)
     assert sub.cg_key_info(C.VIDEO_GEN_AR_WALK, info("kv")) is None
-    assert sub.cg_key_info(C.VIDEO_GEN_WALK, info("nocfg")) is None
+    assert sub.cg_key_info(C.VIDEO_GEN_WALK, info("nocfg")) is None  # no bucket for one branch here
     assert sub.cg_key_info(C.VIDEO_GEN_WALK, info("odd")) is None
     assert sub.cg_key_info(C.VIDEO_GEN_AR_WALK, info("ch", "kv")) is None  # mixed batch
-    assert sub.cg_key_info(C.VIDEO_GEN_AR_WALK, info("ch", "ch")) == video_shape
-    assert sub.cg_key_info(C.PREFILL_WALK, info("vid")) is True
+    assert sub.cg_key_info(C.VIDEO_GEN_AR_WALK, info("ch", "ch")) == (video_shape, BOTH)
+    assert sub.cg_key_info(C.PREFILL_WALK, info("vid")) == BOTH
+    assert sub.cg_key_info(C.PREFILL_WALK, info("vid", "nocfg")) is None  # mixed branches
+
+
+def test_a_guidance_free_deployment_captures_the_one_branch_step(monkeypatch) -> None:
+    """A distilled checkpoint serves guidance 1: its buckets, its prefill
+    bucket and its replay key hold the conditional branch alone, and a
+    two-branch request finds no bucket."""
+    sub, configs = _dit_with_buckets(monkeypatch, prefill=True, distilled_sigmas=(1.0, 0.9375, 0.8333, 0.625))
+    shape = (1, sub.config.latent_channel, 1, 4, 4)
+    image, prefill = configs[0], configs[-1]
+    assert image.additional_key_info == (shape, ONE) and prefill.additional_key_info == ONE
+    assert image.total_tokens_multiplier == 1
+    assert image.single_request_inputs.tensor_inputs["cos"].shape[0] == 1
+    assert prefill.make_node_input(32).kwargs == {"seq_lens": {COND_LABEL: 32}}
+    for rid, gs in (("free", 1.0), ("guided", 6.0)):
+        sub.request_state(rid).add_all(latent_shape=shape, uncond=None if gs == 1.0 else {}, gs=gs)
+    assert sub.cg_key_info(C.IMAGE_GEN_WALK, {"free": None}) == (shape, ONE)
+    assert sub.cg_key_info(C.IMAGE_GEN_WALK, {"guided": None}) is None
+    assert sub.cg_key_info(C.IMAGE_GEN_WALK, {"free": None, "guided": None}) is None  # a mixed batch
+    # the replay's step is one plain plan on the conditional label, not a combined one
+    info = GenStepInfo(labels=ONE, cfg_active=False, capture_key=(shape, ONE))
+    step = sub.declare_step(C.IMAGE_GEN_WALK, ["free"], [ARNodeInputs(input_seq_len=4, resource_step_info=info)],
+                            slot_lease=object())
+    assert [seg.label for seg in step.segments] == [COND_LABEL] and step.cg_key_info == (shape, ONE)
+    assert CFG_BATCHED_LABEL not in repr(step)  # wherever the declaration keeps its combined labels
+    # ...and so is an action batch of one-branch rows, which ran a one-label combined plan
+    sub.node_resources = {}
+    row = ARNodeInputs(input_seq_len=4, resource_step_info=GenStepInfo(labels=ONE, cfg_active=False, capture_key=None))
+    step = sub.declare_step(C.ACTION_GEN_WALK, ["a", "b"], [row, row])
+    assert {seg.label for seg in step.segments} == {COND_LABEL} and CFG_BATCHED_LABEL not in repr(step)
 
 
 def test_windowed_captured_inputs_carry_the_window_layout(monkeypatch) -> None:
@@ -103,7 +139,7 @@ def test_windowed_captured_inputs_carry_the_window_layout(monkeypatch) -> None:
     t = ni.tensor_inputs
     assert torch.equal(t["noisy_token_mask"], torch.tensor([0.0] * 4 + [1.0] * 8))
     assert t["vision_timesteps"].shape == (12,) and torch.all(t["vision_timesteps"] == 500.0)  # window 1, step 1
-    assert ni.resource_step_info.capture_key == (1, ch, 3, 4, 4)
+    assert ni.resource_step_info.capture_key == ((1, ch, 3, 4, 4), BOTH)
     # The per-frame mask is cached alongside, keyed on the window's statics.
     assert torch.equal(sub._noisy_masks(st, "cpu")[1].flatten(), torch.tensor([0.0, 1.0, 1.0]))
     # A kv request at the same shape stages no captured inputs (it never leases).

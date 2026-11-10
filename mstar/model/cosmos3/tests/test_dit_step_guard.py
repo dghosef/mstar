@@ -57,7 +57,7 @@ def _kv_rollout(dit, rid):
         ar_steps=STEPS, ar_iters_per_window=STEPS + 1,
         ar_total_iters=WINDOWS * (STEPS + 1), ar_kv_mode=True,
         ar_retention={}, ar_tokens_per_unit=4,
-        cond={"num_vision_tokens": 4}, uncond=None, latent_shape=(1, 2, 1, 2, 2),
+        cond={"num_vision_tokens": 4}, uncond=None, gs=1.0, latent_shape=(1, 2, 1, 2, 2),
     )
     return st
 

@@ -108,13 +108,13 @@ def test_warmup_compiles_runs_the_real_step_and_a_served_row_reuses_its_compile(
     [(requests, label, results)] = calls
     latent_size = sub._latent_shape(64, 64, 13)
     assert len(requests) == 2 and label == CFG_BATCHED_LABEL and requests[0]["latents"].shape == latent_size
-    assert 4 * requests[0]["rotary_cond"][0].shape[0] == cfg.hidden_size
+    assert 4 * requests[0]["rotaries"][0][0].shape[0] == cfg.hidden_size
     assert [v.shape for branches in results for v in branches] == [latent_size] * 4
 
     static = sub._build_static(list(range(5)), 32, 64, 5, 24.0, False, "cpu")
     latents = torch.randn(sub._latent_shape(32, 64, 5))
     timesteps = torch.full((static["num_noisy_vision_tokens"],), 500.0)
-    row = model.denoise_step_row(static, latents, timesteps, static["rotary"], static["rotary"])
+    row = model.denoise_step_row(static, latents, timesteps, (static["rotary"], static["rotary"]))
     n = static["num_vision_tokens"]
     res.plan(CFG_BATCHED_LABEL, [(COND_LABEL, n), (UNCOND_LABEL, n)], causal=False)
     with torch.no_grad(), torch.compiler.set_stance("fail_on_recompile"):

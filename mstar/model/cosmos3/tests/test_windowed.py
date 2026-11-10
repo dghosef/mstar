@@ -284,7 +284,7 @@ def test_windowed_kv_prefill_state_and_pacing(monkeypatch) -> None:
     }
     fwd = SimpleNamespace(request_id="r", rid_handle="r")
     ni = sub._prepare_windowed_prefill(fwd, md, list(range(7)), list(range(9)), 64, 64, 24.0, 6.0, 4, "cpu")
-    assert ni.kwargs["cfg"] and ni.kwargs["seq_lens"] == {COND_LABEL: 7, UNCOND_LABEL: 9}
+    assert ni.kwargs["seq_lens"] == {COND_LABEL: 7, UNCOND_LABEL: 9}
     st = sub.request_states["r"]
     assert st["ar_kv_mode"] and st["ar_iters_per_window"] == 5
     assert st["ar_total_iters"] == 15
@@ -518,7 +518,7 @@ def test_windowed_can_batch_and_batched_boundary(monkeypatch) -> None:
     out = sub.forward_batched(C.VIDEO_GEN_AR_WALK, ei, latents=lat)
     # Each request's dict carries its statics' tables per branch.
     for req, rid in zip(batched[-1], ("a", "b"), strict=True):
-        assert req["rotary_cond"] is st_rotary[rid][0] and req["rotary_uncond"] is st_rotary[rid][1]
+        assert req["rotaries"][0] is st_rotary[rid][0] and req["rotaries"][1] is st_rotary[rid][1]
     assert "window_latents" in out["a"] and torch.equal(out["a"]["window_latents"][0], lat["a"] * 0.5)
     assert out["a"]["latents"][0].shape == latent_shape  # staged next window
     assert "window_latents" not in out["b"]

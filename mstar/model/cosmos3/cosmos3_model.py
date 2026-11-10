@@ -126,6 +126,7 @@ from mstar.model.cosmos3.submodules import (
     Cosmos3VAEEncoderSubmodule,
     Cosmos3VisionEncoderSubmodule,
     frame_tokens,
+    labels_for,
     latent_frames,
     sound_frames,
 )
@@ -1062,8 +1063,7 @@ class Cosmos3Model(Model):
             if p.get("generate_sound"):
                 scratch += sound_frames(p, config)[1]
         layouts = {UNCOND_LABEL: LabelLayout()}
-        branches = [(COND_LABEL, cond_ids), (UNCOND_LABEL, uncond_ids)]
-        for label, ids in branches if float(p["guidance_scale"]) != 1.0 else branches[:1]:
+        for label, ids in zip(labels_for(float(p["guidance_scale"])), (cond_ids, uncond_ids), strict=False):
             layouts[label] = LabelLayout(
                 spans=(Span("ids", prefill, len(ids), len(ids), "text_inputs"), *windows), scratch=scratch,
                 retention=schedule.retention(per_frame, len(ids)) if windows else None,

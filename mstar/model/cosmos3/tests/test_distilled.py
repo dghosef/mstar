@@ -17,7 +17,7 @@ import torch
 
 from mstar.model.cosmos3.config import Cosmos3Config
 from mstar.model.cosmos3.cosmos3_model import Cosmos3Model
-from mstar.model.cosmos3.submodules import IMAGE_GEN_LOOP, Cosmos3DiTSubmodule
+from mstar.model.cosmos3.submodules import COND_LABEL, IMAGE_GEN_LOOP, Cosmos3DiTSubmodule
 
 SIGMAS = [1.0, 0.9375, 0.8333333333333334, 0.625]
 
@@ -171,7 +171,7 @@ def test_distilled_i2v_loop_repins_anchor(tmp_path, monkeypatch) -> None:
     for step in range(4):
         counts["video_gen_loop"] = step
         ni = sub.prepare_inputs("video_gen", fwd, inputs)
-        assert ni is not None and not ni.resource_step_info.cfg
+        assert ni is not None and ni.resource_step_info.labels == (COND_LABEL,)
         out = sub.forward("video_gen", ei, **sub.preprocess("video_gen", ei, [ni]))
         lat = out["latents"][0]
         assert torch.equal(lat[:, :, 0], anchor[:, :, 0].to(lat.dtype)), f"anchor drifted at step {step}"

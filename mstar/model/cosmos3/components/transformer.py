@@ -1324,23 +1324,23 @@ class Cosmos3OmniTransformer(nn.Module):
         layout: dict,
         latents: torch.Tensor,
         vision_timesteps: torch.Tensor,
-        rotary_cond: tuple[torch.Tensor, torch.Tensor],
-        rotary_uncond: tuple[torch.Tensor, torch.Tensor],
+        rotaries: tuple[tuple[torch.Tensor, torch.Tensor], ...],
         noisy_token_mask: torch.Tensor | None = None,
         sound_latents: torch.Tensor | None = None,
         sound_timesteps: torch.Tensor | None = None,
     ) -> dict:
         """One request of ``denoise_step_batched``, the only place its rows are
         built: a change to what the step reads lands here and in every caller's
-        arguments, the startup warmup's included. ``layout`` is a request's
+        arguments, the startup warmup's included. ``rotaries`` is the request's
+        ``(cos, sin)`` table per guidance branch: one when guidance is off, two
+        (conditional, then unconditional) otherwise. ``layout`` is a request's
         statics or a capture bucket's layout, and carries the sound band's token
         layout when ``sound_latents`` is given. ``noisy_token_mask`` is a captured
         graph's clean/noisy layout as data (see ``denoise_step_batched_cfg``)."""
         row = {
             "latents": latents,
             "vision_timesteps": vision_timesteps,
-            "rotary_cond": rotary_cond,
-            "rotary_uncond": rotary_uncond,
+            "rotaries": rotaries,
             "vision_token_shapes": layout["vision_token_shapes"],
             "vision_noisy_frame_indexes": layout["vision_noisy_frame_indexes"],
             "vision_mse_loss_indexes": layout["mse_gen_indexes"],
@@ -1362,16 +1362,20 @@ class Cosmos3OmniTransformer(nn.Module):
 
         Each request carries its own latents, timestep, rotary tables (which
         differ per request, and per guidance branch) and token layout. Every
-        request contributes a conditional and an unconditional sequence, packed
-        as ``[cond r0 | cond r1 | ... | uncond r0 | uncond r1 | ...]`` to match
-        the order the handle's batched plan lays out its entries. The layers run
-        once over the whole pack; the cache routes each piece to its own request
-        and guidance label. Returns one ``(cond, uncond)`` pair per request, in
-        request order — each branch a velocity, or a ``(video, sound)`` pair for
-        a request with a sound band.
+        request contributes one sequence per guidance branch, packed branch
+        major as ``[cond r0 | cond r1 | ... | uncond r0 | uncond r1 | ...]``
+        (the conditional block alone when guidance is off) to match the order
+        the handle's batched plan lays out its entries. All requests carry the
+        same number of branches. The layers run once over the whole pack; the
+        cache routes each piece to its own request and guidance label. Returns
+        one tuple per request, in request order: its branches' results, each a
+        velocity, or a ``(video, sound)`` pair for a request with a sound band.
 
         Each ``requests`` entry comes from ``denoise_step_row``."""
-        gen_seqs, shapes, cos_cond, sin_cond, cos_uncond, sin_uncond = [], [], [], [], [], []
+        branches = len(requests[0]["rotaries"])
+        gen_seqs, shapes = [], []
+        cos_rows = [[] for _ in range(branches)]
+        sin_rows = [[] for _ in range(branches)]
         for req in requests:
             packed, original_latent_shapes = self._patchify_and_pack_latents([req["latents"]])
             packed = self.proj_in(packed)
@@ -1396,23 +1400,19 @@ class Cosmos3OmniTransformer(nn.Module):
                 gen_seq = torch.cat([gen_seq, sound_seq], dim=0)
             gen_seqs.append(gen_seq)
             shapes.append(original_latent_shapes)
-            cc, sc = req["rotary_cond"]
-            cu, su = req["rotary_uncond"]
-            cos_cond.append(cc)
-            sin_cond.append(sc)
-            cos_uncond.append(cu)
-            sin_uncond.append(su)
+            for b, (cos, sin) in enumerate(req["rotaries"]):
+                cos_rows[b].append(cos)
+                sin_rows[b].append(sin)
 
-        # Conditional block first (all requests), then unconditional block.
-        all_gen = torch.cat(gen_seqs + gen_seqs, dim=0)
-        cos = torch.cat(cos_cond + cos_uncond, dim=0)
-        sin = torch.cat(sin_cond + sin_uncond, dim=0)
+        # One block per branch, each holding every request.
+        all_gen = torch.cat(gen_seqs * branches, dim=0)
+        cos = torch.cat([c for block in cos_rows for c in block], dim=0)
+        sin = torch.cat([c for block in sin_rows for c in block], dim=0)
         self._gen_attend.bind_step(attn=attn, label=label)
         gen_out = self.gen_layers_batched(all_gen, cos, sin)
 
         sizes = [g.shape[0] for g in gen_seqs]
         total = sum(sizes)
-        cond_out, uncond_out = gen_out[:total], gen_out[total:]
 
         def _decode(out, req, original_latent_shapes):
             preds_packed = self.proj_out(out[req["vision_mse_loss_indexes"]])
@@ -1433,10 +1433,11 @@ class Cosmos3OmniTransformer(nn.Module):
         results, off = [], 0
         for i, req in enumerate(requests):
             n = sizes[i]
-            cond_v = _decode(cond_out[off:off + n], req, shapes[i])
-            uncond_v = _decode(uncond_out[off:off + n], req, shapes[i])
+            results.append(tuple(
+                _decode(gen_out[b * total + off:b * total + off + n], req, shapes[i])
+                for b in range(branches)
+            ))
             off += n
-            results.append((cond_v, uncond_v))
         return results
 
     def denoise_step_action_batched(

@@ -509,10 +509,10 @@ def _load():
     return _SETUP_CACHE["base"]
 
 
-def _scenario(num_frames):
+def _scenario(num_frames, gs=GS):
     """Per-mode context: video-aware token ids, shared initial latents, and the
-    fused-pipeline latents the cache-once path must reproduce."""
-    key = f"frames{num_frames}"
+    fused-pipeline latents the cache-once path must reproduce (at guidance ``gs``)."""
+    key = f"frames{num_frames}" if gs == GS else f"frames{num_frames}-gs{gs}"
     if key in _SETUP_CACHE:
         return _SETUP_CACHE[key]
     base = _load()
@@ -532,7 +532,7 @@ def _scenario(num_frames):
     init = torch.randn((1, 48, lat_t, H // 16, W // 16), generator=gen, device=device, dtype=LATENT_DTYPE)
     lat_fused = mpipe(
         prompt=PROMPT, negative_prompt="", num_frames=num_frames, height=H, width=W,
-        num_inference_steps=STEPS, guidance_scale=GS, latents=init.clone(), decode=False,
+        num_inference_steps=STEPS, guidance_scale=gs, latents=init.clone(), decode=False,
     )
     ctx = dict(cond=cond_ids, uncond=uncond_ids, init=init, lat_fused=lat_fused, num_frames=num_frames, **base)
     _SETUP_CACHE[key] = ctx
@@ -1057,10 +1057,11 @@ def test_windowed_kv_dense_matches_paged() -> None:
 
 
 @torch.no_grad()
-def _run_accelerator_graph_denoise(ctx):
+def _run_accelerator_graph_denoise(ctx, gs=GS):
     """Capture the image denoise step and run the whole loop through the real
-    CudaGraphRunner (one captured forward per step covering both guidance
-    branches), returning the final latents."""
+    CudaGraphRunner (one captured forward per step covering the guidance
+    branches), returning the final latents. The deployment's default guidance
+    is ``gs``, which is what picks the branches the capture holds."""
     from mstar.conductor.request_info import CurrentForwardPassInfo
     from mstar.distributed.communication import CommGroup, JointGroups
     from mstar.engine.accelerator_graph_runner import AcceleratorGraphRunner
@@ -1072,8 +1073,9 @@ def _run_accelerator_graph_denoise(ctx):
     dit.gen_capture_resolutions = ((H, W),)
     rid = "cgr0"
     resources = _engine_resources(model, [rid], device, dtype, max_num_pages=256)
+    dit.config.guidance_scale = gs
     md = {"height": H, "width": W, "num_frames": 1, "fps": 24.0,
-          "guidance_scale": GS, "num_inference_steps": STEPS}
+          "guidance_scale": gs, "num_inference_steps": STEPS}
     fwd = CurrentForwardPassInfo(
         request_id=rid, rid_handle=rid, graph_walk="prefill", fwd_index=0,
         random_seed=SEED, max_tokens=0, step_metadata=md,
@@ -1122,27 +1124,33 @@ def _run_accelerator_graph_denoise(ctx):
 
 @torch.no_grad()
 def test_accelerator_graph_matches_eager() -> None:
-    """The captured-graph denoise step is the served path's accelerator: both
+    """The captured-graph denoise step is the served path's accelerator: the
     guidance branches run in one captured forward (~2x faster than the eager
-    step). Each captured forward matches eager to within bf16 (the first step
-    differs by ~one ULP); the multistep solver amplifies that into a small latent
-    spread, but the decoded image is unchanged — so gate the decoded image against
-    the fused pipeline, the same bar the eager engine path meets."""
-    ctx = _scenario(1)
-    if ctx is None:
-        print("  (skipped cuda-graph parity: needs COSMOS3_NANO_DIR + CUDA)")
-        return
-    try:
-        lat_graph = _run_accelerator_graph_denoise(ctx)
-    except Exception as exc:  # noqa: BLE001
-        print(f"  (skipped cuda-graph parity: FlashInfer/capture unavailable: {exc})")
-        return
-    img_fused = ctx["mpipe"]._decode(ctx["lat_fused"]).squeeze().float().cpu()
-    img_graph = ctx["mpipe"]._decode(lat_graph.reshape(ctx["lat_fused"].shape)).squeeze().float().cpu()
-    mse = (img_fused - img_graph).pow(2).mean().item()
-    psnr = float("inf") if mse == 0 else -10 * math.log10(mse)
-    assert psnr >= 25, f"cuda-graph denoise PSNR {psnr:.2f} < 25 (MSE {mse:.3e})"
-    print(f"  cuda-graph denoise vs fused PSNR = {psnr:.2f} dB")
+    step for two). Each captured forward matches eager to within bf16 (the first
+    step differs by ~one ULP); the multistep solver amplifies that into a small
+    latent spread, but the decoded image is unchanged — so gate the decoded image
+    against the fused pipeline, the same bar the eager engine path meets. Both
+    regimes: guided (two branches) and guidance-free (one, a distilled
+    checkpoint's)."""
+    for gs in (GS, 1.0):
+        ctx = _scenario(1, gs)
+        if ctx is None:
+            print("  (skipped cuda-graph parity: needs COSMOS3_NANO_DIR + CUDA)")
+            return
+        default_gs = ctx["dit"].config.guidance_scale
+        try:
+            lat_graph = _run_accelerator_graph_denoise(ctx, gs)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  (skipped cuda-graph parity: FlashInfer/capture unavailable: {exc})")
+            return
+        finally:
+            ctx["dit"].config.guidance_scale = default_gs
+        img_fused = ctx["mpipe"]._decode(ctx["lat_fused"]).squeeze().float().cpu()
+        img_graph = ctx["mpipe"]._decode(lat_graph.reshape(ctx["lat_fused"].shape)).squeeze().float().cpu()
+        mse = (img_fused - img_graph).pow(2).mean().item()
+        psnr = float("inf") if mse == 0 else -10 * math.log10(mse)
+        assert psnr >= 25, f"cuda-graph denoise (guidance {gs}) PSNR {psnr:.2f} < 25 (MSE {mse:.3e})"
+        print(f"  cuda-graph denoise (guidance {gs}) vs fused PSNR = {psnr:.2f} dB")
 
 
 def _main() -> None:
