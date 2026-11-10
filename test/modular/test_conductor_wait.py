@@ -43,7 +43,9 @@ def _lora_op_due(at):
     from mstar.utils.ipc_format import UnloadLoraAdapter
 
     ops = LoraAdapterOps(SimpleNamespace(runtime_update_timeout_s=FAR_S, adapters={}), ["w"], lambda *_: None)
-    ops._pending["op"] = _PendingOp(UnloadLoraAdapter(op_id="op", lora_name="a"), waiting={"w"}, deadline=at)
+    ops._pending["op"] = _PendingOp(
+        UnloadLoraAdapter(op_id="op", lora_name="a", lora_digest="aa" * 32), waiting={"w"}, deadline=at,
+    )
     return ops
 
 
