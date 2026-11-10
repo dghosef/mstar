@@ -603,9 +603,11 @@ def test_the_api_server_pins_digests_and_narrows_targets_in_the_config_it_hands_
 
 def _fake_hub(monkeypatch, repos: dict[str, dict[str, bytes]]) -> list[str]:
     """Point huggingface_hub at a local server holding ``repos`` (repo id -> file -> bytes)
-    at one commit; returns the files it is asked for. A repo named ``*/torn`` announces
-    one byte more than it sends, as a download cut short does."""
+    at one commit; returns the files it is asked for. A file given as a number is answered
+    with that status. A repo named ``*/torn`` announces one byte more than it sends, as a
+    download cut short does."""
     import hashlib
+    import types
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     import huggingface_hub.constants as hf
@@ -622,9 +624,11 @@ def _fake_hub(monkeypatch, repos: dict[str, dict[str, bytes]]) -> list[str]:
             files = repos.get("/".join(parts[1:3])) if len(parts) == 6 and parts[3] == "resolve" else None
             data = None if files is None else files.get(parts[5])
             asked.append(self.path if files is None else parts[5])
-            self.send_response(404 if data is None else 200)
+            self.send_response(data if isinstance(data, int) else 404 if data is None else 200)
             self.send_header("X-Repo-Commit", "c0ffee" * 6 + "c0ff")
-            if data is None:
+            if isinstance(data, int):
+                data = b""
+            elif data is None:
                 self.send_header("X-Error-Code", "RepoNotFound" if files is None else "EntryNotFound")
                 data = b""
             else:
@@ -643,14 +647,17 @@ def _fake_hub(monkeypatch, repos: dict[str, dict[str, bytes]]) -> list[str]:
     monkeypatch.setattr(hf, "ENDPOINT", f"http://127.0.0.1:{server.server_port}")
     monkeypatch.setattr(hf, "HUGGINGFACE_CO_URL_TEMPLATE", hf.ENDPOINT + "/{repo_id}/resolve/{revision}/{filename}")
     monkeypatch.setattr(hf, "HF_HUB_OFFLINE", False)
+    # the hub client's backoff on an error answer, not waited out
+    monkeypatch.setattr("huggingface_hub.utils._http.time", types.SimpleNamespace(sleep=lambda _: None))
     return asked
 
 
 def test_a_configured_adapter_may_be_a_hugging_face_repo_id(adapters, tmp_path, monkeypatch):
     """A repo id is fetched once, by the API server, through the HF cache (offline here, so
     from the cache alone), and the config every worker builds from names its snapshot's
-    file. Online, only the adapter's weights and its config are fetched, never the repo's
-    other files. A repo that cannot be fetched fails startup, named."""
+    file. Online, only the adapter's weights and its configs are fetched, never the repo's
+    other files. A repo that cannot be fetched fails startup, named, as does a config
+    that may be there but could not be fetched (its alpha would be lost)."""
     import os
     import shutil
 
@@ -661,11 +668,15 @@ def test_a_configured_adapter_may_be_a_hugging_face_repo_id(adapters, tmp_path, 
     from mstar.model.base import declared_resources, serving_resources
 
     _, paths = adapters
-    repo = tmp_path / "hub" / "models--org--sql"
-    (repo / "snapshots" / "c0ffee").mkdir(parents=True)
+    repo, commit = tmp_path / "hub" / "models--org--sql", "c0ffee" * 6 + "c0ff"
+    (repo / "snapshots" / commit).mkdir(parents=True)
     (repo / "refs").mkdir()
-    (repo / "refs" / "main").write_text("c0ffee")
-    shutil.copy(paths["a3"], repo / "snapshots" / "c0ffee" / ADAPTER_WEIGHTS_FILE)
+    (repo / "refs" / "main").write_text(commit)
+    shutil.copy(paths["a3"], repo / "snapshots" / commit / ADAPTER_WEIGHTS_FILE)
+    # an earlier online fetch found neither config in the repo
+    (repo / ".no_exist" / commit).mkdir(parents=True)
+    for config in ("adapter_config.json", "config.json"):
+        (repo / ".no_exist" / commit / config).touch()
     monkeypatch.setattr(hf, "HF_HUB_CACHE", str(tmp_path / "hub"))
     monkeypatch.setattr(hf, "HF_HUB_OFFLINE", True)
     model = make_model(get_node_resources=lambda: [make_spec({})])
@@ -675,13 +686,16 @@ def test_a_configured_adapter_may_be_a_hugging_face_repo_id(adapters, tmp_path, 
         return config, resolve_lora_adapters(lora_spec(declared_resources(model, config)), config)
 
     config, digests = resolve({"sql": "org/sql"})
-    fetched = {"sql": str(repo / "snapshots" / "c0ffee" / ADAPTER_WEIGHTS_FILE)}
+    fetched = {"sql": str(repo / "snapshots" / commit / ADAPTER_WEIGHTS_FILE)}
     assert config["resources"]["lora"]["adapters"] == fetched
     assert digests == {"sql": adapter_digest(read_lora_file(paths["a3"]))}
     (worker,) = serving_resources(model, config)
     assert worker.adapters == fetched and worker.adapter_digests == digests
     with pytest.raises(ValueError, match=r"'gone': the Hugging Face repo 'org/gone' is not in the HF cache"):
         resolve({"sql": "org/sql", "gone": "org/gone"})
+    (repo / ".no_exist" / commit / "config.json").unlink()  # not known to be absent
+    with pytest.raises(ValueError, match=r"'sql': .*config.json could not be fetched"):
+        resolve({"sql": "org/sql"})
 
     with open(paths["a1"], "rb") as f:
         weights = f.read()
@@ -690,15 +704,17 @@ def test_a_configured_adapter_may_be_a_hugging_face_repo_id(adapters, tmp_path, 
                      "model.safetensors": bytes(1 << 16)},
         "org/bin": {"adapter_model.bin": weights},
         "org/torn": {ADAPTER_WEIGHTS_FILE: weights},
+        "org/down": {ADAPTER_WEIGHTS_FILE: weights, "adapter_config.json": 503},
     })
     config, digests = resolve({"chat": "org/chat"})
     path = config["resources"]["lora"]["adapters"]["chat"]
     assert os.path.isfile(os.path.join(os.path.dirname(path), "adapter_config.json"))
-    assert set(asked) == {ADAPTER_WEIGHTS_FILE, "adapter_config.json"}
+    assert set(asked) == {ADAPTER_WEIGHTS_FILE, "adapter_config.json", "config.json"}
     with pytest.raises(ValueError) as err:
-        resolve({"bin": "org/bin", "gone": "org/gone", "torn": "org/torn"})
+        resolve({"bin": "org/bin", "gone": "org/gone", "torn": "org/torn", "down": "org/down"})
     assert "'bin': the Hugging Face repo 'org/bin' has no adapter_model.safetensors" in str(err.value)
     assert "'gone': " in str(err.value) and "'torn': " in str(err.value)
+    assert "'down': the Hugging Face repo 'org/down''s adapter_config.json could not be fetched" in str(err.value)
 
 
 def test_a_lora_deployment_still_has_its_kv_pools_checked_against_its_cap(adapters):
