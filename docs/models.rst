@@ -66,6 +66,10 @@ Registry keys live in ``mstar/model/registry.py`` (``MODEL_REGISTRY`` / ``HF_MOD
      - TTS (82M, not autoregressive): misaki G2P + PL-BERT prosody + iSTFTNet
        decoder, 54 bundled voices and voice blends, sentence-chunked streaming,
        batched across requests.
+   * - ``voice_agent``
+     - ``openai/whisper-large-v3-turbo`` + ``Qwen/Qwen3.5-9B`` + ``hexgrad/Kokoro-82M``
+     - A ``MultiModel`` (``mstar.model.multimodel``): speech in, a reply that may run Python, start agents or speak,
+       and audio out, in one server (``configs/voice_agent.yaml``, client in ``examples/voice_agent``).
    * - ``voxcpm2``
      - ``openbmb/VoxCPM2``
      - Tokenizer-free TTS: MiniCPM-4 base and residual LMs emit continuous latent
@@ -755,7 +759,7 @@ one (for example Whisper and Qwen3.5), each on workers of its own: a member's pa
 ``<member>.<partition>``, members whose walk, node, loop, signal or resource names clash are refused, a request's plan
 is its first member's, and every output is turned into bytes by the member that emits its signal
 (``Model.postprocessor``). A ``/generate`` chunk's ``metadata["signal"]`` names the output it came from, so a client
-tells a transcript from a reply. It is a library, not a registered model yet.
+tells a transcript from a reply. It is registered as ``voice_agent`` (``configs/voice_agent.yaml``).
 
 **A Python tool the reply can call.** ``model_kwargs: {tools: [python]}`` in the serving config
 (``configs/qwen3_5_0.8b_tool.yaml``) lets a reply run Python: the chat template is given a ``python(code)`` tool, a

@@ -89,7 +89,7 @@ def _turn(tokenizer, text):
 
 def _routed(tokenizer, text, speak=False):
     """The router's output for a turn, and the exit it names."""
-    router = ToolRouterSubmodule(tokenizer)
+    router = ToolRouterSubmodule(tokenizer, QwenToolFormat())
     ids = _turn(tokenizer, text)
     row = {"ids": ids, "start": 100, "speak": speak, "spawn_agent": False, "child": False, "thinking": False}
     out = router.forward_batched("route", SimpleNamespace(request_ids=["r"]), rows=[row])["r"]
@@ -97,7 +97,7 @@ def _routed(tokenizer, text, speak=False):
 
 
 def _ran(tokenizer, calls, ids, budget=200, handlers=None):
-    tool = ToolSubmodule(tokenizer, handlers or TOOL_HANDLERS)
+    tool = ToolSubmodule(tokenizer, handlers or TOOL_HANDLERS, QwenToolFormat())
     row = {"payload": _unpack(calls), "enable_thinking": False, "budget": budget, "answers": None}
     return tool.forward_batched("tool", SimpleNamespace(request_ids=["r"]), rows=[row])["r"][TOOL_TEXT]
 
@@ -110,7 +110,7 @@ def test_the_router_sends_a_turn_with_calls_to_the_tools_and_one_without_to_its_
     assert _routed(tokenizer, "The answer is 42.")[2] == ANSWER
     assert SPEAK_TEXT not in _routed(tokenizer, CALLS, speak=True)[3]
     # the stop token is fed by the step after it: the turn's last id belongs at the prefill's end plus the rest
-    row = ToolRouterSubmodule(tokenizer).prepare_inputs(
+    row = ToolRouterSubmodule(tokenizer, QwenToolFormat()).prepare_inputs(
         "route", SimpleNamespace(step_metadata={}),
         {"new_token": [ids[:1]], TURN_IDS: [ids[1:]], PREFILL_END: [torch.tensor([95])]})
     assert row.kwargs["start"] == 95 + ids.numel() - 1
@@ -158,7 +158,8 @@ ASKS = (
 
 
 def _spawner(tokenizer, **flags):
-    router = ToolRouterSubmodule(tokenizer, render_agent=lambda task, thinking: [len(task), int(thinking)])
+    router = ToolRouterSubmodule(
+        tokenizer, QwenToolFormat(), render_agent=lambda task, thinking: [len(task), int(thinking)])
     ids = _turn(tokenizer, ASKS)
     row = {"ids": ids, "start": 100, "speak": False, "spawn_agent": True, "child": False, "thinking": False, **flags}
     out = router.forward_batched("route", SimpleNamespace(request_ids=["r"]), rows=[row])["r"]
@@ -177,7 +178,7 @@ def test_a_turn_that_only_spawns_agents_persists_a_prompt_per_task_and_the_spawn
 
 
 def test_an_agent_that_answers_persists_its_final_turn_for_its_parent_and_a_parent_does_not(tokenizer):
-    router = ToolRouterSubmodule(tokenizer)
+    router = ToolRouterSubmodule(tokenizer, QwenToolFormat())
     ids = _turn(tokenizer, "The sum is 55.")
     for child in (True, False):
         row = {"ids": ids, "start": 100, "speak": False, "spawn_agent": False, "child": child, "thinking": False}
@@ -188,7 +189,7 @@ def test_an_agent_that_answers_persists_its_final_turn_for_its_parent_and_a_pare
 
 
 def test_the_join_frames_each_agents_answer_as_a_tool_response_in_task_order_with_errors_in_place(tokenizer):
-    tool = ToolSubmodule(tokenizer, TOOL_HANDLERS)
+    tool = ToolSubmodule(tokenizer, TOOL_HANDLERS, QwenToolFormat())
     _, calls, *_ = _routed(tokenizer, ASKS)
     metadata = {"agents": 3, "agent_errors": {"1": "Error: the agent timed out"}, "enable_thinking": False}
     answers = [_turn(tokenizer, "55"), _turn(tokenizer, "210")]
@@ -235,7 +236,7 @@ def test_a_model_with_the_tool_has_its_walk_its_cycle_and_a_reserve_that_is_the_
         "speak"] is False
 
     # a deployment that spawns: the join and a second continuation follow, an agent's plan has neither
-    model.tools, model.spawn = ("python", "spawn_agent"), True
+    model.tools = ("python", "spawn_agent")
     plan = model.walk_plan("LLM", ["text"], ["text"], {"text_inputs": [object()]}, {})
     assert [step.walk for step in plan] == [
         "prefill_text", "decode", "route", "tool", "prefill_text", "join", "prefill_text"]
@@ -245,7 +246,7 @@ def test_a_model_with_the_tool_has_its_walk_its_cycle_and_a_reserve_that_is_the_
     assert len(child) == 5 and not child[2].spawns and child[2].step_metadata["agent_child"] is True
     assert {"agent_0", "spawned", "agent_answer"} <= {
         e.name for e in model.get_graph_walk_graphs()["route"].outputs}
-    model.tools, model.spawn = ("python",), False
+    model.tools = ("python",)
 
     model.tools = ()
     assert "tool" not in model.get_graph_walk_graphs()
@@ -269,3 +270,26 @@ def test_the_tool_deployment_places_the_tool_node_on_a_rank_of_its_own():
     config["node_groups"] = config["node_groups"][:1]
     with pytest.raises(ValueError, match="needs the nodes"):
         _model().validate_config_yaml(config, str(path))
+
+
+def test_a_tools_model_whose_decode_node_cannot_keep_the_budget_is_refused_at_load():
+    model = _model()
+    model._submodule_cache = {}
+    model._create_submodule = lambda *args: object()
+    with pytest.raises(ValueError, match="not a SampledTokenDecoder"):
+        model.get_submodule("LLM")
+
+
+def test_a_spoken_turns_stream_and_suffix_steps_carry_what_the_node_reads_from_them():
+    from mstar.conductor.request_info import FINAL_PREFILL
+    from mstar.model.components.text_glue import STREAM_BASE, STREAM_WALK, TRANSCRIPT_STREAM
+
+    model = _model()
+    plan = model.walk_plan("LLM", ["text"], ["text"], {"text_inputs": [object()]}, {TRANSCRIPT_STREAM: 40})
+    chunks = next(s for s in plan if s.walk == STREAM_WALK)
+    suffix = [s for s in plan if s.walk == "prefill_text"][1]
+    # a chunk's sampled token is nobody's (else the chain keys an id the KV never writes)
+    assert chunks.step_metadata[FINAL_PREFILL] is False
+    # the glue reads the open prompt's length from the chunks' step; the suffix's carries the key too, which marks
+    # its row as a spoken turn's (its start comes from where the chunks ended, `_TRANSCRIPT_END`)
+    assert chunks.step_metadata[STREAM_BASE] == 40 and STREAM_BASE in suffix.step_metadata
