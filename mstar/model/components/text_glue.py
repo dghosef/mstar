@@ -5,7 +5,8 @@
 incrementally, and the text into the consumer's token ids (`GlueSubmodule`). The two models have
 different vocabularies, so ids cannot cross as they are.
 
-Each pass takes a chunk of the producer's ids and emits the consumer's ids for the words it can
+Each pass takes a chunk of the producer's ids and emits the consumer's ids (with the KV slot they start at: the
+prompt's length and the ids before them) for the words it can
 finish, holding the last word back (a BPE merge does not cross a space, so words tokenize apart;
 a split word would not), and a partial UTF-8 character with it. A pass with nothing finished emits
 no ids: the consumer's node completes it without a forward (an empty row writes nothing). The last
@@ -34,7 +35,11 @@ GLUE_TICK = "stream_tick"
 # a request's streamed prefill, the template's suffix it persists, and the marker that its prompt is spoken
 STREAM_WALK = "prefill_stream"
 SUFFIX = "suffix"
+# a spoken prompt's request kwarg: the length of the prompt before its transcript
 TRANSCRIPT_STREAM = "transcript_stream"
+# the streamed walk's step metadata: where its first id belongs (the open prompt's length), so every chunk can say
+# where it lands without the KV's length, which lags a chunk still on the GPU
+STREAM_BASE = "stream_base"
 TRANSCRIPT_RESERVE = "transcript_reserve"
 # the most ids a transcript puts into the consumer's KV (and the reserve it asks for)
 MAX_TRANSCRIPT_TOKENS = 2048
@@ -74,6 +79,7 @@ class GlueSubmodule(NodeSubmodule):
         ids = torch.cat([t.reshape(-1) for t in chunk]).tolist() if chunk else []
         return ARNodeInputs(input_seq_len=0, kwargs={
             "rid": fwd_info.rid_handle, "ids": ids, "final": is_final_stream_chunk,
+            "base": int(fwd_info.step_metadata[STREAM_BASE]),
         })
 
     def preprocess(
@@ -113,6 +119,11 @@ class GlueSubmodule(NodeSubmodule):
     ) -> dict[str, NameToTensorList]:
         out = {}
         for rid, row in zip(engine_inputs.request_ids, rows, strict=True):
+            before = self.request_state(row["rid"]).kwargs.get("ids_sent", 0)
             ids = self._next_ids(row["rid"], row["ids"], row["final"])
-            out[rid] = {"text_inputs": [torch.tensor(ids, dtype=torch.long).to(self._out_device)]}
+            # the ids, and the position the first belongs at (the prompt's length and the ids before it)
+            out[rid] = {"text_inputs": [
+                torch.tensor(ids, dtype=torch.long).to(self._out_device),
+                torch.tensor([row["base"] + before], dtype=torch.long).to(self._out_device),
+            ]}
         return out

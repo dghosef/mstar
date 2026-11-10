@@ -30,12 +30,17 @@ def tokenizer():
     return AutoTokenizer.from_pretrained(found[0], local_files_only=True)
 
 
+def _render(model, tokenizer, *args, **kwargs):
+    """The whole conversation as the model renders it without thinking: history as it was generated."""
+    return tokenizer.apply_chat_template(*args, **kwargs, **model._exact_history(False))
+
+
 def _hear(glue, chunks):
     """What the node emits for each pass; the last of ``chunks`` is the stream's end."""
     engine = SimpleNamespace(request_ids=["r"])
     out = []
     for i, ids in enumerate(chunks):
-        row = {"rid": "r", "ids": ids, "final": i == len(chunks) - 1}
+        row = {"rid": "r", "ids": ids, "final": i == len(chunks) - 1, "base": 7}
         out.append(glue.forward_batched("prefill_stream", engine, rows=[row])["r"]["text_inputs"][0].tolist())
     return out
 
@@ -59,6 +64,18 @@ def test_a_pass_with_nothing_finished_emits_nothing_and_an_empty_transcript_stil
     assert _hear(GlueSubmodule(tokenizer, tokenizer), [[]]) == [[]]
 
 
+def test_each_chunk_says_where_it_lands_whatever_the_kv_holds_by_then(tokenizer):
+    glue = GlueSubmodule(tokenizer, tokenizer)
+    engine = SimpleNamespace(request_ids=["r"])
+    ids = tokenizer.encode(" one two three four five six", add_special_tokens=False)
+    sent = 0
+    for i, chunk in enumerate([ids[:3], ids[3:], []]):
+        row = {"rid": "r", "ids": chunk, "final": i == 2, "base": 40}
+        got, start = glue.forward_batched("prefill_stream", engine, rows=[row])["r"]["text_inputs"]
+        assert start.tolist() == [40 + sent]       # the prompt's length and the ids the chunks before it wrote
+        sent += got.numel()
+
+
 def test_a_transcript_past_the_cap_is_cut(tokenizer):
     glue = GlueSubmodule(tokenizer, tokenizer)
     chunk = tokenizer.encode(" word " * 100, add_special_tokens=False)
@@ -75,6 +92,21 @@ def _qwen(tokenizer):
     return model
 
 
+def test_the_next_turn_starts_with_the_previous_prompt_and_its_reply_unless_thinking(tokenizer):
+    """Without thinking the history is rendered as it was generated, so the KV chain and the reply's state snapshot
+    are hit through the reply; with thinking the template's own rendering is kept."""
+    model = _qwen(tokenizer)
+    first = [{"role": "user", "content": "Hi"}]
+    for thinking in (False, True):
+        one = model.process_prompt("", [], ["text"], history=first, enable_thinking=thinking)
+        prompt = one.new_input_tensors["text_inputs"][0].tolist()
+        reply = tokenizer.encode("Hello!<|im_end|>\n", add_special_tokens=False)
+        two = model.process_prompt(
+            "And?", [TEXT], ["text"], history=[*first, {"role": "assistant", "content": "Hello!"}],
+            enable_thinking=thinking).new_input_tensors["text_inputs"][0].tolist()
+        assert (two[:len(prompt) + len(reply)] == prompt + reply) is (not thinking)
+
+
 @pytest.mark.parametrize("stream", ["transcript", "voice"])
 def test_a_spoken_turn_is_the_template_cut_at_an_open_user_turn(tokenizer, stream):
     model = _qwen(tokenizer)
@@ -87,13 +119,32 @@ def test_a_spoken_turn_is_the_template_cut_at_an_open_user_turn(tokenizer, strea
         enable_thinking=False,
     )
     prefix, suffix = out.new_input_tensors["text_inputs"][0], out.new_input_tensors[SUFFIX][0]
-    whole = tokenizer.apply_chat_template(
+    whole = _render(model, tokenizer,
         [{"role": "system", "content": "You are brief."}, {"role": "user", "content": "Hi"},
          {"role": "assistant", "content": "Hello!"}, {"role": "user", "content": "What time is it?"}],
         tokenize=False, add_generation_prompt=True, enable_thinking=False)
     ids = torch.cat([prefix, torch.tensor(tokenizer.encode("What time is it?", add_special_tokens=False)), suffix])
     assert tokenizer.decode(ids) == whole
     assert out.metadata[TRANSCRIPT_STREAM] and out.metadata[TRANSCRIPT_RESERVE] >= MAX_TRANSCRIPT_TOKENS
+
+
+def test_a_typed_turn_with_its_history_is_the_chat_template_of_the_whole_conversation(tokenizer):
+    model = _qwen(tokenizer)
+    history = [{"role": "system", "content": "You are brief."}, {"role": "user", "content": "Hi"},
+               {"role": "assistant", "content": "Hello!"}]
+    out = model.process_prompt("What time is it?", [TEXT], ["text"], history=history, enable_thinking=False)
+    whole = _render(model, tokenizer,
+        [*history, {"role": "user", "content": "What time is it?"}],
+        tokenize=False, add_generation_prompt=True, enable_thinking=False)
+    assert tokenizer.decode(out.new_input_tensors["text_inputs"][0]) == whole
+    # a conversation that ends on a tool's answer needs no turn of its own
+    ending = [*history, {"role": "user", "content": "6 * 7?"},
+              {"role": "assistant", "content": "<tool_call>x</tool_call>"}, {"role": "tool", "content": "42"}]
+    out = model.process_prompt(None, [], ["text"], history=ending, enable_thinking=False)
+    assert tokenizer.decode(out.new_input_tensors["text_inputs"][0]) == _render(model, tokenizer,
+        ending, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+    with pytest.raises(ValueError, match="history must be"):
+        model.process_prompt("x", [TEXT], ["text"], history=[{"role": "robot", "content": "x"}])
 
 
 def test_a_spoken_turns_plan_prefills_the_history_the_stream_then_the_suffix(tokenizer):
@@ -133,3 +184,17 @@ def test_whispers_control_tokens_never_reach_the_transcript(whisper_tokenizer, t
     model = object.__new__(WhisperModel)
     model.tokenizer, model.stream_out, model.config = whisper_tokenizer, True, WhisperModelConfig()
     assert model.text_output().detokenizer.to_bytes(ids) == b" hello there"
+
+
+def test_only_a_deployment_that_serves_the_agent_loop_renders_history_as_it_was_generated():
+    template = "x" + Qwen3_5DenseModel._THINK_ONLY_AFTER_QUERY + "y"
+    model = object.__new__(Qwen3_5DenseModel)
+    model.tokenizer = SimpleNamespace(chat_template=template)
+    model.tools = model.stream_in = ()
+    assert model._exact_history(False) == {}         # a plain chat keeps the template's own rendering
+    model.tools = ("python",)
+    assert model._exact_history(True) == {}          # thinking keeps it too
+    assert "or true" in model._exact_history(False)["chat_template"]
+    model.tokenizer = SimpleNamespace(chat_template="a template that changed")
+    with pytest.raises(ValueError, match="earlier turns"):
+        model._exact_history(False)

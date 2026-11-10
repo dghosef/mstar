@@ -170,14 +170,25 @@ def test_a_prefill_after_a_decode_that_finds_its_request_off_by_more_than_the_sp
         llm.declare_step("prefill_text", ["r"], [inp])
 
 
-def test_a_transcript_chunk_prepared_while_the_one_before_it_runs_is_not_taken_for_a_written_id():
+def test_a_spoken_turns_suffix_starts_where_its_transcript_ended_and_no_stop_token_is_looked_for_in_its_rows():
+    from mstar.model.components.text_glue import STREAM_BASE
+
     state = _State()
     llm = _decoder(state)
-    state.tokens += [1, 2, 3]                       # the previous chunk (9 ids) has not committed: the row is ahead
-    inp = llm.prepare_inputs(
-        "prefill_stream", _info("prefill_stream"), {"text_inputs": [torch.tensor([7, 8]), torch.tensor([12])]})
-    llm.declare_step("prefill_stream", ["r"], [inp])
-    assert inp.input_ids.tolist() == [7, 8] and inp.starts_at == 12
+    info = _info("prefill_stream", **{STREAM_BASE: 40})
+    suffix_info = _info("prefill_text", **{STREAM_BASE: 40})
+    for ids, start in (([7, 8], 40), ([], 42), ([9], 42)):          # the chunks, an empty one among them
+        row = llm.prepare_inputs("prefill_stream", info, {"text_inputs": [torch.tensor(ids), torch.tensor([start])]})
+        # the position counter is in another unit than the start (a media prompt): the row is left as it is
+        llm.declare_step("prefill_stream", ["r"], [row], per_request_info={"r": info})
+        assert row.input_ids.tolist() == ids and row.starts_at == start
+    # the suffix row brings no start: it follows the last chunk, however often it is prepared
+    for _ in range(2):
+        suffix = llm.prepare_inputs("prefill_text", suffix_info, {"text_inputs": [torch.tensor([5, 6])]})
+        assert suffix.starts_at == 43
+    # a prompt that is not spoken has no transcript end
+    assert llm.prepare_inputs(
+        "prefill_text", _info("prefill_text"), {"text_inputs": [torch.tensor([5])]}).starts_at is None
 
 
 def test_a_prefill_that_is_not_the_last_before_decode_routes_no_token_with_or_without_tools():
@@ -234,7 +245,7 @@ def test_the_rows_of_a_prefill_that_is_not_the_last_before_decode_have_no_real_s
         runtime_check=True, prefill_walks=frozenset({"prefill_text"}), last_prefill_flag=FINAL_PREFILL)
     eng = make_engine(_submodules={"LLM": make_mgmt(SimpleNamespace(token_stop=stop))})
     infos = {1: _info("prefill_text", **{FINAL_PREFILL: False}), 2: _info("prefill_text", **{FINAL_PREFILL: True}),
-             3: _info("decode"), 4: _info("prefill_text")}
+             3: _info("decode"), 4: _info("prefill_text"), 5: _info("prefill_stream", **{FINAL_PREFILL: False})}
 
     def batch(rids, walk, request_walks=None):
         return SimpleNamespace(
@@ -245,3 +256,5 @@ def test_the_rows_of_a_prefill_that_is_not_the_last_before_decode_have_no_real_s
     assert eng.unreal_sample_rids(batch([1, 2], "prefill_text")) == {1}
     assert eng.unreal_sample_rids(batch([1, 3, 4], "mixed", request_walks={1: "prefill_text"})) == {1}
     assert eng.unreal_sample_rids(batch([3], "decode")) == set()
+    # a transcript chunk's token is nobody's either: keying it would put an id in the chain the KV never writes
+    assert eng.unreal_sample_rids(batch([5], "prefill_stream")) == {5}
