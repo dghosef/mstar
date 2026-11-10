@@ -7,7 +7,7 @@ import torch
 from jinja2 import TemplateError
 from transformers import AutoTokenizer
 
-from mstar.conductor.request_info import APPENDS, FINAL_PREFILL, WalkStep
+from mstar.conductor.request_info import AGENT_CHILD, APPENDS, FINAL_PREFILL, WalkStep
 from mstar.engine.resources.attn.config import AttentionConfig, AttentionSpec
 from mstar.engine.resources.attn.ragged.config import (
     RaggedAttentionConfig,
@@ -26,7 +26,10 @@ from mstar.graph.base import GraphNode, GraphSection, TensorPointerInfo
 from mstar.model.base import KVLabel, ProcessPromptOutput, TensorAndMetadata
 from mstar.model.components.mrope import layout_extent
 from mstar.model.components.python_tool import (
+    ANSWER_TOKENS,
+    MAX_AGENTS,
     ROUTER_NODE,
+    SPAWN,
     SPEAK,
     TOOL_HANDLERS,
     TOOL_NODE,
@@ -90,8 +93,9 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
     # member): the model then has a streamed prefill walk, and `process_prompt` cuts the template at an open user turn
     # the name of the client stream whose text a prompt waits for (`MultiModel`'s `Link.stream`), or ""
     stream_in = ""
+    spawn = False
     OPEN_TURN = "<|fim_pad|>"
-    INTERNAL_KWARGS = (*MultimodalDecoderModel.INTERNAL_KWARGS, TRANSCRIPT_STREAM, TRANSCRIPT_RESERVE)
+    INTERNAL_KWARGS = (*MultimodalDecoderModel.INTERNAL_KWARGS, TRANSCRIPT_STREAM, TRANSCRIPT_RESERVE, AGENT_CHILD)
     METADATA_FILES = (
         "config.json",
         "preprocessor_config.json",
@@ -118,6 +122,8 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
         # (`mstar.model.components.python_tool`), on a ``Router`` and a ``Tool`` node the deployment places.
         # Code the model wrote runs on the host, so serve ``python`` only where callers are trusted.
         self.tools = check_tools(tools)
+        # whether a reply may start agents (`spawn_agent`): child requests of this model, one per task
+        self.spawn = SPAWN in self.tools
         self.stream_in = stream_in
         self.config = Qwen3_5Config.from_hf(self.local_dir)
         # None on a text-only checkpoint (`_create_submodule` then refuses a
@@ -451,6 +457,16 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
             {"pixel_values": video.pixel_values}, [int(group.prod()) // merge ** 2] * t, [group] * t,
         )
 
+    def render_agent(self, task: str, enable_thinking: bool = True) -> list[int]:
+        """The prompt ids of an agent that does ``task``: the chat template, with the same tools as its parent's
+        (so the system and tools block is the one the prefix cache holds for it)."""
+        text = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": task}], tokenize=False, add_generation_prompt=True,
+            enable_thinking=enable_thinking,
+            tools=[TOOL_SCHEMAS[name] for name in self.tools] or None,
+        )
+        return list(encode_ids(self.tokenizer, text))
+
     def kv_layout(self, layout: dict, length: int, advance: int | None = None) -> dict:
         # an image spans max(h', w') MRoPE positions, not its t * h' * w' tokens
         if not layout.get("grid"):  # a text prompt, the only kind a text-only checkpoint takes
@@ -469,7 +485,7 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
         if self.tools:
             walks = {
                 **media_walks(self.config.max_position_embeddings, self.encoders, text=self.TEXT_PROMPTS, tools=True),
-                **tool_walks(),
+                **tool_walks(spawn=self.spawn),
             }
         if self.stream_in:
             # the transcript's chunks, each one a prefill pass that appends to the KV; it samples nothing
@@ -495,8 +511,10 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
             # steps, its tool text), and each step runs under what is left of it, so the reserve is the
             # budget and the step speculated past a stop.
             caps = {self.DECODE_LOOP: self.get_max_output_tokens(**model_kwargs) + 1}
-        # a spoken prompt's transcript and suffix are written after its prompt span too
-        return {loop: cap + int(model_kwargs.get(TRANSCRIPT_RESERVE, 0)) for loop, cap in caps.items()}
+        # a spoken prompt's transcript and suffix are written after its prompt span too, and so are the answers
+        # of the agents a reply may start
+        agents = MAX_AGENTS * (ANSWER_TOKENS + 32) if self.spawn and not model_kwargs.get(AGENT_CHILD) else 0
+        return {loop: cap + int(model_kwargs.get(TRANSCRIPT_RESERVE, 0)) + agents for loop, cap in caps.items()}
 
     def walk_plan(
         self,
@@ -527,6 +545,7 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
         return tool_plan(
             leading, "decode", PREFILL_TEXT, bool(model_kwargs.get("enable_thinking", True)),
             speak=SPEAK in self.tools and "audio" in output_modalities,
+            spawn=self.spawn and not model_kwargs.get(AGENT_CHILD), child=bool(model_kwargs.get(AGENT_CHILD)),
         )
 
     def process_prompt(
@@ -557,7 +576,7 @@ class Qwen3_5DenseModel(MultimodalDecoderModel):
         )
 
         if node_name == ROUTER_NODE and self.tools:
-            return ToolRouterSubmodule(self.tokenizer, device)
+            return ToolRouterSubmodule(self.tokenizer, device, render_agent=self.render_agent)
         if node_name == TOOL_NODE and self.tools:
             handlers = {name: TOOL_HANDLERS[name] for name in self.tools if name in TOOL_HANDLERS}
             return ToolSubmodule(self.tokenizer, handlers, device)

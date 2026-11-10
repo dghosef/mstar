@@ -151,7 +151,7 @@ def test_a_request_no_rebuild_can_write_again_isnt_rebuildable_in_its_pools(monk
     for rid, config in configs.items():
         info = SimpleNamespace(partition_name="p", graph_walk=PREFILL, resource_configs=config, stream_lead_items={})
         w.ingest._add_new_request(SimpleNamespace(
-            request_id=str(rid), partition_worker_graph_ids=None, loop_caps={},
+            request_id=str(rid), partition_worker_graph_ids=None, loop_caps={}, silent=False,
             worker_graph_to_workers={}, initial_inputs=[], request_info=info))
     refused = {rid for rid in configs if not kv._overrides[rid].rebuildable}
     assert refused == ({R, 12, 13} if talker_walk == PREFILL else {12, 13}), (

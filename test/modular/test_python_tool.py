@@ -9,7 +9,10 @@ import torch
 
 from mstar.conductor.request_info import APPENDS, PREFILL_END, TOOLS, TURN_IDS, WalkStep
 from mstar.model.components.python_tool import (
+    AGENT_ANSWER,
+    AGENT_PROMPTS,
     ANSWER,
+    SPAWNED,
     TOOL_CALLS,
     TOOL_HANDLERS,
     TOOL_TEXT,
@@ -79,14 +82,14 @@ def _routed(tokenizer, text, speak=False):
     """The router's output for a turn, and the exit it names."""
     router = ToolRouterSubmodule(tokenizer)
     ids = _turn(tokenizer, text)
-    row = {"ids": ids, "start": 100, "speak": speak}
+    row = {"ids": ids, "start": 100, "speak": speak, "spawn_agent": False, "child": False, "thinking": False}
     out = router.forward_batched("route", SimpleNamespace(request_ids=["r"]), rows=[row])["r"]
     return ids, out[TOOL_CALLS][0], router.check_stop("r", None, out).exit, out
 
 
 def _ran(tokenizer, calls, ids, budget=200, handlers=None):
     tool = ToolSubmodule(tokenizer, handlers or TOOL_HANDLERS)
-    row = {"payload": _unpack(calls), "enable_thinking": False, "budget": budget}
+    row = {"payload": _unpack(calls), "enable_thinking": False, "budget": budget, "answers": None}
     return tool.forward_batched("tool", SimpleNamespace(request_ids=["r"]), rows=[row])["r"][TOOL_TEXT]
 
 
@@ -137,6 +140,59 @@ def test_a_turn_that_only_speaks_exits_through_speak_and_writes_its_text_to_the_
         assert exit_name == TOOLS_EXIT and SPEAK_TEXT not in out
 
 
+ASKS = (
+    '<tool_call>\n<function=spawn_agent>\n<parameter=task>\nsum 1..10\n</parameter>\n</function>\n</tool_call>'
+    '<tool_call>\n<function=spawn_agent>\n<parameter=task>\nsum 1..200\n</parameter>\n</function>\n</tool_call>')
+
+
+def _spawner(tokenizer, **flags):
+    router = ToolRouterSubmodule(tokenizer, render_agent=lambda task, thinking: [len(task), int(thinking)])
+    ids = _turn(tokenizer, ASKS)
+    row = {"ids": ids, "start": 100, "speak": False, "spawn_agent": True, "child": False, "thinking": False, **flags}
+    out = router.forward_batched("route", SimpleNamespace(request_ids=["r"]), rows=[row])["r"]
+    return router, out
+
+
+def test_a_turn_that_only_spawns_agents_persists_a_prompt_per_task_and_the_spawned_flag(tokenizer):
+    router, out = _spawner(tokenizer)
+    assert router.check_stop("r", None, out).exit == "spawn"
+    assert [out[name][0].tolist() for name in AGENT_PROMPTS if name in out] == [[9, 0], [10, 0]]
+    assert out[SPAWNED][0].tolist() == [1]
+    # once per request, and never in an agent: the same turn is calls nobody handles
+    for flags in ({"spawn_agent": False}, {"child": True, "spawn_agent": False}):
+        router, out = _spawner(tokenizer, **flags)
+        assert router.check_stop("r", None, out).exit == TOOLS_EXIT and AGENT_PROMPTS[0] not in out
+
+
+def test_an_agent_that_answers_persists_its_final_turn_for_its_parent_and_a_parent_does_not(tokenizer):
+    router = ToolRouterSubmodule(tokenizer)
+    ids = _turn(tokenizer, "The sum is 55.")
+    for child in (True, False):
+        row = {"ids": ids, "start": 100, "speak": False, "spawn_agent": False, "child": child, "thinking": False}
+        out = router.forward_batched("route", SimpleNamespace(request_ids=["r"]), rows=[row])["r"]
+        assert (AGENT_ANSWER in out) is child
+        assert router.check_stop("r", None, out).exit == ANSWER
+    assert out is not None and ids.tolist() == _turn(tokenizer, "The sum is 55.").tolist()
+
+
+def test_the_join_frames_each_agents_answer_as_a_tool_response_in_task_order_with_errors_in_place(tokenizer):
+    tool = ToolSubmodule(tokenizer, TOOL_HANDLERS)
+    _, calls, *_ = _routed(tokenizer, ASKS)
+    metadata = {"agents": 3, "agent_errors": {"1": "Error: the agent timed out"}, "enable_thinking": False}
+    answers = [_turn(tokenizer, "55"), _turn(tokenizer, "210")]
+    row = tool.prepare_inputs(
+        "tool", SimpleNamespace(step_metadata=metadata, max_tokens=500),
+        {TOOL_CALLS: [calls], "agent_answers": answers}).kwargs
+    assert row["answers"] == ["55", "Error: the agent timed out", "210"]
+    text, start = tool.forward_batched("tool", SimpleNamespace(request_ids=["r"]), rows=[row])["r"][TOOL_TEXT]
+    written = tokenizer.decode(text[1:].tolist())
+    bodies = [part.split("\n</tool_response>")[0].strip() for part in written.split("<tool_response>")[1:]]
+    assert bodies == ["55", "Error: the agent timed out", "210"] and start.tolist() == [100]
+    # a step that joins nothing runs the calls' handlers
+    assert tool.prepare_inputs(
+        "tool", SimpleNamespace(step_metadata={}, max_tokens=500), {TOOL_CALLS: [calls]}).kwargs["answers"] is None
+
+
 def _model():
     model = object.__new__(Qwen3_5DenseModel)
     model.config, model.media, model.tools = SimpleNamespace(max_position_embeddings=64), (), ("python",)
@@ -166,6 +222,18 @@ def test_a_model_with_the_tool_has_its_walk_its_cycle_and_a_reserve_that_is_the_
     assert model.walk_plan("LLM", ["text"], ["text"], {"text_inputs": [object()]}, {})[2].step_metadata[
         "speak"] is False
 
+    # a deployment that spawns: the join and a second continuation follow, an agent's plan has neither
+    model.tools, model.spawn = ("python", "spawn_agent"), True
+    plan = model.walk_plan("LLM", ["text"], ["text"], {"text_inputs": [object()]}, {})
+    assert [step.walk for step in plan] == [
+        "prefill_text", "decode", "route", "tool", "prefill_text", "tool", "prefill_text"]
+    assert plan[2].exits == {"answer": 7, "speak": 7, "tools": 3, "spawn": 5} and plan[2].spawns == AGENT_PROMPTS
+    assert plan[5].joins and not plan[3].joins and plan[6].exits == {"": 1}
+    child = model.walk_plan("LLM", ["text"], ["text"], {"text_inputs": [object()]}, {"agent_child": "parent"})
+    assert len(child) == 5 and not child[2].spawns and child[2].step_metadata["agent_child"] is True
+    assert {"agent_0", "spawned", "agent_answer"} <= {
+        e.name for e in model.get_graph_walk_graphs()["route"].outputs}
+    model.tools, model.spawn = ("python",), False
 
     model.tools = ()
     assert "tool" not in model.get_graph_walk_graphs()
