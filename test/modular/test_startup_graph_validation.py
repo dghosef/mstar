@@ -699,6 +699,13 @@ def _z_image(name, model_kwargs, tmp_path, monkeypatch):
     return model
 
 
+def _qwen_image21(name, model_kwargs, tmp_path, monkeypatch):
+    from mstar.model.qwen_image21.config import QwenImage21Config
+    model = _constructed(name, model_kwargs)
+    model.set_config(QwenImage21Config())
+    return model
+
+
 def _higgs(name, model_kwargs, tmp_path, monkeypatch):
     from mstar.model.higgs_audio.higgs_audio_model import HiggsAudioModel, HiggsAudioModelConfig, audio_encoder
     from mstar.model.multimodal_decoder import MediaIntake
@@ -901,6 +908,7 @@ _FACTORIES = {
     "CosyVoice3Model": _cosyvoice3,
     "Flux2KleinModel": _flux2,
     "ZImageModel": _z_image,
+    "QwenImage21Model": _qwen_image21,
     "HiggsAudioModel": _higgs,
     "KokoroModel": _kokoro,
     "LTX25Model": _ltx2_5,

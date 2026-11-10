@@ -333,14 +333,14 @@ def test_load_image_resamples_before_rgb_conversion(tmp_path):
     assert not np.array_equal(np.array(other), np.array(expected))
 
 
-def test_qwen3_encoder_config_rejects_taps_at_or_past_the_final_norm():
+def test_qwen3_encoder_config_rejects_taps_past_the_last_layer():
     from mstar.model.components.diffusion.qwen3.encoder import Qwen3EncoderConfig
 
-    with pytest.raises(ValueError, match="below layer"):
-        Qwen3EncoderConfig(num_hidden_layers=36, hidden_state_layers=(9, 36))
+    with pytest.raises(ValueError, match="at most"):
+        Qwen3EncoderConfig(num_hidden_layers=36, hidden_state_layers=(9, 37))
     with pytest.raises(ValueError, match="1-indexed"):
         Qwen3EncoderConfig(num_hidden_layers=36, hidden_state_layers=(0,))
-    assert Qwen3EncoderConfig(num_hidden_layers=36, hidden_state_layers=(35,)).num_layers_needed == 35
+    assert Qwen3EncoderConfig(num_hidden_layers=36, hidden_state_layers=(36,)).num_layers_needed == 36
 
 
 def test_component_iterator_filters_skipped_keys_before_reading(tmp_path):

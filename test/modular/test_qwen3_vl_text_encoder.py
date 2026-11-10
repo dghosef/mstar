@@ -70,18 +70,24 @@ def _tiny_qwen3_vl(path):
     return model
 
 
-def _reference_hidden(model, ids):
+def _reference_hidden(model, ids, tap=TAP):
     kwargs = dict(input_ids=ids, attention_mask=torch.ones_like(ids), use_cache=False, output_hidden_states=True)
+    # the last layer's output before the final norm, as Qwen-Image-2.1 reads it: a hook returning the
+    # norm's input (transformers 5 ties hidden_states[-1] to the normed output)
+    norm = model.model.language_model.norm
+    handle = norm.register_forward_hook(lambda module, args, output: args[0])
     try:
         out = model.model(mm_token_type_ids=torch.zeros_like(ids), **kwargs)
     except TypeError:  # a transformers without token types
         out = model.model(**kwargs)
-    return out.hidden_states[TAP]
+    finally:
+        handle.remove()
+    return out.hidden_states[tap]
 
 
-def _encoder(path, fused_qkv):
+def _encoder(path, fused_qkv, tap=TAP):
     config = Qwen3EncoderConfig.from_qwen3_vl(
-        json.loads((path / "config.json").read_text()), hidden_state_layers=(TAP,), fused_qkv=fused_qkv,
+        json.loads((path / "config.json").read_text()), hidden_state_layers=(tap,), fused_qkv=fused_qkv,
     )
     assert (config.num_hidden_layers, config.rope_theta) == (4, 5_000_000.0)
     with torch.device("meta"):
@@ -95,14 +101,15 @@ def _encoder(path, fused_qkv):
     return encoder
 
 
-@pytest.mark.parametrize("fused_qkv", [True, False])
-def test_tapped_hidden_state_matches_transformers(tmp_path, fused_qkv):
+# the last tap (4 of 4 layers) is the pre-norm output Qwen-Image-2.1 conditions on
+@pytest.mark.parametrize("fused_qkv,tap", [(True, TAP), (False, TAP), (False, 4)])
+def test_tapped_hidden_state_matches_transformers(tmp_path, fused_qkv, tap):
     reference = _tiny_qwen3_vl(tmp_path)
-    encoder = _encoder(tmp_path, fused_qkv)
+    encoder = _encoder(tmp_path, fused_qkv, tap)
     ids = torch.randint(0, 240, (1, 11), generator=torch.Generator().manual_seed(1))
     with torch.no_grad():
         ours = encoder(ids, torch.ones_like(ids))
-        theirs = _reference_hidden(reference, ids)
+        theirs = _reference_hidden(reference, ids, tap)
     torch.testing.assert_close(ours, theirs, rtol=1e-5, atol=1e-5)
 
 

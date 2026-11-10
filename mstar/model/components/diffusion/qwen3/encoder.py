@@ -91,11 +91,11 @@ class Qwen3EncoderConfig:
             raise ValueError(
                 f"hidden_state_layers must name decoder layers (1-indexed); got {self.hidden_state_layers}"
             )
-        if max(self.hidden_state_layers) >= self.num_hidden_layers:
+        if max(self.hidden_state_layers) > self.num_hidden_layers:
             raise ValueError(
-                f"hidden_state_layers {self.hidden_state_layers} must lie below layer {self.num_hidden_layers}: "
-                "HF's hidden_states[num_hidden_layers] is the normed last_hidden_state, which this encoder "
-                "(no final norm) does not produce"
+                f"hidden_state_layers {self.hidden_state_layers} must be at most the LM's {self.num_hidden_layers} "
+                "layers; the last one taps the last layer's output before the final norm, which this encoder "
+                "never applies (transformers 5's hidden_states[-1] is normed)"
             )
 
     @property
