@@ -152,20 +152,21 @@ class RecurrentStatePool(Resource):
     ) -> "RecurrentStatePool":
         config = spec.config
         config.shard(info.head_shards)
-        world_size = 1 if info.joint_comm_group is None else info.joint_comm_group.world_size
+        group = info.joint_comm_group
+        rank, world_size = (0, 1) if group is None else (group.rank, group.world_size)
         # no snapshot slots where the engine keeps them from serving a hit
         if spec.resource_key not in info.prefix_caches:
             config = replace(config, prefix_slots=0)
         # resolved here, not written back: the config is the model's, shared by its specs
         return cls(
             device=info.device, config=config, comm_group=info.joint_comm_group,
-            name=spec.resource_key, kv_dtype=info.kv_dtype, world_size=world_size,
+            name=spec.resource_key, kv_dtype=info.kv_dtype, rank=rank, world_size=world_size,
         )
 
     def __init__(
         self, device: torch.device, config: RecurrentStateConfig,
         comm_group: JointGroups | None = None, name: str = "recurrent_state",
-        kv_dtype: torch.dtype | None = None, world_size: int = 1,
+        kv_dtype: torch.dtype | None = None, rank: int = 0, world_size: int = 1,
     ):
         """``kv_dtype`` (the engine's) stands in for a block's ``dtype=None``."""
         if config.prefix_slots and config.disable_sink_slot:
@@ -211,11 +212,14 @@ class RecurrentStatePool(Resource):
         self._admit_taken: dict[tuple[str, str], tuple[int, bool]] = {}
         # the part of it the pre-plan pass took: all `clear_preplan` gives back
         self._preplan_taken: set[tuple[str, str]] = set()
-        # Admission, as `KVManager` decides it: only at one rank, since a
-        # reservation held on rank 0 alone would make the ranks refuse different
-        # allocations. `_reserved` holds, per admitted request, the slots kept
-        # for labels it hasn't taken yet, and `_kept` their sum.
-        self._decides = world_size == 1
+        # Admission, as `KVManager` allots it: rank 0 alone reserves, since it
+        # picks the batches. `_reserved` holds, per admitted request, the slots
+        # kept for labels it hasn't taken yet, and `_kept` their sum. A slot is
+        # refused for another request's reservation only at one rank: rank 0
+        # reserves at readiness, between the other ranks' admits, so the refusal
+        # would go differently on each.
+        self._allots = rank == 0
+        self._world_size = world_size
         self._reserved: dict[str, int] = {}
         self._kept = 0
         # Bumped by every change to which slot a (rid, label) holds or to its
@@ -453,7 +457,8 @@ class RecurrentStatePool(Resource):
             if slot is not None:
                 return slot
             kept = self._reserved.get(rid, 0)
-            if label not in self.config.labels or len(self._free) - self._kept + bool(kept) <= 0:
+            kept_back = self._kept - bool(kept) if self._world_size == 1 else 0
+            if label not in self.config.labels or len(self._free) - kept_back <= 0:
                 # an undeclared label, or every free slot is kept for an admitted request
                 return None
             if kept:
@@ -481,7 +486,7 @@ class RecurrentStatePool(Resource):
     # Admission: a slot for each declared label, for a request that holds none
 
     def ask(self, rid: str, node_name: str, graph_walk: str) -> AdmitOutcome | None:
-        if not self._decides:
+        if not self._allots:
             return None
         with self._lock:
             if self._slots.get(rid) or rid in self._reserved:

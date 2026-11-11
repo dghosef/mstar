@@ -65,7 +65,7 @@ def _resources(cfg: KDAConfig, tp: int = 1, speculative_tokens: int = 0):
     group = None
     if tp > 1:
         group = SimpleNamespace(
-            world_size=tp, tp_group=SimpleNamespace(world_size=tp), sp_group=SimpleNamespace(world_size=1),
+            rank=0, world_size=tp, tp_group=SimpleNamespace(world_size=tp), sp_group=SimpleNamespace(world_size=1),
         )
     pool = build_resource(pool_spec, EngineResourceInfo(device=CPU, joint_comm_group=group))
     kda = build_resource(kda_spec, EngineResourceInfo(

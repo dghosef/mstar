@@ -598,10 +598,13 @@ class KVManager(AttentionResource):
         self._rank = joint_comm_group.rank if joint_comm_group is not None else 0
         self._world_size = joint_comm_group.world_size if joint_comm_group is not None else 1
         self._comm_group = joint_comm_group
-        # Only a deciding pool asks and keeps allotments. With more than one rank none decides.
-        # Rank 0 would allot at readiness, after the step goes to the other ranks and before its
-        # admit, so a grant could pass on one rank and fail on another.
-        self._decides = self._world_size == 1 and leads
+        # Only rank 0 of the leading pool asks and keeps allotments: it alone picks the batches,
+        # and what its allotments decide reaches the other ranks through a lease or a delta.
+        self._allots = self._rank == 0 and leads
+        # The room checks at a grant run only at one rank. Rank 0 allots at readiness, after a
+        # step goes to the other ranks and before its admit, so a check there could pass on one
+        # rank and fail on another.
+        self._checks_room = self._allots and self._world_size == 1
         # An allotment covers the labels `_nodes` open.
         # `_asks` holds the prompt pages of each request that asked and has no allotment yet.
         # `_unused` counts the pages admitted requests were allotted and haven't used yet.
@@ -781,11 +784,10 @@ class KVManager(AttentionResource):
                 keyed.update(named.growth)
             self._keyed_walks[label] = frozenset(keyed)
         self._prefix_root = root
-        self._index = PrefixIndex(self._arena)
-        if self._world_size == 1:
-            # The evictable set is counted only at one rank. When the arena reports to the index, `insert`
-            # reads owner counts to decide a page's parent, and those counts can differ between ranks.
-            self._arena.index = self._index
+        # Every rank counts the evictable set, which rank 0's room reads. Above one rank `insert` doesn't
+        # read owner counts to pick a page's parent, since they can differ between ranks.
+        self._index = PrefixIndex(self._arena, reparent=self._world_size == 1)
+        self._arena.index = self._index
         if self._cpu_pool is not None:
             self._open_host_writes()
 
@@ -1812,7 +1814,7 @@ class KVManager(AttentionResource):
         copy those pages back so its probe finds them. Returns the label whose
         stream waits on the copy.
 
-        On a pool that decides admission the copy can take more pages than are free, and `_grant`
+        On a pool that allots the copy can take more pages than are free, and `_grant`
         evicts for the rest, since the walk would take as many pages to compute them. Any other pool
         has no allotment to bound the copy, so the copy takes free pages only. The walk computes
         whatever isn't copied.
@@ -1871,7 +1873,7 @@ class KVManager(AttentionResource):
                 stream.read_pending = True
                 return label
             budget = self._arena.num_free
-            if self._decides:
+            if self._allots:
                 # the copy and the run's evictable pages come out of the allowance
                 evictable = self._index.evictable()
                 budget = self._allowance(rid) - sum(page in evictable for page in run)
@@ -3550,7 +3552,7 @@ class KVManager(AttentionResource):
             needed = sum(len(state.host_pages) - len(runs[label]) for label, state in states.items())
             # retaining the runs already took their evictable pages out of the room, so the check runs
             # even when the index holds every page
-            fits = not self._decides or needed <= self._room()
+            fits = not self._allots or needed <= self._room()
             pages = self._grant(rid, ", ".join(states), needed, 0) if fits else None
             if pages is None:
                 for run in runs.values():
@@ -3990,7 +3992,8 @@ class KVManager(AttentionResource):
                 f"the streams leave {unused} allotted pages unused, but the pool counts {self._unused}"
             )
             evictable = 0 if self._index is None else len(self._index.evictable())
-            assert self._unused <= arena.num_free + evictable, (
+            # above one rank a grant can take what rank 0 allotted another request
+            assert not self._checks_room or self._unused <= arena.num_free + evictable, (
                 f"admitted requests were allotted {self._unused} pages they haven't used, "
                 f"but only {arena.num_free} are free and {evictable} evictable"
             )
@@ -4088,7 +4091,7 @@ class KVManager(AttentionResource):
         A request that can't fit even in an empty pool fails here, and not after
         waiting behind every request ahead of it.
         """
-        if not self._decides or rid in self._allotments:
+        if not self._allots or rid in self._allotments:
             return None
         with self._lock:
             if rid not in self._asks:
@@ -4227,7 +4230,7 @@ class KVManager(AttentionResource):
         of what ``rid`` was allotted and hasn't used, then out of the room, and the walk
         recomputes the pages neither covers.
         """
-        if self._decides:
+        if self._allots:
             evictable = self._index.evictable()
             allowance = self._allowance(rid)
             for at, page in enumerate(pages):
@@ -4440,10 +4443,11 @@ class KVManager(AttentionResource):
 
     def _grant(self, rid: str, label: str, n: int, past: int) -> list[int] | None:
         """Take ``n`` free pages for ``rid``, of which ``past`` go beyond what its allotment has
-        left, evicting cached pages if too few are free. None when the pool is short, which on a deciding
-        pool means ``past`` is more than the room. The pages within the allotment need
-        no check, since the allotments never count more than the pool has."""
-        if past and self._decides and past > self._room():
+        left, evicting cached pages if too few are free. None when the pool is short, which where
+        the room is checked (one rank) means ``past`` is more than the room. The pages within the
+        allotment need no check there, since the allotments never count more than the pool has.
+        Above one rank every rank takes what the pool has, so a grant goes the same way on each."""
+        if past and self._checks_room and past > self._room():
             return None
         pages = self._arena.acquire(n)
         if pages is None and self._index is not None:
@@ -4451,7 +4455,7 @@ class KVManager(AttentionResource):
             # without failing a request that is already running
             self._evict(n - self._arena.num_free)
             pages = self._arena.acquire(n)
-        if pages is None and self._decides:
+        if pages is None and self._checks_room:
             raise RuntimeError(
                 f"KV {self.name}: {rid}/{label} could not take {n} pages that its allotment and the room "
                 f"covered, so the allotments count pages the pool can't reach: {self._arena.num_free} free, "

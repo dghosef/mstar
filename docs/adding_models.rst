@@ -1451,11 +1451,10 @@ runner's admission (``LoraAdapterPool.ask`` / ``reserve``), in arrival order wit
 other resource that asks, so it holds no KV pages meanwhile and the rows already running
 keep stepping; the admit's ``AllocationFailed`` stays only as a backstop. Only the first
 waiting request is admitted, so a cold adapter is not starved by steady traffic on resident
-ones: requests behind it wait too, and the held slots drain. On one GPU, where KV admits
-every request as well, that holds back base-model requests too: a request waiting for a
-slot, or for its adapter's host copy, stops every newer admission on its node until a slot
-drains or the read lands. Under tensor parallelism KV does not ask, so base requests go on
-past it. The slot wait does not arise while the adapters in rotation fit in ``max_slots``,
+ones: requests behind it wait too, and the held slots drain. KV admits every request as
+well (on a lockstep instance, on its leader), so that holds back base-model requests too: a
+request waiting for a slot, or for its adapter's host copy, stops every newer admission on
+its node until a slot drains or the read lands. The slot wait does not arise while the adapters in rotation fit in ``max_slots``,
 and the copy wait is at most one read, which starts at the request's ingest. A slot is
 reserved for a request only once its adapter's host copy is in (even for an adapter
 resident in a slot, which a miss admitted ahead may evict), so its admit does not wait on a

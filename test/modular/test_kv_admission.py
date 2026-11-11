@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import random
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, ".")
 
@@ -461,26 +462,114 @@ def test_a_request_one_pool_holds_back_keeps_no_allotment_in_another_on_its_node
     assert decode.ok, "requests waiting on the cross pool kept the room the running request decodes into"
 
 
-def _cfg_parallel_pool(node: str, world_size: int = 1) -> KVManager:
+def _cfg_parallel_pool(node: str, world_size: int = 1, rank: int = 0) -> KVManager:
     spec = KVSpec(
         resource_key="kv", nodes={"LLM", "LLM_cfg_text", "LLM_cfg_img"}, leader="LLM",
         config=PagedKVConfig(num_layers=1, num_kv_heads=2, head_dim=8, max_seq_len=4096, max_num_pages=9, page_size=16),
     )
-    tp = CommGroup(my_global_rank=0, my_group_rank=0, group_members=list(range(world_size)))
+    tp = CommGroup(my_global_rank=rank, my_group_rank=rank, group_members=list(range(world_size)))
     group = None if world_size == 1 else JointGroups(tp_group=tp, sp_group=CommGroup.trivial(), instance=tp)
     return KVManager.build(spec, EngineResourceInfo(
         device=torch.device("cpu"), kv_dtype=torch.float32, nodes=frozenset({node}), joint_comm_group=group,
     ))
 
 
-def test_only_the_leaders_pool_holds_a_request_back_and_none_above_one_rank():
-    for node, world_size, holds in (("LLM", 1, True), ("LLM_cfg_text", 1, False), ("LLM", 2, False)):
-        kv = _cfg_parallel_pool(node, world_size)
+def test_only_rank_0_of_the_leaders_pool_holds_a_request_back():
+    for node, world_size, rank, holds in (
+        ("LLM", 1, 0, True), ("LLM_cfg_text", 1, 0, False), ("LLM", 2, 0, True), ("LLM", 2, 1, False),
+    ):
+        kv = _cfg_parallel_pool(node, world_size, rank)
         for rid in ("a", "b"):
             _laid_out(kv, rid, list(range(80)))
 
-        assert _ready(kv, "a") and _ready(kv, "b") is not holds, f"{node}'s pool at world size {world_size} decided"
-        assert holds or not (kv._allotments or kv._asks), "a pool that doesn't decide kept admission state"
+        assert _ready(kv, "a") and _ready(kv, "b") is not holds, (
+            f"{node}'s pool on rank {rank} of {world_size} allotted"
+        )
+        assert holds or not (kv._allotments or kv._asks), "a pool that doesn't allot kept admission state"
+
+
+def _lockstep_pair(max_num_pages: int) -> list[KVManager]:
+    """Rank 0 and rank 1 of one instance, with the prefix cache open as ``prefix_cache_tp`` opens it."""
+    ranks = []
+    for rank in (0, 1):
+        kv = KVManager(
+            cfg=PagedKVConfig(
+                num_layers=1, num_kv_heads=1, head_dim=8, max_seq_len=4096,
+                max_num_pages=max_num_pages, page_size=PAGE_SIZE, prefix_cache_tp=True,
+            ),
+            name="kv", joint_comm_group=SimpleNamespace(rank=rank, world_size=2), transfer_engine_info=None,
+            device=torch.device("cpu"), dtype=torch.float32,
+        )
+        kv.enable_prefix_cache(ROOT)
+        ranks.append(kv)
+    return ranks
+
+
+def _same_step(ranks: list[KVManager], rid: str, span: int) -> bool:
+    """One step of ``rid`` on every rank, as the leader's broadcast runs it: admitted, then
+    committed, or rolled back where the admit refused."""
+    step, ctx = KVStep(segments=(Segment(rid, "main", span),)), _ctx(rid)
+    outcomes = [kv.admit(step, ctx).ok for kv in ranks]
+    assert len(set(outcomes)) == 1, f"{rid}'s step of {span} admitted {outcomes} on ranks 0 and 1"
+    for kv in ranks:
+        if outcomes[0]:
+            kv.plan(step, ctx)
+            kv.commit(step, ctx)
+        else:
+            kv.rollback_admit(step, ctx)
+    pages = [kv._streams[rid]["main"].page_indices for kv in ranks]
+    assert pages[0] == pages[1], f"{rid} holds pages {pages[0]} on rank 0 and {pages[1]} on rank 1"
+    return outcomes[0]
+
+
+def test_rank_0_allots_between_any_two_steps_and_every_rank_admits_alike():
+    """Rank 0 alone keeps allotments, reserving whenever its scheduler reaches the head of the queue,
+    between steps the instance has already been sent. No rank checks a step's grant against them, so
+    each step admits alike on every rank and takes the same pages, a decode step past its allotment
+    while rank 0 has no room left included."""
+    rng = random.Random(SEED)
+    ranks = _lockstep_pair(max_num_pages=12)
+    leader = ranks[0]
+    waiting = [f"r{i}" for i in range(40)]
+    prompts = {rid: PAGE_SIZE * rng.randint(1, 4) for rid in waiting}
+    for rid in waiting:
+        for kv in ranks:
+            _laid_out(kv, rid, list(range(prompts[rid])))
+    running: dict[str, int] = {}
+    held = past_room = 0
+    for _ in range(600):
+        if waiting and rng.random() < 0.3:
+            if _ready(leader, waiting[0]):
+                running[waiting.pop(0)] = 0
+            else:
+                held += 1
+            continue
+        if not running:
+            continue
+        rid = rng.choice(sorted(running))
+        decoding = running[rid] > 0
+        past_room += decoding and leader._room() <= 0
+        ok = _same_step(ranks, rid, 1 if decoding else prompts[rid])
+        running[rid] += 1
+        if not ok or running[rid] > rng.randint(2, 40):
+            del running[rid]
+            for kv in ranks:
+                _remove(kv, rid)
+
+    assert held >= 10 and past_room >= 10, f"seed {SEED}: rank 0 held {held}, grew past its room {past_room}"
+
+
+def test_rank_0_counts_the_pages_only_the_index_holds_as_room():
+    """Only a grant evicts, so above one rank too a page only the index holds has to count as room,
+    or a pool the cache had filled would admit nothing again. Every rank then evicts the same pages."""
+    ranks = _lockstep_pair(max_num_pages=9)
+    for n, rid in enumerate(("a", "b", "c")):
+        for kv in ranks:
+            _laid_out(kv, rid, [n * 1000 + i for i in range(64)], keyed=True)
+        assert _ready(ranks[0], rid), f"rank 0 held {rid} back with {ranks[0]._arena.num_free} pages free"
+        _same_step(ranks, rid, 64)
+        for kv in ranks:
+            _remove(kv, rid)
 
 
 def test_an_allotment_covers_only_the_labels_its_workers_nodes_open():
