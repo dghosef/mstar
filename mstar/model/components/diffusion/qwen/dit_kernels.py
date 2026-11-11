@@ -15,6 +15,10 @@ the callers run the eager ops (``fits``).
   target's tokens take the step's, the references' timestep 0's), one pass instead of the per-token select.
 * :func:`gated_add`: ``x + gate * y``, the same two parameter sets.
 
+Two more fuse ``nn.LayerNorm`` (no affine) in front of the modulation, :func:`norm_modulate` and
+:func:`gated_norm_modulate` (the residual, then its norm, in one pass). They are not bit-exact: Triton sums the row
+statistics in its own order; the step's output stays within the bf16 noise of the reference.
+
 Every launch turns Triton's fp fusion off: with it on, the compiler folds a bf16 round trip between a multiply and
 an add into one fused multiply-add, which drops the rounding the eager ops make there.
 """
@@ -106,6 +110,44 @@ if triton is not None:
         tl.store(o_ptr + tok * D + col, (x + gy).to(tl.bfloat16), mask=mask)
 
 
+    @triton.jit
+    def _ln_mod(r, s1p_ptr, sh_ptr, o_ptr, base, prow_off, cols, mask, D, eps):
+        # LayerNorm (no affine) of the fp32 row r, rounded to bf16 as nn.LayerNorm's output, then modulated
+        mean = tl.sum(r, axis=0) / D
+        rc = tl.where(mask, r - mean, 0.0)
+        rstd = tl.math.rsqrt(tl.sum(rc * rc, axis=0) / D + eps)
+        y = (rc * rstd).to(tl.bfloat16).to(tl.float32)
+        s1p = tl.load(s1p_ptr + prow_off + cols, mask=mask, other=0.0).to(tl.float32)
+        sh = tl.load(sh_ptr + prow_off + cols, mask=mask, other=0.0).to(tl.float32)
+        m = (y * s1p).to(tl.bfloat16).to(tl.float32)
+        tl.store(o_ptr + base + cols, (m + sh).to(tl.bfloat16), mask=mask)
+
+    @triton.jit
+    def _norm_modulate_kernel(x_ptr, s1p_ptr, sh_ptr, o_ptr, L, D, rows_per_set, split, eps, BLOCK: tl.constexpr):
+        tok = tl.program_id(0).to(tl.int64)
+        cols = tl.arange(0, BLOCK)
+        mask = cols < D
+        row, token = tok // L, tok % L
+        prow = tl.where(token < split, row, rows_per_set + row).to(tl.int64)
+        x = tl.load(x_ptr + tok * D + cols, mask=mask, other=0.0).to(tl.float32)
+        _ln_mod(x, s1p_ptr, sh_ptr, o_ptr, tok * D, prow * D, cols, mask, D, eps)
+
+    @triton.jit
+    def _gated_norm_modulate_kernel(x_ptr, g_ptr, y_ptr, s1p_ptr, sh_ptr, xo_ptr, o_ptr, L, D, rows_per_set, split,
+                                    eps, BLOCK: tl.constexpr):
+        tok = tl.program_id(0).to(tl.int64)
+        cols = tl.arange(0, BLOCK)
+        mask = cols < D
+        row, token = tok // L, tok % L
+        prow = tl.where(token < split, row, rows_per_set + row).to(tl.int64)
+        x = tl.load(x_ptr + tok * D + cols, mask=mask, other=0.0).to(tl.float32)
+        y = tl.load(y_ptr + tok * D + cols, mask=mask, other=0.0).to(tl.float32)
+        g = tl.load(g_ptr + prow * D + cols, mask=mask, other=0.0).to(tl.float32)
+        r = (x + (g * y).to(tl.bfloat16).to(tl.float32)).to(tl.bfloat16)
+        tl.store(xo_ptr + tok * D + cols, r, mask=mask)
+        _ln_mod(r.to(tl.float32), s1p_ptr, sh_ptr, o_ptr, tok * D, prow * D, cols, mask, D, eps)
+
+
 def fits(*tensors: torch.Tensor) -> bool:
     """Whether the fused kernels take these tensors: CUDA bf16 with Triton available."""
     return triton is not None and all(t.is_cuda and t.dtype == torch.bfloat16 for t in tensors)
@@ -189,3 +231,42 @@ def gated_add(x: torch.Tensor, gate: torch.Tensor, y: torch.Tensor, split: int) 
 @gated_add.register_fake
 def _(x, gate, y, split):
     return torch.empty_like(x)
+
+
+@torch.library.custom_op("mstar::qwen_image_norm_modulate", mutates_args=())
+def norm_modulate(x: torch.Tensor, scale1p: torch.Tensor, shift: torch.Tensor, split: int, eps: float) -> torch.Tensor:
+    """``LayerNorm(x) * scale1p + shift`` (no affine; parameters by token as :func:`modulate`) in one pass. Not
+    bit-exact: the row statistics sum in Triton's order, not ``nn.LayerNorm``'s."""
+    rows, length, dim = x.shape
+    out = torch.empty_like(x)
+    _norm_modulate_kernel[(rows * length,)](
+        x, scale1p, shift, out, length, dim, rows, split, eps, BLOCK=triton.next_power_of_2(dim),
+        enable_fp_fusion=False,
+    )
+    return out
+
+
+@norm_modulate.register_fake
+def _(x, scale1p, shift, split, eps):
+    return torch.empty_like(x)
+
+
+@torch.library.custom_op("mstar::qwen_image_gated_norm_modulate", mutates_args=())
+def gated_norm_modulate(
+    x: torch.Tensor, gate: torch.Tensor, y: torch.Tensor, scale1p: torch.Tensor, shift: torch.Tensor, split: int,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(r, norm_modulate(r))`` for the residual ``r = x + gate * y`` (the gate rounded as :func:`gated_add`),
+    reading ``x`` and ``y`` once. The norm is :func:`norm_modulate`'s."""
+    rows, length, dim = x.shape
+    res, out = torch.empty_like(x), torch.empty_like(x)
+    _gated_norm_modulate_kernel[(rows * length,)](
+        x, gate, y, scale1p, shift, res, out, length, dim, rows, split, eps, BLOCK=triton.next_power_of_2(dim),
+        enable_fp_fusion=False,
+    )
+    return res, out
+
+
+@gated_norm_modulate.register_fake
+def _(x, gate, y, scale1p, shift, split, eps):
+    return torch.empty_like(x), torch.empty_like(x)

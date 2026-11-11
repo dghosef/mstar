@@ -172,7 +172,14 @@ class _GeluProj(nn.Module):
         self.proj = ColumnParallelLinear(comm_group, dim, inner, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.gelu(self.proj(x), approximate="tanh")
+        proj = self.proj
+        # a plain column shard (no LoRA twin, no gather): the bias and the GELU fold into its GEMM
+        if (x.is_cuda and type(proj) is ColumnParallelLinear and proj.bias is not None and not proj.skip_bias_add
+                and not proj._local_output_start and not (proj.gather_output and proj.tp_size > 1)):
+            # cuBLASLt's bias + tanh-GELU epilogue, from the fp32 accumulator (not bit-exact: eager rounds first)
+            out = torch._addmm_activation(proj.bias, x.flatten(0, -2), proj.weight.t(), use_gelu=True)
+            return out.unflatten(0, x.shape[:-1])
+        return F.gelu(proj(x), approximate="tanh")
 
 
 class _FeedForward(nn.Module):
@@ -285,6 +292,25 @@ def _modulate(x: torch.Tensor, params: torch.Tensor, split: int):
     return _by_token(lambda t, s1p, sh: t * s1p + sh, split, (x,), (scale1p, shift)), gate
 
 
+def _norm_modulate(x: torch.Tensor, norm: nn.LayerNorm, params: torch.Tensor, split: int):
+    """:func:`_modulate` of ``norm(x)``; one pass on CUDA (:func:`kernels.norm_modulate`)."""
+    shift, scale, gate = (p.contiguous() for p in params.chunk(3, dim=-1))
+    if kernels.fits(x, shift) and x.is_contiguous():
+        return kernels.norm_modulate(x, 1 + scale, shift, split, norm.eps), gate
+    return _modulate(norm(x), params, split)
+
+
+def _gated_norm_modulate(x: torch.Tensor, gate: torch.Tensor, y: torch.Tensor, norm: nn.LayerNorm,
+                         params: torch.Tensor, split: int):
+    """``(r, *_norm_modulate(r, norm, params, split))`` for ``r = x + gate * y``; one pass on CUDA."""
+    shift, scale, next_gate = (p.contiguous() for p in params.chunk(3, dim=-1))
+    if kernels.fits(x, gate, y, shift) and x.is_contiguous() and y.is_contiguous():
+        res, out = kernels.gated_norm_modulate(x, gate, y, 1 + scale, shift, split, norm.eps)
+        return res, out, next_gate
+    res = _gated_add(x, gate, y, split)
+    return (res, *_modulate(norm(res), params, split))
+
+
 def _gated_add(x: torch.Tensor, gate: torch.Tensor, y: torch.Tensor, split: int) -> torch.Tensor:
     """``x + gate * y``, ``gate`` by token as in :func:`_modulate`."""
     if kernels.fits(x, gate, y) and x.is_contiguous() and y.is_contiguous():
@@ -320,15 +346,13 @@ class QwenImageBlock(nn.Module):
         txt_mod1, txt_mod2 = self.txt_mod(txt_temb).chunk(2, dim=-1)
         txt_split = txt.shape[1]
 
-        img_in, img_gate1 = _modulate(self.img_norm1(img), img_mod1, split)
-        txt_in, txt_gate1 = _modulate(self.txt_norm1(txt), txt_mod1, txt_split)
+        img_in, img_gate1 = _norm_modulate(img, self.img_norm1, img_mod1, split)
+        txt_in, txt_gate1 = _norm_modulate(txt, self.txt_norm1, txt_mod1, txt_split)
         img_attn, txt_attn = self.attn(img_in, txt_in, layout, txt_freqs, attend)
-        img = _gated_add(img, img_gate1, img_attn, split)
-        txt = _gated_add(txt, txt_gate1, txt_attn, txt_split)
+        img, img_in, img_gate2 = _gated_norm_modulate(img, img_gate1, img_attn, self.img_norm2, img_mod2, split)
+        txt, txt_in, txt_gate2 = _gated_norm_modulate(txt, txt_gate1, txt_attn, self.txt_norm2, txt_mod2, txt_split)
 
-        img_in, img_gate2 = _modulate(self.img_norm2(img), img_mod2, split)
         img = _gated_add(img, img_gate2, self.img_mlp(img_in), split)
-        txt_in, txt_gate2 = _modulate(self.txt_norm2(txt), txt_mod2, txt_split)
         txt = _gated_add(txt, txt_gate2, self.txt_mlp(txt_in), txt_split)
         return img, txt
 
