@@ -5,13 +5,10 @@ config's ``resources:`` block applied (``apply_yaml_overrides``), sharded to one
 its node's tp * sp heads, on the GPU. It then admits requests one after another as a
 server does and grows each one: a prefill of L - 128 tokens in one step, then 128 one-token
 decode steps. It stops at the first request admission makes wait, or whose step is refused.
-At one rank a request waits until it can be allotted its pages (`ask` / `reserve`); above
-one rank no pool allots, so only a refused step stops it. Every request stays resident.
-A one-step prefill holds all of a prompt's sliding K/V until it commits, so above one rank
-a server that chunks a prompt's prefill can hold more requests of long prompts than this
-counts (at one rank a request is allotted its whole prompt's pages, however it is chunked).
-"without" is the same pool keeping every layer's tokens, with the same max_num_pages, so
-the same bytes.
+A request waits until it can be allotted its pages (`ask` / `reserve`); above one rank rank 0
+allots for every rank of the instance. Every request stays resident. A request is allotted its
+whole prompt's pages however its prefill is chunked. "without" is the same pool keeping every
+layer's tokens, with the same max_num_pages, so the same bytes.
 
 Only the checkpoint's metadata (configs, tokenizer) is read, from the registry's repo.
 ``--model-path`` reads another repo or a local directory instead:

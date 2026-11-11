@@ -21,9 +21,13 @@ if TYPE_CHECKING:
 
 
 class PrefixIndex:
-    def __init__(self, arena: "PageArena") -> None:
+    def __init__(self, arena: "PageArena", reparent: bool = True) -> None:
+        """``reparent``: whether `insert` files a page with no parent when the index alone holds the
+        parent. That reads owner counts, so a lockstep instance, whose ranks' counts differ while
+        rank 0 leases ahead of the others, files every page under its parent."""
         num_pages = arena.max_num_pages
         self._arena = arena
+        self._reparent = reparent
         self._by_key: dict[bytes, int] = {}
         self._key: list[bytes | None] = [None] * num_pages
         self._parent: list[int | None] = [None] * num_pages
@@ -55,8 +59,8 @@ class PrefixIndex:
                 self._stamp[page] = self._clock
 
     def insert(self, key: bytes, page: int, parent: int | None = None) -> bool:
-        """Name ``page`` by ``key`` under ``parent``; the first writer wins. When the arena reports to this
-        index and the index alone holds ``parent``, ``page`` is filed with no parent. Filed under ``parent``,
+        """Name ``page`` by ``key`` under ``parent``; the first writer wins. When the index reparents, the
+        arena reports to it and it alone holds ``parent``, ``page`` is filed with no parent. Filed under ``parent``,
         a held ``page`` would keep `evict` from freeing ``parent``, which the pool counts as evictable."""
         assert parent is None or self._key[parent] is not None, (
             f"page {page} indexed under parent page {parent}, which the index "
@@ -69,7 +73,7 @@ class PrefixIndex:
             f"indexed under {self._key[page].hex()[:16]}; evicting one entry "
             "would free a page the other still names"
         )
-        if parent is not None and self._arena.index is self and self._arena.owners(parent) == 1:
+        if parent is not None and self._reparent and self._arena.index is self and self._arena.owners(parent) == 1:
             parent = None
         self._clock += 1
         self.filed += 1

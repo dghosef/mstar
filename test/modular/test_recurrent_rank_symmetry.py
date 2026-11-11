@@ -24,7 +24,7 @@ class _Joint:
 
     def __init__(self, free: list[int]):
         self.free = free
-        self.world_size = len(free)
+        self.rank, self.world_size = 0, len(free)
         self.tp_group, self.sp_group = SimpleNamespace(world_size=len(free)), SimpleNamespace(world_size=1)
 
     def agree(self, values: list[int]) -> list[int]:
