@@ -82,7 +82,7 @@ from mstar.model.submodule_base import (
     StopPolicy,
     engine_step,
 )
-from mstar.platforms.compile import with_inductor_overrides
+from mstar.platforms.compile import deterministic_inductor_options, with_inductor_overrides
 from mstar.profile.worker import ExecTimings
 from mstar.utils import knobs
 from mstar.utils.client_errors import client_error_text
@@ -909,9 +909,12 @@ class Engine:
 
     def _compile_regions(self) -> None:
         """Compile and warm each node's ``compile_regions`` with dynamic=True
-        (a whole-forward compile uses dynamic=None) in torch.compile's default
-        mode: the compile level (``MSTAR_COMPILE_LEVEL``) tunes captured
-        forwards, whose shapes are fixed per bucket."""
+        (a whole-forward compile uses dynamic=None) in Inductor's deterministic
+        mode, passed as options so it holds in every graph a region breaks
+        into: its defaults time each reduction's candidate configs on the
+        device, so a region's output differed between server processes. The
+        compile level (``MSTAR_COMPILE_LEVEL``) tunes captured forwards, whose
+        shapes are fixed per bucket."""
         if not self.device_capability.is_available:
             return
         for node_name, submodule_mgmt in self._submodules.items():
@@ -931,7 +934,9 @@ class Engine:
                 if isinstance(target, torch.nn.Module):
                     owner, name, target = target, "forward", target.forward
                 # an instance attribute shadows the method for every caller
-                setattr(owner, name, with_inductor_overrides(torch.compile(target, dynamic=True)))
+                setattr(owner, name, with_inductor_overrides(torch.compile(
+                    target, dynamic=True, options=deterministic_inductor_options() or None,
+                )))
                 with torch.no_grad(), fp32_precision_scope(submodule_mgmt.fp32_precision), autocast_scope(
                     self._autocast_dtype_for(node_name), self._device.type, node_name,
                 ), _outside_steps(submodule_mgmt):
