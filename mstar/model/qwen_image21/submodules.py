@@ -141,10 +141,6 @@ class QwenImage21VaeEncoderSubmodule(NodeSubmodule):
         super().__init__()
         self.vae = vae
         self._compile = compile
-        if compile:
-            # channels-last conv weights: the compiled encoder then runs its convs NHWC with no layout transposes
-            # (1024^2: 12.8 ms against 28.5 NCHW, compiled or eager); this node's VAE copy is its own
-            vae.encoder.to(memory_format=torch.channels_last)
 
     def compile_regions(self) -> dict[str, list[tuple]]:
         if not self._compile:
