@@ -19,6 +19,7 @@ denoises both labels in one step. Request knobs: docs/models.rst.
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 from collections.abc import Hashable
@@ -99,6 +100,7 @@ from mstar.model.qwen_image21.submodules import (
 )
 from mstar.model.submodule_base import NodeSubmodule
 from mstar.utils.hf_snapshot import resolve_snapshot_dir
+from mstar.utils.threads import ThreadPool
 
 logger = logging.getLogger(__name__)
 
@@ -128,12 +130,21 @@ def _template(prompt: str, images: int) -> str:
     return f"{head}{vision}{prompt}<|im_end|>\n<|im_start|>assistant\n"
 
 
+@functools.cache
+def _band_pool() -> ThreadPool:
+    """Resizes a reference's four bands at once (``_fit_reference``)."""
+    return ThreadPool(max_workers=4, thread_name_prefix="qwen21-resize")
+
+
 def _over_white(image):
     """The Qwen3-VL copy of an RGBA reference: alpha composited over white, as the checkpoint was trained."""
     from PIL import Image
 
+    alpha = image.getchannel("A")
+    if alpha.getextrema() == (255, 255):
+        return image.convert("RGB")  # a full mask pastes the image's own bytes
     white = Image.new("RGB", image.size, (255, 255, 255))
-    white.paste(image, mask=image.getchannel("A"))
+    white.paste(image, mask=alpha)
     return white
 
 
@@ -380,7 +391,15 @@ class QwenImage21Model(Model):
                 f"output_resolution {resolution}, outside Qwen3-VL's {cfg.min_pixels} to {cfg.max_pixels} px, "
                 "which would resize it again and break its 2x2 latents per vision slot"
             )
-        return rgba, rgba.resize((width, height), Image.Resampling.LANCZOS)
+        if (width, height) == rgba.size:
+            return rgba, rgba.resize((width, height), Image.Resampling.LANCZOS)
+        # PIL's RGBA resize to the byte: premultiplied (the identity when opaque), each band resampled alone,
+        # divided back out; the bands on their own threads, since PIL resamples one without the GIL
+        opaque = int(image[3].min()) == 255
+        src = rgba if opaque else rgba.convert("RGBa")
+        bands = _band_pool().map(lambda band: band.resize((width, height), Image.Resampling.LANCZOS), src.split())
+        out = Image.merge(src.mode, list(bands))
+        return rgba, out if opaque else out.convert("RGBA")
 
     def process_prompt(
         self, prompt: str | None, input_modalities: list[str], output_modalities: list[str],

@@ -164,6 +164,28 @@ def test_turbo_runs_only_its_fixed_grid():
         model.process_prompt("p", ["text"], ["image"], {}, num_inference_steps=40)
 
 
+@pytest.mark.parametrize("size", [(1200, 800), (1024, 1024), (777, 1311), (2048, 1536)])
+@pytest.mark.parametrize("opaque", [True, False])
+def test_reference_copies_are_the_rgba_resize_and_white_paste_to_the_bit(size, opaque):
+    """The per-band resize (and the opaque copy without a paste) give the bytes of PIL's RGBA LANCZOS resize and
+    the paste over white."""
+    from PIL import Image
+
+    from mstar.model.qwen_image21.qwen_image21_model import _over_white
+
+    image = _image(*size)
+    if opaque:
+        image[3] = 255
+    pil = Image.fromarray(image.permute(1, 2, 0).numpy(), mode="RGBA")
+    width, height = calculate_dimensions(1024 * 1024, size[0] / size[1])
+    ref = pil.resize((width, height), Image.Resampling.LANCZOS)
+    white = Image.new("RGB", ref.size, (255, 255, 255))
+    white.paste(ref, mask=ref.getchannel("A"))
+    _, resized = _model()._fit_reference(image, 1024)
+    assert resized.mode == "RGBA" and resized.tobytes() == ref.tobytes()
+    assert _over_white(resized).tobytes() == white.tobytes()
+
+
 def test_vae_pixels_are_the_image_processors_to_the_bit_and_layout():
     """The VAE's latents depend on its input's exact values and memory layout (cuDNN kernels)."""
     image_processor = pytest.importorskip("diffusers.image_processor")
