@@ -69,11 +69,10 @@ class QwenImage21TextEncoderSubmodule(NodeSubmodule):
     disable_torch_compile = True
     disable_autocast = True
 
-    def __init__(self, encoder: nn.Module, vision: QwenVisionModel, compile: bool = False):
+    def __init__(self, encoder: nn.Module, vision: QwenVisionModel):
         super().__init__()
         self.encoder = encoder
         self.vision = vision
-        self._compile = compile
         # per-frame SDPA, not a node resource: the tower runs once per request
         self._frames = FrameSDPA()
         for block in vision.blocks:
@@ -88,19 +87,6 @@ class QwenImage21TextEncoderSubmodule(NodeSubmodule):
             PROMPT_LENGTHS: tuple(meta[PROMPT_LENGTHS]), DROP: int(meta[DROP]),
             GRIDS: tuple(tuple(int(v) for v in grid) for grid in meta.get(GRIDS, ())),
         })
-
-    def compile_regions(self) -> dict[str, list[tuple]]:
-        """Each decoder layer on its own, dynamic in the prompt length: every layer runs one code object, so
-        Dynamo traces it once and the others reuse the graph. Warmed on a 77-token prompt; a layer reads its
-        rotary tables and mask off its attention, which the encoder sets before each layer."""
-        if not self._compile:
-            return {}
-        device, layers = self.get_device(), self.encoder.layers
-        hidden = torch.zeros(1, 77, self.encoder.config.hidden_size, device=device, dtype=self.encoder.dtype)
-        rotary = self.encoder._text_rotary(device, 77)
-        for layer in layers:
-            layer.self_attn.rotary, layer.self_attn.attn_mask = rotary, None
-        return {f"encoder.layers.{i}": [(hidden,)] for i in range(len(layers))}
 
     def can_batch(self, batch, model_inputs) -> bool:
         return False
