@@ -45,12 +45,11 @@ class _Tokenizer:
 
 
 class _ImageProcessor:
-    """Qwen3-VL's grid for an image already on the 32-px grid within its pixel bounds."""
+    """The settings of Qwen3-VL's image processor that ``_vision_inputs`` reads (the checkpoint's)."""
 
-    def __call__(self, images, return_tensors="pt") -> dict:
-        grids = [(1, image.size[1] // 16, image.size[0] // 16) for image in images]
-        return {"pixel_values": torch.zeros(sum(h * w for _, h, w in grids), 1536),
-                "image_grid_thw": torch.tensor(grids)}
+    patch_size, temporal_patch_size, merge_size = 16, 2, 2
+    image_mean = image_std = [0.5, 0.5, 0.5]
+    rescale_factor = 0.00392156862745098
 
 
 class _Processor:
@@ -162,6 +161,30 @@ def test_turbo_runs_only_its_fixed_grid():
     assert model.get_loop_caps() == {"denoise_loop": 3}
     with pytest.raises(ValueError, match="exactly 3"):
         model.process_prompt("p", ["text"], ["image"], {}, num_inference_steps=40)
+
+
+def test_vision_inputs_are_qwen3_vls_image_processor_to_the_bit():
+    """The tower's pixels and grids, as the checkpoint's processor makes them, for on-grid references of
+    different sizes and of one size (the processor stacks those)."""
+    processing = pytest.importorskip("transformers.models.qwen2_vl.image_processing_qwen2_vl")
+    import numpy as np
+    from PIL import Image
+
+    # the checkpoint's processor/preprocessor_config.json
+    settings = _ImageProcessor()
+    processor = processing.Qwen2VLImageProcessor(
+        patch_size=settings.patch_size, temporal_patch_size=settings.temporal_patch_size,
+        merge_size=settings.merge_size, image_mean=settings.image_mean, image_std=settings.image_std,
+        rescale_factor=settings.rescale_factor, size={"longest_edge": 16777216, "shortest_edge": 65536}, resample=3)
+    model = _model()
+    model._processor = type("Processor", (), {"tokenizer": _Tokenizer(), "image_processor": processor})()
+    rng = np.random.default_rng(0)
+    for sizes in ([(320, 224), (256, 256)], [(256, 256), (256, 256), (288, 256)]):
+        images = [Image.fromarray(rng.integers(0, 256, (h, w, 3), dtype=np.uint8), "RGB") for w, h in sizes]
+        ref = processor(images=images, return_tensors="pt")
+        pixel_values, grids = model._vision_inputs(images)
+        assert torch.equal(pixel_values, ref["pixel_values"]) and pixel_values.dtype == ref["pixel_values"].dtype
+        assert grids == [tuple(int(v) for v in g) for g in ref["image_grid_thw"]]
 
 
 def test_vae_pixels_are_the_image_processors_to_the_bit_and_layout():

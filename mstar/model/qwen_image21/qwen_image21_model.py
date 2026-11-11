@@ -294,8 +294,29 @@ class QwenImage21Model(Model):
         return torch.tensor(self._ensure_processor().tokenizer(text)["input_ids"], dtype=torch.long)
 
     def _vision_inputs(self, images: list) -> tuple[torch.Tensor, list[tuple[int, int, int]]]:
-        out = self._ensure_processor().image_processor(images=images, return_tensors="pt")
-        return out["pixel_values"].to(torch.float32), [tuple(int(v) for v in g) for g in out["image_grid_thw"]]
+        """Qwen3-VL's image processor to the bit, for RGB references already on its grid (``_fit_reference``):
+        its fused rescale-and-normalize (``x - mean / rescale``, then ``/ std / rescale``, in fp32) written
+        straight into its patch order, each patch repeated over its temporal frames, with no float copy,
+        no patchify copy and no concatenation."""
+        processor = self._ensure_processor().image_processor
+        patch, frames, merge = processor.patch_size, processor.temporal_patch_size, processor.merge_size
+        mean = (torch.tensor(processor.image_mean) * (1.0 / processor.rescale_factor)).view(3, 1, 1)
+        std = (torch.tensor(processor.image_std) * (1.0 / processor.rescale_factor)).view(3, 1, 1)
+        grids = [(1, image.size[1] // patch, image.size[0] // patch) for image in images]
+        out = torch.empty(sum(h * w for _, h, w in grids), 3, frames, patch, patch)
+        row = 0
+        for image, (_, h, w) in zip(images, grids, strict=True):
+            pixels = torch.from_numpy(np.array(image))  # [H, W, 3] uint8
+            # [H, W, C] -> [H/merge/patch, W/merge/patch, merge, merge, C, patch, patch], the processor's order
+            patches = pixels.view(h // merge, merge, patch, w // merge, merge, patch, 3).permute(0, 3, 1, 4, 6, 2, 5)
+            dest = out[row:row + h * w].view(h // merge, w // merge, merge, merge, 3, frames, patch, patch)
+            first = dest[:, :, :, :, :, 0]
+            torch.sub(patches, mean, out=first)
+            first.div_(std)
+            for frame in range(1, frames):
+                dest[:, :, :, :, :, frame].copy_(first)
+            row += h * w
+        return out.view(row, -1), grids
 
     def max_input_files(self) -> dict[str, int]:
         return {"image": MAX_REFERENCE_IMAGES, "audio": 0, "video": 0}
