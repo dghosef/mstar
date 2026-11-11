@@ -612,7 +612,10 @@ class KVManager(AttentionResource):
         self._asks: dict[str, int] = {}
         self._allotments: dict[str, Allotment] = {}
         self._unused = 0
-        if _DEBUG_ASSERTS and tp_cache:
+        # Under a TP prefix cache every rank hashes the pages it takes, and a follower checks its trail
+        # against rank 0's on each step, so ranks that took different pages stop at once (one hash per
+        # allocation).
+        if tp_cache:
             self._arena.trail = (0, 0)
         self._device = device
         self._lock = threading.RLock()
