@@ -639,8 +639,10 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, captured=False, padd
         torch.testing.assert_close(out[:n].float(), case.want(causal)[:, heads], **tol)
         if rows == PREFILL_ROWS and not captured:
             # a first prefill: no row holds stored context on any rank, so TP exchanges nothing and
-            # SP gathers its partners' shares of the own tokens alone
-            first = _Case.build(((0, 5), (0, 3)), device, dtype)
+            # SP gathers its partners' shares of the own tokens alone, each padded to the longest
+            # (of 5 tokens and 3 here)
+            first_rows = ((0, 5), (0, 2), (0, 1))
+            first = _Case.build(first_rows, device, dtype)
             _plan(attn, first)
             exchanged = len(calls)
             context = attn._current_plan_states["main"].context
@@ -648,6 +650,10 @@ def _over_ranks(rank, world, backend, store, over_sp, rows, captured=False, padd
             torch.testing.assert_close(first.runner(attn, placement, heads)().float(), first.want()[:, heads], **tol)
             context.run = attend_slots
             assert len(calls) == exchanged + over_sp, "a step with no stored context ran the exchange"
+            if over_sp:
+                qo = np.cumsum([0, *(new for _, new in first_rows)])
+                share = max(len(zigzag_rows(qo, world, r)[0]) for r in range(world))
+                assert calls[-1][2] == (share, Q_HEADS, HEAD_DIM), f"gathered more than the shares: {calls[-1]}"
             # one stored token, which one rank alone holds: TP's exchange would otherwise run on that
             # rank alone; SP gathers either way
             one = _Case.build(((1, 3),), device, dtype)

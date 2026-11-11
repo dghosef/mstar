@@ -2784,7 +2784,8 @@ page. Attention runs on each rank's slots and merges the partials across the par
   and the node loads without its SP group, so every layer but attention runs replicated across
   SP; prefer TP mode where it applies. Every paged pool of the node must set the key, and the
   node must not be in the model's ``sp_enabled_nodes``. Each layer all-gathers the partials; under
-  the same exception it attends no slots and gathers its own tokens' shares alone.
+  the same exception it attends no slots and gathers the ranks' shares of its own tokens alone,
+  which tile the step, so nothing is merged.
   Chunked prefill stays off on SP ranks (``_unchunkable_nodes``), as for the model's own SP, so
   SP mode prefills a prompt in one step; chunking an SP-placed pool's prompts is not supported yet.
   TP mode chunks prompts as without placement.

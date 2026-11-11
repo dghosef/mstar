@@ -349,9 +349,10 @@ class ContextParallelWrapper(ABC):
                 "attention over a context-parallel KV pool attends a step's own tokens from the k and v "
                 "run is passed; this step has more than one token a row and got none"
             )
+        if self._own_only:
+            return self._own_alone(q, k, v).to(q.dtype)
         new = None if self.new is None else self.new.run(q, k, v)
-        merged = self._own_alone(new) if self._own_only else self._merged_over_ranks(q, kv_cache_layer, new)
-        return merged.to(q.dtype)
+        return self._merged_over_ranks(q, kv_cache_layer, new).to(q.dtype)
 
     @abstractmethod
     def _merged_over_ranks(
@@ -361,9 +362,9 @@ class ContextParallelWrapper(ABC):
         own tokens' ``(out, lse)`` (None for a one-token-a-row step)."""
 
     @abstractmethod
-    def _own_alone(self, new: tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
-        """The own tokens' attention from ``new``, for a step with no stored context (``plan``): no
-        rank has a partial to merge."""
+    def _own_alone(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """The own tokens' attention for ``q`` over the step's keys ``k`` and ``v``, for a step with
+        no stored context (``plan``): no rank has a partial to merge."""
 
     def forget_plan(self) -> None:
         """Replan the own-token wrapper on the next ``plan`` whatever its layout, for a dropped
@@ -413,9 +414,9 @@ class TPContextParallelWrapper(ContextParallelWrapper):
     def _plan_own(self, qo_indptr, causal):
         self.new.plan(KeyRows.whole(qo_indptr.numpy()), causal)
 
-    def _own_alone(self, new):
+    def _own_alone(self, q, k, v):
         # whole on every rank: no exchange
-        return new[0]
+        return self.new.run(q, k, v)[0]
 
     def _merged_over_ranks(self, q, kv_cache_layer, new):
         queries = self._exchange_queries(q)
@@ -456,7 +457,8 @@ class TPContextParallelWrapper(ContextParallelWrapper):
 class SPContextParallelWrapper(ContextParallelWrapper):
     """Attention over an ``SPPlacement``: the partners hold the same heads, so each attends its own
     slots and its zigzag share of the own tokens (``ZigzagWrapper``) for its own queries, merges the
-    two, and one gather merges every partner's."""
+    two, and one gather merges every partner's. A step with no stored context gathers the shares
+    alone (``ZigzagWrapper.gathered``)."""
 
     _placement: SPPlacement
     new: "ZigzagWrapper | None"
@@ -472,9 +474,8 @@ class SPContextParallelWrapper(ContextParallelWrapper):
     def _plan_own(self, qo_indptr, causal):
         self.new.plan(qo_indptr, causal=causal)
 
-    def _own_alone(self, new):
-        # a rank holds its own share alone
-        return gather_merge(self._placement.group, *new)
+    def _own_alone(self, q, k, v):
+        return self.new.gathered(q, k, v)
 
     def _merged_over_ranks(self, q, kv_cache_layer, new):
         # this rank's slots' partial merged with its share of the own tokens, rounded back to the
@@ -535,7 +536,7 @@ class ZigzagWrapper:
     """A step's own tokens under SP placement, attended for this rank's zigzag chunks alone on
     ``kernel``, out 0 and lse -inf off them. On a captured kernel it gathers the same number of
     queries every replay: its share, then padding, which gathers token 0 and scatters to a row
-    ``run`` drops."""
+    ``run`` drops. On an eager one it also places every partner's share (``gathered``)."""
 
     def __init__(self, placement: SPPlacement, kernel: OwnTokensKernel, device: torch.device):
         self._placement, self.kernel, self._device = placement, kernel, device
@@ -546,6 +547,10 @@ class ZigzagWrapper:
         # each planned query's token to gather and row to scatter to; None when the last plan gave
         # this rank none
         self._gather = self._scatter = None
+        # eager: the longest share's queries, and each of the step's tokens' row in a gather of
+        # every partner's share padded to that many (`gathered`)
+        self._share_rows = 0
+        self._placed = None
         if kernel.captured is not None:
             # never reallocated, so a replay reads the addresses it was captured with
             self._tokens = torch.zeros(2, kernel.captured.queries, dtype=torch.int64, device=device)
@@ -562,12 +567,20 @@ class ZigzagWrapper:
             host[:, : len(tokens)] = tokens
             host[1, len(tokens):] = self._bucket_tokens
             self._stager.copy_(self._tokens, host.reshape(-1))
-        elif len(tokens):
-            self._gather = self._scatter = to_device_nonblocking(tokens, self._device, torch.int64)
         else:
-            # none of the step's tokens is this rank's to attend
-            self._gather = self._scatter = None
-            return
+            # every partner's share, from the plan every rank shares, so the gather's shape is too
+            size, index = self._placement.size, self._placement.index
+            shares = [tokens if j == index else zigzag_rows(step, size, j, causal)[0] for j in range(size)]
+            self._share_rows = max(len(share) for share in shares)
+            placed = np.empty(self._step_tokens, dtype=np.int64)
+            for j, share in enumerate(shares):
+                placed[share] = j * self._share_rows + np.arange(len(share))
+            staged = to_device_nonblocking(np.concatenate([tokens, placed]), self._device, torch.int64)
+            self._gather = self._scatter = staged[: len(tokens)] if len(tokens) else None
+            self._placed = staged[len(tokens):]
+            if not len(tokens):
+                # none of the step's tokens is this rank's to attend
+                return
         self.kernel.plan(rows, causal)
 
     def forget_plan(self) -> None:
@@ -586,6 +599,20 @@ class ZigzagWrapper:
             out.index_copy_(0, self._scatter, got.to(out.dtype))
             lse.index_copy_(0, self._scatter, got_lse.float())
         return out[:n], lse[:n]
+
+    def gathered(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """The own tokens' attention for every token of an eager step that attends them alone, in
+        ``q``'s dtype: this rank's share, then one gather of every partner's, which tile the step,
+        so nothing is merged. A share shorter than the longest goes padded with 0s no token reads."""
+        n, heads, dim = q.shape
+        assert not self._bucket_tokens and n == self._step_tokens, f"{n} query tokens for a plan of {self._step_tokens}"
+        if self._gather is None:
+            share = q.new_zeros(0, heads, dim)
+        else:
+            share = self.kernel.run(q.index_select(0, self._gather), k, v)[0].to(q.dtype)
+        if share.shape[0] < self._share_rows:
+            share = torch.cat([share, share.new_zeros(self._share_rows - share.shape[0], heads, dim)])
+        return self._placement.group.all_gather(share.contiguous(), dim=0).index_select(0, self._placed)
 
 
 def merge(outs: Sequence[torch.Tensor], lses: torch.Tensor) -> torch.Tensor:
