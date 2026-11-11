@@ -155,6 +155,23 @@ def _(x, weight, freqs, eps):
     return torch.empty(x.shape, dtype=x.dtype, device=x.device)
 
 
+@torch.library.custom_op("mstar::qwen_image_qk_pair_norm_rope", mutates_args=())
+def qk_pair_norm_rope(
+    q: torch.Tensor, k: torch.Tensor, q_weight: torch.Tensor, k_weight: torch.Tensor, freqs: torch.Tensor, eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """:func:`qk_norm_rope` of q and of k (``[N, H, 128]``, k shaped and strided as q) in one launch."""
+    oq = torch.empty(q.shape, dtype=q.dtype, device=q.device)
+    ok = torch.empty_like(oq)
+    _norm_rope_into(q[None], q_weight, freqs, eps, oq[None], (k[None], k_weight, ok[None]))
+    return oq, ok
+
+
+@qk_pair_norm_rope.register_fake
+def _(q, k, q_weight, k_weight, freqs, eps):
+    oq = torch.empty(q.shape, dtype=q.dtype, device=q.device)
+    return oq, torch.empty_like(oq)
+
+
 @torch.library.custom_op("mstar::qwen_image_joint_qk_norm_rope", mutates_args=())
 def joint_qk_norm_rope(
     txt: torch.Tensor, img: torch.Tensor, txt_weight: torch.Tensor, img_weight: torch.Tensor,
