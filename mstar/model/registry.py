@@ -216,10 +216,21 @@ HF_MODELS.update({
 })
 # dense Qwen3, 8B only (the size with a shipped config and a parity run): text only
 MODEL_REGISTRY["qwen3_8b"] = ("mstar.model.qwen3.qwen3_model", "Qwen3Model")
+# any text checkpoint Qwen3Model can read from its config.json; the repo comes from model_kwargs
+MODEL_REGISTRY["text_chat"] = ("mstar.model.qwen3.qwen3_model", "Qwen3Model")
 HF_MODELS["qwen3_8b"] = {"model_path_hf": "Qwen/Qwen3-8B"}
 # Qwen3.8-27B is the Qwen3.5 architecture (same config.json geometry)
 MODEL_REGISTRY["qwen3_8_27b"] = ("mstar.model.qwen3_5.qwen3_5_model", "Qwen3_5DenseModel")
 HF_MODELS["qwen3_8_27b"] = {"model_path_hf": "Qwen/Qwen3.8-27B"}
+
+
+# A checkpoint's architecture -> the registered model that builds it from its own files.
+# `mstar serve <org/name>` reads this.
+HF_ARCHITECTURES: dict[str, str] = {
+    "Qwen3ForCausalLM": "text_chat",
+    "LlamaForCausalLM": "text_chat",
+    "MistralForCausalLM": "text_chat",
+}
 
 
 def model_init_kwargs(name: str) -> dict:

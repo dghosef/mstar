@@ -101,6 +101,9 @@ Registry keys live in ``mstar/model/registry.py`` (``MODEL_REGISTRY`` / ``HF_MOD
    * - ``qwen3_8b``
      - ``Qwen/Qwen3-8B``
      - Dense Qwen3 text chat; see the notes below.
+   * - ``text_chat``
+     - Any Qwen3, Llama or Mistral text checkpoint, by name
+     - Launched as ``mstar serve <org/name>``; see the notes below.
    * - ``qwen3_5_{0.8,2,4,9,27}b``
      - ``Qwen/Qwen3.5-4B``
      - Hybrid-attention VLM (text + image in, text out): gated DeltaNet linear
@@ -442,6 +445,27 @@ then the answer ``to=user``. Tool calls are refused for now. Images resize with 
 reference's antialiased Lanczos, which torchvision has from 0.27 (torch 2.12); an older
 torchvision falls back to PIL's Lanczos with a warning, and its pixels differ slightly.
 
+Any text checkpoint by its Hugging Face name (``text_chat``)
+-----------------------------------------------------------
+
+``mstar serve <org/name>`` serves a text checkpoint with no model file written
+for it, on the same node, walks and captures as ``qwen3_8b``. A repo registered
+above launches its own port instead. Otherwise ``architectures`` in its
+``config.json`` must be ``Qwen3ForCausalLM``, ``LlamaForCausalLM`` or
+``MistralForCausalLM``. The command writes an ordinary YAML, one GPU with the KV
+pool sized to its free memory, and prints the path; copy it to tune, or to run
+tensor-parallel with ``--config`` (``model: text_chat`` and
+``model_kwargs.model_path_hf: <org/name>``). ``/v1/models`` lists it as ``text_chat``.
+
+Refused at startup, naming the reason, rather than served wrong: a ``config.json``
+key nothing reads (``auto_map``, ``quantization_config`` and any key added
+later), a sliding window, RoPE scaling other than ``llama3``, attention or MLP
+biases, an activation other than SiLU, a checkpoint tensor nothing reads, and a
+repo with no chat template. Remote code never runs. Such a model is built from
+its config and isn't individually checked against its reference, which the
+server says at launch; ``test/integration/test_qwen3_real_weights.py`` runs that
+check for a repo added to its ``CASES``.
+
 Qwen3-8B (``qwen3_8b``)
 -----------------------
 
@@ -451,8 +475,8 @@ prefill samples the first token and a decode loop the rest; both are captured.
 Sampling defaults come from the checkpoint's ``generation_config.json``.
 ``model_kwargs.max_seq_len`` bounds prompt plus reply (default: the
 checkpoint's context), and ``prefill_token_buckets`` replaces the captured
-prefill ladder. Rope scaling, sliding windows and attention biases are refused
-at startup rather than ignored. A request's ``min_tokens`` is a 400 unless
+prefill ladder. Anything in the checkpoint's config it doesn't implement is
+refused at startup rather than ignored. A request's ``min_tokens`` is a 400 unless
 ``model_kwargs.serve_min_tokens: true``, which bars the stop ids at the cost of
 FlashInfer's fused sampling path on every step.
 

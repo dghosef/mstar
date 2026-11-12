@@ -865,7 +865,8 @@ def _parakeet(name, model_kwargs, tmp_path, monkeypatch):
 # config.json of each repo a shipped Qwen3-8B config names, the keys that matter
 _QWEN3_REPOS = {
     "Qwen/Qwen3-8B": {
-        "model_type": "qwen3", "hidden_size": 4096, "num_hidden_layers": 36, "num_attention_heads": 32,
+        "architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3", "hidden_size": 4096, "num_hidden_layers": 36,
+        "num_attention_heads": 32,
         "num_key_value_heads": 8, "head_dim": 128, "intermediate_size": 12288, "vocab_size": 151936,
         "rms_norm_eps": 1e-6, "rope_theta": 1000000, "max_position_embeddings": 40960,
         "tie_word_embeddings": False, "eos_token_id": 151645, "torch_dtype": "bfloat16",
@@ -884,7 +885,8 @@ def _qwen3(name, model_kwargs, tmp_path, monkeypatch):
         return path
 
     monkeypatch.setattr(qwen3_model, "resolve_snapshot_dir", snapshot)
-    return _constructed(name, model_kwargs)
+    # the text_chat template names no checkpoint
+    return _constructed(name, {"model_path_hf": next(iter(_QWEN3_REPOS)), **model_kwargs})
 
 
 def _default(name, model_kwargs, tmp_path, monkeypatch):

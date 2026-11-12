@@ -292,6 +292,7 @@ def load_hf_weights(
     stacked_params: list[StackedParamRule] | None = None,
     name_remapper: Callable[[str], str | None] | None = None,
     extra_skip_fragments: tuple[str, ...] = (),
+    strict: bool = False,
 ) -> set[str]:
     """Convenience wrapper for HF-style checkpoint loading.
 
@@ -310,6 +311,7 @@ def load_hf_weights(
         stacked_params=stacked_params,
         name_remapper=name_remapper,
         skip_predicate=skip,
+        strict=strict,
     )
 
 

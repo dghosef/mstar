@@ -1695,6 +1695,7 @@ ADAPTER_REGISTRY.update({
 ADAPTER_REGISTRY["qwen3_8_27b"] = Qwen3_5Adapter()
 # dense Qwen3, text only: the model applies its own chat template
 ADAPTER_REGISTRY["qwen3_8b"] = TextChatAdapter()
+ADAPTER_REGISTRY["text_chat"] = TextChatAdapter()
 
 
 def get_adapter(model_name: str) -> OpenAIAdapter | None:

@@ -3,6 +3,7 @@
     mstar serve bagel                 # defaults, port 8000
     mstar serve qwen3_omni --gpus 0,1,2
     mstar serve orpheus --port 9000
+    mstar serve Qwen/Qwen3-14B        # a Hugging Face name
 
 ``serve <model>`` resolves a sensible default config, fills in the
 plumbing that the low-level ``mstar-serve`` requires (socket/upload dirs, a
@@ -15,8 +16,11 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import json
 import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import mstar
@@ -93,6 +97,8 @@ DEFAULT_CONFIGS["qwen3_5_27b"] = "qwen3_5_27b_tp4.yaml"
 DEFAULT_CONFIGS["qwen3_8_27b"] = "qwen3_8_27b_tp4.yaml"
 # dense Qwen3: 8B; other sizes take --config
 DEFAULT_CONFIGS["qwen3_8b"] = "qwen3_8b.yaml"
+# the template `mstar serve <org/name>` fills in
+DEFAULT_CONFIGS["text_chat"] = "text_chat.yaml"
 
 
 def _repo_root() -> Path:
@@ -100,12 +106,91 @@ def _repo_root() -> Path:
     return Path(mstar.__file__).resolve().parent.parent
 
 
-def _resolve_config(model: str, override: str | None) -> str:
+# GPU memory a launched-by-name deployment leaves free of weights and KV: captures, sampler, kernels
+_GPU_HEADROOM_BYTES = 8 << 30
+_NAMED_MAX_PAGES = 8192
+
+
+def _free_gpu_bytes() -> int:
+    """Free memory of the first visible GPU. Asks nvidia-smi: CUDA must not start in
+    this process, which goes on to launch the server."""
+    device = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "-i", device, "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        return int(out.split()[0]) << 20
+    except (OSError, subprocess.CalledProcessError, ValueError, IndexError) as exc:
+        sys.exit(f"error: cannot read free GPU memory for a launch by name ({exc}); pass --config <path.yaml>")
+
+
+def _has_chat_template(snapshot: Path) -> bool:
+    tokenizer = snapshot / "tokenizer_config.json"
+    return (
+        (snapshot / "chat_template.jinja").is_file() or (snapshot / "chat_template.json").is_file()
+        or (tokenizer.is_file() and bool(json.loads(tokenizer.read_text()).get("chat_template")))
+    )
+
+
+def _config_from_checkpoint(repo: str, cache_dir: str | None) -> str:
+    """The default config of a model launched by its Hugging Face name, or of the
+    hand port that repo is registered under."""
+    import yaml
+
+    from mstar.model.qwen3.config import qwen3_lm_config
+    from mstar.model.registry import HF_ARCHITECTURES, HF_MODELS
+    from mstar.utils.hf_snapshot import resolve_snapshot_dir
+
+    ported = [key for key, entry in HF_MODELS.items() if entry.get("model_path_hf") == repo]
+    if len(ported) > 1:
+        sys.exit(f"error: {repo} is registered as several models; name one: {', '.join(sorted(ported))}")
+    if ported:
+        return _resolve_config(ported[0], None)
+    snapshot = resolve_snapshot_dir(repo, cache_dir=cache_dir, allow_patterns=["*.json", "*.jinja"])
+    hf = json.loads((snapshot / "config.json").read_text())
+    architecture = (hf.get("architectures") or [None])[0]
+    if architecture not in HF_ARCHITECTURES:
+        sys.exit(f"error: {repo}: no generic builder for architecture {architecture!r}")
+    if not _has_chat_template(snapshot):
+        sys.exit(f"error: {repo} has no chat template; serve its chat (-Instruct) checkpoint")
+    try:
+        lm = qwen3_lm_config(hf)
+    except ValueError as exc:
+        sys.exit(f"error: {repo}: {exc}")
+    with open(_resolve_config(HF_ARCHITECTURES[architecture], None)) as f:
+        config = yaml.safe_load(f)
+    max_seq_len = min(lm.max_position_embeddings, config["max_seq_len"])
+    # K and V, in bf16
+    token_bytes = lm.num_hidden_layers * lm.num_key_value_heads * lm.head_dim * 2 * 2
+    from mstar.engine.resources.kv.config import DEFAULT_PAGE_SIZE
+
+    # a repo with no index is one small file, which the headroom covers
+    index = snapshot / "model.safetensors.index.json"
+    weights = json.loads(index.read_text()).get("metadata", {}).get("total_size", 0) if index.is_file() else 0
+    room = _free_gpu_bytes() - int(weights) - _GPU_HEADROOM_BYTES
+    if room < token_bytes * max_seq_len:
+        sys.exit(f"error: {repo} does not fit one GPU with a {max_seq_len}-token context; "
+                 "pass --config <path.yaml> with a tensor-parallel node group")
+    config["max_seq_len"] = max_seq_len
+    config["model_kwargs"] = {**config["model_kwargs"], "model_path_hf": repo, "max_seq_len": max_seq_len}
+    config["resources"]["kv_cache"]["max_num_pages"] = min(room // (token_bytes * DEFAULT_PAGE_SIZE), _NAMED_MAX_PAGES)
+    fd, path = tempfile.mkstemp(prefix="mstar_named_", suffix=".yaml")
+    with os.fdopen(fd, "w") as f:
+        yaml.safe_dump(config, f)
+    print(f"{repo}: built from its config.json and not individually checked against its reference; "
+          f"deployment config written to {path}", file=sys.stderr)
+    return path
+
+
+def _resolve_config(model: str, override: str | None, cache_dir: str | None = None) -> str:
     if override:
         p = Path(override)
         if not p.exists():
             sys.exit(f"error: --config path not found: {override}")
         return str(p)
+    if model not in DEFAULT_CONFIGS and "/" in model:
+        return _config_from_checkpoint(model, cache_dir)
     if model not in DEFAULT_CONFIGS:
         avail = ", ".join(sorted(DEFAULT_CONFIGS))
         sys.exit(f"error: unknown model {model!r}. Known models: {avail}\n"
@@ -244,9 +329,10 @@ def _next_steps(model: str, host: str, port: int, api_key_set: bool = False) -> 
 
 
 def _serve(args: argparse.Namespace) -> None:
-    config = _resolve_config(args.model, args.config)
+    # first: a launch by name sizes its config to these GPUs
     if args.gpus is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = args.gpus
+    config = _resolve_config(args.model, args.config, args.cache_dir)
     if args.compile_level is not None:
         os.environ["MSTAR_COMPILE_LEVEL"] = str(args.compile_level)
 
@@ -295,7 +381,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     serve = sub.add_parser("serve", help="launch a server for a model (one command)")
-    serve.add_argument("model", help=f"model name ({', '.join(sorted(DEFAULT_CONFIGS))}) or use --config")
+    serve.add_argument(
+        "model",
+        help=f"model name ({', '.join(sorted(DEFAULT_CONFIGS))}), a Hugging Face name (org/name), or use --config",
+    )
     serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument(

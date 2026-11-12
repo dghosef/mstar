@@ -72,6 +72,22 @@ class Qwen3LMConfig:
     rope_theta: float = 1_000_000.0
     max_position_embeddings: int = 32768
     tie_word_embeddings: bool = False
+    qk_norm: bool = True
+    # Llama-3's scaled RoPE; a scale of 1 is plain RoPE
+    rope_scale: float = 1.0
+    rope_low_freq_factor: float = 1.0
+    rope_high_freq_factor: float = 1.0
+    rope_old_context_len: int = 8192
+
+    def position_kwargs(self) -> dict:
+        """``PositionConfig``'s side of the RoPE the attention layers apply."""
+        if self.rope_scale == 1.0:
+            return {"rope_theta": self.rope_theta}
+        return {
+            "rope_theta": self.rope_theta, "rope_scale": self.rope_scale,
+            "low_freq_factor": self.rope_low_freq_factor, "high_freq_factor": self.rope_high_freq_factor,
+            "old_context_len": self.rope_old_context_len,
+        }
 
     @classmethod
     def from_hf(cls, hf: dict) -> "Qwen3LMConfig":
@@ -107,9 +123,13 @@ class Qwen3DenseLM(nn.Module):
                     num_heads=config.num_attention_heads,
                     num_kv_heads=config.num_key_value_heads,
                     head_dim=config.head_dim,
-                    qk_norm=True,
+                    qk_norm=config.qk_norm,
                     rms_norm_eps=config.rms_norm_eps,
                     rope_theta=config.rope_theta,
+                    rope_scale=config.rope_scale,
+                    rope_low_freq_factor=config.rope_low_freq_factor,
+                    rope_high_freq_factor=config.rope_high_freq_factor,
+                    rope_old_context_len=config.rope_old_context_len,
                     input_hidden_size=config.hidden_size,
                     attn_key=attn_key,
                     kv_key=kv_key,
@@ -135,20 +155,25 @@ class Qwen3DenseLM(nn.Module):
             gather_output=True,
         )
 
-    def load_weights(self, weights) -> set[str]:
+    def load_weights(self, weights, *, strict: bool = False) -> set[str]:
         """Stream HF ``(name, tensor)`` pairs (``model.`` prefix already
-        dropped); tie the head to the embedding when the checkpoint does;
-        raise on anything left unloaded."""
+        dropped); a checkpoint with no head whose config ties it loads the
+        embedding as the head. ``strict`` refuses a tensor nothing here reads.
+        Raises on anything left unloaded."""
         from mstar.model.loader import LLAMA_STACKED_PARAMS, load_hf_weights
 
-        loaded = load_hf_weights(self, weights, stacked_params=LLAMA_STACKED_PARAMS)
+        def with_tied_head():
+            head, embedding = False, None
+            for name, tensor in weights:
+                head = head or name == "lm_head.weight"
+                embedding = tensor if name == "embed_tokens.weight" else embedding
+                yield name, tensor
+            if not head and embedding is not None and self.config.tie_word_embeddings:
+                yield "lm_head.weight", embedding
+
+        loaded = load_hf_weights(self, with_tied_head(), stacked_params=LLAMA_STACKED_PARAMS, strict=strict)
         if "lm_head.weight" not in loaded:
-            if not self.config.tie_word_embeddings:
-                raise RuntimeError("Qwen3 checkpoint has no lm_head.weight and does not tie embeddings")
-            # Both shard the vocab dim by TP rank over the same rows, so the
-            # local embedding shard is this rank's head shard.
-            self.lm_head.weight.data.copy_(self.embed_tokens.weight.data)
-            loaded.add("lm_head.weight")
+            raise RuntimeError("Qwen3 checkpoint has no lm_head.weight and does not tie embeddings")
         missing = sorted(set(dict(self.named_parameters())) - loaded)
         if missing:
             raise RuntimeError(

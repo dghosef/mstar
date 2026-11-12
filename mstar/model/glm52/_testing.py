@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import dataclasses
+import sys
+import types
 
 import torch
 
@@ -47,14 +49,33 @@ def fake_quantize_fp8_block(
     return w_fp8, scale_inv, dequant
 
 
+def _rope_table(
+    dim: int, num_positions: int, scale: float, theta: float,
+    low_freq_factor: float | None = None, high_freq_factor: float | None = None, old_context_len: float | None = None,
+) -> torch.Tensor:
+    """``[position, cos... sin...]`` for plain RoPE, or Llama-3's scaled RoPE when ``scale`` isn't 1."""
+    freqs = theta ** (-torch.arange(0, dim, 2, dtype=torch.float64) / dim)
+    if scale != 1.0:
+        wavelen = 2 * torch.pi / freqs
+        scaled = freqs / scale
+        smooth = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
+        medium = (wavelen >= old_context_len / high_freq_factor) & (wavelen <= old_context_len / low_freq_factor)
+        low = wavelen > old_context_len / low_freq_factor
+        freqs = torch.where(medium, (1 - smooth) * scaled + smooth * freqs, torch.where(low, scaled, freqs))
+    angles = torch.outer(torch.arange(num_positions, dtype=torch.float64), freqs)
+    return torch.cat((angles.cos(), angles.sin()), dim=-1).float()
+
+
 def cpu_rope_apply_qk_inplace(
     q, k, pos_ids, cos_sin_cache, rotary_dim, interleave, rope_scale, rope_theta, **llama31,
 ) -> None:
     """CPU stand-in for ``mstar::rope_apply_qk_inplace``, which has CUDA and XPU kernels only:
     rotates the first ``rotary_dim`` dims of each head of ``q`` and ``k`` in place from the
-    position resource's fp32 table, in fp32, as FlashInfer's cos/sin-cache kernel does."""
-    del rotary_dim, rope_scale, rope_theta, llama31  # all encoded in the table
-    assert cos_sin_cache is not None, "GLM-5.2 rotates from its fp32 table (position_config)"
+    position resource's fp32 table, in fp32, as FlashInfer's cos/sin-cache kernel does, or
+    from one computed here when the position resource builds none."""
+    del rotary_dim
+    if cos_sin_cache is None:
+        cos_sin_cache = _rope_table(q.shape[-1], int(pos_ids.max()) + 1, rope_scale, rope_theta, **llama31)
     half = cos_sin_cache.shape[-1] // 2
     rows = cos_sin_cache[pos_ids.long()]
     cos, sin = rows[:, None, :half], rows[:, None, half:]
@@ -67,6 +88,21 @@ def cpu_rope_apply_qk_inplace(
             x1, x2 = pe[..., :half], pe[..., half:]
             out = torch.cat((x1 * cos - x2 * sin, x2 * cos + x1 * sin), dim=-1)
         x[..., : 2 * half] = out.to(x.dtype)
+
+
+def _cpu_rmsnorm(x, weight, eps=1e-6):
+    x32 = x.float()
+    normed = x32 * torch.rsqrt(x32.pow(2).mean(-1, keepdim=True) + eps)
+    return (normed * weight.float()).to(x.dtype)
+
+
+def install_cpu_flashinfer(monkeypatch) -> None:
+    """Stand in for FlashInfer on CPU for one test: forced, since on a box with real
+    FlashInfer an earlier import would route CPU tensors into GPU kernels."""
+    module = types.ModuleType("flashinfer")
+    module.norm = types.SimpleNamespace(rmsnorm=_cpu_rmsnorm)
+    monkeypatch.setitem(sys.modules, "flashinfer", module)
+    install_cpu_rope(monkeypatch)
 
 
 def install_cpu_rope(monkeypatch) -> None:
@@ -92,6 +128,8 @@ class ReferenceAttentionResource(AttentionResource):
     dense causal attention over the rows a real NHD ``KVManager`` holds, planned from
     that manager's plan output.
     """
+
+    requires_kv_write = True
 
     def __init__(self, kv_cache: str = "kv"):
         self._kv_name = kv_cache
@@ -124,7 +162,8 @@ class ReferenceAttentionResource(AttentionResource):
             rows = kv_cache_layer[pages].transpose(0, 1).reshape(
                 2, len(view.page_idxs) * page_size, *kv_cache_layer.shape[3:]
             )[:, :view.length]
-            keys, vals = rows[0].float(), rows[1].float()
+            # (T, H_kv, D), repeated to the query heads under GQA
+            keys, vals = (r.float().repeat_interleave(q.shape[1] // r.shape[1], dim=1) for r in rows)
             start = view.length - view.to_compute
             for j in range(view.to_compute):
                 qj = q[row + j].float()

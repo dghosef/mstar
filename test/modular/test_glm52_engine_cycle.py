@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import sys
-import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,24 +12,9 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
-def _cpu_rmsnorm(x, weight, eps=1e-6):
-    x32 = x.float()
-    normed = x32 * torch.rsqrt(x32.pow(2).mean(-1, keepdim=True) + eps)
-    return (normed * weight.float()).to(x.dtype)
-
-
-def _cpu_flashinfer() -> types.ModuleType:
-    fi = types.ModuleType("flashinfer")
-    fi.norm = types.SimpleNamespace(rmsnorm=_cpu_rmsnorm)
-    return fi
-
-
 @pytest.fixture(autouse=True)
 def _force_cpu_flashinfer(monkeypatch):
-    # forced per test: on a box with real flashinfer an earlier import would
-    # otherwise route CPU tensors into GPU kernels
-    monkeypatch.setitem(sys.modules, "flashinfer", _cpu_flashinfer())
-    install_cpu_rope(monkeypatch)
+    install_cpu_flashinfer(monkeypatch)
 
 
 from request_walks import run_walks  # noqa: E402
@@ -38,7 +22,7 @@ from request_walks import run_walks  # noqa: E402
 from mstar.engine.resources import StepContext  # noqa: E402
 from mstar.model.glm52._testing import (  # noqa: E402
     build_cpu_resources,
-    install_cpu_rope,
+    install_cpu_flashinfer,
     per_request_outputs,
 )
 from mstar.model.glm52.components.causal_lm import Glm52ForCausalLM  # noqa: E402

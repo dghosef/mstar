@@ -125,13 +125,19 @@ class _Margins:
         torch.cuda.empty_cache()
 
 
-CASES = [("qwen3_8b", "Qwen/Qwen3-8B")]
+CASES = [
+    ("qwen3_8b", "Qwen/Qwen3-8B"),
+    ("text_chat", "Qwen/Qwen3-14B"),
+    ("text_chat", "unsloth/Llama-3.1-8B-Instruct"),
+    ("text_chat", "mistralai/Mistral-7B-Instruct-v0.2"),
+]
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 
 
-def _served_ids(tmp_path, name: str) -> list[list[int]]:
-    config = {"model": name, "max_seq_len": 4096, "model_kwargs": {"max_seq_len": 4096},
+def _served_ids(tmp_path, name: str, repo: str) -> list[list[int]]:
+    kwargs = {"max_seq_len": 4096, **({"model_path_hf": repo} if name == "text_chat" else {})}
+    config = {"model": name, "max_seq_len": 4096, "model_kwargs": kwargs,
               "node_groups": [{"node_names": ["LLM"], "ranks": [0]}]}
     path = tmp_path / f"{name}.yaml"
     path.write_text(yaml.safe_dump(config))
@@ -145,12 +151,12 @@ def _served_ids(tmp_path, name: str) -> list[list[int]]:
         return [_ids(url, p) for p in PROMPTS]
 
 
-@pytest.mark.parametrize("name, repo", CASES, ids=[c[0] for c in CASES])
+@pytest.mark.parametrize("name, repo", CASES, ids=[c[1] for c in CASES])
 def test_plain_greedy_tokens_are_transformers_greedy_tokens(tmp_path, name, repo):
     if _snapshot(repo) is None:
         pytest.skip(f"{repo} is not fully cached")
     margins = _Margins(pytest.importorskip("transformers"), repo)
-    served = _served_ids(tmp_path, name)
+    served = _served_ids(tmp_path, name, repo)
     lm = margins.load()
     try:
         for i, ids in enumerate(served):

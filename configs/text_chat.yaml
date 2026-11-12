@@ -1,0 +1,12 @@
+model: "text_chat"
+# A template. `mstar serve <org/name>` fills in the checkpoint and sizes the KV
+# pool to the GPU; a config of your own names model_kwargs.model_path_hf.
+max_seq_len: 32768
+model_kwargs:
+  max_seq_len: 32768
+resources:
+  kv_cache:
+    max_num_pages: 1024
+node_groups:
+  - node_names: [LLM]
+    ranks: [0]

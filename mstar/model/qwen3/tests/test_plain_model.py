@@ -48,15 +48,128 @@ def test_a_scaled_rope_in_rope_parameters_is_refused(tmp_path):
 
 
 @pytest.mark.parametrize("change, message", [
-    ({"model_type": "llama"}, "not a dense Qwen3 checkpoint"),
-    ({"rope_scaling": {"rope_type": "yarn"}}, "rope_scaling"),
-    ({"use_sliding_window": True}, "sliding-window"),
+    ({"model_type": "llama"}, "unsupported checkpoint"),
+    ({"architectures": ["GemmaForCausalLM"]}, "unsupported checkpoint"),
+    ({"rope_scaling": {"rope_type": "yarn", "factor": 4.0}}, "scaled RoPE"),
+    ({"rope_scaling": {
+        "rope_type": "llama3", "factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
+        "original_max_position_embeddings": 8192, "partial_rotary_factor": 0.5,
+    }}, "scaled RoPE"),
+    ({"use_sliding_window": True}, "sliding"),
+    # absent, it is the reference's default of 4096
+    ({"architectures": ["MistralForCausalLM"], "model_type": "mistral"}, "sliding-window"),
     ({"attention_bias": True}, "attention_bias"),
     ({"hidden_act": "gelu"}, "hidden_act"),
+    ({"new_quirk": 1}, "new_quirk"),
+    ({"auto_map": {"AutoConfig": "custom.Config"}}, "auto_map"),
+    ({"quantization_config": {"quant_method": "fp8"}}, "quantization_config"),
 ])
 def test_what_the_shared_decoder_doesnt_implement_is_refused_at_startup(tmp_path, change, message):
     with pytest.raises(ValueError, match=message):
         _model(tmp_path, change)
+
+
+def _tiny_checkpoint(path, architecture: str, model_type: str, **config):
+    """A random float32 checkpoint written by transformers, with the config it writes."""
+    transformers = pytest.importorskip("transformers")
+
+    torch.manual_seed(0)
+    cfg = transformers.AutoConfig.for_model(
+        model_type, hidden_size=32, num_hidden_layers=3, num_attention_heads=4, num_key_value_heads=2, head_dim=8,
+        intermediate_size=48, vocab_size=97, max_position_embeddings=512, architectures=[architecture], **config,
+    )
+    reference = transformers.AutoModelForCausalLM.from_config(cfg, dtype=torch.float32).eval()
+    reference.save_pretrained(path)
+    return reference
+
+
+TINY_FAMILIES = [
+    ("Qwen3ForCausalLM", "qwen3", {"rope_parameters": {"rope_type": "default", "rope_theta": 1e6}}),
+    # scaled RoPE whose bands all land inside a short context, and a head tied to the embedding
+    ("LlamaForCausalLM", "llama", {"tie_word_embeddings": True, "rope_parameters": {
+        "rope_type": "llama3", "rope_theta": 5e5, "factor": 8.0, "low_freq_factor": 1.0, "high_freq_factor": 4.0,
+        "original_max_position_embeddings": 64,
+    }}),
+    ("MistralForCausalLM", "mistral", {"sliding_window": None, "rope_parameters": {
+        "rope_type": "default", "rope_theta": 1e6,
+    }}),
+]
+
+
+@pytest.mark.parametrize("architecture, model_type, config", TINY_FAMILIES, ids=[f[1] for f in TINY_FAMILIES])
+def test_a_tiny_checkpoint_matches_transformers(tmp_path, monkeypatch, architecture, model_type, config):
+    """Wiring, through the real step cycle and KV pool: the RoPE and attention kernels are
+    CPU stand-ins, so the real ones are `test_qwen3_real_weights.py`'s."""
+    import dataclasses
+
+    from mstar.engine.resources import StepContext
+    from mstar.engine.resources.kv import manager as kv_manager
+    from mstar.engine.resources.kv.config import PagedKVConfig
+    from mstar.engine.resources.position.manager import RopeManager
+    from mstar.engine.resources.runner import StepRunner
+    from mstar.model.glm52 import _testing
+    from mstar.model.qwen3.config import ATTN, DECODE_WALK, KV_CACHE, PREFILL_WALK, ROPE, SAMPLER
+    from mstar.model.qwen3.qwen3_model import Qwen3Model
+    from mstar.model.submodule_base import ARNodeInputs
+
+    _testing.install_cpu_flashinfer(monkeypatch)
+    reference = _tiny_checkpoint(tmp_path, architecture, model_type, **config)
+    model = Qwen3Model(model_path_hf=str(tmp_path), max_seq_len=64, accelerator_graph=False)
+    sub = model.get_submodule("LLM", device="cpu", autocast_dtype=torch.float32)
+
+    lm = model.config
+    device = torch.device("cpu")
+    monkeypatch.setattr(kv_manager, "KVTransferManager", _testing._StubTransferManager)
+    kv = kv_manager.KVManager(
+        cfg=PagedKVConfig(
+            num_layers=lm.num_hidden_layers, num_kv_heads=lm.num_key_value_heads, num_qo_heads=lm.num_attention_heads,
+            head_dim=lm.head_dim, max_seq_len=64, max_num_pages=16, page_size=8,
+        ),
+        name=KV_CACHE, joint_comm_group=None, transfer_engine_info=None, device=device, dtype=torch.float32,
+    )
+    (position,) = [s.config for s in model.get_node_resources() if s.resource_key == ROPE]
+    resources = {
+        KV_CACHE: kv, ATTN: _testing.ReferenceAttentionResource(KV_CACHE),
+        ROPE: RopeManager(
+            config=dataclasses.replace(position, rope_dtype=torch.float32), device=device, max_seq_len=64,
+        ),
+        SAMPLER: _testing.GreedySampler(),
+    }
+    runner = StepRunner(resources, node_resources={"LLM": list(resources)})
+    runner.ingest_request("r")
+    sub.bind_node_resources(resources)
+
+    def logits(walk: str, ids: torch.Tensor) -> torch.Tensor:
+        step = sub.declare_step(walk, ["r"], [ARNodeInputs(input_ids=ids, input_seq_len=ids.numel())])
+        step.set_ctx(StepContext(request_ids=("r",), graph_walk=walk, slot=0, capture=False))
+        assert runner.admit(step).ok
+        runner.plan(step)
+        with torch.no_grad():
+            out = sub.lm.logits(sub.lm(sub.lm.embed(ids), label="main"))
+        runner.commit(step)
+        return out
+
+    ids = torch.randint(0, 97, (40,))
+    with torch.no_grad():
+        expected = reference(ids[None]).logits[0]
+    # past the short context's bands, so the scaled RoPE differs from the plain one
+    assert torch.allclose(logits(PREFILL_WALK, ids[:32]), expected[:32], atol=1e-4, rtol=1e-3)
+    for i in range(32, 40):
+        assert torch.allclose(logits(DECODE_WALK, ids[i:i + 1])[0], expected[i], atol=1e-4, rtol=1e-3)
+
+
+def test_a_tensor_nothing_reads_is_refused(tmp_path):
+    from safetensors.torch import load_file, save_file
+
+    architecture, model_type, config = TINY_FAMILIES[0]
+    _tiny_checkpoint(tmp_path, architecture, model_type, **config)
+    (path,) = tmp_path.glob("*.safetensors")
+    save_file({**load_file(path), "model.layers.0.self_attn.extra.weight": torch.zeros(2)}, path)
+    from mstar.model.qwen3.qwen3_model import Qwen3Model
+
+    model = Qwen3Model(model_path_hf=str(tmp_path), max_seq_len=64, accelerator_graph=False)
+    with pytest.raises(ValueError, match="no parameter here"):
+        model.get_submodule("LLM", device="cpu", autocast_dtype=torch.float32)
 
 
 def _prompt(model, ids: list[int]):

@@ -1,5 +1,6 @@
-"""Dense Qwen3 (Qwen3-8B and its siblings): text in, text out on one ``LLM``
-node, a packed prefill then a decode loop, on the shared Qwen3 decoder.
+"""Dense text chat (Qwen3, Llama, Mistral, read from the checkpoint's config):
+text in, text out on one ``LLM`` node, a packed prefill then a decode loop, on
+the shared Qwen3 decoder.
 """
 from __future__ import annotations
 
@@ -71,6 +72,8 @@ class Qwen3Model(Model):
         serve_min_tokens: bool = False,
         **kwargs,
     ):
+        if not model_path_hf:
+            raise ValueError("no checkpoint: set model_kwargs.model_path_hf")
         self.model_path_hf = model_path_hf
         self.cache_dir = cache_dir
         self.local_dir = resolve_snapshot_dir(
@@ -135,7 +138,7 @@ class Qwen3Model(Model):
             ),
             AttentionSpec(resource_key=ATTN, nodes=nodes, config=AttentionConfig(kv_cache=KV_CACHE)),
             PositionSpec(
-                resource_key=ROPE, nodes=nodes, config=PositionConfig(kv_cache=KV_CACHE, rope_theta=config.rope_theta),
+                resource_key=ROPE, nodes=nodes, config=PositionConfig(kv_cache=KV_CACHE, **config.position_kwargs()),
             ),
             SamplerSpec(
                 resource_key=SAMPLER, nodes=nodes, vocab_size=config.vocab_size,
@@ -232,7 +235,7 @@ class Qwen3Model(Model):
         tensors: NameToTensorList | None = None, prompt_parts: list[PromptPart] | None = None, **kwargs,
     ) -> ProcessPromptOutput:
         if output_modalities != ["text"] or set(input_modalities) - {TEXT}:
-            raise ValueError("Qwen3 takes text and produces text")
+            raise ValueError("this model takes text and produces text")
         if tensors and tensors.get("text_inputs"):
             (ids,) = tensors["text_inputs"]
         elif prompt is None and not prompt_parts:
@@ -303,8 +306,8 @@ class Qwen3Model(Model):
 
         lm = self.build_lm(device, tp_group, dtype or torch.bfloat16)
         lm.load_weights(
-            (key.removeprefix("model."), tensor) for key, tensor in iter_safetensors_shards(weights, device=device)
-            if key.startswith(("model.", "lm_head."))
+            ((key.removeprefix("model."), tensor) for key, tensor in iter_safetensors_shards(weights, device=device)),
+            strict=True,
         )
         lm.requires_grad_(False).eval()
         return self.make_submodule(lm)
